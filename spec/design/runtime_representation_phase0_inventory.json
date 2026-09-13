@@ -1,6 +1,406 @@
 {
-  "schema_version": 4,
-  "freeze_sha256": "ba54e4c3f15a6524039c77aed2663665432dca270ce2ea1529428f3b82269abf",
+  "schema_version": 6,
+  "freeze_sha256": "905e0c46e65d95d9111dec2d66c40e703dbd3c8c6323ee0e92fa49f853ddaddc",
+  "source_inventory": {
+    "mutations": [
+      {
+        "witness_id": "phase0.mutate_backend_element_spelling",
+        "implementation_sha256": "a7bb6cd427b0ef3cf20cb2c2bca1c82767067ca43d44b69c5f298c450a9248ba",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_descriptor_field",
+        "implementation_sha256": "43837a17e04d9aa9ef67d16e5e9ddf85c1c83450c581da84776f20825258e13e",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_direct_data_access",
+        "implementation_sha256": "d7a09dce6bc48db797a94c57c642f92a73111032d182cfd627ea1c01fdfb0f99",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_direct_data_access_after_test_module",
+        "implementation_sha256": "95d0ac80bd78cdfb5b3822adb61354c1f176af58708e65111fd1a13cee4f8ee4",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_incomplete_dtype",
+        "implementation_sha256": "f530a0c7a874ed4502a74484e4be9aec1b25a05d7d4567c6d740405bd955d543",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_incomplete_arithmetic_repr",
+        "implementation_sha256": "eefa16f8d6a548651988846c43a777cb0c4e8c41d9190d7b53db62deb2cbb195",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_element_binding",
+        "implementation_sha256": "4a37ea35e2763315b8514c2250993dee40002cf34c8883e018f2328d35e763d4",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_fixed_rank_metadata",
+        "implementation_sha256": "25daa1dae101b37c94d378c692e4931ebaa9f8352eb596383aa00fc039a054cf",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_load_store_template",
+        "implementation_sha256": "5516dcb8749c7428d0b11d1d7dda1dd8de4b4a1094641c72a11ec0b1348e2798",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_narrow_metadata",
+        "implementation_sha256": "17ab32171a24b8bf58fbca823c92a8ed780e81f5bbd5131da8d6ec407b7b7a59",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_normalized_key_arithmetic",
+        "implementation_sha256": "2fe7caf5f79f8c5f18515a211073875bb84938c86347e4c263f43004ea69d1c4",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_retired_capacity_normalizer",
+        "implementation_sha256": "955e70aa636012fdeb8ea2a7d990f971e47cfebfae031325b6f98f59700859f9",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_capacity_owner_saturation",
+        "implementation_sha256": "1fbfb148c80bfe1048052c9668db73598f585cc0deed9296b1f0666b4ea4bf88",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_capacity_owner_wrapping_product",
+        "implementation_sha256": "b28aae73ac22f89aaf6924078a61397815a8d8618d1e46166724bd71e77c6e31",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_capacity_owner_legacy_key",
+        "implementation_sha256": "494c72cf4de0abe630ffa08743f136fb1d273ada41bd605d76c97a243003c603",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_raw_element_pointer",
+        "implementation_sha256": "afa16420ecc733155ac815c783167131321002d1d4f6dc5da1b365da86908e9c",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_width_arithmetic",
+        "implementation_sha256": "4a69cfab4f130096dd101db74e22a6549c0174c8308df424d4fb38fad33fb409",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_metadata_owner_width",
+        "implementation_sha256": "cc5b3a468b71c33f9193cf659898b35329bd2bece94709a84f14f545540d7f4b",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
+        "implementation_sha256": "528209e5d31902f9e024054fa79c799f9efa04abf4fc684666d73527a6fd74d3",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_public_element_pointer_export",
+        "implementation_sha256": "35b14726d39b3393d3f9d16eee596d60636ace8104672f9f678be77d7531444b",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_body_direct_data_access",
+        "implementation_sha256": "3f92b83033c0ebdb91ba20c8b0f3e4b0266799ee39fa05c0ea30af57032077e7",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_extern_element_data",
+        "implementation_sha256": "0e691349cdfb6ef2fe1e4b8e8b04cb002cdbc7ca78c1d8fbfbe03a99ac797dc8",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
+        "implementation_sha256": "89d7943fda9ab8af0d6d866ec2daed29931999695129b7baa51a5b5f1650c929",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_tagged_struct_field",
+        "implementation_sha256": "66baae0e709c09a4ec03e9479725377473a14a9a50a22a9bb4f24ea7f50b0193",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_union_field",
+        "implementation_sha256": "b6d58b8b6d47fc238d02b874bb0114528ba943b582f0b4aefe64b2424eeb1045",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_macro_typed_carrier",
+        "implementation_sha256": "8f0d0eb57078e4652fa6ad694f4ad1e488c5057b995f8a39a02350aa5a19a7b7",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_multi_declarator_data",
+        "implementation_sha256": "a0c78b453578eb6c58692ccc1a1ce6bcb24a4526ffdeaf23ee83716a10f2bfbe",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_enum_width",
+        "implementation_sha256": "0113416023e5f21c3eb72233a70c9d05aaec5dcf8216f69e3a1509ca78d554ee",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_objc_element_pointer_parameter",
+        "implementation_sha256": "4202ed69a1291bcf4a105a4101ba1496ec028792ace76c3dc90b2f4c25ccf0a2",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_carrier_in_simd_arm",
+        "implementation_sha256": "bba59895b0bee2e4291fa8a743048dc79c7c96793fe130c2c292059a1a057827",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_undeclared_conditional",
+        "implementation_sha256": "7d6ecdd87843d497c6b202490003f980111197eaf8ac2bf681d08929057d1a6d",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_objc_method_carrier",
+        "implementation_sha256": "e7a5958edfecef3fa0698863da5a7ded9cc19d05ba713c8600903bfc2505a98b",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
+        "implementation_sha256": "1b207ca7ea965d3a5d807e8e57d314384b5721fb1c036c685bb589fb746d4236",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_pointer_to_element_array",
+        "implementation_sha256": "92711242d52e99b8e85951af0cadbaf9351da7a3ac5aece490d58d207edeb654",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_include_outside_universe",
+        "implementation_sha256": "47366f3cb6ed8a7e4ef9a171ad5cab57f8cfb4ac1dd902bf1be90b0e026b43fe",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_include_in_dead_arm",
+        "implementation_sha256": "5d33bb0a7db370c16c2bde57a325b796079e362ad2d9128a5eb80c768e37387c",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_objc_block_parameter",
+        "implementation_sha256": "bfed9fb46724b06a6b4c66a35c22d6b60752905a5b6aced8a0df7f3d8125ff1b",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
+        "implementation_sha256": "3d8b4530f2844f61872f1ffb47e4bdc842eee9a3a1213e7702b791bcc927718d",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_rust_cast_turbofish",
+        "implementation_sha256": "a08615b7a560c8ce5e1bbc910c5f2cafaa83b7df6e47784ad9534b696e838bba",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_int8_element_pointer",
+        "implementation_sha256": "ff68ddf828b03077df95b128d5b1fb85ab984fae444d4805fe841af685626062",
+        "expected_failure": {
+          "code": "inventory.unclassified",
+          "reason_prefix": "unclassified inventory hit"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_c_elifdef_arm",
+        "implementation_sha256": "50bf8e800ba8482f82eeaa5ed3069af1c5c4bc571bcdc89622062cff96985992",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_rust_path_module",
+        "implementation_sha256": "459c3cde96dae99f997843567dcb6924bc2674e18b7065d664ecf710eb3a3183",
+        "expected_failure": {
+          "code": "source.rejected",
+          "reason_prefix": "fail-closed inventory scanner rejected"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_unregistered_inventory_source",
+        "implementation_sha256": "61a6a9e86484fe59ba32eb608c9df980c1fae09489882378276285647ba25b4f",
+        "expected_failure": {
+          "code": "inventory.unregistered_source",
+          "reason_prefix": "the frozen inventory source list is stale"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      },
+      {
+        "witness_id": "phase0.mutate_unregistered_subdirectory_source",
+        "implementation_sha256": "1a8bdbc2a124cc88e29c9b317aa9e92c5f42b0914f1636bb1a448fb6a03f70c0",
+        "expected_failure": {
+          "code": "inventory.unregistered_source",
+          "reason_prefix": "the frozen inventory source list is stale"
+        },
+        "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+      }
+    ]
+  },
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2452,1107 +2852,5 @@
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/random_observer.rs|owner=SUPPORT",
       "sample": "/* CHELIS_NATIVE_RANDOM_OBSERVER_BEGIN */ typedef struct { uint64_t value; } __chelis_random_obse..."
     }
-  ],
-  "coverage_manifest": {
-    "source_inventory": {
-      "artifact": "the frozen INVENTORY_SOURCES file list",
-      "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
-      "universe": {
-        "registered_sources": 84,
-        "roots": [
-          "crates/chelis-runtime/src/**/*.rs",
-          "crates/chelis-runtime/include/**/*.h",
-          "crates/chelis-runtime/build.rs",
-          "crates/chelis-vocab/src/**/*.rs",
-          "crates/chelis-vocab/build.rs",
-          "crates/chelis-ir/src/**/*.rs",
-          "crates/chelis-ir/build.rs",
-          "crates/chelis-python/src/**/*.rs",
-          "crates/chelis-python/build.rs",
-          "crates/chelis-backend-*/src/**/*.rs",
-          "crates/chelis-backend-*/runtime/**/*.h",
-          "crates/chelis-backend-*/runtime/**/*.cpp",
-          "crates/chelis-backend-*/build.rs"
-        ],
-        "closure_rule": "the registered list must equal its roots' tracked contents; a new file fails until it is registered"
-      },
-      "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
-      "expected_success": "every hit is exact active debt from the frozen foundation",
-      "owner_module_final_forms": {
-        "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h": [
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::byte_capacity"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::count"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::data"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::dtype"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::ownership"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::rank"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::reserved"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::shape"
-          },
-          {
-            "kind": "descriptor-field",
-            "owner": "chelis_gpu_tensor::strides"
-          },
-          {
-            "kind": "fixed-rank-metadata",
-            "owner": "chelis_gpu_tensor::reserved"
-          },
-          {
-            "kind": "narrow-metadata",
-            "owner": "chelis_gpu_tensor::rank"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_gpu_tensor::shape"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_gpu_tensor::strides"
-          }
-        ],
-        "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp": [
-          {
-            "kind": "direct-data-access",
-            "owner": "canonical_plan"
-          },
-          {
-            "kind": "direct-data-access",
-            "owner": "chelis_device_tensor_clone"
-          },
-          {
-            "kind": "direct-data-access",
-            "owner": "chelis_device_tensor_copy_from_host"
-          },
-          {
-            "kind": "direct-data-access",
-            "owner": "chelis_device_tensor_copy_to_host"
-          },
-          {
-            "kind": "direct-data-access",
-            "owner": "chelis_device_tensor_import"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "array_preflight"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "canonical_strides"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "tagged_array"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "array_preflight"
-          }
-        ],
-        "crates/chelis-backend-hip/src/emit.rs": [
-          {
-            "kind": "backend-element-spelling",
-            "owner": "HipEmitter::tagged_i64"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "HipEmitter::collect_kernels"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "HipEmitter::kernel_source_for_op"
-          }
-        ],
-        "crates/chelis-python/src/lib.rs": [
-          {
-            "kind": "raw-element-pointer",
-            "owner": "HipGetDeviceFn"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "cpu_input_tensor"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "gpu_input_tensor"
-          }
-        ],
-        "crates/chelis-python/src/native_tensor.rs": [
-          {
-            "kind": "direct-data-access",
-            "owner": "ValidatedTensor::adopt"
-          },
-          {
-            "kind": "direct-data-access",
-            "owner": "ValidatedTensor::data"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "ValidatedTensor::adopt"
-          }
-        ],
-        "crates/chelis-runtime/include/chelis_runtime.h": [
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_metadata_plan_shape"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_metadata_plan_strides"
-          }
-        ],
-        "crates/chelis-runtime/src/lib.rs": [
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_metadata_plan_shape"
-          },
-          {
-            "kind": "raw-element-pointer",
-            "owner": "chelis_metadata_plan_strides"
-          }
-        ],
-        "crates/chelis-backend-c/src/emit.rs": [
-          {
-            "kind": "backend-element-spelling",
-            "owner": "CEmitter::emit_elementwise_index_steps"
-          }
-        ],
-        "crates/chelis-backend-c/src/host_emit.rs": [
-          {
-            "kind": "backend-element-spelling",
-            "owner": "HostEmitter < 'a >::emit_elementwise_index_step"
-          }
-        ],
-        "crates/chelis-runtime/src/metadata.rs": [
-          {
-            "kind": "width-arithmetic",
-            "owner": "ElementCount::bytes"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "ElementCount::scratch_len"
-          }
-        ],
-        "crates/chelis-runtime/src/element.rs": [
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for f64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for f32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for F16Bits"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for Bf16Bits"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for i64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for i32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for i16"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for i8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ElementStorage for Bool8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "TensorElement for T"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for f64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for f32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for F16Bits"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for Bf16Bits"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for i64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for i32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for i16"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for i8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "private :: Sealed for Bool8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for f64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for f32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for i64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for i32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for i16"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for i8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticIdentity for ()"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "assert_registration"
-          }
-        ],
-        "crates/chelis-vocab/src/lib.rs": [
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::Ieee754Binary32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::Ieee754Binary64"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::ExactTwosComplement8"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::ExactTwosComplement16"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::ExactTwosComplement32"
-          },
-          {
-            "kind": "dtype-contract",
-            "owner": "ArithmeticRepr::ExactTwosComplement64"
-          },
-          {
-            "kind": "width-arithmetic",
-            "owner": "DTypeContract::byte_width"
-          }
-        ],
-        "crates/chelis-ir/src/capacity_key.rs": [
-          {
-            "kind": "exact-capacity-arithmetic",
-            "owner": "ExactLiteralProduct::include"
-          }
-        ]
-      },
-      "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
-      "mutations": [
-        {
-          "witness_id": "phase0.mutate_backend_element_spelling",
-          "expected_kind": "backend-element-spelling",
-          "path": "crates/chelis-backend-metal/src/emit.rs",
-          "implementation_sha256": "a7bb6cd427b0ef3cf20cb2c2bca1c82767067ca43d44b69c5f298c450a9248ba",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_descriptor_field",
-          "expected_kind": "descriptor-field",
-          "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "43837a17e04d9aa9ef67d16e5e9ddf85c1c83450c581da84776f20825258e13e",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_direct_data_access",
-          "expected_kind": "direct-data-access",
-          "path": "crates/chelis-runtime/src/decimal_parse.rs",
-          "implementation_sha256": "d7a09dce6bc48db797a94c57c642f92a73111032d182cfd627ea1c01fdfb0f99",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_direct_data_access_after_test_module",
-          "expected_kind": "direct-data-access",
-          "path": "crates/chelis-runtime/src/decimal_parse.rs",
-          "implementation_sha256": "95d0ac80bd78cdfb5b3822adb61354c1f176af58708e65111fd1a13cee4f8ee4",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_incomplete_dtype",
-          "expected_kind": "dtype-contract",
-          "path": "crates/chelis-vocab/src/lib.rs",
-          "implementation_sha256": "f530a0c7a874ed4502a74484e4be9aec1b25a05d7d4567c6d740405bd955d543",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_incomplete_arithmetic_repr",
-          "expected_kind": "dtype-contract",
-          "path": "crates/chelis-vocab/src/lib.rs",
-          "implementation_sha256": "eefa16f8d6a548651988846c43a777cb0c4e8c41d9190d7b53db62deb2cbb195",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_element_binding",
-          "expected_kind": "dtype-contract",
-          "path": "crates/chelis-runtime/src/element.rs",
-          "implementation_sha256": "4a37ea35e2763315b8514c2250993dee40002cf34c8883e018f2328d35e763d4",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "Storage for UnregisteredElement",
-            "private :: Sealed for UnregisteredElement"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_fixed_rank_metadata",
-          "expected_kind": "fixed-rank-metadata",
-          "path": "crates/chelis-python/src/lib.rs",
-          "implementation_sha256": "25daa1dae101b37c94d378c692e4931ebaa9f8352eb596383aa00fc039a054cf",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_load_store_template",
-          "expected_kind": "load-store-template",
-          "path": "crates/chelis-backend-c/src/host_emit.rs",
-          "implementation_sha256": "5516dcb8749c7428d0b11d1d7dda1dd8de4b4a1094641c72a11ec0b1348e2798",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_narrow_metadata",
-          "expected_kind": "narrow-metadata",
-          "path": "crates/chelis-python/src/lib.rs",
-          "implementation_sha256": "17ab32171a24b8bf58fbca823c92a8ed780e81f5bbd5131da8d6ec407b7b7a59",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_normalized_key_arithmetic",
-          "expected_kind": "normalized-key-arithmetic",
-          "path": "crates/chelis-ir/src/dag.rs",
-          "implementation_sha256": "2fe7caf5f79f8c5f18515a211073875bb84938c86347e4c263f43004ea69d1c4",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_retired_capacity_normalizer",
-          "expected_kind": "normalized-key-arithmetic",
-          "path": "crates/chelis-ir/src/dag.rs",
-          "implementation_sha256": "955e70aa636012fdeb8ea2a7d990f971e47cfebfae031325b6f98f59700859f9",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "DimExpr::normalized_key"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_capacity_owner_saturation",
-          "expected_kind": "saturating-capacity-fold",
-          "path": "crates/chelis-ir/src/capacity_key.rs",
-          "implementation_sha256": "1fbfb148c80bfe1048052c9668db73598f585cc0deed9296b1f0666b4ea4bf88",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_capacity_owner_wrapping_product",
-          "expected_kind": "wrapping-capacity-fold",
-          "path": "crates/chelis-ir/src/capacity_key.rs",
-          "implementation_sha256": "b28aae73ac22f89aaf6924078a61397815a8d8618d1e46166724bd71e77c6e31",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_capacity_owner_legacy_key",
-          "expected_kind": "legacy-capacity-key-use",
-          "path": "crates/chelis-ir/src/capacity_key.rs",
-          "implementation_sha256": "494c72cf4de0abe630ffa08743f136fb1d273ada41bd605d76c97a243003c603",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_raw_element_pointer",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/src/ieee_narrow.rs",
-          "implementation_sha256": "afa16420ecc733155ac815c783167131321002d1d4f6dc5da1b365da86908e9c",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_width_arithmetic",
-          "expected_kind": "width-arithmetic",
-          "path": "crates/chelis-runtime/src/format_shortest.rs",
-          "implementation_sha256": "4a69cfab4f130096dd101db74e22a6549c0174c8308df424d4fb38fad33fb409",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_metadata_owner_width",
-          "expected_kind": "width-arithmetic",
-          "path": "crates/chelis-runtime/src/metadata.rs",
-          "implementation_sha256": "cc5b3a468b71c33f9193cf659898b35329bd2bece94709a84f14f545540d7f4b",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
-          "expected_kind": "unknown-arithmetic-spelling",
-          "path": "crates/chelis-runtime/include/chelis_simd.h",
-          "implementation_sha256": "528209e5d31902f9e024054fa79c799f9efa04abf4fc684666d73527a6fd74d3",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_public_element_pointer_export",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "35b14726d39b3393d3f9d16eee596d60636ace8104672f9f678be77d7531444b",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_body_direct_data_access",
-          "expected_kind": "direct-data-access",
-          "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "3f92b83033c0ebdb91ba20c8b0f3e4b0266799ee39fa05c0ea30af57032077e7",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_extern_element_data",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "0e691349cdfb6ef2fe1e4b8e8b04cb002cdbc7ca78c1d8fbfbe03a99ac797dc8",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "89d7943fda9ab8af0d6d866ec2daed29931999695129b7baa51a5b5f1650c929",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_tagged_struct_field",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "66baae0e709c09a4ec03e9479725377473a14a9a50a22a9bb4f24ea7f50b0193",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_pool::slab"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_union_field",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "b6d58b8b6d47fc238d02b874bb0114528ba943b582f0b4aefe64b2424eeb1045",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_slot::d"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_macro_typed_carrier",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "8f0d0eb57078e4652fa6ad694f4ad1e488c5057b995f8a39a02350aa5a19a7b7",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_slab"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_multi_declarator_data",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "a0c78b453578eb6c58692ccc1a1ce6bcb24a4526ffdeaf23ee83716a10f2bfbe",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_pair_a",
-            "runtime_representation_phase0_probe_pair_b"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_enum_width",
-          "expected_kind": "width-arithmetic",
-          "path": "crates/chelis-runtime/include/chelis_runtime_dtype.h",
-          "implementation_sha256": "0113416023e5f21c3eb72233a70c9d05aaec5dcf8216f69e3a1509ca78d554ee",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_objc_element_pointer_parameter",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "4202ed69a1291bcf4a105a4101ba1496ec028792ace76c3dc90b2f4c25ccf0a2",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_fill"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_carrier_in_simd_arm",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_simd.h",
-          "implementation_sha256": "bba59895b0bee2e4291fa8a743048dc79c7c96793fe130c2c292059a1a057827",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_avx"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_undeclared_conditional",
-          "expected_kind": "undeclared-conditional",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "7d6ecdd87843d497c6b202490003f980111197eaf8ac2bf681d08929057d1a6d",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_objc_method_carrier",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "e7a5958edfecef3fa0698863da5a7ded9cc19d05ba713c8600903bfc2505a98b",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "RuntimeRepresentationPhase0Probe::elements"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
-          "expected_kind": "unknown-arithmetic-spelling",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "1b207ca7ea965d3a5d807e8e57d314384b5721fb1c036c685bb589fb746d4236",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_pointer_to_element_array",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "92711242d52e99b8e85951af0cadbaf9351da7a3ac5aece490d58d207edeb654",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_rows"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_include_outside_universe",
-          "expected_kind": "include-outside-universe",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "47366f3cb6ed8a7e4ef9a171ad5cab57f8cfb4ac1dd902bf1be90b0e026b43fe",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_include_in_dead_arm",
-          "expected_kind": "undeclared-conditional",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "5d33bb0a7db370c16c2bde57a325b796079e362ad2d9128a5eb80c768e37387c",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_objc_block_parameter",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "bfed9fb46724b06a6b4c66a35c22d6b60752905a5b6aced8a0df7f3d8125ff1b",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_block"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
-          "expected_kind": "width-arithmetic",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "3d8b4530f2844f61872f1ffb47e4bdc842eee9a3a1213e7702b791bcc927718d",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_scratch"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_rust_cast_turbofish",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/src/format_shortest.rs",
-          "implementation_sha256": "a08615b7a560c8ce5e1bbc910c5f2cafaa83b7df6e47784ad9534b696e838bba",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_turbofish"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_int8_element_pointer",
-          "expected_kind": "raw-element-pointer",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "ff68ddf828b03077df95b128d5b1fb85ab984fae444d4805fe841af685626062",
-          "expected_failure": {
-            "code": "inventory.unclassified",
-            "reason_prefix": "unclassified inventory hit"
-          },
-          "expected_owners": [
-            "runtime_representation_phase0_probe_i8"
-          ],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_c_elifdef_arm",
-          "expected_kind": "undeclared-conditional",
-          "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "50bf8e800ba8482f82eeaa5ed3069af1c5c4bc571bcdc89622062cff96985992",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_rust_path_module",
-          "expected_kind": "rust-path-module",
-          "path": "crates/chelis-ir/src/dag.rs",
-          "implementation_sha256": "459c3cde96dae99f997843567dcb6924bc2674e18b7065d664ecf710eb3a3183",
-          "expected_failure": {
-            "code": "source.rejected",
-            "reason_prefix": "fail-closed inventory scanner rejected"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_unregistered_inventory_source",
-          "expected_kind": "unregistered-inventory-source",
-          "path": "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
-          "implementation_sha256": "61a6a9e86484fe59ba32eb608c9df980c1fae09489882378276285647ba25b4f",
-          "expected_failure": {
-            "code": "inventory.unregistered_source",
-            "reason_prefix": "the frozen inventory source list is stale"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        },
-        {
-          "witness_id": "phase0.mutate_unregistered_subdirectory_source",
-          "expected_kind": "unregistered-inventory-source",
-          "path": "crates/chelis-ir/src/repr_probe/mod.rs",
-          "implementation_sha256": "1a8bdbc2a124cc88e29c9b317aa9e92c5f42b0914f1636bb1a448fb6a03f70c0",
-          "expected_failure": {
-            "code": "inventory.unregistered_source",
-            "reason_prefix": "the frozen inventory source list is stale"
-          },
-          "expected_owners": [],
-          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
-        }
-      ]
-    },
-    "release_reproducers": [
-      {
-        "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test checked_c_alloc_like --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
-      },
-      {
-        "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test checked_c_alloc_like --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
-      },
-      {
-        "name": "checked C snapshot delegation and restoration mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_metadata --test checked_c_snapshot_metadata"
-      },
-      {
-        "name": "checked shape observation before storage submission execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_snapshot_)"
-      },
-      {
-        "name": "checked vmap shape observation on its shifted axis",
-        "command": "cargo nextest run -p chelis-cli --test runtime_extent_slice_a -E test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"
-      },
-      {
-        "name": "checked C reduction delegation and bypass mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_reduction"
-      },
-      {
-        "name": "checked C reductions and Count optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile --test fused_compile -E binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)"
-      },
-      {
-        "name": "checked C reduction example parity",
-        "command": "cargo nextest run -p chelis-cli --test parity --test issue_1294_standard_lowerings -E test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"
-      },
-      {
-        "name": "checked C JSON ordering scratch delegation and lifetime controls",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_json_scratch"
-      },
-      {
-        "name": "checked C JSON ordering scratch recursive and empty execution",
-        "command": "cargo nextest run -p chelis-cli --test issue_1314_json_bigint -E test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"
-      },
-      {
-        "name": "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
-        "command": "cargo nextest run -p chelis-cli --test issue_1314_json_bigint -E test(=json_scratch_execution_detects_skipped_cleanup)"
-      },
-      {
-        "name": "checked C literal ingress delegation controls",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_host_metadata"
-      },
-      {
-        "name": "checked C literal storage optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_literals_)"
-      },
-      {
-        "name": "checked C window delegation and bypass mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_window"
-      },
-      {
-        "name": "checked C window geometry and gradient optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile --test issue_254_reduce_window_emit -E test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)"
-      },
-      {
-        "name": "checked C window executable example parity",
-        "command": "cargo nextest run -p chelis-cli --test parity -E test(parity_checked_window_geometry) | test(parity_corpus_is_complete)"
-      },
-      {
-        "name": "checked C BLAS submission delegation and bypass mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_blas"
-      },
-      {
-        "name": "checked C BLAS optimized submission and vendor prototype execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_blas_) | test(blas_vendor_dimension_contract)"
-      },
-      {
-        "name": "checked C sparse delegation and bypass mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_sparse"
-      },
-      {
-        "name": "checked C sparse optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_sparse_)"
-      },
-      {
-        "name": "checked C sparse host summary execution and rejection",
-        "command": "cargo nextest run -p chelis-cli --test cross_library_sparse_summaries --test parity -E binary(cross_library_sparse_summaries) | test(parity_checked_sparse_axes)"
-      },
-      {
-        "name": "checked C shared indexing cohort and restoration mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_indexing"
-      },
-      {
-        "name": "checked C shared indexing optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_indexing_)"
-      },
-      {
-        "name": "checked C movement delegation and restoration mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_movement --test checked_c_movement_plans"
-      },
-      {
-        "name": "movement local extent CLI parity and primitive diagnostics",
-        "command": "cargo nextest run -p chelis-cli --test issue_616_runtime_movement_c_parity"
-      },
-      {
-        "name": "verified expansion primitive identity and local guards",
-        "command": "cargo nextest run -p chelis-ir --test movement_expansion_kind"
-      },
-      {
-        "name": "verified expansion primitive identity and local guards in release",
-        "command": "cargo nextest run --release -p chelis-ir --test movement_expansion_kind"
-      },
-      {
-        "name": "checked C movement optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"
-      },
-      {
-        "name": "checked C shared indexing dtype dispatch and storage reuse",
-        "command": "cargo nextest run -p chelis-backend-c --lib --test host_emit_dtype_dispatch --test dtype_matrix_bf16_f16 --test fused_in_place_exec --test fused_in_place_forall_alias"
-      },
-      {
-        "name": "checked C shared indexing cast behavior and first failure",
-        "command": "cargo nextest run -p chelis-cli --test issue_759_checked_cast_default --test cast_trunc --test cbackend_cast_memcpy --test cbackend_cast_arithmetic_composition"
-      },
-      {
-        "name": "checked C reshape and shared indexing example parity",
-        "command": "cargo nextest run -p chelis-cli --test parity -E test(parity_checked_reshape)"
-      },
-      {
-        "name": "checked C DAG reshape optimized UBSan execution",
-        "command": "cargo nextest run -p chelis-backend-c --lib -E test(checked_c_metadata_dag_reshape_executes_under_ubsan)"
-      },
-      {
-        "name": "checked C host reshape optimized UBSan execution",
-        "command": "cargo nextest run -p chelis-cli --test cbackend_reshape_memcpy"
-      },
-      {
-        "name": "sealed runtime element contract",
-        "command": "cargo nextest run --release -p chelis-runtime --test element_contract"
-      },
-      {
-        "name": "closed representation vocabulary contract",
-        "command": "cargo nextest run -p chelis-vocab --test dtype_contract --test dtype_contract_compile"
-      },
-      {
-        "name": "structural inventory scanner contract",
-        "command": "cargo nextest run -p chelis-repr-inventory --test inventory"
-      },
-      {
-        "name": "exact capacity key contract",
-        "command": "cargo test --release -p chelis-ir capacity_key::tests::"
-      },
-      {
-        "name": "opaque capacity key public surface",
-        "command": "cargo test --release -p chelis-ir --doc capacity_key"
-      },
-      {
-        "name": "exact shared capacity and finite projection release controls",
-        "command": "cargo nextest run --release -p chelis-ir --test issue_888_capacity_collision --test dim_expr_evaluation"
-      },
-      {
-        "name": "capacity collision planner-level release reproducers",
-        "command": "cargo nextest run --release -p chelis-backend-c -p chelis-backend-hip --test issue_888_capacity_collision"
-      },
-      {
-        "name": "count byte zero and foreign metadata release reproducers",
-        "command": "cargo nextest run --release -p chelis-runtime --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation"
-      },
-      {
-        "name": "landed representation receipts",
-        "command": "cargo nextest run --release -p chelis-runtime --test bool8_storage_type --test dim_carrier_int64 --test runtime_dtype_c_probe --test runtime_dtype_generated_header --test runtime_dtype_invalid_ffi"
-      },
-      {
-        "name": "shared capacity census classifier",
-        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
-      }
-    ],
-    "hardware_probes": [
-      {
-        "lane": "hip",
-        "status": "manual-required",
-        "command": "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1"
-      },
-      {
-        "lane": "metal",
-        "status": "manual-required",
-        "command": "cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1"
-      }
-    ],
-    "hardware_disposition": "manual-required rows are harness registrations, not executed receipts",
-    "acceptance": "RUNTIME REPRESENTATION PHASE 0: PASS"
-  }
+  ]
 }

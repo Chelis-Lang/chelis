@@ -1,9 +1,10 @@
 """Unit contracts for the chelis#893 Phase 0 acceptance oracle.
 
 These cover the parts of the oracle that are not proved by running it: that the
-frozen source list still equals its roots, that the freeze digest actually binds
-what it claims to, that every classifier has a controlled mutation, and that a
-mutation cannot be weakened without moving the freeze.
+frozen source list still equals its roots, that the freeze digest binds the
+finished foundation and reviewed mutation contracts, that the runtime manifest
+exactly describes the configuration the oracle executes, and that every
+classifier has a controlled mutation.
 
 The seam classification rules themselves are proved in the scanner's own suite
 (`cargo nextest run -p chelis-repr-inventory --test inventory`), which is where
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -131,11 +133,419 @@ class BaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
             oracle.validate_baseline(mutated, self.rows)
 
-    def test_freeze_digest_rejects_an_edited_coverage_manifest(self) -> None:
+    def test_baseline_contains_only_the_frozen_foundation_and_shrink_only_debt(
+        self,
+    ) -> None:
+        self.assertEqual(
+            set(self.baseline),
+            {
+                "schema_version",
+                "freeze_sha256",
+                "foundation_rows",
+                "source_inventory",
+                "active_debt",
+            },
+        )
+        self.assertNotIn("coverage_manifest", self.baseline)
+
+    def test_freeze_has_no_live_coverage_configuration_input(self) -> None:
+        digest = oracle._freeze_digest(
+            self.baseline["foundation_rows"],
+            self.baseline["source_inventory"],
+        )
+        manifest = oracle.coverage_manifest()
+        manifest["release_reproducers"] = []
+        manifest["hardware_probes"] = []
+        manifest["source_inventory"]["universe"]["registered_sources"] = 0
+        manifest["acceptance"] = "ALWAYS PASS"
+        self.assertEqual(
+            digest,
+            oracle._freeze_digest(
+                self.baseline["foundation_rows"],
+                self.baseline["source_inventory"],
+            ),
+        )
+
+    def test_all_current_mutations_are_exactly_frozen(self) -> None:
+        frozen = self.baseline["source_inventory"]["mutations"]
+        current = oracle.frozen_mutation_rows(oracle.phase0_mutation_probes())
+        self.assertEqual(len(frozen), 44)
+        self.assertEqual(frozen, current)
+
+    def test_mutation_implementation_drift_rejects_the_frozen_contract(self) -> None:
+        probes = oracle.phase0_mutation_probes()
+
+        def weakened(source: str) -> str:
+            return source
+
+        drifted = (
+            oracle.MutationProbe(
+                witness_id=probes[0].witness_id,
+                expected_kind=probes[0].expected_kind,
+                path=probes[0].path,
+                mutate=weakened,
+                expected_failure=probes[0].expected_failure,
+                expected_owners=probes[0].expected_owners,
+            ),
+            *probes[1:],
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure,
+            "frozen mutation contract",
+        ):
+            oracle.validate_baseline(self.baseline, self.rows, probes=drifted)
+
+    def test_mutation_contract_fields_are_inside_the_freeze(self) -> None:
+        cases = (
+            ("witness_id", "phase0.reviewed_replacement"),
+            ("implementation_sha256", "0" * 64),
+            (
+                "expected_failure",
+                {"code": "different.code", "reason_prefix": "different reason"},
+            ),
+            ("command", "python scripts/runtime_representation_oracle.py --phase 0"),
+        )
+        original_digest = self.baseline["freeze_sha256"]
+        for field, value in cases:
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated["source_inventory"]["mutations"][0][field] = value
+                self.assertNotEqual(
+                    original_digest,
+                    oracle._freeze_digest(
+                        mutated["foundation_rows"],
+                        mutated["source_inventory"],
+                    ),
+                )
+                with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_schema_rejects_a_reintroduced_persisted_coverage_manifest(self) -> None:
         mutated = json.loads(json.dumps(self.baseline))
-        mutated["coverage_manifest"]["acceptance"] = "ALWAYS PASS"
-        with self.assertRaises(oracle.OracleFailure):
+        mutated["coverage_manifest"] = oracle.coverage_manifest()
+        with self.assertRaisesRegex(oracle.OracleFailure, "top-level fields"):
             oracle.validate_baseline(mutated, self.rows)
+
+    def test_active_debt_rejects_ignored_authority_fields(self) -> None:
+        for field, value in (
+            ("coverage_manifest", {"acceptance": "ALWAYS PASS"}),
+            ("authority", "trusted"),
+        ):
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated["active_debt"][0][field] = value
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"active_debt\[0\].*exact fields",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_every_persisted_row_requires_exact_fields_and_types(self) -> None:
+        cases = (
+            ("foundation extra", "foundation_rows", 0, "authority", "trusted"),
+            ("foundation missing", "foundation_rows", 0, "deletion_phase", None),
+            ("foundation identity type", "foundation_rows", 0, "identity", 7),
+            ("foundation phase type", "foundation_rows", 0, "deletion_phase", "4"),
+            ("foundation bool phase", "foundation_rows", 0, "deletion_phase", True),
+            ("foundation phase value", "foundation_rows", 0, "deletion_phase", 0),
+            ("active missing", "active_debt", 0, "sample", None),
+            ("active identity type", "active_debt", 0, "identity", 7),
+            ("active sample type", "active_debt", 0, "sample", {"text": "stored"}),
+        )
+        for name, row_class, index, field, value in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                row = mutated[row_class][index]
+                if "missing" in name:
+                    del row[field]
+                else:
+                    row[field] = value
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    rf"{row_class}\[{index}\]",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_duplicate_identities_are_rejected_before_digest_comparison(self) -> None:
+        for row_class in ("foundation_rows", "active_debt"):
+            with self.subTest(row_class=row_class):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated[row_class][1]["identity"] = mutated[row_class][0]["identity"]
+                with self.assertRaisesRegex(oracle.OracleFailure, "duplicate identity"):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_mutation_rows_fail_closed_on_unsupported_fields_and_duplicates(
+        self,
+    ) -> None:
+        mutated = json.loads(json.dumps(self.baseline))
+        mutated["source_inventory"]["mutations"][0]["path"] = "ignored.rs"
+        with self.assertRaisesRegex(
+            oracle.OracleFailure,
+            r"source_inventory\.mutations\[0\].*exact fields",
+        ):
+            oracle.validate_baseline(mutated, self.rows)
+
+        mutated = json.loads(json.dumps(self.baseline))
+        mutations = mutated["source_inventory"]["mutations"]
+        mutations[1]["witness_id"] = mutations[0]["witness_id"]
+        with self.assertRaisesRegex(oracle.OracleFailure, "duplicate witness_id"):
+            oracle.validate_baseline(mutated, self.rows)
+
+    def test_source_inventory_requires_the_exact_mutation_envelope(self) -> None:
+        cases = (
+            ("extra", {"mutations": [], "authority": "ignored"}),
+            ("missing", {}),
+            ("mutations type", {"mutations": {}}),
+        )
+        for name, source_inventory in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated["source_inventory"] = source_inventory
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"source_inventory",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_mutation_rows_require_exact_nested_fields_and_types(self) -> None:
+        cases = (
+            ("missing implementation", "implementation_sha256", None),
+            ("implementation type", "implementation_sha256", 7),
+            ("implementation spelling", "implementation_sha256", "not-a-sha"),
+            ("witness type", "witness_id", 7),
+            ("command type", "command", ["phase", "0"]),
+            ("failure extra", "failure_extra", "ignored"),
+            ("failure code type", "failure_code", 7),
+            ("failure reason type", "failure_reason", 7),
+        )
+        for name, field, value in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                row = mutated["source_inventory"]["mutations"][0]
+                if field == "failure_extra":
+                    row["expected_failure"]["ignored"] = value
+                elif field == "failure_code":
+                    row["expected_failure"]["code"] = value
+                elif field == "failure_reason":
+                    row["expected_failure"]["reason_prefix"] = value
+                elif name.startswith("missing"):
+                    del row[field]
+                else:
+                    row[field] = value
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"source_inventory\.mutations\[0\]",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_top_level_fields_require_exact_types_before_digest_validation(self) -> None:
+        cases = (
+            ("missing freeze", "freeze_sha256", None),
+            ("schema string", "schema_version", "6"),
+            ("schema bool", "schema_version", True),
+            ("freeze type", "freeze_sha256", 7),
+            ("freeze spelling", "freeze_sha256", "not-a-sha"),
+        )
+        for name, field, value in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                if name.startswith("missing"):
+                    del mutated[field]
+                else:
+                    mutated[field] = value
+                with self.assertRaisesRegex(oracle.OracleFailure, field):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_load_rejects_duplicate_json_object_keys(self) -> None:
+        duplicates = (
+            (
+                "top-level",
+                '{"schema_version":6,"freeze_sha256":"'
+                + oracle.FREEZE_SHA256
+                + '","foundation_rows":[],"source_inventory":{"mutations":[]},'
+                '"active_debt":[],'
+                '"active_debt":[{"identity":"x","sample":""}]}',
+                "active_debt",
+            ),
+            (
+                "nested",
+                '{"schema_version":6,"freeze_sha256":"'
+                + oracle.FREEZE_SHA256
+                + '","foundation_rows":[],"source_inventory":{"mutations":[]},'
+                '"active_debt":[{"identity":"x","identity":"y","sample":""}]}',
+                "identity",
+            ),
+        )
+        for name, duplicate, key in duplicates:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "baseline.json"
+                path.write_text(duplicate, encoding="utf-8")
+                with mock.patch.object(oracle, "BASELINE_PATH", path):
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        f"duplicate JSON object key: {key}",
+                    ):
+                        oracle.load_baseline()
+
+    def test_schema_accepts_supported_neighbor_rows(self) -> None:
+        supported = json.loads(json.dumps(self.baseline))
+        supported["active_debt"][0]["sample"] = "a different reviewed sample"
+        supported["foundation_rows"][0]["deletion_phase"] = 1
+        supported["source_inventory"]["mutations"][0]["command"] = "reviewed command"
+        oracle._validate_baseline_schema(supported)
+
+    def test_regeneration_rejects_ignored_fields_before_deriving_or_writing(
+        self,
+    ) -> None:
+        mutated = json.loads(json.dumps(self.baseline))
+        mutated["active_debt"][0]["authority"] = "trusted"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "baseline.json"
+            with (
+                mock.patch.object(oracle, "load_baseline", return_value=mutated),
+                mock.patch.object(oracle, "BASELINE_PATH", output),
+                mock.patch.object(oracle, "inventory_rows") as inventory_rows,
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"active_debt\[0\].*exact fields",
+                ):
+                    oracle.regenerate()
+            inventory_rows.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_regeneration_preserves_retired_foundation_rows(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        active_rows = self.rows[:1]
+        regenerated = oracle.build_foundation_baseline(
+            active_rows,
+            foundation_rows=foundation,
+            source_inventory=self.baseline["source_inventory"],
+            active_debt_rows=self.baseline["active_debt"],
+        )
+        self.assertEqual(regenerated["foundation_rows"], foundation)
+        self.assertEqual(
+            regenerated["source_inventory"],
+            self.baseline["source_inventory"],
+        )
+        self.assertEqual(
+            regenerated["active_debt"],
+            [row.to_active_dict() for row in active_rows],
+        )
+
+    def test_regeneration_adds_a_new_row_to_the_reviewed_foundation(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        added = oracle.InventoryRow(
+            kind="direct-data-access",
+            path="crates/chelis-runtime/src/invented.rs",
+            owner="new_owner",
+            deletion_phase=3,
+            sample="invented",
+        )
+        regenerated = oracle.build_foundation_baseline(
+            (*self.rows, added),
+            foundation_rows=foundation,
+            source_inventory=self.baseline["source_inventory"],
+            active_debt_rows=self.baseline["active_debt"],
+        )
+        self.assertIn(added.to_baseline_dict(), regenerated["foundation_rows"])
+        self.assertNotEqual(
+            regenerated["freeze_sha256"],
+            oracle._freeze_digest(foundation, self.baseline["source_inventory"]),
+        )
+
+    def test_regeneration_rejects_a_retired_identity_before_writing(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        active_ids = {
+            str(row["identity"]) for row in self.baseline["active_debt"]
+        }
+        retired = next(
+            row for row in foundation if str(row["identity"]) not in active_ids
+        )
+        identity = {
+            part.split("=", 1)[0]: part.split("=", 1)[1]
+            for part in str(retired["identity"]).split("|")
+        }
+        reactivated = oracle.InventoryRow(
+            kind=identity["kind"],
+            path=identity["path"],
+            owner=identity["owner"],
+            deletion_phase=int(retired["deletion_phase"]),
+            sample="reviewer reactivation reproduction",
+        )
+        observed = (*self.rows, reactivated)
+
+        with self.assertRaisesRegex(
+            oracle.OracleFailure,
+            "retired Phase 0 identity reappeared",
+        ):
+            oracle.build_foundation_baseline(
+                observed,
+                foundation_rows=foundation,
+                source_inventory=self.baseline["source_inventory"],
+                active_debt_rows=self.baseline["active_debt"],
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "baseline.json"
+            with (
+                mock.patch.object(oracle, "BASELINE_PATH", output),
+                mock.patch.object(
+                    oracle,
+                    "load_baseline",
+                    return_value=self.baseline,
+                ),
+                mock.patch.object(
+                    oracle,
+                    "inventory_rows",
+                    return_value=observed,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    "retired Phase 0 identity reappeared",
+                ):
+                    oracle.regenerate()
+            self.assertFalse(output.exists())
+
+    def test_regeneration_rejects_current_mutation_drift_without_rewriting(
+        self,
+    ) -> None:
+        probes = oracle.phase0_mutation_probes()
+
+        def weakened(source: str) -> str:
+            return source
+
+        drifted = (
+            oracle.MutationProbe(
+                witness_id=probes[0].witness_id,
+                expected_kind=probes[0].expected_kind,
+                path=probes[0].path,
+                mutate=weakened,
+                expected_failure=probes[0].expected_failure,
+                expected_owners=probes[0].expected_owners,
+            ),
+            *probes[1:],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "baseline.json"
+            with (
+                mock.patch.object(oracle, "BASELINE_PATH", output),
+                mock.patch.object(oracle, "load_baseline", return_value=self.baseline),
+                mock.patch.object(
+                    oracle,
+                    "phase0_mutation_probes",
+                    return_value=drifted,
+                ),
+                mock.patch.object(oracle, "inventory_rows") as inventory_rows,
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    "frozen mutation contract",
+                ):
+                    oracle.regenerate()
+            inventory_rows.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_active_debt_cannot_add_an_identity(self) -> None:
         mutated = json.loads(json.dumps(self.baseline))
@@ -342,9 +752,12 @@ class MutationContractTests(unittest.TestCase):
             self.assertEqual(entry["command"], oracle.PHASE0_COMMAND)
             self.assertRegex(str(entry["implementation_sha256"]), r"^[0-9a-f]{64}$")
 
-    def test_mutation_body_change_moves_the_freeze_digest(self) -> None:
+    def test_mutation_body_change_moves_the_runtime_manifest_and_frozen_projection(
+        self,
+    ) -> None:
         probes = oracle.phase0_mutation_probes()
         before = oracle.coverage_manifest(probes)
+        frozen = oracle.frozen_mutation_rows(probes)
 
         def weakened(source: str) -> str:
             return source
@@ -360,6 +773,7 @@ class MutationContractTests(unittest.TestCase):
             *probes[1:],
         )
         self.assertNotEqual(before, oracle.coverage_manifest(replaced))
+        self.assertNotEqual(frozen, oracle.frozen_mutation_rows(replaced))
 
     def test_implementation_digest_is_independent_of_import_name(self) -> None:
         digest = oracle._mutation_implementation_sha256(oracle.mutate_direct_data_access)
@@ -574,6 +988,43 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(oracle.OracleFailure, "failed with exit 1"):
                 oracle.run_phase0(run_mutations=False)
         self.assertEqual(run.call_count, 1)
+
+    def test_runner_rejects_a_manifest_that_does_not_match_its_configuration(
+        self,
+    ) -> None:
+        drifted = oracle.coverage_manifest()
+        drifted["release_reproducers"] = drifted["release_reproducers"][:-1]
+        with (
+            mock.patch.object(oracle, "validate_phase0_inventory"),
+            mock.patch.object(oracle, "coverage_manifest", return_value=drifted),
+            mock.patch.object(oracle, "_run_leg") as run_leg,
+        ):
+            with self.assertRaisesRegex(oracle.OracleFailure, "coverage manifest drifted"):
+                oracle.run_phase0(run_mutations=False)
+        run_leg.assert_not_called()
+
+    def test_runner_executes_every_manifested_mutation_and_reproducer(self) -> None:
+        probes = oracle.phase0_mutation_probes()
+        legs = oracle.phase0_legs()
+        self.assertEqual(len(probes), 44)
+        self.assertEqual(
+            oracle.load_baseline()["source_inventory"]["mutations"],
+            oracle.frozen_mutation_rows(probes),
+        )
+        with (
+            mock.patch.object(oracle, "validate_phase0_inventory"),
+            mock.patch.object(oracle, "_expect_mutation_rejected") as reject,
+            mock.patch.object(oracle, "_run_leg") as run_leg,
+        ):
+            oracle.run_phase0()
+        self.assertEqual(
+            [call.args[0] for call in reject.call_args_list],
+            list(probes),
+        )
+        self.assertEqual(
+            [call.args[0] for call in run_leg.call_args_list],
+            list(legs),
+        )
 
 
 if __name__ == "__main__":

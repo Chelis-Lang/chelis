@@ -1,6 +1,7 @@
 //! Type environment: maps variable names to type schemes.
 
 use chelis_unord::{UnordMap, UnordSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -101,7 +102,9 @@ struct ConstructorBinding {
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
-    bindings: UnordMap<String, Scheme>,
+    // Schemes are immutable once bound. Lexical snapshots copy the name map,
+    // while sharing signature bodies until a scope replaces its own binding.
+    bindings: UnordMap<String, Arc<Scheme>>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
     /// Every exact owner remains available so constructor syntax can select by
@@ -242,7 +245,7 @@ impl Env {
 
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings.get(name)
+        self.bindings.get(name).map(Arc::as_ref)
     }
 
     /// Look up the active constructor owner and scheme for an exact name.
@@ -387,18 +390,18 @@ impl Env {
             .into_iter()
             .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
         let first = matches.next()?;
-        matches.next().is_none().then_some(first)
+        matches.next().is_none().then_some(first.as_ref())
     }
 
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
-        self.bindings.insert(name, scheme);
+        self.bindings.insert(name, Arc::new(scheme));
     }
 
     /// Bind a constructor in both structural constructor position and the
     /// ordinary value environment used by bare/nullary references.
     pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
-        self.bindings.insert(name.clone(), scheme.clone());
+        self.bindings.insert(name.clone(), Arc::new(scheme.clone()));
         let candidates = self.constructor_bindings.entry(name).or_default();
         candidates.retain(|candidate| candidate.owner != owner);
         candidates.push(ConstructorBinding { owner, scheme });

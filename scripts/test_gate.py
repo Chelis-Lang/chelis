@@ -738,6 +738,11 @@ NON_GATE_WORKFLOWS = {
     "changelog.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
+    # First separable loud-unsupported C7.5 slice: daily/manual standing
+    # rejection-issue liveness on main plus tracking-issue reporting. It runs
+    # no command owned by the per-PR developer gate. The broader Phase 4
+    # nightly matrix remains pending.
+    "loud-unsupported-nightly.yml",
     # Manually dispatched Phase 3 acceptance on a provisioned AMD GPU runner;
     # the hardware oracle is not part of the per-PR developer gate.
     "ownership-hip.yml",
