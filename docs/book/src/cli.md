@@ -228,6 +228,18 @@ selected manifest names in the same order. Tuple roots and statically fixed
 ADT roots use dotted component names. If a lane cannot produce an owed root,
 evaluation exits nonzero instead of returning a partial JSON document.
 
+The compiler API can supply tensor bindings when selecting a parameterized
+Host entry, including through `PreparedEvalInContext::eval_root`. An available
+lowered Host kernel contributes its shape-witness parameters to `required_inputs`;
+entry/profile admission is unchanged. Missing required bindings leave the
+declaration unentered; invalid required wire tensors fail before entry.
+Genuinely dead parameters and unrelated
+bindings are not decoded. Preparation can inspect Host lowering metadata again
+per request; it does not cache a speculative execution plan or change runtime
+error and Random-state ownership. The
+[selected Host API tests](../../../crates/chelis-compiler-api/tests/issue_2013_selected_host_inputs.rs)
+demonstrate supplied bindings; `chelis eval --file` supplies an empty binding map.
+
 If evaluation fails after `print` or `debug`, text mode emits the preceding
 transcript on stdout before reporting the error on stderr. Later effects do
 not run and no result roots are printed. With `--json`, failure leaves stdout

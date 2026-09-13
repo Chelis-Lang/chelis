@@ -462,13 +462,12 @@ Either way, chelis#1870's migration inventory must include both sites.
 - Use one source for narrow-float capability prose, then point users to the
   normative dtype matrix rather than restating its contents.
 
-### Standing canary delivered; changed-row narrowing remains
+### Standing canary and changed-row PR admission
 
 Chelis#1961 made standing issue membership source-derived, and chelis#1971
 landed `.github/workflows/loud-unsupported-nightly.yml` with daily/manual
 execution, serialized reporting, duplicate recovery, and close-on-recovery.
-The pull-request job still validates the standing issue manifest. The first
-manual default-branch receipt, workflow run `34765689930`, passed on
+The first manual default-branch receipt, workflow run `34765689930`, passed on
 `da11a6fa388e7f52465cc28728513a331a85cac5` in 10 minutes 45 seconds. Its
 status job completed successfully without opening a failure issue.
 
@@ -478,9 +477,15 @@ The sequencing preconditions are now satisfied:
 2. the scheduled standing-liveness canary has workflow-registry and
    trigger-loop controls.
 
-Restricting the pull-request check to rows the change adds or modifies remains
-a separate implementation slice. The standing nightly continues to own every
-source-derived row after that narrowing.
+The pull-request check now live-validates added or modified authority rows,
+while still freshly checking complete source/manifest agreement on every
+triggered run. Its exact synthetic merge's first parent supplies the base;
+the second must equal the event PR head. Invalid Git evidence or either
+manifest fails closed. Schema 1 fixes each row's kind and state, so a changed
+valid identity is a new or renumbered issue number. The standing nightly
+continues to check every source-derived row, including unchanged authorities
+that acquire more citing sites. This delivers the issue-liveness split only;
+the structured diagnostic migration and broader §C7.5 matrix remain separate.
 
 ## Deterrence and execution reach
 
@@ -509,8 +514,8 @@ Pull-request execution reach remains the largest immediate gap:
 | rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
-| §C7.5 standing-liveness canary | Daily/manual workflow on `main`; the regular PR job still checks the standing manifest until changed-row narrowing lands |
-| newly added or changed package integration target | Candidate required change-owned shards derive its PR execution; merged-main acceptance remains outstanding |
+| §C7.5 standing-liveness canary | Daily/manual workflow checks every standing row on `main`; the regular PR job live-validates changed authority rows |
+| newly added or changed package integration target | Required change-owned shards landed in chelis#2019 and passed merged-main acceptance; representative hosted cost trials remain under chelis#1824 |
 
 The former contrast between the two expand inventories remains historical
 evidence for execution reach. The selected insert inventory stayed

@@ -699,7 +699,7 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         script_unit = _ci_job_block("script-unit")
         for command in (
             ".venv/bin/python scripts/check_rejection_authority_boundary.py",
-            ".venv/bin/python scripts/validate_rejection_issue_manifest.py",
+            '.venv/bin/python scripts/validate_rejection_issue_manifest.py --pr-head "$PR_HEAD"',
         ):
             _assert_executable_run_once(liveness, command)
             self.assertNotIn("run: " + command, script_unit)

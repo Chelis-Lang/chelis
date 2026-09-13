@@ -2622,6 +2622,15 @@ pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResul
     eval_compiled(&compiled, request.bindings, None)
 }
 
+/// Evaluate the selected roots using only their required tensor bindings.
+/// A selected parameterized declaration becomes owed when those inputs are
+/// present; bindings do not supply live scalar or container parameters.
+/// Admitted selected Host calls receive tensor actuals in authored parameter
+/// order. An available lowered Host kernel also contributes its shape-witness
+/// parameters to input demand; this does not broaden entry/profile admission.
+/// Missing required inputs leave the declaration unentered. Invalid required
+/// wire tensors fail before entry; genuinely dead and unrelated bindings are
+/// not decoded. Host execution still owns lowering errors and executed effects.
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
     eval_selected_for_target(request, selected_root_names, Target::Eval)
 }
@@ -2691,6 +2700,7 @@ pub struct PreparedEval {
 impl PreparedEval {
     /// Evaluate exactly one selected root. Other top-level non-fn bindings
     /// stay registered for lazy reference but are not eagerly evaluated.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -2895,7 +2905,9 @@ pub fn eval_in_context_for_target(
 /// into the evaluator instead of an empty map. This is the reef-aware
 /// analogue of [`eval`] with bindings: it lets the Python `eval(...,
 /// project_root=...)` path resolve library imports (issue #816) while still
-/// binding the new source's free `Load`s to the caller's inputs.
+/// binding the new source's free `Load`s and the selected `main`'s required
+/// tensor parameters to the caller's inputs. The binding and non-observation
+/// rules are the same as [`eval_selected`].
 pub fn eval_in_context_with_bindings(
     context: &crate::context::CompiledContext,
     new_source: &str,
@@ -2984,6 +2996,9 @@ pub struct PreparedEvalInContext {
 
 impl PreparedEvalInContext {
     /// Evaluate exactly one selected root against the prepared compile.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
+    /// Selected Host demand may inspect a new lowering product, including the
+    /// checked library proof; execution does not reuse that speculative plan.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -3577,7 +3592,7 @@ fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
 }
 
 /// Specialize callable tensor entries selected for evaluation into owed
-/// roots once all authored parameters have bindings. The checked manifest
+/// roots once all required runtime inputs have bindings. The checked manifest
 /// intentionally excludes parameterized declarations in the abstract; this
 /// produces a new `ManifestedProgram` for the concrete evaluation request
 /// rather than reaching around the manifest to the legacy named-root map.
@@ -3689,6 +3704,36 @@ fn manifested_program_for_eval<'a>(
         {
             continue;
         }
+
+        if selected_roots.len() != selected_entries.len() {
+            match selected_host_input_demand(compiled, candidate, &parameter_names) {
+                Ok(Some(inputs)) => {
+                    if inputs.iter().any(|name| {
+                        signature
+                            .params
+                            .iter()
+                            .find(|param| param.name == *name)
+                            .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
+                    }) {
+                        continue;
+                    }
+                    required_inputs.extend(inputs);
+                    if !required_inputs
+                        .iter()
+                        .all(|input| available.contains(input.as_str()))
+                    {
+                        continue;
+                    }
+                }
+                Ok(None) => {}
+                Err(_deferred_lowering) => {
+                    // A failed metadata query does not change admission or
+                    // choose an interpreter fallback. Decode the original
+                    // demanded inputs normally; the unchanged runtime still
+                    // owns lowering and its error at the entered-call boundary.
+                }
+            }
+        }
         let unsupported_prim = selected_roots.iter().find_map(|root| {
             compiled
                 .dag
@@ -3783,6 +3828,47 @@ fn manifested_program_for_eval<'a>(
         manifest,
         compiled.program.target(),
     ))
+}
+
+/// Refine selected Host-call admission from the same kernel input carrier
+/// that runtime stages, including declared shape witnesses. The temporary
+/// product is never reused for execution: runtime owns its current Random
+/// context, inherited exclusion, and any entered lowering error.
+fn selected_host_input_demand(
+    compiled: &CompiledSource,
+    name: &str,
+    parameters: &BTreeSet<String>,
+) -> std::result::Result<Option<BTreeSet<String>>, chelis_ir::lower::LowerDiagnostic> {
+    let composed;
+    let checked = if let Some(library) = &compiled.library_runtime {
+        composed =
+            CheckedProgram::compose(&library.checked, compiled.checked()).ok_or_else(|| {
+                chelis_ir::lower::LowerDiagnostic::new(
+                    "runtime kernel program lost its checked library proof".to_owned(),
+                    None,
+                    None,
+                )
+            })?;
+        &composed
+    } else {
+        compiled.checked()
+    };
+    let session = chelis_ir::host::HostLoweringSession::new(checked);
+    let context =
+        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
+            seed: None,
+            counter: 0,
+        });
+    chelis_ir::host::host_def_evaluation_plan(&session, name, &context).map(|plan| {
+        plan.map(|plan| {
+            plan.kernel_for_inspection()
+                .inputs
+                .iter()
+                .filter(|input| parameters.contains(&input.name))
+                .map(|input| input.name.clone())
+                .collect()
+        })
+    })
 }
 
 fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
@@ -7002,6 +7088,98 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn selected_host_failed_demand_query_preserves_wire_and_entered_error_boundaries() {
+        // This checked helper has an actual fatal static-DAG lowering, not a
+        // mocked diagnostic. Tensorizing its scalar sink makes every live
+        // parameter admissible through EvalRequest without changing the concat.
+        let mut source = include_str!("../../../tests/support/helper_summary_fatal.ch")
+            .split("def zero_qk()")
+            .next()
+            .unwrap()
+            .replace("causal_sdpa_with_sink", "bad")
+            .replace(
+                "-> f32 -> tensor[s, d, f32]",
+                "-> &tensor[f32] -> tensor[s, d, f32]",
+            )
+            .replace("scalar_to_tensor(sink)", "copy(sink)");
+        source.push_str("def entry(q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> int32 = 7i32\n");
+        let compiled = compile_source(SourceKind::Surf, &source).unwrap();
+        let parameters = ["q", "k", "v", "scale", "mask", "sink"]
+            .map(str::to_owned)
+            .into();
+        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:946..952`";
+        assert_eq!(
+            selected_host_input_demand(&compiled, "bad", &parameters)
+                .unwrap_err()
+                .to_string(),
+            lowering_message,
+        );
+        let tensor = |shape: &[i64], data| crate::schema::TensorValue {
+            shape: shape.into(),
+            data: wire_values::storage_f32(data),
+        };
+        for (root, q_shape) in [
+            ("bad", None),
+            ("bad", Some(vec![2, 3])),
+            ("bad", Some(vec![-1])),
+            ("good", Some(vec![-1])),
+            ("entry", Some(vec![2, 3])),
+        ] {
+            let mut bindings = BTreeMap::from([
+                ("k".into(), tensor(&[2, 3], vec![0.0; 6])),
+                (
+                    "v".into(),
+                    tensor(&[2, 3], vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]),
+                ),
+                ("scale".into(), tensor(&[2, 2], vec![1.0; 4])),
+                ("mask".into(), tensor(&[2, 2], vec![0.0; 4])),
+                ("sink".into(), tensor(&[], vec![0.0])),
+            ]);
+            if let Some(shape) = &q_shape {
+                bindings.insert("q".into(), tensor(shape, vec![0.0; 6]));
+            }
+            let result = eval_compiled(&compiled, bindings, Some(&[root.into()]));
+            if q_shape.is_none() || root == "good" {
+                let result = result.unwrap();
+                assert!(result.transcript.is_empty(), "{result:?}");
+                assert_eq!(result.manifest.entries.len(), 1, "{result:?}");
+                assert_eq!(result.manifest.entries[0].name, "good");
+                assert!(result.manifest.entries[0].required_inputs.is_empty());
+                if root == "good" {
+                    assert_eq!(result.roots.len(), 1, "{result:?}");
+                    assert_eq!(result.roots[0].name.as_deref(), Some("good"));
+                    assert_eq!(
+                        serde_json::to_value(&result.roots[0].value).unwrap(),
+                        serde_json::json!({"type":"scalar","value":{"dtype":"int32","value":7}})
+                    );
+                } else {
+                    assert!(result.roots.is_empty(), "{result:?}");
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.stage, "eval");
+                assert_eq!(error.errors.len(), 1, "{error:?}");
+                assert_eq!(
+                    error.errors[0].message,
+                    if q_shape == Some(vec![-1]) {
+                        "binding `q`: tensor extent must be a nonnegative int64"
+                    } else {
+                        lowering_message
+                    }
+                );
+                assert_eq!(
+                    error.transcript,
+                    if root == "entry" {
+                        vec!["entry"]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
 
     fn native_wire_witness_fixture() -> Dag {
         use chelis_ir::dag::RtAxis;

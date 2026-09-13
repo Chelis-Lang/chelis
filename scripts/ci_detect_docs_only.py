@@ -96,6 +96,7 @@ REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
         "crates/chelis-types/src/rejection_registry_generated.rs",
         "crates/chelis-types/src/unsupported.rs",
         "scripts/capacity_census_liveness.py",
+        "scripts/ci_change_owned.py",
         "scripts/check_rejection_authority_boundary.py",
         "scripts/ci_detect_docs_only.py",
         "scripts/generate_rejection_registries.py",

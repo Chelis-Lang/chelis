@@ -127,6 +127,7 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
             "scripts/test_generate_rejection_registries.py",
             "scripts/test_validate_rejection_issue_manifest.py",
             "scripts/capacity_census_liveness.py",
+            "scripts/ci_change_owned.py",
             "scripts/ci_detect_docs_only.py",
             "crates/chelis-types/src/rejection_registry_generated.rs",
             "crates/chelis-types/src/unsupported.rs",
