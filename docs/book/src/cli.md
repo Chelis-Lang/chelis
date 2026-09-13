@@ -182,6 +182,14 @@ When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+Named-axis calls in this compiled library context prepare the lowered call's
+selected tensor inputs and required shape witnesses before execution. A
+same-named formal or a statically dead capture does not by itself initialize
+a library value. Optional shape witnesses can use already-available tensors,
+but do not trigger initialization. An entered initializer's error is preserved.
+The CLI regression fixtures use separate Reef packages to exercise this lazy
+library boundary; a standalone rank-polymorphic example cannot demonstrate it.
+
 ### Targeted evaluation and root manifests
 
 Function aliases remain callable entries, without display roots of their own.
