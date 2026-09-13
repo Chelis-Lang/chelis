@@ -1327,18 +1327,21 @@ execution tests prove its sanctioned replacements work.
 ## B1. Freeze points
 
 - Phase 0 freezes the immutable `foundation_rows`, including each identity's
-  owning deletion phase. Later phases may reduce raw hits but may not add an
-  exception. The digest binds only the canonical foundation object; the
-  separately stored active-debt list sits outside that digest so it can shrink,
-  while regeneration preserves retired foundation identities.
-  `coverage_manifest()` is code-derived configuration, not a persisted or
-  frozen baseline field. At runtime the oracle captures the current mutations,
-  reproducers, and hardware registrations, verifies that the manifest is their
-  exact projection, and executes every non-hardware mutation and reproducer.
-  Each mutation projection retains its stable witness ID, source path, current
-  implementation digest, expected failure code and reason, and required command.
-  Changing that executable configuration is reviewed as code and does not by
-  itself move the foundation freeze.
+  owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
+  row binds its stable witness ID, exact implementation digest, expected
+  failure code and reason, and required command. Later phases may reduce raw
+  hits but may not add an exception or weaken a witness without a reviewed
+  freeze move. The separately stored active-debt list sits outside the digest
+  so it can shrink, while regeneration preserves retired foundation identities
+  and the reviewed mutation rows. `coverage_manifest()` remains code-derived
+  configuration rather than a persisted baseline field: it adds source paths,
+  seam kinds, expected owners, release reproducers, hardware probes, counts,
+  and ordinary execution configuration. At runtime the oracle verifies that
+  live probes match the frozen mutation rows, verifies that the richer manifest
+  is the exact projection of the current configuration, and executes every
+  non-hardware mutation and reproducer. Changes only to live-derived
+  reproducers, hardware probes, counts, or ordinary configuration do not move
+  the freeze.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   checked finite-count types, and a required test-identity floor. Later phases
   consume the contracts without parallel tables. Tests newly selected by an
@@ -1356,20 +1359,22 @@ execution tests prove its sanctioned replacements work.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
   child test substitutes for it.
 
-Moving an architectural freeze, adding or changing a Phase 0 foundation row, or
-removing, renaming, or intentionally replacing a required test identity
-requires changing this document, the owning numbered spec when semantics move,
-the oracle's integrity digest, and a mutation that would have accepted the
-forbidden behavior. Adding a test already selected by a frozen command does not
-move the required floor.
+Moving an architectural freeze, adding or changing a Phase 0 foundation row or
+frozen mutation row, or removing, renaming, or intentionally replacing a
+required test identity requires changing this document, the owning numbered
+spec when semantics move, and the oracle's integrity digest. A foundation
+change also requires a mutation that would have accepted the forbidden
+behavior. Adding a test already selected by a frozen command does not move the
+required floor.
 
-A Phase 0 source-universe, final-form, mutation, reproducer, or hardware
-registration that does not add or change a foundation row does not move the
-foundation digest and does not require a B1 amendment paragraph. Its owning
-change still updates code, focused positive and negative tests, and current
-documentation. The runtime manifest/configuration equality check, source
-closure, expected-failure checks, and execution of every mutation and
-reproducer remain mandatory.
+A Phase 0 source-universe, final-form, reproducer, or hardware registration that
+does not add or change a foundation row or frozen mutation row does not move the
+digest and does not require a B1 amendment paragraph. Its owning change still
+updates code, focused positive and negative tests, and current documentation.
+Adding, removing, renaming, reimplementing, retargeting, or changing the
+expected failure or command of a mutation does move the freeze. The runtime
+manifest/configuration equality check, source closure, expected-failure checks,
+and execution of every mutation and reproducer remain mandatory.
 
 The checked-extent staged plan registers `chelis-ir/src/host/staged.rs` in
 that source universe. It composes existing tagged values and DAG carriers,

@@ -1,4 +1,4 @@
-Runtime-representation Phase 0 now freezes only its reviewed foundation rows.
-Its source, mutation, reproducer, and hardware coverage manifest is derived and
-validated from the code executed by the oracle, so ordinary coverage additions
-no longer require a foundation re-freeze.
+Runtime-representation Phase 0 now freezes its reviewed foundation rows and all
+44 mutation identities, implementations, expected failures, and commands.
+Release reproducers, hardware probes, counts, and ordinary configuration remain
+live-derived, so those changes do not require a freeze move.
