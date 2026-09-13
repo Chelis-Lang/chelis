@@ -160,7 +160,14 @@ fn fused_zero_keeps_nested_named_extent_claim() {
         } else {
             let error = eval(request(&source)).unwrap_err();
             assert_eq!(error.stage, "eval", "{error:?}");
-            assert!(format!("{error:?}").contains("extent"), "{error:?}");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("claimed = 2"), "{error:?}");
+            assert!(rendered.contains("shrink axis 1 = 3"), "{error:?}");
+            assert!(
+                rendered.contains("numeric trap: domain in shrink at int64"),
+                "{error:?}"
+            );
+            assert!(!rendered.contains("extent source(s)"), "{error:?}");
         }
     }
 }

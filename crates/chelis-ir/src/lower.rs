@@ -10171,7 +10171,7 @@ impl<'program> LowerCtx<'program> {
                 body.span_id().map(ToOwned::to_owned),
             )
         };
-        let root_map = Self::fused_vectorized_root_map(&grad_result.dag, &vmapped)
+        let root_map = vectorized_root_map(&grad_result.dag, &vmapped)
             .unwrap_or_else(|message| invalid_mapping(message));
 
         let batch_source = param_types
@@ -10290,31 +10290,6 @@ impl<'program> LowerCtx<'program> {
             }
             _ => LoweredValue::Tuple(flattened.into_iter().map(LoweredValue::Node).collect()),
         }
-    }
-
-    /// Vectorization retains the complete input-root order but may insert
-    /// nodes. Identity correspondence is positional, never numeric-ID based.
-    fn fused_vectorized_root_map(
-        before: &Dag,
-        after: &Dag,
-    ) -> Result<UnordMap<NodeId, NodeId>, String> {
-        if before.roots().len() != after.roots().len() {
-            return Err("root count changed during vectorization".into());
-        }
-        for dag in [before, after] {
-            let mut seen = UnordSet::new();
-            for root in dag.roots() {
-                if dag.get(*root).is_none_or(|node| node.id != *root) || !seen.insert(*root) {
-                    return Err(format!("invalid or duplicate root {root:?}"));
-                }
-            }
-        }
-        Ok(before
-            .roots()
-            .iter()
-            .copied()
-            .zip(after.roots().iter().copied())
-            .collect())
     }
 
     fn materialize_vmapped_arg(
@@ -17089,7 +17064,7 @@ mod fused_zero_tests {
         let grad = grad_dag_checked(&dag, forward, &[x, y]).unwrap();
         let vectorized = vmap::vectorize_axis0(&grad.dag, DimInfo::Lit(2)).unwrap();
         assert_eq!(grad.dag.roots().len(), vectorized.roots().len());
-        let roots = LowerCtx::fused_vectorized_root_map(&grad.dag, &vectorized).unwrap();
+        let roots = vectorized_root_map(&grad.dag, &vectorized).unwrap();
         assert!(
             grad.grad_nodes
                 .to_sorted()
@@ -17182,27 +17157,6 @@ mod fused_zero_tests {
         .unwrap();
         assert_eq!(values[&roots[0]].to_f64_lossy_vec(), [9.0; 6]);
         assert_eq!(values[&roots[1]].to_f64_lossy_vec(), [15.0; 6]);
-    }
-
-    #[test]
-    fn fused_zero_root_correspondence_rejects_missing_duplicate_and_invalid_roots() {
-        let mut original = Dag::new();
-        let input = original.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            tensor_type(&[], Prim::F32),
-            None,
-        );
-        original.add_root(input);
-        let mut missing = original.clone();
-        missing.set_roots(vec![]);
-        assert!(LowerCtx::fused_vectorized_root_map(&original, &missing).is_err());
-        let mut invalid = original.clone();
-        invalid.set_roots(vec![NodeId(99)]);
-        assert!(LowerCtx::fused_vectorized_root_map(&original, &invalid).is_err());
-        let mut duplicate = original.clone();
-        duplicate.set_roots(vec![input, input]);
-        assert!(LowerCtx::fused_vectorized_root_map(&duplicate, &duplicate).is_err());
     }
 
     fn context() -> LowerCtx<'static> {
