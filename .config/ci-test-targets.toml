@@ -483,6 +483,15 @@ tracking_issue = "chelis#1293"
 # exact files. Overlap is forbidden by the parser.
 
 [[path_rule]]
+prefix = "examples/caller_actual_scope.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing issue_1915_caller_actual_scope target checks this exact example and its eval/native results"
+tracking_issue = "chelis#1956"
+
+[[path_rule]]
 prefix = ".cargo/"
 disposition = "packages"
 packages = [
