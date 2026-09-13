@@ -502,7 +502,10 @@
         "two_op_output_members_guard_against_the_canonical_member_on_eval",
         "two_record_paths_that_join_to_one_string_get_two_locals",
         "unused_parameters_keep_their_entry_witnesses_until_after_the_guard",
-        "vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval"
+        "vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval",
+        "vmap_ordinary_shape_preserves_the_nested_gradient_claim",
+        "vmap_ordinary_shape_root_transport_preserves_repeated_result_leaves",
+        "vmap_ordinary_shape_value_executes_on_both_lanes"
       ]
     },
     {
