@@ -483,6 +483,16 @@ tracking_issue = "chelis#1293"
 # exact files. Overlap is forbidden by the parser.
 
 [[path_rule]]
+prefix = "spec/02-surf-syntax.md"
+disposition = "packages"
+packages = ["chelis-surf", "chelis-types", "chelis-compiler-api"]
+
+[[path_rule]]
+prefix = "spec/04-type-system.md"
+disposition = "packages"
+packages = ["chelis-types", "chelis-compiler-api"]
+
+[[path_rule]]
 prefix = "examples/caller_actual_scope.ch"
 disposition = "owner"
 workflow = "ci.yml"
