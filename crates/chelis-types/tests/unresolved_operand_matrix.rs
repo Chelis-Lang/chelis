@@ -2250,3 +2250,149 @@ fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
         )
     });
 }
+
+/// Spec/03 section 6.2 lexical binders cannot capture a substituted helper parameter.
+/// Round 2: the four shadowing witnesses reject on 1dd0f547 but accept on
+/// its base; alpha-renaming alone restores acceptance there.
+#[test]
+fn restricted_body_precision_follows_lexical_bindings() {
+    for (case, program) in [
+        (
+            "body_local_shadow",
+            r#"def g[p](x: tensor[3, p]) -> tensor[f32] = {
+ x = to_tensor([1.0f32, 2.0f32, 3.0f32])
+ mean(x, 0i32)
+}
+f = g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+        (
+            "body_lambda_shadow",
+            r#"def g[p](x: tensor[3, p]) -> tensor[f32] = {
+ h = fn (x: tensor[3, f32]) -> mean(x, 0i32)
+ h(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+}
+f = g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+        (
+            "body_callee_shadow",
+            r#"def g[p](x: tensor[3, p]) -> tensor[3, p] = {
+ mean = fn (t) -> t
+ mean(x)
+}
+f = g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+        (
+            "body_match_shadow",
+            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = match (to_tensor([1.0f32, 2.0f32, 3.0f32]),7i32) with { | (x,k) => mean(x,0i32) }
+f=g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+        (
+            "body_renamed_local",
+            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = {
+ y=to_tensor([1.0f32, 2.0f32, 3.0f32])
+ mean(y,0i32)
+}
+f=g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+        (
+            "body_match_renamed",
+            r#"def g[p](x: tensor[3,p]) -> tensor[f32] = match (to_tensor([1.0f32, 2.0f32, 3.0f32]),7i32) with { | (y,k) => mean(y,0i32) }
+f=g(to_tensor([1i32, 2i32, 4i32]))
+"#,
+        ),
+    ] {
+        check(program).unwrap_or_else(|errors| panic!("{case}: {}", summary(&errors)));
+    }
+    // A captured parameter and its sequential alias retain the substituted
+    // dtype, even after another binding reuses its name.
+    for body in [
+        "mean(x, 0i32)",
+        "{\n y = x\n x = to_tensor([1.0f32, 2.0f32, 3.0f32])\n mean(y, 0i32)\n}",
+        "{\n h = fn (y: int32) -> mean(x, 0i32)\n h(1i32)\n}",
+    ] {
+        for (dtype, values, rejects) in [
+            ("int32", "[1i32, 2i32, 4i32]", true),
+            ("f32", "[1.0f32, 2.0f32, 4.0f32]", false),
+        ] {
+            let program = format!(
+                "def g[p](x: tensor[3, p]) -> tensor[p] = {body}\nf = g(to_tensor({values}))\n"
+            );
+            let result = check(&program);
+            if rejects {
+                let errors = result.expect_err("the captured parameter still carries int32");
+                assert!(
+                    errors.iter().any(|e| e
+                        .message
+                        .contains(&format!("mean on operand precision `{dtype}`"))),
+                    "{}",
+                    summary(&errors)
+                );
+            } else {
+                result.expect("the captured float parameter remains admissible");
+            }
+        }
+    }
+}
+
+/// [05-OP-43] and the operation atoms govern concrete instantiations as well
+/// as declarations. Every policy family has an invalid and valid call here.
+#[test]
+fn every_family_route_checks_concrete_helper_instantiations() {
+    for op in [
+        "mean",
+        "softmax",
+        "exp",
+        "log",
+        "sin",
+        "tan",
+        "atan",
+        "sqrt",
+        "relu",
+        "sigmoid",
+        "tanh",
+        "silu",
+        "gelu",
+        "recip",
+        "div",
+        "trunc_div",
+    ] {
+        let body = match op {
+            "mean" | "softmax" => format!("{op}(x, 0i32)"),
+            "div" | "trunc_div" => format!("{op}(x, x)"),
+            _ => format!("{op}(x)"),
+        };
+        let result_type = if op == "mean" {
+            "tensor[p]"
+        } else {
+            "tensor[3, p]"
+        };
+        for (values, float) in [
+            ("[1i32, 2i32, 4i32]", false),
+            ("[1.0f32, 2.0f32, 4.0f32]", true),
+        ] {
+            let program = format!(
+                "def g[p](x: tensor[3, p]) -> {result_type} = {body}\nf = g(to_tensor({values}))\n"
+            );
+            let result = check(&program);
+            if float == (op == "trunc_div") {
+                let errors =
+                    result.expect_err(&format!("{op}: inadmissible concrete instantiation"));
+                assert!(
+                    errors.iter().any(|e| matches!(
+                        e.kind,
+                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                    ) && e.message.contains(op)),
+                    "{op}: {}",
+                    summary(&errors)
+                );
+            } else {
+                result.unwrap_or_else(|errors| panic!("{op}: {}", summary(&errors)));
+            }
+        }
+    }
+}

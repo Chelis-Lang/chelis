@@ -859,7 +859,11 @@ lexical order, and tuple projections from concretely typed parameters, when
 the callee's own body applies a restricted operation to its parameter. The
 same argument reader also rejects the bool-arithmetic witness of #1937.
 Local bindings record precision in declaration order, including an unknown
-answer that shadows an outer name. The reader does not establish general
+answer that shadows an outer name. Call-site and substituted-body reads share
+one lexical traversal, so lambda, match, and local callee bindings mask outer
+names in both contexts. The body reader dispatches through the same family
+policy as eager and deferred validation; the matrix checks all sixteen family
+routes with valid and invalid concrete instantiations. The reader does not establish general
 precision transport: #1940 owns function-value calls, #1941 owns polymorphic
 call chains, and local-lambda and ADT-field cases remain under #1805. The
 matrix contains disposition locks for these known gaps. An unresolved

@@ -845,55 +845,60 @@ pub(super) fn walk_for_poly_op_constraint_violations(
         .and_then(|(_, _, kids)| kids.get(1))
         .and_then(extract_fn_params_and_body)
         .map(|(_, body)| body);
-    walk_for_poly_op_constraint_violations_in(
+    walk_with_precision_scope(
         body.as_ref().unwrap_or(expr),
         defs,
         type_env,
-        declared_bounds,
         scope,
         &BTreeMap::new(),
-        errors,
+        &mut |expr, locals| {
+            let Some((DeepTag::App, _, _)) = stamped_parts(expr) else {
+                return;
+            };
+            match expr {
+                deep::Expr::List(list, _) => check_app_for_poly_op_constraint(
+                    list,
+                    defs,
+                    type_env,
+                    declared_bounds,
+                    scope,
+                    locals,
+                    errors,
+                ),
+                deep::Expr::Node(node, span) => check_app_for_poly_op_constraint(
+                    &node.to_list(*span),
+                    defs,
+                    type_env,
+                    declared_bounds,
+                    scope,
+                    locals,
+                    errors,
+                ),
+                _ => {}
+            }
+        },
     );
 }
 
-/// chelis#1805 round 1 P1-1: the walk carries the BLOCK bindings in scope at
-/// each call site, so the argument reader can answer from the binding a name
-/// actually refers to.
-///
-/// Without it the reader saw only the enclosing definition's parameter scope
-/// and the top-level value bindings, so a block-local binding that shadows a
-/// top-level one was read as the top-level one. That is wrong in both
-/// directions: it rejected a legal program naming a dtype no operand at the
-/// call carried, and it admitted an illegal one whose shadowed binding happened
-/// to be admissible.
-#[allow(clippy::too_many_arguments)]
-fn walk_for_poly_op_constraint_violations_in(
+/// Both call-site argument reads and substituted body reads use this lexical
+/// traversal. A binding stores its precision in its defining scope, including
+/// unknown, so later shadowing cannot retarget an alias or a builtin call.
+fn walk_with_precision_scope(
     expr: &deep::Expr,
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
-    declared_bounds: &BTreeMap<String, UnordSet<String>>,
     scope: &BTreeMap<String, deep::Expr>,
     locals: &BTreeMap<String, Option<String>>,
-    errors: &mut DiagnosticSink<'_>,
+    visit: &mut impl FnMut(&deep::Expr, &BTreeMap<String, Option<String>>),
 ) {
-    stack_guard!("walk_for_poly_op_constraint_violations_in", expr);
-    // spec/03 section 6.2: let pairs are sequential. Resolve each value in
-    // its defining scope, then remember that precision (including unknown)
-    // so a later binding cannot change what an earlier alias denotes.
+    stack_guard!("walk_with_precision_scope", expr);
+    visit(expr, locals);
     if let Some((DeepTag::Let, _, kids)) = stamped_parts(expr) {
         let mut extended = locals.clone();
         if let Some((DeepTag::Bind, _, bind_kids)) = kids.first().and_then(stamped_parts) {
             for pair in bind_kids.as_chunks::<2>().0 {
                 let value = &pair[1];
-                walk_for_poly_op_constraint_violations_in(
-                    value,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    &extended,
-                    errors,
-                );
+                walk_with_precision_scope(value, defs, type_env, scope, &extended, visit);
                 if let Some(name) = symbol_name(&pair[0]) {
                     let precision = annotated_type_of_expr(value)
                         .as_ref()
@@ -906,15 +911,7 @@ fn walk_for_poly_op_constraint_violations_in(
             }
         }
         for body in kids.iter().skip(1) {
-            walk_for_poly_op_constraint_violations_in(
-                body,
-                defs,
-                type_env,
-                declared_bounds,
-                scope,
-                &extended,
-                errors,
-            );
+            walk_with_precision_scope(body, defs, type_env, scope, &extended, visit);
         }
         return;
     }
@@ -944,120 +941,43 @@ fn walk_for_poly_op_constraint_violations_in(
             }
         }
         for body in kids.iter().skip(1) {
-            walk_for_poly_op_constraint_violations_in(
-                body,
-                defs,
-                type_env,
-                declared_bounds,
-                scope,
-                &extended,
-                errors,
-            );
+            walk_with_precision_scope(body, defs, type_env, scope, &extended, visit);
         }
         return;
     }
+    // Structural carriers preserve their own children; metadata can carry
+    // syntax too. Binder declarations above are consumed before this descent.
     match expr {
-        deep::Expr::List(list, _span) => {
-            // Check if this is `(app (var name) arg1 arg2 ...)` calling
-            // a top-level user-def with a polymorphic precision sig.
-            if get_tag(list) == Some(DeepTag::App) {
-                check_app_for_poly_op_constraint(
-                    list,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
+        deep::Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
+        }
+        deep::Expr::List(list, _) => {
             for child in &list.elements {
-                walk_for_poly_op_constraint_violations_in(
-                    child,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
-        }
-        deep::Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, v| {
-                walk_for_poly_op_constraint_violations_in(
-                    v,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
-            });
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            walk_for_poly_op_constraint_violations_in(
-                &meta.expr,
-                defs,
-                type_env,
-                declared_bounds,
-                scope,
-                locals,
-                errors,
-            );
-            meta.metadata.visit_syntax(&mut |_, v| {
-                walk_for_poly_op_constraint_violations_in(
-                    v,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
-            });
-        }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_poly_op_constraint_violations_in(
-                &bridged,
-                defs,
-                type_env,
-                declared_bounds,
-                scope,
-                locals,
-                errors,
-            );
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
-                walk_for_poly_op_constraint_violations_in(
-                    child,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                walk_for_poly_op_constraint_violations_in(
-                    child,
-                    defs,
-                    type_env,
-                    declared_bounds,
-                    scope,
-                    locals,
-                    errors,
-                );
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
         }
+        deep::Expr::Map(map, _) => map.visit_syntax(&mut |_, child| {
+            walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
+        }),
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_with_precision_scope(&meta.expr, defs, type_env, scope, locals, visit);
+            meta.metadata.visit_syntax(&mut |_, child| {
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
+            });
+        }
+        deep::Expr::Atom(_, _) => {}
     }
 }
 
@@ -1154,19 +1074,35 @@ pub(super) fn check_app_for_poly_op_constraint(
     if subst.is_empty() {
         return;
     }
-    // Map the body's parameter names to the sig's parameter precision-var
-    // names, so we can resolve `(var x)` inside the body to a precision
-    // variable. The body's params and the sig's params line up by
-    // position.
-    let mut param_to_prec: UnordMap<String, String> = UnordMap::new();
-    for (body_param_name, sig_param) in body_params.iter().zip(sig_params.iter()) {
-        if let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) {
-            param_to_prec.insert(body_param_name.clone(), prec_var_name);
-        }
-    }
-    // Walk the body looking for restricted ops applied to body parameters
-    // whose precision tvar (after substitution) violates §5.4 / §5.7.2.
-    walk_body_for_restricted_ops(body, &param_to_prec, &subst, callee_name, list, errors);
+    // Seed every parameter as a lexical binding, including non-polymorphic
+    // ones and unknown precisions. A parameter named like an operation must
+    // shadow that builtin just as a local binding does.
+    let bindings = body_params
+        .iter()
+        .zip(&sig_params)
+        .map(|(name, ty)| {
+            let precision = precision_var_name_in_type_expr(ty)
+                .and_then(|var| subst.get(&var).cloned())
+                .or_else(|| precision_prim_name_in_type_expr(ty));
+            (name.clone(), precision)
+        })
+        .collect();
+    walk_with_precision_scope(
+        body,
+        defs,
+        type_env,
+        &BTreeMap::new(),
+        &bindings,
+        &mut |expr, bindings| {
+            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+                && let Some(op_name) = callee_kids.first().and_then(symbol_name)
+                && !bindings.contains_key(op_name)
+            {
+                check_restricted_op_in_body(op_name, &kids[1..], bindings, callee_name, errors);
+            }
+        },
+    );
 }
 
 /// Top-level def signature lookup: scan `type_env` for the callee's
@@ -1442,60 +1378,6 @@ pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
     meta.ty().map(|v| v.expression().clone())
 }
 
-/// Walk a polymorphic def's body looking for `(app (var op) arg1 arg2 ...)`
-/// where `op` is one of the §5.4 (transcendental, float-only) or §5.7.2
-/// (matmul, integer-rejected) restricted ops, and `arg1`/`arg2` are
-/// `(var name)` references to body parameters. Validate the substituted
-/// precision against the spec rule.
-pub(super) fn walk_body_for_restricted_ops(
-    expr: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-    callee_name: &str,
-    call_site_list: &deep::List,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    stack_guard!("walk_body_for_restricted_ops", expr);
-    // chelis#1107: carrier-preserving read, so the walk descends through
-    // stamped `Expr::Node` bodies instead of stopping at the first one.
-    if let Some((tag, _, kids)) = stamped_parts(expr) {
-        if tag == DeepTag::App
-            && let Some(callee) = kids.first()
-            && let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee)
-            && let Some(op_name) = callee_kids.first().and_then(symbol_name)
-        {
-            check_restricted_op_in_body(
-                op_name,
-                &kids[1..],
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-        for child in kids {
-            walk_body_for_restricted_ops(
-                child,
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-    } else if let deep::Expr::MetaExpr(meta, _) = expr {
-        walk_body_for_restricted_ops(
-            &meta.expr,
-            param_to_prec,
-            subst,
-            callee_name,
-            call_site_list,
-            errors,
-        );
-    }
-}
-
 /// `op_name`: the name of the inner operation (e.g. `matmul`, `exp`).
 /// `op_args`: the arg expressions of the `(app (var op_name) ...)` form.
 pub(super) const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
@@ -1538,13 +1420,13 @@ pub(super) const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 pub(super) fn check_restricted_op_in_body(
     op_name: &str,
     op_args: &[deep::Expr],
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
+    bindings: &BTreeMap<String, Option<String>>,
     callee_name: &str,
-    call_site_list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    if !INTEGER_REJECTED_OPS.contains(&op_name)
+    let family = operand_family_policy(op_name);
+    if family.is_none()
+        && !INTEGER_REJECTED_OPS.contains(&op_name)
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
         && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
         && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
@@ -1558,15 +1440,41 @@ pub(super) fn check_restricted_op_in_body(
     // `(var x)` reference to a body param OR a deeper expression — for
     // the latter we look at its annotated type's precision slot.
     for (arg_index, arg) in op_args.iter().enumerate() {
-        let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
+        let resolved_prim = if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
+            && let Some(name) = kids.first().and_then(symbol_name)
+            && let Some(precision) = bindings.get(name)
+        {
+            precision.clone()
+        } else {
+            annotated_type_of_expr(arg)
+                .as_ref()
+                .and_then(precision_prim_name_in_type_expr)
+        };
         let Some(prim_name) = resolved_prim else {
             continue;
         };
         let Some(prim) = Prim::parse_name(&prim_name) else {
             continue;
         };
-        let _ = call_site_list; // span hint reserved for future plumbing
         let first_data_arg = arg_index == 0;
+        // Reduction axes are metadata operands. Every family policy uses the
+        // same authority here as the eager and deferred operand checks.
+        if (first_data_arg || !matches!(op_name, "mean" | "softmax"))
+            && let Some(required) = family
+            && match required {
+                OperandFamily::Float => !prim.is_float(),
+                OperandFamily::Integer => !prim.is_integer(),
+            }
+        {
+            let (kind, message, mut hints) = family_policy_rejection(
+                op_name,
+                &PrecisionSubject::Concrete(prim_name.clone()),
+                required,
+            );
+            hints.push(format!("Reached through the polymorphic sig for `{callee_name}` instantiated at `{prim_name}`."));
+            errors.push(CheckError::new(kind, message, hints));
+            return;
+        }
         let consult_shared_policy =
             BOOL_REJECTED_ARITH_OPS.contains(&op_name) || (op_name == "mean" && first_data_arg);
         if consult_shared_policy
@@ -1663,36 +1571,6 @@ pub(super) fn check_restricted_op_in_body(
             return;
         }
     }
-}
-
-/// Resolve a single arg's precision-tvar binding for restricted-op
-/// checking. If the arg is `(var name)` and `name` is in the body's
-/// param-to-prec map, look up the call-site substitution.  If the arg
-/// is itself an `app` with an annotated tensor type whose precision
-/// slot is concrete, use that. Returns `Some(prim_name)` if resolvable.
-pub(super) fn resolve_arg_precision_through_subst(
-    arg: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-) -> Option<String> {
-    // chelis#1107: carrier-preserving read -- the last link in the WS-A8
-    // chain, so a stamped `(var {} x)` operand resolves its precision.
-    if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
-        && let Some(name) = kids.first().and_then(symbol_name)
-        && let Some(prec_var) = param_to_prec.get(name)
-        && let Some(prim) = subst.get(prec_var)
-    {
-        return Some(prim.clone());
-    }
-    // Fall back to the arg's annotated type's concrete precision (when
-    // the body did its own arithmetic, e.g. `wx = matmul(x, w);
-    // softmax(wx)`).
-    if let Some(ty) = annotated_type_of_expr(arg)
-        && let Some(prim) = precision_prim_name_in_type_expr(&ty)
-    {
-        return Some(prim);
-    }
-    None
 }
 
 pub(super) fn validate_ir_expr(
