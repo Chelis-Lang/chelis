@@ -740,6 +740,11 @@ fn parity_annotated_concat_softmax_eval_and_c_rejection() {
     );
 }
 
+#[test]
+fn parity_caller_actual_scope() {
+    drive_parity(&examples_root().join("caller_actual_scope.ch"), true);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -751,6 +756,7 @@ fn parity_annotated_concat_softmax_eval_and_c_rejection() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "annotated_concat_softmax.ch",
+        "caller_actual_scope.ch",
         "source-file-names.ch",
         "checked_reshape.ch",
         "checked_sparse_axes.ch",
