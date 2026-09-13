@@ -28,7 +28,8 @@ int32_t chelis_tensor_rank(const Tensor *tensor) { return tensor->rank; }
 int64_t chelis_tensor_shape(const Tensor *tensor, int32_t index) { return tensor->shape[index]; }
 View chelis_tensor_read_view(const Tensor *tensor) { View view = {tensor->data, tensor->count, 0, {0}}; return view; }
 void fixture_entry(Tensor **inputs, int input_count, Tensor **outputs, int output_count) {
-    if (input_count < 1) abort(); ++calls;
+    if (input_count < 1) abort();
+    ++calls;
     for (int index = 0; index < output_count; ++index) {
         Tensor *tensor = calloc(1, sizeof(Tensor)); *tensor = *inputs[0];
         tensor->data = tensor->payload;
