@@ -325,7 +325,10 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
             "{name}: a checked helper label must reach insert and rank-spread consumers"
         );
     }
-    assert_eq!(raw_results["matrix_anchored"], r#"{"type":"tensor","value":{"shape":[2,2,3],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000","40a00000","40c00000","3f800000","40000000","40400000","40800000","40a00000","40c00000"]}}}"#);
+    assert_eq!(
+        raw_results["matrix_anchored"],
+        r#"{"type":"tensor","value":{"shape":[2,2,3],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000","40a00000","40c00000","3f800000","40000000","40400000","40800000","40a00000","40c00000"]}}}"#
+    );
     assert_eq!(
         raw_results["mixed_axes"],
         r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41200000"]}}}"#,
@@ -450,12 +453,20 @@ fn checked_result_axis_view_keeps_invalid_named_insert_rejection() {
             ),
             bindings: BTreeMap::new(),
         }).expect_err("duplicate inserted names and absent anchors remain errors");
-        let messages = error.errors.iter().map(|diagnostic| diagnostic.message.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(messages.contains(if new_axis == "fixed" {
-            "inserted axis `fixed` already names an axis"
-        } else {
-            "anchor `missing` is not a named axis"
-        }), "{messages}");
+        let messages = error
+            .errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            messages.contains(if new_axis == "fixed" {
+                "inserted axis `fixed` already names an axis"
+            } else {
+                "anchor `missing` is not a named axis"
+            }),
+            "{messages}"
+        );
         assert!(!messages.contains("internal compiler error"), "{messages}");
     }
 }

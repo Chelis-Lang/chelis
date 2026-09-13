@@ -14412,17 +14412,27 @@ impl<'program> LowerCtx<'program> {
     /// The existing reshape adjoint restores the producer's original type.
     fn checked_result_axis_view(&mut self, id: NodeId, ty: TensorType) -> NodeId {
         let mut inputs = vec![id];
-        let new_shape = (0..ty.dims.len()).map(|axis| {
-            let shape = self.dag.add_node(
-                RiscOp::Shape { axis },
-                vec![id],
-                TensorType { dims: vec![], precision: Prim::Int64 },
-                self.current_span_id.clone(),
-            );
-            inputs.push(shape);
-            RtDim::Node(inputs.len() - 1)
-        }).collect();
-        self.dag.add_node(RiscOp::Reshape { new_shape }, inputs, ty, self.current_span_id.clone())
+        let new_shape = (0..ty.dims.len())
+            .map(|axis| {
+                let shape = self.dag.add_node(
+                    RiscOp::Shape { axis },
+                    vec![id],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                inputs.push(shape);
+                RtDim::Node(inputs.len() - 1)
+            })
+            .collect();
+        self.dag.add_node(
+            RiscOp::Reshape { new_shape },
+            inputs,
+            ty,
+            self.current_span_id.clone(),
+        )
     }
 
     /// chelis#1397's declaration half: keep a declared result dimension over an
@@ -20273,7 +20283,11 @@ mod tests {
             None,
         );
         let mut labelled = ctx.dag.get(id).unwrap().output_type.clone();
-        LowerCtx::refine_checked_result_axis_name(&mut labelled, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        LowerCtx::refine_checked_result_axis_name(
+            &mut labelled,
+            0,
+            &DimInfo::Named("fixed".into(), Some(2)),
+        );
         assert_eq!(
             labelled.dims,
             vec![DimInfo::Named("fixed".into(), Some(7))],
@@ -20281,7 +20295,11 @@ mod tests {
         );
 
         labelled.dims = vec![DimInfo::Lit(3)];
-        LowerCtx::refine_checked_result_axis_name(&mut labelled, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        LowerCtx::refine_checked_result_axis_name(
+            &mut labelled,
+            0,
+            &DimInfo::Named("fixed".into(), Some(2)),
+        );
         assert_eq!(
             labelled.dims,
             vec![DimInfo::Named("fixed".into(), Some(3))],
@@ -20291,23 +20309,50 @@ mod tests {
 
     #[test]
     fn checked_result_axis_view_does_not_retype_elementwise_producer() {
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
-        let original = TensorType { dims: vec![DimInfo::Named("raw".into(), None)], precision: Prim::F32 };
-        let input = ctx.dag.add_node(RiscOp::Load { name: "x".into() }, vec![], original.clone(), None);
-        let relu = ctx.dag.add_node(RiscOp::Relu, vec![input], original.clone(), None);
-        let labelled = TensorType { dims: vec![DimInfo::Named("fixed".into(), None)], precision: Prim::F32 };
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let original = TensorType {
+            dims: vec![DimInfo::Named("raw".into(), None)],
+            precision: Prim::F32,
+        };
+        let input = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            original.clone(),
+            None,
+        );
+        let relu = ctx
+            .dag
+            .add_node(RiscOp::Relu, vec![input], original.clone(), None);
+        let labelled = TensorType {
+            dims: vec![DimInfo::Named("fixed".into(), None)],
+            precision: Prim::F32,
+        };
         let view = ctx.checked_result_axis_view(relu, labelled.clone());
         assert_ne!(view, relu);
         assert_eq!(ctx.dag.get(input).unwrap().output_type, original);
         assert_eq!(ctx.dag.get(relu).unwrap().output_type, original);
         assert_eq!(ctx.dag.get(view).unwrap().output_type, labelled);
-        assert_eq!(crate::dag::op_declarable_axes(&ctx.dag, ctx.dag.get(view).unwrap()), vec![0]);
-        let Some(crate::axis_sources::ExtentOrigin::ScalarInput { value, .. }) = crate::axis_sources::resolve_axis_extent(&ctx.dag, view, 0) else {
+        assert_eq!(
+            crate::dag::op_declarable_axes(&ctx.dag, ctx.dag.get(view).unwrap()),
+            vec![0]
+        );
+        let Some(crate::axis_sources::ExtentOrigin::ScalarInput { value, .. }) =
+            crate::axis_sources::resolve_axis_extent(&ctx.dag, view, 0)
+        else {
             panic!("the view must carry an explicit runtime extent source");
         };
         let extent = ctx.dag.get(value).unwrap();
         assert!(matches!(extent.op, RiscOp::Shape { axis: 0 }));
-        assert_eq!(extent.inputs, vec![relu], "the extent is observed from this producer, not inferred from a label");
+        assert_eq!(
+            extent.inputs,
+            vec![relu],
+            "the extent is observed from this producer, not inferred from a label"
+        );
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
