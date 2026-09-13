@@ -612,7 +612,21 @@ be represented.
    site identity nor an exhaustiveness proof: aliases, bindings, indirection,
    equivalent numeric-default spellings, count relocation, and in-crate raw
    emission can evade it. The corresponding typed mutation oracle is the
-   authority. For the hosted [#732] no-third-formatter classes the same
+   authority. `closed_vocabulary_architecture.rs` keeps positive evidence at
+   consumer-crate granularity: the ratified production roots for each crate
+   must contain the typed vocabulary or tagged-carrier markers in non-comment
+   source tokens, but no marker is assigned to an owner filename. Recognized
+   extensions select an explicit Rust or C-family lexical projection. Positive
+   evidence excludes comment and literal payloads except active C-family
+   include operands. Forbidden rules match active token structure, retaining
+   ordinary string-literal tokens where the rule requires them while excluding
+   raw-string and comment payloads; C-family block comments are non-nesting and
+   Rust block comments remain nested. The rules are scanned recursively across
+   the relevant crate source trees and published runtime/device headers,
+   including device-specific header suffixes, so an in-crate owner move cannot
+   hide one. The explicit crate/root set remains supporting inventory; the
+   added-variant mutation remains the exhaustiveness authority. For the hosted [#732]
+   no-third-formatter classes the same
    textual limits apply and the residue is DECLARED at the owning rule
    (`faithful_observation.md` §B2.4, each piece with its owner):
    derived-Debug containers embedding floats, bare `{}` Display /
