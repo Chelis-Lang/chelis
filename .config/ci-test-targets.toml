@@ -2,6 +2,18 @@
 # New integration targets run in the unfiltered nightly unless added here.
 version = 1
 
+[[target]]
+package = "chelis-ir"
+name = "issue_1753_grad_result_order_ir"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_1753_grad_result_order"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1753_grad_result_order_cli"
+
 # chelis#1922: fatal helper-summary error transport and same-process recovery.
 # Host evaluation only; no C build or package provisioning.
 [[target]]
