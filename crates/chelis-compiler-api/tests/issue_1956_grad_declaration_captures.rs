@@ -142,6 +142,17 @@ fn frozen_named_transform_does_not_follow_later_target_or_value_shadows() {
 }
 
 #[test]
+fn frozen_same_name_target_retains_its_existing_public_gradient() {
+    let source =
+        format!("{LOSS}out = {{ loss = loss\n grad(loss)(to_tensor([1.0f32, 2.0f32])) }}\n");
+    for selected in [false, true] {
+        let result = evaluate(&source, selected);
+        assert_observation(&result, selected, &["out"], &[]);
+        assert_tensor(&result, "out", &DECLARATION);
+    }
+}
+
+#[test]
 fn frozen_anonymous_transform_keeps_the_creation_time_value() {
     let source = format!(
         "{LOSS}out = {{ w = to_tensor([7.0f32, 11.0f32])\n derivative = grad(fn (x: tensor[2, f32]) -> sum(mul(x, w), 0i32))\n w = to_tensor([13.0f32, 17.0f32])\n derivative(to_tensor([1.0f32, 2.0f32])) }}\n"
