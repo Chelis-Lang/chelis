@@ -4,7 +4,7 @@
 version = 2
 
 # chelis#2020: inherited profile admission must not copy the whole program per call.
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "recursive_profile_allocations"
 
