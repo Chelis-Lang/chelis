@@ -821,15 +821,15 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 107 rows and none of them is an unexplained
+The recorded phase-B corpus has 111 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 23 non-`executes_exactly` values
-against 84 `executes_exactly`, and every one of the twenty-three is accounted
-for. Twenty-two rows are `rejects_exactly`, an exit state, since those programs
+count of the JSON's `phase_b` column reaches 27 non-`executes_exactly` values
+against 84 `executes_exactly`, and every one of the twenty-seven is accounted
+for. Twenty-six rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
-defect. Nine of the twenty-two predate B2c:
+defect. Nine of the twenty-six predate B2c:
 `expand.positional.replacement.non_unit_source_static`,
 `shrink.to_end.nonzero_start`, and the seven `route.untied` rows
 (`gather.gate`, `matmul.match`, `scatter_replace.gate`, `sum.copy`,
@@ -846,9 +846,29 @@ checker verdict no lane varies is one row and the program never reaches a
 lane. That control is also the only `rejects_exactly` phase-B row whose baseline
 EQUALS its exit state: it was already refused, correctly, before B2c, so it is this section's
 "Invalid-program controls remain `rejects_exactly`" rather than a defect that
-moved. One row,
+moved. Four more rejection rows cover `dtype.late_precision`:
+`instantiation`, `binds_one_application_later`, `declared_bound`, and
+`family_routes`, whose tensor operand's precision was unresolved when the
+dtype policy first ran. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
+
+The `dtype.late_precision` receipts cover direct tensor literals, calls with
+concrete declared result precision, parameter and value bindings resolved in
+lexical order, and tuple projections from concretely typed parameters, when
+the callee's own body applies a restricted operation to its parameter. The
+same argument reader also rejects the bool-arithmetic witness of #1937.
+Local bindings record precision in declaration order, including an unknown
+answer that shadows an outer name. Call-site and substituted-body reads share
+one lexical traversal, so lambda, match, and local callee bindings mask outer
+names in both contexts. The body reader dispatches through the same family
+policy as eager and deferred validation; the matrix checks all sixteen family
+routes with valid and invalid concrete instantiations. The reader does not establish general
+precision transport: #1940 owns function-value calls, #1941 owns polymorphic
+call chains, and local-lambda and ADT-field cases remain under #1805. The
+matrix contains disposition locks for these known gaps. An unresolved
+precision entry still discharges silently at the declaration boundary; this
+change does not adopt #1942's proposed declaration-time rejection.
 
 Phase B has NO deferred rows. `PHASE_B_DEFERRED` is an empty mapping, and B2c
 is what emptied it: `concat.literal_claim.inlined_root.{c,eval}` were the only

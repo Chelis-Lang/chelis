@@ -575,6 +575,9 @@ pub(super) fn validate_polymorphic_op_constraints(
 ) {
     let defs_with_bodies = collect_def_bodies(exprs);
     let defsigs = collect_defsig_exprs(exprs);
+    // chelis#1805: which precision variables carry a declared bound, so this
+    // pass leaves those to the in-def decision instead of reporting twice.
+    let declared_bounds = collect_defsig_dtype_bounds(exprs);
     // Merge defsig sigs into the type-env view so polymorphic
     // signatures (which haven't been annotated onto def bodies yet) are
     // visible to the call-site lookup.
@@ -601,6 +604,7 @@ pub(super) fn validate_polymorphic_op_constraints(
             expr,
             &defs_with_bodies,
             &combined_env,
+            &declared_bounds,
             &scope,
             errors,
         );
@@ -733,6 +737,42 @@ pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> BTreeMap<String, dee
     out
 }
 
+/// chelis#1805: per def name, the precision variables its signature declares a
+/// dtype-family bound for.
+///
+/// This is what keeps the two enforcement points DISJOINT. A precision variable
+/// with a declared bound is decided inside the def, where the bound is stated
+/// and no call site is needed: `def g[p: Int](x: tensor[3, p]) = mean(x, 0i32)`
+/// is rejected on its own. A variable with no bound is decided here, at the
+/// instantiation. Without this split a bounded-and-badly-instantiated call
+/// reported the same defect twice, once naming the bound and once naming the
+/// dtype.
+pub(super) fn collect_defsig_dtype_bounds(
+    exprs: &[deep::Expr],
+) -> BTreeMap<String, UnordSet<String>> {
+    let mut out: BTreeMap<String, UnordSet<String>> = BTreeMap::new();
+    for expr in top_level_decl_items(exprs) {
+        // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
+        let Some((tag, meta, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if tag != DeepTag::Defsig {
+            continue;
+        }
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let bounds = chelis_deep::decode_dtype_bounds(meta);
+        if bounds.is_empty() {
+            continue;
+        }
+        out.entry(name.to_string())
+            .or_default()
+            .extend(bounds.into_iter().map(|(var, _)| var));
+    }
+    out
+}
+
 /// Map from def name to (params: Vec<param-name>, body-expr).
 pub(super) type DefBodyMap = UnordMap<String, (Vec<String>, deep::Expr)>;
 
@@ -752,8 +792,15 @@ pub(super) fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
         let Some(body) = kids.get(1) else {
             continue;
         };
-        let Some((params, body_expr)) = extract_fn_params_and_body(body) else {
-            continue;
+        // chelis#1805: a top-level VALUE binding (`t = to_tensor([1i32, ...])`)
+        // desugars to a `def` whose body is not a `fn`, so it was absent from
+        // this map and `precision_of_argument_expr` could not read the
+        // precision of `g(t)`'s argument. Recording it as a parameterless def
+        // is safe for the call-site walk, which only ever looks up a callee
+        // that carries a polymorphic signature.
+        let (params, body_expr) = match extract_fn_params_and_body(body) {
+            Some(pair) => pair,
+            None => (Vec::new(), body.clone()),
         };
         out.insert(name.to_string(), (params, body_expr));
     }
@@ -787,48 +834,150 @@ pub(super) fn walk_for_poly_op_constraint_violations(
     expr: &deep::Expr,
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
+    declared_bounds: &BTreeMap<String, UnordSet<String>>,
     scope: &BTreeMap<String, deep::Expr>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    stack_guard!("walk_for_poly_op_constraint_violations", expr);
+    // The enclosing def's parameters already have their declared types in
+    // `scope`. Nested lambdas establish their own scope in the inner walk.
+    let body = stamped_parts(expr)
+        .filter(|(tag, _, _)| *tag == DeepTag::Def)
+        .and_then(|(_, _, kids)| kids.get(1))
+        .and_then(extract_fn_params_and_body)
+        .map(|(_, body)| body);
+    walk_with_precision_scope(
+        body.as_ref().unwrap_or(expr),
+        defs,
+        type_env,
+        scope,
+        &BTreeMap::new(),
+        &mut |expr, locals| {
+            let Some((DeepTag::App, _, _)) = stamped_parts(expr) else {
+                return;
+            };
+            match expr {
+                deep::Expr::List(list, _) => check_app_for_poly_op_constraint(
+                    list,
+                    defs,
+                    type_env,
+                    declared_bounds,
+                    scope,
+                    locals,
+                    errors,
+                ),
+                deep::Expr::Node(node, span) => check_app_for_poly_op_constraint(
+                    &node.to_list(*span),
+                    defs,
+                    type_env,
+                    declared_bounds,
+                    scope,
+                    locals,
+                    errors,
+                ),
+                _ => {}
+            }
+        },
+    );
+}
+
+/// Both call-site argument reads and substituted body reads use this lexical
+/// traversal. A binding stores its precision in its defining scope, including
+/// unknown, so later shadowing cannot retarget an alias or a builtin call.
+fn walk_with_precision_scope(
+    expr: &deep::Expr,
+    defs: &DefBodyMap,
+    type_env: &IrTypeEnv,
+    scope: &BTreeMap<String, deep::Expr>,
+    locals: &BTreeMap<String, Option<String>>,
+    visit: &mut impl FnMut(&deep::Expr, &BTreeMap<String, Option<String>>),
+) {
+    stack_guard!("walk_with_precision_scope", expr);
+    visit(expr, locals);
+    if let Some((DeepTag::Let, _, kids)) = stamped_parts(expr) {
+        let mut extended = locals.clone();
+        if let Some((DeepTag::Bind, _, bind_kids)) = kids.first().and_then(stamped_parts) {
+            for pair in bind_kids.as_chunks::<2>().0 {
+                let value = &pair[1];
+                walk_with_precision_scope(value, defs, type_env, scope, &extended, visit);
+                if let Some(name) = symbol_name(&pair[0]) {
+                    let precision = annotated_type_of_expr(value)
+                        .as_ref()
+                        .and_then(precision_prim_name_in_type_expr)
+                        .or_else(|| {
+                            precision_of_argument_expr(value, type_env, defs, scope, &extended, 0)
+                        });
+                    extended.insert(name.to_string(), precision);
+                }
+            }
+        }
+        for body in kids.iter().skip(1) {
+            walk_with_precision_scope(body, defs, type_env, scope, &extended, visit);
+        }
+        return;
+    }
+    if let Some((tag @ (DeepTag::Fn | DeepTag::Arm), _, kids)) = stamped_parts(expr) {
+        let mut extended = locals.clone();
+        if let Some(binders) = kids.first() {
+            if tag == DeepTag::Fn {
+                if let Some((names, _)) = extract_fn_params_and_body(expr) {
+                    for name in names {
+                        extended.insert(name, None);
+                    }
+                }
+                if let Some((DeepTag::Params, _, params)) = stamped_parts(binders) {
+                    for param in params {
+                        if let Some((name, declared)) = param_name_and_inline_type(param) {
+                            extended.insert(
+                                name,
+                                declared.as_ref().and_then(precision_prim_name_in_type_expr),
+                            );
+                        }
+                    }
+                }
+            } else {
+                for name in chelis_deep::pattern_binder_names(binders) {
+                    extended.insert(name, None);
+                }
+            }
+        }
+        for body in kids.iter().skip(1) {
+            walk_with_precision_scope(body, defs, type_env, scope, &extended, visit);
+        }
+        return;
+    }
+    // Structural carriers preserve their own children; metadata can carry
+    // syntax too. Binder declarations above are consumed before this descent.
     match expr {
-        deep::Expr::List(list, _span) => {
-            // Check if this is `(app (var name) arg1 arg2 ...)` calling
-            // a top-level user-def with a polymorphic precision sig.
-            if get_tag(list) == Some(DeepTag::App) {
-                check_app_for_poly_op_constraint(list, defs, type_env, scope, errors);
+        deep::Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
+        }
+        deep::Expr::List(list, _) => {
             for child in &list.elements {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
-        }
-        deep::Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, v| {
-                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            });
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            walk_for_poly_op_constraint_violations(&meta.expr, defs, type_env, scope, errors);
-            meta.metadata.visit_syntax(&mut |_, v| {
-                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            });
-        }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_poly_op_constraint_violations(&bridged, defs, type_env, scope, errors);
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
             }
         }
+        deep::Expr::Map(map, _) => map.visit_syntax(&mut |_, child| {
+            walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
+        }),
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_with_precision_scope(&meta.expr, defs, type_env, scope, locals, visit);
+            meta.metadata.visit_syntax(&mut |_, child| {
+                walk_with_precision_scope(child, defs, type_env, scope, locals, visit);
+            });
+        }
+        deep::Expr::Atom(_, _) => {}
     }
 }
 
@@ -836,11 +985,14 @@ pub(super) fn walk_for_poly_op_constraint_violations(
 /// is a top-level user-def with a polymorphic-precision sig, compute the
 /// call-site precision substitution and re-check the body for restricted
 /// ops with substituted precisions.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_app_for_poly_op_constraint(
     list: &deep::List,
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
+    declared_bounds: &BTreeMap<String, UnordSet<String>>,
     scope: &BTreeMap<String, deep::Expr>,
+    locals: &BTreeMap<String, Option<String>>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let kids = children(list);
@@ -859,6 +1011,9 @@ pub(super) fn check_app_for_poly_op_constraint(
     let Some(callee_name) = callee_kids.first().and_then(symbol_name) else {
         return;
     };
+    if locals.contains_key(callee_name) || scope.contains_key(callee_name) {
+        return;
+    }
     // Look up the callee's declared signature; only proceed if it carries
     // a precision tvar (otherwise there's nothing to monomorphize).
     let Some(sig_expr) = lookup_sig_in_type_env(type_env, callee_name) else {
@@ -884,13 +1039,31 @@ pub(super) fn check_app_for_poly_op_constraint(
         let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) else {
             continue;
         };
-        let arg_ty =
-            annotated_type_of_expr(arg_expr).or_else(|| resolve_var_type_in_scope(arg_expr, scope));
-        let Some(arg_ty) = arg_ty else {
+        // chelis#1805: a precision variable with a DECLARED bound belongs to
+        // the in-def decision, which rejected the declaration itself if the
+        // bound admits a dtype the body's operation does not. Reporting it here
+        // as well would print one defect twice.
+        if declared_bounds
+            .get(callee_name)
+            .is_some_and(|declared| declared.contains(&prec_var_name))
+        {
             continue;
-        };
-        let Some(prim_name) = precision_prim_name_in_type_expr(&arg_ty) else {
-            continue;
+        }
+        // chelis#1805: the argument's own annotation first, then the binding
+        // chain. Before this, the pass read a `type:` annotation or the
+        // enclosing definition's parameter scope and gave up on the whole call
+        // otherwise, so `g(to_tensor([1i32, 2i32, 4i32]))` instantiated a
+        // float-only body at `int32` and the C lane printed the integer
+        // quotient.
+        let annotated = annotated_type_of_expr(arg_expr)
+            .as_ref()
+            .and_then(precision_prim_name_in_type_expr);
+        let prim_name = match annotated {
+            Some(prim_name) => prim_name,
+            None => match precision_of_argument_expr(arg_expr, type_env, defs, scope, locals, 0) {
+                Some(prim_name) => prim_name,
+                None => continue,
+            },
         };
         // Last-write-wins is fine: if the same `q` appears in multiple
         // params, the call site's unification already enforced consistency
@@ -901,19 +1074,35 @@ pub(super) fn check_app_for_poly_op_constraint(
     if subst.is_empty() {
         return;
     }
-    // Map the body's parameter names to the sig's parameter precision-var
-    // names, so we can resolve `(var x)` inside the body to a precision
-    // variable. The body's params and the sig's params line up by
-    // position.
-    let mut param_to_prec: UnordMap<String, String> = UnordMap::new();
-    for (body_param_name, sig_param) in body_params.iter().zip(sig_params.iter()) {
-        if let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) {
-            param_to_prec.insert(body_param_name.clone(), prec_var_name);
-        }
-    }
-    // Walk the body looking for restricted ops applied to body parameters
-    // whose precision tvar (after substitution) violates §5.4 / §5.7.2.
-    walk_body_for_restricted_ops(body, &param_to_prec, &subst, callee_name, list, errors);
+    // Seed every parameter as a lexical binding, including non-polymorphic
+    // ones and unknown precisions. A parameter named like an operation must
+    // shadow that builtin just as a local binding does.
+    let bindings = body_params
+        .iter()
+        .zip(&sig_params)
+        .map(|(name, ty)| {
+            let precision = precision_var_name_in_type_expr(ty)
+                .and_then(|var| subst.get(&var).cloned())
+                .or_else(|| precision_prim_name_in_type_expr(ty));
+            (name.clone(), precision)
+        })
+        .collect();
+    walk_with_precision_scope(
+        body,
+        defs,
+        type_env,
+        &BTreeMap::new(),
+        &bindings,
+        &mut |expr, bindings| {
+            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+                && let Some(op_name) = callee_kids.first().and_then(symbol_name)
+                && !bindings.contains_key(op_name)
+            {
+                check_restricted_op_in_body(op_name, &kids[1..], bindings, callee_name, errors);
+            }
+        },
+    );
 }
 
 /// Top-level def signature lookup: scan `type_env` for the callee's
@@ -1015,21 +1204,170 @@ pub(super) fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<Stri
     prec_kids.first().and_then(symbol_name).map(String::from)
 }
 
-/// Look up the type of `(var name)` in the enclosing-def `scope` map
-/// (built from the def's sig + inline param annotations). Returns
-/// `None` when the expression is not a var or the name is not in
-/// scope.
-pub(super) fn resolve_var_type_in_scope(
+/// chelis#1805: the concrete precision an ARGUMENT expression carries, when the
+/// call site did not annotate it and it is not a parameter of the enclosing def.
+///
+/// This pass reads Deep syntax rather than the inference substitution, so it
+/// answers only for the shapes whose precision the syntax already states, and
+/// `None` for everything else. `None` is the pre-existing behaviour: the call is
+/// simply not substituted, exactly as before this function existed.
+///
+/// The reader handles these concrete argument spellings:
+///
+/// - a `to_tensor` literal, whose element literals carry their own dtype
+///   metadata;
+/// - a call to a top-level def whose signature names a concrete result
+///   precision;
+/// - a reference to a parameter or value binding, resolved in lexical order;
+/// - a tuple projection from a parameter with a declared concrete element type.
+///
+/// A successful read supplies a restricted operation reached by the callee's
+/// parameter name in its own body. It does not establish precision transport
+/// through arbitrary expressions or calls. Known residuals include function
+/// values (#1940), polymorphic call chains (#1941), and local lambda or ADT
+/// field spellings (#1805); the matrix tests lock those cases.
+#[allow(clippy::too_many_arguments)]
+fn precision_of_argument_expr(
     expr: &deep::Expr,
+    type_env: &IrTypeEnv,
+    defs: &DefBodyMap,
     scope: &BTreeMap<String, deep::Expr>,
-) -> Option<deep::Expr> {
-    // chelis#1107: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(expr)?;
-    if tag != DeepTag::Var {
+    locals: &BTreeMap<String, Option<String>>,
+    depth: usize,
+) -> Option<String> {
+    stack_guard!("precision_of_argument_expr", expr, None);
+    // A value binding whose body is another value binding is legal, and a
+    // self-referential one is not this pass's business to diagnose, so the walk
+    // is bounded rather than trusting the program to be acyclic.
+    if depth > 4 {
         return None;
     }
+    let (tag, _, kids) = stamped_parts(expr)?;
+    match tag {
+        // `(var name)`: the binding chain, innermost first. chelis#1805 round
+        // 1 P1-1: each step answers for the name or answers `None`, and NEVER
+        // falls through to an outer binding the inner one shadows.
+        DeepTag::Var => {
+            let name = kids.first().and_then(symbol_name)?;
+            if let Some(precision) = locals.get(name) {
+                return precision.clone();
+            }
+            if let Some(declared) = scope.get(name) {
+                return precision_prim_name_in_type_expr(declared);
+            }
+            if let Some(declared) = result_type_of_sig(type_env, name)
+                && let Some(prim_name) = precision_prim_name_in_type_expr(&declared)
+            {
+                return Some(prim_name);
+            }
+            // A `t = to_tensor([1i32, ...])` value binding desugars to a
+            // parameterless `def` with no signature at all, so its precision is
+            // only in its body.
+            let (params, body) = defs.get(name)?;
+            if !params.is_empty() {
+                return None;
+            }
+            precision_of_argument_expr(
+                body,
+                type_env,
+                defs,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                depth + 1,
+            )
+        }
+        // chelis#1805 round 1 P1-2: a tuple element of a value whose type the
+        // chain above already states. The element index is a literal, so the
+        // declared tuple type answers directly; no registry is consulted, which
+        // is what separates this from an ADT field access.
+        DeepTag::TupleGet => {
+            let target = kids.first()?;
+            let index = usize::try_from(extract_int_literal(kids.get(1)?)?).ok()?;
+            let declared = declared_type_of_var(target, type_env, scope, locals)?;
+            let (DeepTag::TTuple, _, elements) = stamped_parts(&declared)? else {
+                return None;
+            };
+            precision_prim_name_in_type_expr(elements.get(index)?)
+        }
+        DeepTag::App => {
+            let (callee_tag, _, callee_kids) = stamped_parts(kids.first()?)?;
+            if callee_tag != DeepTag::Var {
+                return None;
+            }
+            let callee = callee_kids.first().and_then(symbol_name)?;
+            if locals.contains_key(callee) || scope.contains_key(callee) {
+                return None;
+            }
+            if callee == "to_tensor" {
+                return first_literal_prim_name(kids.get(1)?);
+            }
+            precision_prim_name_in_type_expr(&result_type_of_sig(type_env, callee)?)
+        }
+        _ => None,
+    }
+}
+
+/// The declared TYPE of a `(var name)`, through the same binding chain the
+/// precision reader walks. Used where a shape, rather than only a precision,
+/// has to be read back.
+fn declared_type_of_var(
+    expr: &deep::Expr,
+    type_env: &IrTypeEnv,
+    scope: &BTreeMap<String, deep::Expr>,
+    locals: &BTreeMap<String, Option<String>>,
+) -> Option<deep::Expr> {
+    let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
     let name = kids.first().and_then(symbol_name)?;
-    scope.get(name).cloned()
+    if locals.contains_key(name) {
+        // A block binding states no type of its own; only its value does, and
+        // the precision reader is what reads that.
+        return None;
+    }
+    if let Some(declared) = scope.get(name) {
+        return Some(declared.clone());
+    }
+    result_type_of_sig(type_env, name)
+}
+
+/// A name's declared result type: the last element of its `t-fn`, or the whole
+/// type when the signature is not a function.
+fn result_type_of_sig(type_env: &IrTypeEnv, name: &str) -> Option<deep::Expr> {
+    let sig = lookup_sig_in_type_env(type_env, name)?;
+    match parse_t_fn_parts(sig) {
+        Some((_, ret)) => Some(ret),
+        None => Some(sig.clone()),
+    }
+}
+
+/// The dtype of the first literal inside a `Cons` list, which is the element
+/// dtype a `to_tensor` literal carries.
+///
+/// The desugarer gives every element the same annotation, so the first one
+/// answers for the tensor. An empty list, or one whose head is not an annotated
+/// literal, answers `None`: chelis#1909 rejects the empty literal under a
+/// reducing route at the declaration boundary before this pass runs.
+fn first_literal_prim_name(list_expr: &deep::Expr) -> Option<String> {
+    let (tag, _, kids) = stamped_parts(list_expr)?;
+    if tag != DeepTag::App {
+        return None;
+    }
+    let (callee_tag, _, callee_kids) = stamped_parts(kids.first()?)?;
+    if callee_tag != DeepTag::Var || callee_kids.first().and_then(symbol_name)? != "Cons" {
+        return None;
+    }
+    let element = kids.get(1)?;
+    let (element_tag, meta, _) = stamped_parts(element)?;
+    if element_tag != DeepTag::Lit {
+        return None;
+    }
+    let declared = meta.ty()?.expression().clone();
+    let (prim_tag, _, prim_kids) = stamped_parts(&declared)?;
+    if prim_tag != DeepTag::TPrim {
+        return None;
+    }
+    prim_kids.first().and_then(symbol_name).map(String::from)
 }
 
 /// Pull the `type:` meta entry off a Deep expression. Returns the inner
@@ -1038,60 +1376,6 @@ pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
     // chelis#1107: carrier-preserving read.
     let (_, meta, _) = stamped_parts(expr)?;
     meta.ty().map(|v| v.expression().clone())
-}
-
-/// Walk a polymorphic def's body looking for `(app (var op) arg1 arg2 ...)`
-/// where `op` is one of the §5.4 (transcendental, float-only) or §5.7.2
-/// (matmul, integer-rejected) restricted ops, and `arg1`/`arg2` are
-/// `(var name)` references to body parameters. Validate the substituted
-/// precision against the spec rule.
-pub(super) fn walk_body_for_restricted_ops(
-    expr: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-    callee_name: &str,
-    call_site_list: &deep::List,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    stack_guard!("walk_body_for_restricted_ops", expr);
-    // chelis#1107: carrier-preserving read, so the walk descends through
-    // stamped `Expr::Node` bodies instead of stopping at the first one.
-    if let Some((tag, _, kids)) = stamped_parts(expr) {
-        if tag == DeepTag::App
-            && let Some(callee) = kids.first()
-            && let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee)
-            && let Some(op_name) = callee_kids.first().and_then(symbol_name)
-        {
-            check_restricted_op_in_body(
-                op_name,
-                &kids[1..],
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-        for child in kids {
-            walk_body_for_restricted_ops(
-                child,
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-    } else if let deep::Expr::MetaExpr(meta, _) = expr {
-        walk_body_for_restricted_ops(
-            &meta.expr,
-            param_to_prec,
-            subst,
-            callee_name,
-            call_site_list,
-            errors,
-        );
-    }
 }
 
 /// `op_name`: the name of the inner operation (e.g. `matmul`, `exp`).
@@ -1136,13 +1420,13 @@ pub(super) const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 pub(super) fn check_restricted_op_in_body(
     op_name: &str,
     op_args: &[deep::Expr],
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
+    bindings: &BTreeMap<String, Option<String>>,
     callee_name: &str,
-    call_site_list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    if !INTEGER_REJECTED_OPS.contains(&op_name)
+    let family = operand_family_policy(op_name);
+    if family.is_none()
+        && !INTEGER_REJECTED_OPS.contains(&op_name)
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
         && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
         && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
@@ -1156,15 +1440,41 @@ pub(super) fn check_restricted_op_in_body(
     // `(var x)` reference to a body param OR a deeper expression — for
     // the latter we look at its annotated type's precision slot.
     for (arg_index, arg) in op_args.iter().enumerate() {
-        let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
+        let resolved_prim = if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
+            && let Some(name) = kids.first().and_then(symbol_name)
+            && let Some(precision) = bindings.get(name)
+        {
+            precision.clone()
+        } else {
+            annotated_type_of_expr(arg)
+                .as_ref()
+                .and_then(precision_prim_name_in_type_expr)
+        };
         let Some(prim_name) = resolved_prim else {
             continue;
         };
         let Some(prim) = Prim::parse_name(&prim_name) else {
             continue;
         };
-        let _ = call_site_list; // span hint reserved for future plumbing
         let first_data_arg = arg_index == 0;
+        // Reduction axes are metadata operands. Every family policy uses the
+        // same authority here as the eager and deferred operand checks.
+        if (first_data_arg || !matches!(op_name, "mean" | "softmax"))
+            && let Some(required) = family
+            && match required {
+                OperandFamily::Float => !prim.is_float(),
+                OperandFamily::Integer => !prim.is_integer(),
+            }
+        {
+            let (kind, message, mut hints) = family_policy_rejection(
+                op_name,
+                &PrecisionSubject::Concrete(prim_name.clone()),
+                required,
+            );
+            hints.push(format!("Reached through the polymorphic sig for `{callee_name}` instantiated at `{prim_name}`."));
+            errors.push(CheckError::new(kind, message, hints));
+            return;
+        }
         let consult_shared_policy =
             BOOL_REJECTED_ARITH_OPS.contains(&op_name) || (op_name == "mean" && first_data_arg);
         if consult_shared_policy
@@ -1261,36 +1571,6 @@ pub(super) fn check_restricted_op_in_body(
             return;
         }
     }
-}
-
-/// Resolve a single arg's precision-tvar binding for restricted-op
-/// checking. If the arg is `(var name)` and `name` is in the body's
-/// param-to-prec map, look up the call-site substitution.  If the arg
-/// is itself an `app` with an annotated tensor type whose precision
-/// slot is concrete, use that. Returns `Some(prim_name)` if resolvable.
-pub(super) fn resolve_arg_precision_through_subst(
-    arg: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-) -> Option<String> {
-    // chelis#1107: carrier-preserving read -- the last link in the WS-A8
-    // chain, so a stamped `(var {} x)` operand resolves its precision.
-    if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
-        && let Some(name) = kids.first().and_then(symbol_name)
-        && let Some(prec_var) = param_to_prec.get(name)
-        && let Some(prim) = subst.get(prec_var)
-    {
-        return Some(prim.clone());
-    }
-    // Fall back to the arg's annotated type's concrete precision (when
-    // the body did its own arithmetic, e.g. `wx = matmul(x, w);
-    // softmax(wx)`).
-    if let Some(ty) = annotated_type_of_expr(arg)
-        && let Some(prim) = precision_prim_name_in_type_expr(&ty)
-    {
-        return Some(prim);
-    }
-    None
 }
 
 pub(super) fn validate_ir_expr(

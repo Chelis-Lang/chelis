@@ -61,6 +61,15 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
             }
             None
         }
+        // chelis#1805 measured this arm safe rather than repairing it. The
+        // builtin's signature shares ONE `Float`-bounded precision variable
+        // across both tensors and the tolerance, so unification propagates that
+        // bound onto a caller's own binder and rejects every integer
+        // instantiation at the call site, with the [04-DTYPE-2] family
+        // diagnostic rather than this one. Admitting the variable here
+        // therefore skips no decision;
+        // `a_signature_bounded_callee_is_caught_at_the_call_site` is the
+        // witness.
         Some(Type::Tensor(_, TensorPrec::Var(_))) | Some(Type::Error(_)) | None => None,
         Some(other) => {
             return reject(
@@ -282,6 +291,11 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         site.register(arg_tys, result_ty, subst, product);
                     }
                 }
+                // chelis#1805: safe for the same reason as
+                // `test_assert_close_tensor` above. `dropout`'s signature binds
+                // its tensor and its rate to one `Float`-bounded precision
+                // variable, so an integer instantiation is rejected where the
+                // caller supplies it.
                 Type::Tensor(_, TensorPrec::Var(_)) | Type::Error(_) => {}
                 _ => {
                     return reject(

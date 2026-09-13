@@ -191,6 +191,7 @@ pub(super) fn finish_unified_app(
         kids,
         &func_name,
         &arg_tys,
+        env,
         subst,
         errors,
         &mut checked_route_observed,
