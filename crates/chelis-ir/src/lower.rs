@@ -9438,11 +9438,18 @@ impl<'program> LowerCtx<'program> {
         // witness for a bounded precision. Bind its checked identity before
         // the shared-argument fallback, which must not overwrite it. The
         // optional precision comes from checked metadata, never default_type.
-        if let Some(prim) = checked_result_precision
-            && let Some(result) = extract_fn_return_type(fn_expr)
-            && let Some(name) = formal_param_type_var_name(result)
-        {
-            self.prec_substitutions.insert(name, prim);
+        // The body and the preserved authored signature may use different
+        // identities (checker `tN` versus source `p`); both describe this
+        // call's result and must be actualized before validating its claim.
+        if let Some(prim) = checked_result_precision {
+            for result in [extract_fn_return_type(fn_expr), fn_expr.result_type()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(name) = formal_param_type_var_name(result) {
+                    self.prec_substitutions.insert(name, prim);
+                }
+            }
         }
         // Body metadata uses checker-renamed variables (e.g. t304), while
         // casts may still name the source binder (p). Resolve both from the

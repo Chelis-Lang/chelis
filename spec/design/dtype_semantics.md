@@ -401,6 +401,9 @@ ratified at spec/04 §5.2 in the same change set:
   from aligned actual types, including scalar dtype witnesses, and from checked
   result constraints when no argument carries the target. Checked cast-result
   identities take precedence over unrelated outer binders with the same spelling.
+  A result-only constraint actualizes both the checker-renamed body result
+  identity and the preserved authored signature's result binder before lowering
+  validates the result claim (#1746); neither may remain generic at that point.
   The acceptance oracle is `cargo test -p chelis-cli --test
   issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
   numeric target dtypes, truncating-cast parity, and invalid-target rejection.
