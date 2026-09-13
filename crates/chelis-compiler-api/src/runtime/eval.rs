@@ -3984,17 +3984,21 @@ mod legacy_capture_order_tests {
     const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
     const LIVE: &str = "add(x, uniform_like(weights, 0.0f32, 1.0f32))";
 
+    fn checked_library(source: &str) -> crate::pipeline::CheckedLibrary {
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, source, None)
+                .expect("source fixture parses and expands");
+        crate::pipeline::check_prepared_library(prepared)
+            .expect("real library fixture passes type, effect and linearity checks")
+    }
+
     fn library(initializer: &str, params: &str, body: &str) -> crate::pipeline::CheckedLibrary {
         let source = format!(
             "weights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
              def sample({params}) -> tensor[2, f32] = {body}\n\
              def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
         );
-        let prepared =
-            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
-                .expect("source fixture parses and expands");
-        crate::pipeline::check_prepared_library(prepared)
-            .expect("real library fixture passes type, effect and linearity checks")
+        checked_library(&source)
     }
 
     fn context<'a>(
@@ -4317,6 +4321,29 @@ mod legacy_capture_order_tests {
             error,
             "numeric trap: division by zero in floor_div at int32"
         );
+    }
+
+    #[test]
+    fn transform_preparation_retains_vmap_capture_rank_refusal() {
+        let library = checked_library(
+            "weights = { _ = print(\"initialize\")\n scalar_to_tensor(3.0f32) }\n\
+             def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
+             def mapped() = vmap(weighted)\n",
+        );
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let factory = ctx.resolve_top_level("mapped").unwrap();
+        let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        let error = ctx
+            .apply_resolved_callable(callable, vec![zeros()])
+            .unwrap_err();
+        eprintln!("vmap rank error={error:?} transcript={:?}", ctx.transcript);
+        assert_eq!(
+            error,
+            "host runtime: `vmap(...)` over a def capturing top-level binding `weights` is unsupported: the transform types the capture as rank 1 (batched) but the binding is rank 0. vmap-with-captures must broadcast the capture across the batch axis, not batch it (tracked residual, chelis#377)."
+        );
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!(ctx.random_counter, 5);
     }
 
     #[test]
