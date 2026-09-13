@@ -887,6 +887,24 @@ driver, or an eval test that emits a forged producer-authored receipt fail
 before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
 evidence; they are not trusted as evidence of their own free-form detail.
 
+Chelis#1868 trials a derived review report beside those digests. The required
+CI Docs job runs `scripts/phase3_test_change_report.py` against committed
+snapshots, computes their unique merge base, and publishes the comparison
+commits, changed required-test identities, source locations, and changes to
+required membership. Both revisions supply their literal `REQUIRED_TESTS`
+inventory, parsed without executing historical Python. A removed obligation
+therefore remains visible even when the candidate no longer declares it.
+Missing Git history, unreadable inventories, ambiguous definitions, and a
+missing candidate required definition fail closed. A definition missing from
+the base can be reported as restored by the candidate. Ordinary edits, including
+an emptied body, produce a review cue; this report does not certify behavior.
+It prints the existing doctrine that changing a guard merely to accept an edit
+is not a repair. The definition digests, comparator checks, receipts, mutation
+controls, and authoritative Phase 3 acceptance command above remain in force.
+Retirement still requires executable-example derivation, each body's owning
+comparator or receipt obligation, and equivalent mutation evidence under
+`guard_artifact_proposal_assessment.md`.
+
 Chelis#1870 trials structured unsupported identity beside this frozen
 comparison rather than weakening it. The rejected-cell exact comparator and
 its mutations remain, including the Phase 3 definition digest. The actual
