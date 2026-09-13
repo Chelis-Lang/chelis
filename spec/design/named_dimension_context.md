@@ -119,7 +119,10 @@ For an inline plain callable, lowering first preserves the helper's
 authored return claim, including its runtime obligation and source diagnostic.
 When checked and produced ranks agree, it then transports only a distinct,
 non-wildcard *named* checker-annotated call-result axis as a caller-side label.
-That label is not resolved against the callee's signature: the same spelling
+Resolve that axis in the saved caller substitutions before transporting a
+remaining name. A caller binder already actualized to a literal must not
+reappear as an unbound runtime symbol at an inlined root (#1917).
+The label is not resolved against the callee's signature: the same spelling
 may name an unrelated callee parameter. Label transport creates no equality
 claim and imports neither checker-substituted literals nor optional extents;
 an existing produced extent is retained. Authored two-source guards remain

@@ -380,6 +380,50 @@ fn checked_result_name_transport_keeps_authored_named_mismatch_rejection() {
     );
 }
 
+/// spec/04 §4.7: a checked caller name still denotes that caller's actual
+/// axis after inlining; each helper keeps its own authored result claim.
+#[test]
+fn checked_result_name_transport_resolves_monomorphized_caller_scope() {
+    for divisor in [1, 2] {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: format!(
+                "def g(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])\n\
+                 def h(x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\n\
+                 def f(a: tensor[left, f32], b: tensor[right, f32]) -> tensor[f32] = add(sum(sum(g(a), 1i32), 0i32), sum(sum(h(b), 1i32), 0i32))\n\
+                 def main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n"
+            ),
+            bindings: BTreeMap::new(),
+        });
+        if divisor == 1 {
+            let roots = collect_named_roots_json(
+                &result.expect("independent caller extents").roots,
+                &["main"],
+            );
+            assert_eq!(
+                roots["main"],
+                r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41f80000"]}}}"#
+            );
+        } else {
+            let error = result.expect_err("the second helper's false authored claim must trap");
+            let messages = error
+                .errors
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                messages.contains("claimed = 6, reshape axis 0 = 3"),
+                "{messages}"
+            );
+            assert!(
+                messages.ends_with("numeric trap: domain in reshape at int64"),
+                "{messages}"
+            );
+        }
+    }
+}
+
 #[test]
 fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     let dir = TempDir::new().expect("tempdir");
