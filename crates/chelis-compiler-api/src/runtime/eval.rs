@@ -404,6 +404,12 @@ impl<'a> EvalContext<'a> {
 
     fn admit_execution_profile(&mut self, expr: &Expr, bound: &[String]) {
         use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        // An excluded caller already determines every nested dispatch. Avoid
+        // copying the program definitions for a classification that would
+        // immediately return this same inherited reason (chelis#2020).
+        if self.execution_exclusion.is_some() {
+            return;
+        }
         let defs = self
             .top_level_defs
             .to_sorted()

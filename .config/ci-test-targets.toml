@@ -3,6 +3,11 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 2
 
+# chelis#2020: inherited profile admission must not copy the whole program per call.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "recursive_profile_allocations"
+
 # chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
 [[standing_target]]
 package = "chelis-compiler-api"
