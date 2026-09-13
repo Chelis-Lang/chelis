@@ -1,0 +1,1 @@
+Type environment snapshots share immutable signature bodies, reducing allocation during checking of modules with many wide function signatures while preserving lexical isolation and serialized environments.
