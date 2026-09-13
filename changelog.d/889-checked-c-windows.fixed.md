@@ -1,1 +1,0 @@
-Generated C window reductions and gradients validate complete window geometry and result/cotangent shapes before storage submission, and use checked int64 index projections instead of coordinate scratch arrays.

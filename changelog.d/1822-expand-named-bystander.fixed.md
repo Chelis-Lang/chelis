@@ -1,1 +1,0 @@
-An `expand` whose kept axis carries a signature dimension binder now builds and runs on the C target with the size argument's extent on the expanded axis, instead of failing ownership lowering or, with no consumer, trapping at run time while the interpreter returned the right answer (chelis#1822).

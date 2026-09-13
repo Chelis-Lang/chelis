@@ -1,1 +1,0 @@
-Add an opt-in ownership-checked C backend entry for closed fixed-control dropout execution plans, with saved-mask replay and unchanged tensor ABI. Ordinary source-build and host-helper admission remain separate work.

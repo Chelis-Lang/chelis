@@ -1,1 +1,0 @@
-Keep ordinary `shape` value reads scalar under `vmap`, shift the queried axis, and broadcast the result through existing consumer/root expansion. This also preserves valid nested shape claims when gradient forward work remains live.
