@@ -33,6 +33,8 @@ pub mod c_lexical;
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
@@ -360,42 +362,196 @@ fn excerpt(text: &str) -> String {
 // Rust
 // ---------------------------------------------------------------------------
 
-fn is_exact_cfg_test_module(module: &syn::ItemMod) -> bool {
-    module.attrs.iter().any(|attribute| {
-        attribute.path().is_ident("cfg")
-            && attribute
-                .parse_args::<syn::Path>()
-                .is_ok_and(|path| path.is_ident("test"))
-    })
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestCfg {
+    True,
+    False,
+    Unknown,
+}
+
+fn evaluate_test_cfg(meta: &syn::Meta) -> Result<TestCfg, ScanError> {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => Ok(TestCfg::False),
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => Ok(TestCfg::Unknown),
+        syn::Meta::List(list) if list.path.is_ident("not") => {
+            let nested = list
+                .parse_args::<syn::Meta>()
+                .map_err(|error| ScanError::new(format!("unsupported cfg predicate: {error}")))?;
+            Ok(match evaluate_test_cfg(&nested)? {
+                TestCfg::True => TestCfg::False,
+                TestCfg::False => TestCfg::True,
+                TestCfg::Unknown => TestCfg::Unknown,
+            })
+        }
+        syn::Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+            let nested = list
+                .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                .map_err(|error| ScanError::new(format!("unsupported cfg predicate: {error}")))?;
+            let values = nested
+                .iter()
+                .map(evaluate_test_cfg)
+                .collect::<Result<Vec<_>, _>>()?;
+            if list.path.is_ident("all") {
+                if values.contains(&TestCfg::False) {
+                    Ok(TestCfg::False)
+                } else if values.iter().all(|value| *value == TestCfg::True) {
+                    Ok(TestCfg::True)
+                } else {
+                    Ok(TestCfg::Unknown)
+                }
+            } else if values.contains(&TestCfg::True) {
+                Ok(TestCfg::True)
+            } else if values.iter().all(|value| *value == TestCfg::False) {
+                Ok(TestCfg::False)
+            } else {
+                Ok(TestCfg::Unknown)
+            }
+        }
+        syn::Meta::List(_) => Ok(TestCfg::Unknown),
+    }
+}
+
+fn item_is_test_only(attributes: &[syn::Attribute]) -> Result<bool, ScanError> {
+    for attribute in attributes {
+        if attribute.path().is_ident("cfg") {
+            let predicate = attribute
+                .parse_args::<syn::Meta>()
+                .map_err(|error| ScanError::new(format!("unsupported cfg predicate: {error}")))?;
+            if evaluate_test_cfg(&predicate)? == TestCfg::False {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        syn::Item::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+fn impl_item_attributes(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(item) => &item.attrs,
+        syn::ImplItem::Fn(item) => &item.attrs,
+        syn::ImplItem::Macro(item) => &item.attrs,
+        syn::ImplItem::Type(item) => &item.attrs,
+        syn::ImplItem::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+fn trait_item_attributes(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Const(item) => &item.attrs,
+        syn::TraitItem::Fn(item) => &item.attrs,
+        syn::TraitItem::Macro(item) => &item.attrs,
+        syn::TraitItem::Type(item) => &item.attrs,
+        syn::TraitItem::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+fn foreign_item_attributes(item: &syn::ForeignItem) -> &[syn::Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Verbatim(_) => &[],
+        _ => &[],
+    }
 }
 
 #[derive(Default)]
-struct TestModuleSpans {
+struct TestItemSpans {
     spans: Vec<proc_macro2::Span>,
+    error: Option<ScanError>,
 }
 
-impl<'ast> Visit<'ast> for TestModuleSpans {
-    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        if is_exact_cfg_test_module(module) {
-            self.spans.push(module.span());
-        } else {
-            visit::visit_item_mod(self, module);
+impl TestItemSpans {
+    fn exclude(&mut self, attributes: &[syn::Attribute], span: proc_macro2::Span) -> bool {
+        match item_is_test_only(attributes) {
+            Ok(true) => {
+                self.spans.push(span);
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
         }
     }
 }
 
-/// Blank every `#[cfg(test)]` module while preserving byte offsets and line
-/// breaks. Only an exact `cfg(test)` is excluded: `cfg(not(test))`, production
-/// items that follow a test module, and files whose names end in `_tests.rs`
-/// all remain production source.
+impl<'ast> Visit<'ast> for TestItemSpans {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !self.exclude(item_attributes(item), item.span()) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        if !self.exclude(impl_item_attributes(item), item.span()) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        if !self.exclude(trait_item_attributes(item), item.span()) {
+            visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        if !self.exclude(foreign_item_attributes(item), item.span()) {
+            visit::visit_foreign_item(self, item);
+        }
+    }
+
+    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+        let excluded = match statement {
+            syn::Stmt::Local(local) => self.exclude(&local.attrs, local.span()),
+            syn::Stmt::Macro(item_macro) => self.exclude(&item_macro.attrs, item_macro.span()),
+            syn::Stmt::Item(_) | syn::Stmt::Expr(_, _) => false,
+        };
+        if !excluded {
+            visit::visit_stmt(self, statement);
+        }
+    }
+}
+
+/// Blank every item that cannot exist when `cfg(test)` is false while
+/// preserving byte offsets and line breaks.
 pub fn production_rust_source(source: &str) -> Result<String, ScanError> {
     let file = syn::parse_file(source).map_err(|error| {
         ScanError::new(format!(
             "cannot parse Rust source before test-region exclusion: {error}"
         ))
     })?;
-    let mut visitor = TestModuleSpans::default();
+    let mut visitor = TestItemSpans::default();
     visitor.visit_file(&file);
+    if let Some(error) = visitor.error {
+        return Err(error);
+    }
     let mut line_starts = vec![0usize];
     for (index, byte) in source.bytes().enumerate() {
         if byte == b'\n' {
@@ -421,6 +577,305 @@ pub fn production_rust_source(source: &str) -> Result<String, ScanError> {
     String::from_utf8(bytes).map_err(|error| {
         ScanError::new(format!("test-region exclusion damaged Rust UTF-8: {error}"))
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionRustSource {
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Default)]
+struct IncludeMacroFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for IncludeMacroFinder {
+    fn visit_macro(&mut self, item: &'ast syn::Macro) {
+        if item.path.is_ident("include") {
+            self.found = true;
+        }
+        visit::visit_macro(self, item);
+    }
+}
+
+fn normalized_relative(root: &Path, path: &Path) -> Result<String, ScanError> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| ScanError::new(format!("canonicalize repository root: {error}")))?;
+    let canonical = path.canonicalize().map_err(|error| {
+        ScanError::new(format!("canonicalize module `{}`: {error}", path.display()))
+    })?;
+    let relative = canonical.strip_prefix(&canonical_root).map_err(|_| {
+        ScanError::new(format!(
+            "production module `{}` resolves outside the repository",
+            path.display()
+        ))
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ScanError::new(format!(
+            "production module path is not normalized: {}",
+            relative.display()
+        )));
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn path_attribute(
+    attributes: &[syn::Attribute],
+    owner: &str,
+) -> Result<Option<PathBuf>, ScanError> {
+    let mut selected = None;
+    for attribute in attributes {
+        if attribute.path().is_ident("path") {
+            let syn::Meta::NameValue(value) = &attribute.meta else {
+                return Err(ScanError::new(format!(
+                    "unsupported #[path] wiring on `{owner}`"
+                )));
+            };
+            let syn::Expr::Lit(expression) = &value.value else {
+                return Err(ScanError::new(format!(
+                    "unsupported #[path] wiring on `{owner}`"
+                )));
+            };
+            let syn::Lit::Str(path) = &expression.lit else {
+                return Err(ScanError::new(format!(
+                    "unsupported #[path] wiring on `{owner}`"
+                )));
+            };
+            if selected.replace(PathBuf::from(path.value())).is_some() {
+                return Err(ScanError::new(format!(
+                    "ambiguous repeated #[path] wiring on `{owner}`"
+                )));
+            }
+        } else if attribute.path().is_ident("cfg_attr") {
+            let nested = attribute
+                .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                .map_err(|error| {
+                    ScanError::new(format!("unsupported cfg_attr on `{owner}`: {error}"))
+                })?;
+            let Some(condition) = nested.first() else {
+                return Err(ScanError::new(format!(
+                    "unsupported empty cfg_attr on `{owner}`"
+                )));
+            };
+            let carries_path = nested
+                .iter()
+                .skip(1)
+                .any(|meta| meta.path().is_ident("path"));
+            if carries_path && evaluate_test_cfg(condition)? != TestCfg::False {
+                return Err(ScanError::new(format!(
+                    "conditional #[path] wiring on `{owner}` is ambiguous in the production graph"
+                )));
+            }
+        }
+    }
+    Ok(selected)
+}
+
+fn child_module_directory(path: &Path) -> PathBuf {
+    if path.file_name().is_some_and(|name| name == "mod.rs") {
+        path.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+    } else {
+        path.parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(path.file_stem().unwrap_or_default())
+    }
+}
+
+struct ProductionGraph<'a> {
+    root: &'a Path,
+    sources: std::collections::BTreeMap<String, ProductionRustSource>,
+    module_directories: std::collections::BTreeMap<String, PathBuf>,
+}
+
+fn token_stream_has_module_wiring(tokens: proc_macro2::TokenStream) -> bool {
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Group(group) => {
+                if token_stream_has_module_wiring(group.stream()) {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Ident(ident)
+                if matches!(ident.to_string().as_str(), "mod" | "include") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn validate_item_macro_module_wiring(items: &[syn::Item]) -> Result<(), ScanError> {
+    for item in items {
+        if item_is_test_only(item_attributes(item))? {
+            continue;
+        }
+        match item {
+            syn::Item::Macro(item_macro)
+                if item_macro.mac.path.is_ident("macro_rules") && item_macro.ident.is_some() =>
+            {
+                let name = item_macro.ident.as_ref().expect("guarded").to_string();
+                if token_stream_has_module_wiring(item_macro.mac.tokens.clone()) {
+                    return Err(ScanError::new(format!(
+                        "macro_rules! `{name}` has unsupported production module wiring"
+                    )));
+                }
+            }
+            syn::Item::Mod(module) if module.content.is_some() => {
+                validate_item_macro_module_wiring(&module.content.as_ref().expect("guarded").1)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+impl<'a> ProductionGraph<'a> {
+    fn walk_file(&mut self, path: &Path, module_directory: PathBuf) -> Result<(), ScanError> {
+        let relative = normalized_relative(self.root, path)?;
+        if let Some(previous) = self.module_directories.get(&relative) {
+            if previous != &module_directory {
+                return Err(ScanError::new(format!(
+                    "ambiguous module context for `{relative}`"
+                )));
+            }
+            return Ok(());
+        }
+        let source = fs::read_to_string(path).map_err(|error| {
+            ScanError::new(format!("read production module `{relative}`: {error}"))
+        })?;
+        let file = syn::parse_file(&source).map_err(|error| {
+            ScanError::new(format!(
+                "cannot parse production module `{relative}`: {error}"
+            ))
+        })?;
+        let mut include = IncludeMacroFinder::default();
+        include.visit_file(&file);
+        if include.found {
+            return Err(ScanError::new(format!(
+                "unsupported include! wiring in production module `{relative}`"
+            )));
+        }
+        validate_item_macro_module_wiring(&file.items)?;
+        let production = production_rust_source(&source)
+            .map_err(|error| ScanError::new(format!("production module `{relative}`: {error}")))?;
+        self.module_directories
+            .insert(relative.clone(), module_directory.clone());
+        self.sources.insert(
+            relative.clone(),
+            ProductionRustSource {
+                path: relative,
+                source: production,
+            },
+        );
+        self.walk_items(&file.items, &module_directory)
+    }
+
+    fn walk_items(
+        &mut self,
+        items: &[syn::Item],
+        module_directory: &Path,
+    ) -> Result<(), ScanError> {
+        for item in items {
+            if item_is_test_only(item_attributes(item))? {
+                continue;
+            }
+            let syn::Item::Mod(module) = item else {
+                if let syn::Item::Macro(item_macro) = item
+                    && !item_macro.mac.path.is_ident("macro_rules")
+                    && !item_macro.mac.path.is_ident("thread_local")
+                    && token_stream_has_module_wiring(item_macro.mac.tokens.clone())
+                {
+                    return Err(ScanError::new(format!(
+                        "unsupported item macro `{}` may alter the production module graph",
+                        item_macro.mac.path.to_token_stream()
+                    )));
+                }
+                continue;
+            };
+            let owner = module.ident.to_string();
+            if let Some((_, nested)) = &module.content {
+                if path_attribute(&module.attrs, &owner)?.is_some() {
+                    return Err(ScanError::new(format!(
+                        "unsupported #[path] on inline module `{owner}`"
+                    )));
+                }
+                self.walk_items(nested, &module_directory.join(&owner))?;
+                continue;
+            }
+            let selected = if let Some(attribute_path) = path_attribute(&module.attrs, &owner)? {
+                module_directory.join(attribute_path)
+            } else {
+                let flat = module_directory.join(format!("{owner}.rs"));
+                let nested = module_directory.join(&owner).join("mod.rs");
+                match (flat.is_file(), nested.is_file()) {
+                    (true, false) => flat,
+                    (false, true) => nested,
+                    (true, true) => {
+                        return Err(ScanError::new(format!(
+                            "ambiguous module `{owner}`: both `{}` and `{}` exist",
+                            flat.display(),
+                            nested.display()
+                        )));
+                    }
+                    (false, false) => {
+                        return Err(ScanError::new(format!(
+                            "production module `{owner}` resolves to neither `{}` nor `{}`",
+                            flat.display(),
+                            nested.display()
+                        )));
+                    }
+                }
+            };
+            if !selected.is_file() {
+                return Err(ScanError::new(format!(
+                    "production #[path] module `{owner}` does not exist at `{}`",
+                    selected.display()
+                )));
+            }
+            let child_directory = child_module_directory(&selected);
+            self.walk_file(&selected, child_directory)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn discover_production_rust_sources(
+    root: &Path,
+    target_roots: &[String],
+) -> Result<Vec<ProductionRustSource>, ScanError> {
+    let mut graph = ProductionGraph {
+        root,
+        sources: Default::default(),
+        module_directories: Default::default(),
+    };
+    for target_root in target_roots {
+        let relative = Path::new(target_root);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ScanError::new(format!(
+                "production target root is not normalized: `{target_root}`"
+            )));
+        }
+        let absolute = root.join(relative);
+        graph.walk_file(
+            &absolute,
+            absolute
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+        )?;
+    }
+    Ok(graph.sources.into_values().collect())
 }
 
 /// Does this Rust type name a tensor element, or an array or slice of one?
@@ -706,7 +1161,7 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     }
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        if is_exact_cfg_test_module(module) {
+        if item_is_test_only(&module.attrs).is_ok_and(|test_only| test_only) {
             return;
         }
         self.with_owner(module.ident.to_string(), |scanner| {

@@ -577,7 +577,9 @@ class WriteModeTests(unittest.TestCase):
             root = _fake_repo(Path(td))
             recorder = _Recorder()
             _code, output = _run([], repo_root=root, recorder=recorder)
-        self.assertIn("[tier 0 1/4] rejection-registry (python):", output)
+        self.assertIn(
+            "[tier 0 1/4] rejection-registry (cargo + python):", output
+        )
         self.assertIn("[tier 1 4/4] std-bundle (cargo):", output)
         self.assertIn(
             "owns: spec/design/loud_unsupported_issue_manifest.json, "

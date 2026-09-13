@@ -16,9 +16,11 @@ from capacity_census_liveness import IssueKind, IssueRecord, IssueState, fetch_i
 from generate_rejection_registries import (
     MANIFEST_REL,
     derive_issue_numbers,
-    discover_issue_citations,
+    discover_production_sources,
     load_issue_manifest,
     manifest_derivation_problems,
+    parse_production_issue_citations,
+    verify_compiler_source_closure,
 )
 
 
@@ -48,7 +50,9 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     manifest_path = root / MANIFEST_REL
     numbers = load_issue_manifest(manifest_path)
-    source_numbers = derive_issue_numbers(discover_issue_citations(root))
+    sources = discover_production_sources(root)
+    verify_compiler_source_closure(root, sources)
+    source_numbers = derive_issue_numbers(parse_production_issue_citations(sources))
     derivation_problems = manifest_derivation_problems(numbers, source_numbers)
     if derivation_problems:
         for problem in derivation_problems:

@@ -420,7 +420,13 @@ pending decision 3.
 
 `spec/design/loud_unsupported_issue_manifest.json` is generated from the exact
 literal issue identities cited by production `unimplemented_rejection!`
-invocations. Its current set is **#600, #689, #729, #759, #829, #879, #912,
+invocations. Cargo supplies the non-test crate target roots and the existing
+`syn` inventory owner follows their production module graph, including
+literal `#[path]` sources outside `src`, while excluding `cfg(test)`-only
+modules/items and failing closed on ambiguous or unsupported module wiring.
+Rustc dep-info from non-test production targets is then reconciled against
+that graph through the repository's existing configuration-closure parser.
+Its current set is **#600, #689, #729, #759, #829, #879, #912,
 #951, #1058, #1059, #1138, #1192, #1277, #1298, #1306, #1364, #1383, #1482,
 and #1844**. Repeated citation sites collapse to one row; a missing cited row,
 an uncited stale row, or a dynamic/malformed issue argument fails the
@@ -428,10 +434,11 @@ generator. The first regeneration removed #1291 because no production
 rejection cites it; #1291's remaining hardware work and closing condition are
 unchanged and no longer masquerade as rejection-construction authority.
 
-The Rejection Authority Liveness job still checks every standing row whenever
-its existing change gate triggers, so closing any listed issue reddens that
-run. The #1870 changed-row PR narrowing and scheduled standing-state canary
-are not part of this prerequisite slice. (#691 and #714 left the set via PR
+Every Rust-source or crate-manifest edit conservatively triggers Rejection
+Authority Liveness, which first rechecks structural citation/generated-byte
+agreement and then checks every standing row, so closing any listed issue
+reddens that run. The #1870 changed-row PR narrowing and scheduled
+standing-state canary are not part of this prerequisite slice. (#691 and #714 left the set via PR
 #1164; their one-time closure by #1151 and un-closure by the #1159 revert is
 the worked example of why closing a pinned issue from the roadmap top-down
 breaks the build.)

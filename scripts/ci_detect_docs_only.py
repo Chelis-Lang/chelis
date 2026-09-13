@@ -164,7 +164,13 @@ def rejection_authority_changed(paths: list[str]) -> bool:
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
     if not cleaned:
         return True
-    return any(path in REJECTION_AUTHORITY_PATHS for path in cleaned)
+    return any(
+        path in REJECTION_AUTHORITY_PATHS
+        or path.endswith(".rs")
+        or path == "Cargo.toml"
+        or (path.startswith("crates/") and path.endswith("/Cargo.toml"))
+        for path in cleaned
+    )
 
 
 def diagnostic_kind_changed(paths: list[str]) -> bool:

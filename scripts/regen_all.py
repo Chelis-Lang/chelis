@@ -5,17 +5,18 @@ Usage (from the repository root, with the worktree's managed Python):
 
     .venv/bin/python scripts/regen_all.py               # write tiers 0 and 1
     .venv/bin/python scripts/regen_all.py --check       # report stale legs only
-    .venv/bin/python scripts/regen_all.py --tier 0      # the Python-only tier
+    .venv/bin/python scripts/regen_all.py --tier 0      # lightweight generators
     .venv/bin/python scripts/regen_all.py --full        # tiers 0, 1, 2 plus the
                                                         # check-only legs
     .venv/bin/python scripts/regen_all.py --full --check
 
 Tiers, in dependency order
 --------------------------
-0   Python-only writers that need no build: the source-derived rejection issue
-    manifest and Rust registry (`generate_rejection_registries.py --write`),
-    the embedded conformance skill assets (`regenerate_conformance_assets.py`),
-    and the
+0   Lightweight writers: the source-derived rejection issue manifest and Rust
+    registry (`generate_rejection_registries.py --write`) compile and run only
+    the existing `syn` inventory helper to derive the production module graph;
+    the embedded conformance skill assets
+    (`regenerate_conformance_assets.py`), and the
     opaque-invariants corpus (`tests/corpus/opaque_invariants/generate_corpus.py`).
     The corpus generator has no `--check`; this script regenerates into a
     temporary directory and byte-compares, the same three comparisons
@@ -183,7 +184,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "spec/design/loud_unsupported_issue_manifest.json",
                 "crates/chelis-types/src/rejection_registry_generated.rs",
             ),
-            needs="python",
+            needs="cargo + python",
         ),
         RegenLeg(
             name="conformance-assets",

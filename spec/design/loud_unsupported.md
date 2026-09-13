@@ -364,11 +364,24 @@ REGISTRIES of what actually exists:
 - `IssueRef` wraps `NonZeroU32` AND validates membership in a checked-in,
   source-derived issue manifest recording, per number: it is an ISSUE (not a
   PR), and it is OPEN. `scripts/generate_rejection_registries.py` discovers
-  every Rust file recursively below `crates/*/src`, excluding only the
-  defining `crates/chelis-types/src/unsupported.rs`, and parses every
-  production `unimplemented_rejection!` invocation. The first argument must
-  be an unsuffixed positive decimal integer literal; dynamic expressions,
-  alternate delimiters, suffixes, zero, and malformed invocations are errors.
+  Cargo's non-test library and binary target roots, then the existing
+  `chelis-repr-inventory` `syn` parser follows their inline, ordinary external,
+  and literal `#[path]` module edges. It excludes every module or item whose
+  `cfg` cannot be true with `test=false`, so `src/tests.rs` and inline
+  `#[cfg(test)]` citations are not authority, while a production `#[path]`
+  source outside `src` is. Ambiguous ordinary module paths, conditional or
+  malformed path wiring, `include!`, and macro definitions that directly emit
+  module wiring fail closed. The defining
+  `crates/chelis-types/src/unsupported.rs` remains the sole citation
+  exclusion. The generator also runs Cargo's non-test production targets and
+  reuses `check_configuration_closure.py`'s rustc dep-info parser; every
+  compiler-read repository source must appear in the structural graph. Thus
+  the parser does not self-certify module closure.
+  Every resulting production `unimplemented_rejection!` invocation is parsed.
+  The first argument accepts Rust's full unsuffixed decimal token grammar
+  (leading zeroes and arbitrary/trailing underscores), then must decode to a
+  positive `u32`; dynamic expressions, alternate delimiters, suffixes, zero,
+  overflow, and malformed invocations are errors.
   The macro name is likewise exact: production imports and reexports may not
   rename `unimplemented_rejection`, because an aliased invocation would evade
   source derivation. Rust strings, raw strings, ordinary character literals,
@@ -378,18 +391,22 @@ REGISTRIES of what actually exists:
   generator writes both `spec/design/loud_unsupported_issue_manifest.json`
   and the Rust membership artifact, while `--check` rejects a cited issue
   missing from the manifest, an uncited stale row, or byte drift in either
-  generated artifact. Tests freeze the production roots and sole exclusion,
-  exact parsing, both drift directions, duplicate handling, and Rust byte
-  agreement.
+  generated artifact. Tests freeze Cargo target-kind selection, the structural
+  module and test-exclusion contract, the sole citation exclusion, exact
+  parsing, both drift directions, duplicate handling, and Rust byte agreement.
 - **A source-derived manifest is still self-authorizing with respect to live
   tracker state** - the same PR can cite a closed issue, a PR number, or a
   nonexistent number and regenerate a structurally valid row. Every
   construction, registry, validator, imported liveness-helper, detector, and
   workflow input therefore remains in the `Rejection Authority Liveness`
-  change set. As of 2026-09-13, that job preserves the existing conservative
-  behavior: whenever triggered it verifies EVERY standing manifest row
-  against the live tracker (exists, is an issue, is open), not only rows
-  changed by the PR. The proposed changed-row PR narrowing and §C7.5 scheduled
+  change set. Every Rust source path and workspace crate manifest
+  conservatively triggers that job, including a newly added crate or a
+  production `#[path]` target outside `src`; the job reruns structural source
+  and generated-byte agreement before tracker validation. As of 2026-09-13,
+  it preserves the existing conservative liveness behavior: whenever
+  triggered it verifies EVERY standing manifest row against the live tracker
+  (exists, is an issue, is open), not only rows changed by the PR. The
+  proposed changed-row PR narrowing and §C7.5 scheduled
   standing-manifest canary remain later #1870 slices; this source-derivation
   prerequisite implements neither. Until the canary lands, standing-state
   drift remains a named pending control rather than an implied daily

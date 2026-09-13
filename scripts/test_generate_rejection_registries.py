@@ -12,6 +12,7 @@ from generate_rejection_registries import (
     MANIFEST_REL,
     OUTPUT_REL,
     RegistryError,
+    compiler_source_closure_problems,
     derive_issue_numbers,
     discover_atoms,
     discover_issue_citations,
@@ -19,6 +20,7 @@ from generate_rejection_registries import (
     load_issue_manifest,
     manifest_derivation_problems,
     parse_issue_citations,
+    production_target_roots_from_metadata,
     render_issue_manifest,
     render_registry,
 )
@@ -50,29 +52,71 @@ class DiscoverAtoms(unittest.TestCase):
 
 
 class ProductionSources(unittest.TestCase):
-    def test_only_crate_src_trees_are_production_and_macro_owner_is_excluded(
+    def test_cargo_target_roots_exclude_tests_examples_benches_and_build_scripts(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            included = (
-                root / "crates/example/src/lib.rs",
-                root / "crates/example/src/nested/module.rs",
-                root / "crates/other/src/main.rs",
-            )
-            excluded = (
-                root / "crates/example/tests/integration.rs",
-                root / "crates/example/examples/demo.rs",
-                root / "crates/example/benches/bench.rs",
-                root / "crates/example/build.rs",
-                root / "crates/chelis-types/src/unsupported.rs",
-                root / "scripts/not_production.rs",
-            )
-            for path in included + excluded:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("// fixture\n")
+        root = Path("/repo")
+        metadata = {
+            "workspace_members": ["example 0.1.0"],
+            "packages": [
+                {
+                    "id": "example 0.1.0",
+                    "targets": [
+                        {
+                            "kind": ["lib"],
+                            "src_path": "/repo/crates/example/src/lib.rs",
+                        },
+                        {
+                            "kind": ["bin"],
+                            "src_path": "/repo/crates/example/src/main.rs",
+                        },
+                        {
+                            "kind": ["test"],
+                            "src_path": "/repo/crates/example/tests/integration.rs",
+                        },
+                        {
+                            "kind": ["example"],
+                            "src_path": "/repo/crates/example/examples/demo.rs",
+                        },
+                        {
+                            "kind": ["bench"],
+                            "src_path": "/repo/crates/example/benches/bench.rs",
+                        },
+                        {
+                            "kind": ["custom-build"],
+                            "src_path": "/repo/crates/example/build.rs",
+                        },
+                    ],
+                }
+            ],
+        }
+        self.assertEqual(
+            production_target_roots_from_metadata(root, metadata),
+            [
+                "crates/example/src/lib.rs",
+                "crates/example/src/main.rs",
+            ],
+        )
 
-            self.assertEqual(discover_production_sources(root), list(included))
+    def test_real_production_graph_includes_path_reached_source_outside_src(
+        self,
+    ) -> None:
+        paths = {source.path for source in discover_production_sources(ROOT)}
+        self.assertIn(Path("tests/support/c_lexical.rs"), paths)
+        self.assertNotIn(Path("crates/chelis-types/src/unsupported.rs"), paths)
+
+    def test_compiler_source_missing_from_parser_graph_fails_closure(self) -> None:
+        self.assertEqual(
+            compiler_source_closure_problems(
+                {"crates/example/src/lib.rs"},
+                {
+                    "crates/example/src/lib.rs",
+                    "tests/support/compiler_reached.rs",
+                    "crates/chelis-types/src/unsupported.rs",
+                },
+            ),
+            ["tests/support/compiler_reached.rs"],
+        )
 
 
 class IssueCitations(unittest.TestCase):
@@ -91,6 +135,18 @@ class IssueCitations(unittest.TestCase):
             [citation.number for citation in citations], [1277, 879, 879]
         )
         self.assertEqual(derive_issue_numbers(citations), [879, 1277])
+
+    def test_all_valid_positive_unsuffixed_decimal_spellings_are_accepted(
+        self,
+    ) -> None:
+        spellings = ("879", "000879", "8_79", "8__79", "879_", "0_879")
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                citations = parse_issue_citations(
+                    Path("crates/example/src/lib.rs"),
+                    f'unimplemented_rejection!({spelling}, "production");',
+                )
+                self.assertEqual([citation.number for citation in citations], [879])
 
     def test_comments_and_string_literals_are_not_citations(self) -> None:
         citations = parse_issue_citations(
@@ -149,6 +205,8 @@ class IssueCitations(unittest.TestCase):
             'unimplemented_rejection!(issue, "dynamic")',
             'unimplemented_rejection!("879", "string")',
             'unimplemented_rejection!(0, "zero")',
+            'unimplemented_rejection!(0_, "zero")',
+            'unimplemented_rejection!(0__0, "zero")',
             'unimplemented_rejection!(879u32, "suffix")',
             'unimplemented_rejection!(879 + 1, "expression")',
             'unimplemented_rejection!(0x36f, "hex")',

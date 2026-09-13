@@ -138,9 +138,24 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
     def test_unrelated_paths_do_not_require_live_validation(self):
         self.assertFalse(
             m.rejection_authority_changed(
-                ["README.md", "crates/chelis-ir/src/lower.rs"]
+                ["README.md", "packages/chelis-std/src/prelude.ch"]
             )
         )
+
+    def test_existing_new_and_path_reached_rust_sources_require_validation(self):
+        for path in (
+            "crates/chelis-ir/src/lower.rs",
+            "crates/brand-new/src/lib.rs",
+            "crates/brand-new/src/tests.rs",
+            "tests/support/c_lexical.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(m.rejection_authority_changed([path]))
+
+    def test_workspace_manifest_edits_require_validation(self):
+        for path in ("Cargo.toml", "crates/brand-new/Cargo.toml"):
+            with self.subTest(path=path):
+                self.assertTrue(m.rejection_authority_changed([path]))
 
     def test_empty_change_set_fails_safe(self):
         self.assertTrue(m.rejection_authority_changed([]))
