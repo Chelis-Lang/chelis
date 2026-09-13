@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "legs": [
     {
       "name": "checked host metadata debug contract",
@@ -53,7 +53,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::checked_c_affine::affine_shapes_and_coordinates_preserve_exact_metadata",
         "chelis-runtime::checked_c_affine::malformed_affine_metadata_traps_before_returning",
         "chelis-runtime::checked_c_alloc_like::alloc_like_preserves_shape_and_checks_each_result_representation",
@@ -202,7 +202,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::checked_c_affine::affine_shapes_and_coordinates_preserve_exact_metadata",
         "chelis-runtime::checked_c_affine::malformed_affine_metadata_traps_before_returning",
         "chelis-runtime::checked_c_alloc_like::alloc_like_preserves_shape_and_checks_each_result_representation",
@@ -310,7 +310,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_metadata::snapshot_delegation_rejects_raw_stride_and_byte_reconstruction",
         "chelis-backend-c::checked_c_snapshot_metadata::generated_metadata_uses_runtime_queries_without_rank_sized_stack_scratch"
       ]
@@ -325,7 +325,7 @@
         "-E",
         "(test(checked_snapshot_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_snapshot_shape_capture_survives_submission_repurpose"
       ]
     },
@@ -339,7 +339,7 @@
         "-E",
         "(test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::runtime_extent_slice_a::vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice"
       ]
     },
@@ -353,7 +353,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_reduction::bypassing_each_consumer_and_scratch_owner_is_rejected",
         "chelis-backend-c::checked_c_reduction::reduction_consumers_require_checked_domains_before_allocation"
       ]
@@ -370,7 +370,7 @@
         "-E",
         "(binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_c_reduction_nontrailing_kernels_execute_under_sanitizers",
         "chelis-backend-c::exec_compile::checked_c_reduction_sum_and_count_preserve_empty_groups_under_sanitizers",
         "chelis-backend-c::exec_compile::direct_fused_max_reduce_runtime_shape_guard_precedes_allocation_and_executes",
@@ -401,7 +401,7 @@
         "-E",
         "(test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::issue_1294_standard_lowerings::canonical_sum_preserves_integer_trap_occurrence_in_eval_and_c",
         "chelis-cli::issue_1294_standard_lowerings::hosted_matmul_empty_reductions_and_batches_keep_dtype_and_shape",
         "chelis-cli::issue_1294_standard_lowerings::hosted_matmul_preserves_the_canonical_reduction_tree",
@@ -419,7 +419,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_json_scratch::json_order_scratch_has_checked_capacity_and_cleanup_tail",
         "chelis-backend-c::checked_c_json_scratch::json_scratch_bypass_and_lifetime_controls_fail",
         "chelis-backend-c::checked_c_json_scratch::json_scratch_conditional_release_is_rejected",
@@ -436,7 +436,7 @@
         "-E",
         "(test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::issue_1314_json_bigint::json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c"
       ]
     },
@@ -450,7 +450,7 @@
         "-E",
         "(test(=json_scratch_execution_detects_skipped_cleanup)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::issue_1314_json_bigint::json_scratch_execution_detects_skipped_cleanup"
       ]
     },
@@ -464,7 +464,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_host_metadata::constant_copy_validates_literal_domain_before_storage",
         "chelis-backend-c::checked_c_host_metadata::dimension_rendering_has_no_unchecked_arithmetic_variant",
         "chelis-backend-c::checked_c_host_metadata::literal_ingress_bypass_controls_fail"
@@ -480,7 +480,7 @@
         "-E",
         "(test(checked_literals_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_literals_preserve_every_storage_width_and_reject_count_mismatch",
         "chelis-backend-c::exec_compile::checked_literals_reject_inconsistent_ir_storage_dtype"
       ]
@@ -495,7 +495,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_window::window_projection_and_submission_bypass_controls_fail",
         "chelis-backend-c::checked_c_window::windows_delegate_complete_geometry_before_storage"
       ]
@@ -512,7 +512,7 @@
         "-E",
         "(test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_windows_forward_and_gradient_execute_with_exact_geometry_under_sanitizers",
         "chelis-backend-c::exec_compile::checked_windows_reject_incorrect_runtime_result_and_cotangent_shapes",
         "chelis-backend-c::exec_compile::exec_reduce_window_grad_max_matches_evaluator_oracle",
@@ -538,7 +538,7 @@
         "-E",
         "(test(parity_checked_window_geometry) | test(parity_corpus_is_complete)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::parity::parity_checked_window_geometry",
         "chelis-cli::parity::parity_corpus_is_complete"
       ]
@@ -553,7 +553,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_blas::blas_dag_paths_use_checked_domains_before_storage",
         "chelis-backend-c::checked_c_blas::blas_domain_bypass_controls_are_rejected",
         "chelis-backend-c::checked_c_blas::blas_host_summary_uses_checked_submission_and_offsets"
@@ -569,7 +569,7 @@
         "-E",
         "(test(checked_blas_) | test(blas_vendor_dimension_contract)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::blas_vendor_dimension_contract_matches_actual_function_prototypes",
         "chelis-backend-c::exec_compile::checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers"
       ]
@@ -584,7 +584,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_sparse::bypassing_sparse_projection_or_submission_is_rejected",
         "chelis-backend-c::checked_c_sparse::sparse_dag_consumers_delegate_to_one_checked_domain",
         "chelis-backend-c::checked_c_sparse::sparse_host_summaries_use_checked_submission_and_indexing"
@@ -600,7 +600,7 @@
         "-E",
         "(test(checked_c_sparse_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers",
         "chelis-backend-c::exec_compile::checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers"
       ]
@@ -617,7 +617,7 @@
         "-E",
         "(binary(cross_library_sparse_summaries) | test(parity_checked_sparse_axes)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cross_library_sparse_summaries::checked_sparse_host_helpers_execute_nontrailing_exact_integer_domains",
         "chelis-cli::cross_library_sparse_summaries::nested_user_def_gather_wrapper_chain_emits_inline_sparse_gather_loop",
         "chelis-cli::cross_library_sparse_summaries::nested_user_def_scatter_replace_wrapper_chain_emits_inline_loop",
@@ -642,7 +642,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_indexing::cohort_control_rejects_raw_helpers_late_validation_and_unchecked_loop_bounds",
         "chelis-backend-c::checked_c_indexing::final_projection_owners_reject_raw_calculations_constant_steps_and_weak_identity",
         "chelis-backend-c::checked_c_indexing::shared_indexing_cohort_has_checked_projections_before_storage_changes"
@@ -658,7 +658,7 @@
         "-E",
         "(test(checked_c_indexing_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers",
         "chelis-backend-c::exec_compile::checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_sanitizers"
       ]
@@ -675,7 +675,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::checked_c_movement::movement_control_rejects_removed_checks_and_raw_index_helpers",
         "chelis-backend-c::checked_c_movement::permutation_and_expansion_use_checked_metadata_before_allocation",
         "chelis-backend-c::checked_c_movement_plans::all_five_movement_emitters_use_checked_plans_without_rank_scratch",
@@ -692,7 +692,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::issue_616_runtime_movement_c_parity::checked_movement_expansion_guards_preserve_expand_and_insert_identity",
         "chelis-cli::issue_616_runtime_movement_c_parity::issue_616_literal_axis_still_checked_beside_runtime_axis",
         "chelis-cli::issue_616_runtime_movement_c_parity::issue_616_multi_axis_runtime_pad_matches_c",
@@ -716,7 +716,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::movement_expansion_kind::expansion_kind_and_local_guard_keep_the_primitive_identity"
       ]
     },
@@ -731,7 +731,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::movement_expansion_kind::expansion_kind_and_local_guard_keep_the_primitive_identity"
       ]
     },
@@ -745,7 +745,7 @@
         "-E",
         "(test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::a_literal_claim_on_a_symbolic_input_in_a_local_class_traps",
         "chelis-backend-c::exec_compile::a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
         "chelis-backend-c::exec_compile::checked_c_movement_affine_maps_preserve_bits_under_sanitizers",
@@ -771,7 +771,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::blas::tests::detects_matmul_pattern",
         "chelis-backend-c::blas::tests::rejects_mismatched_k_dims",
         "chelis-backend-c::blas::tests::rejects_non_sum_node",
@@ -1027,7 +1027,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cast_trunc::a_gradient_through_cast_trunc_is_a_clean_error_not_a_silent_zero",
         "chelis-cli::cast_trunc::a_non_float_source_is_a_check_time_type_error",
         "chelis-cli::cast_trunc::a_non_integer_target_is_a_check_time_type_error",
@@ -1088,7 +1088,7 @@
         "-E",
         "(test(parity_checked_reshape)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::parity::parity_checked_reshape"
       ]
     },
@@ -1101,7 +1101,7 @@
         "-E",
         "(test(checked_c_metadata_dag_reshape_executes_under_ubsan)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::tests::checked_c_metadata_dag_reshape_executes_under_ubsan"
       ]
     },
@@ -1115,7 +1115,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cbackend_reshape_memcpy::cbackend_reshape_tensor_f32_control",
         "chelis-cli::cbackend_reshape_memcpy::cbackend_reshape_tensor_f64",
         "chelis-cli::cbackend_reshape_memcpy::cbackend_reshape_tensor_int64",
@@ -1134,7 +1134,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::element_contract::all_nine_storage_and_arithmetic_types_match_the_spec",
         "chelis-runtime::element_contract::bool_storage_admits_only_canonical_construction",
         "chelis-runtime::element_contract::checked_access_rejects_equal_width_representation_swaps",
@@ -1154,7 +1154,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-vocab::dtype_contract::arithmetic_does_not_follow_storage_width_or_grant_bool_arithmetic",
         "chelis-vocab::dtype_contract::arithmetic_vocabulary_is_exact_and_fully_registered",
         "chelis-vocab::dtype_contract::contract_is_available_in_constant_contexts",
@@ -1175,7 +1175,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-repr-inventory::inventory::a_block_argument_call_does_not_open_an_owner",
         "chelis-repr-inventory::inventory::a_block_literal_parameter_is_a_carrier_and_is_classified",
         "chelis-repr-inventory::inventory::a_c_header_owns_its_rows_by_declaration_never_by_a_keyword",
@@ -1259,7 +1259,7 @@
         "-E",
         "(test(capacity_key::tests::)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
         "chelis-ir::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
         "chelis-ir::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
@@ -1289,7 +1289,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::dim_expr_evaluation::binding_is_not_a_capacity_proof_or_an_unchecked_projection",
         "chelis-ir::dim_expr_evaluation::finite_products_and_exact_quotients_keep_their_values",
         "chelis-ir::dim_expr_evaluation::invalid_quotient_obligations_survive_an_outer_zero_in_both_orders",
@@ -1313,7 +1313,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::issue_888_capacity_collision::equal_symbolic_capacities_still_share_a_slot",
         "chelis-backend-c::issue_888_capacity_collision::exact_planner_separates_saturated_legacy_key_collision",
         "chelis-backend-c::issue_888_capacity_collision::representable_symbolic_capacities_do_not_share_a_slot",
@@ -1337,7 +1337,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::exact_tagged_c_abi::bool_is_one_byte_and_fill_preserves_the_canonical_bit",
         "chelis-runtime::exact_tagged_c_abi::borrowed_view_copies_shape_and_honors_declared_capacity",
         "chelis-runtime::exact_tagged_c_abi::decimal_scalar_parsing_rounds_once_at_each_declared_float_width",
@@ -1370,7 +1370,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::bool8_storage_type::canonical_values_round_trip",
         "chelis-runtime::bool8_storage_type::layout_is_one_transparent_byte",
         "chelis-runtime::bool8_storage_type::non_canonical_bytes_are_rejected",
@@ -1402,7 +1402,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::capacity_census_tripwire::a_declaration_free_root_is_still_reached",
         "chelis-cli::capacity_census_tripwire::a_declaration_missing_from_every_attributed_bucket_fails",
         "chelis-cli::capacity_census_tripwire::a_declared_dtype_family_bound_is_numeric_capacity",
@@ -1543,7 +1543,7 @@
         "-E",
         "(test(capacity_key::tests::)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::capacity_key::tests::capacity_key_product_regions_flatten_sort_fold_and_remove_identity",
         "chelis-ir::capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision",
         "chelis-ir::capacity_key::tests::class_supplied_extent_retains_its_origin_through_pass_through",
@@ -1572,7 +1572,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::dim_expr_evaluation::binding_is_not_a_capacity_proof_or_an_unchecked_projection",
         "chelis-ir::dim_expr_evaluation::finite_products_and_exact_quotients_keep_their_values",
         "chelis-ir::dim_expr_evaluation::invalid_quotient_obligations_survive_an_outer_zero_in_both_orders",
@@ -1595,7 +1595,7 @@
         "-E",
         "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::issue_888_capacity_collision::equal_symbolic_capacities_still_share_a_slot",
         "chelis-backend-c::issue_888_capacity_collision::exact_planner_separates_saturated_legacy_key_collision",
         "chelis-backend-c::issue_888_capacity_collision::representable_symbolic_capacities_do_not_share_a_slot",
@@ -1613,7 +1613,7 @@
         "-E",
         "test(ownership::storage::tests::)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::ownership::storage::tests::c_excludes_entry_borrows_while_hip_counts_input_mirrors",
         "chelis-ir::ownership::storage::tests::c_materialized_store_has_storage_independent_of_its_source",
         "chelis-ir::ownership::storage::tests::complete_runtime_owned_proof_mints_one_linear_token",
@@ -1633,7 +1633,7 @@
         "--test",
         "never_reuse_boundary"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-metal::never_reuse_boundary::production_source_has_no_local_reuse_or_abort_stub_path",
         "chelis-backend-metal::never_reuse_boundary::reusable_hint_still_projects_distinct_metal_allocations",
         "chelis-backend-metal::never_reuse_boundary::unsupported_lowering_is_a_typed_error_not_an_abort_artifact",
@@ -1650,7 +1650,7 @@
         "-E",
         "test(ownership::storage::tests::)"
       ],
-      "selected": [
+      "required": [
         "chelis-ir::ownership::storage::tests::c_excludes_entry_borrows_while_hip_counts_input_mirrors",
         "chelis-ir::ownership::storage::tests::c_materialized_store_has_storage_independent_of_its_source",
         "chelis-ir::ownership::storage::tests::complete_runtime_owned_proof_mints_one_linear_token",
@@ -1671,7 +1671,7 @@
         "--test",
         "never_reuse_boundary"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-metal::never_reuse_boundary::production_source_has_no_local_reuse_or_abort_stub_path",
         "chelis-backend-metal::never_reuse_boundary::reusable_hint_still_projects_distinct_metal_allocations",
         "chelis-backend-metal::never_reuse_boundary::unsupported_lowering_is_a_typed_error_not_an_abort_artifact",
@@ -1689,7 +1689,7 @@
         "--test",
         "dtype_contract_compile"
       ],
-      "selected": [
+      "required": [
         "chelis-vocab::dtype_contract::arithmetic_does_not_follow_storage_width_or_grant_bool_arithmetic",
         "chelis-vocab::dtype_contract::arithmetic_vocabulary_is_exact_and_fully_registered",
         "chelis-vocab::dtype_contract::contract_is_available_in_constant_contexts",
@@ -1708,7 +1708,7 @@
         "--test",
         "element_contract"
       ],
-      "selected": [
+      "required": [
         "chelis-runtime::element_contract::all_nine_storage_and_arithmetic_types_match_the_spec",
         "chelis-runtime::element_contract::bool_storage_admits_only_canonical_construction",
         "chelis-runtime::element_contract::checked_access_rejects_equal_width_representation_swaps",
@@ -1717,7 +1717,7 @@
       ]
     }
   ],
-  "python_selected": [
+  "python_required": [
     "scripts.test_runtime_representation_oracle.BaselineTests.test_a_retired_foundation_identity_cannot_be_restored",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_active_debt_cannot_add_an_identity",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_active_debt_cannot_retain_a_stale_identity",
@@ -1772,18 +1772,23 @@
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_every_registered_source_exists_exactly_once",
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_the_frozen_source_list_equals_its_roots",
     "scripts.test_runtime_representation_oracle.SourceUniverseTests.test_the_universe_holds_the_phase2_owned_sources",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_added_test_binary_is_hashed_and_checked_after_execution",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_duplicate_json_fields_are_not_a_valid_selection",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_receipt_names_and_reports_an_added_test",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_requires_one_passing_framework_case_per_selection",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_expected_mutation_failure_requires_the_exact_assertion_case",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_failed_process_cannot_publish_a_passing_transcript",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_fixture_target_isolated_from_inherited_target_and_preserves_foreign_junit",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_fresh_execution_cannot_reuse_old_junit",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_frozen_selection_accepts_additions_but_blocks_loss_or_rename",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_junit_receipt_is_workspace_owned_when_build_target_is_external",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_manifest_cannot_erase_a_selected_negative_or_mutation",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_manifest_requires_schema_two_sorted_identity_floors",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_missing_or_changed_binary_after_execution_is_rejected",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_native_and_mutation_selections_remain_exact",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_phase_one_rejects_development_shortcuts",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_public_command_rejects_development_shortcuts_before_source_validation",
-    "scripts.test_runtime_representation_phase1.ReceiptTests.test_python_skip_missing_and_duplicate_success_fail_receipts",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_python_selection_executes_and_reports_additions_but_blocks_every_nonpass",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_runtime_archive_requires_current_cargo_artifact_identity",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_selection_requires_current_binary_and_exact_nonempty_census"
   ],
@@ -1811,7 +1816,7 @@
         "-E",
         "test(=tests::checked_c_metadata_dag_reshape_executes_under_ubsan)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::tests::checked_c_metadata_dag_reshape_executes_under_ubsan"
       ]
     },
@@ -1825,7 +1830,7 @@
         "-E",
         "test(=checked_literals_preserve_every_storage_width_and_reject_count_mismatch)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::exec_compile::checked_literals_preserve_every_storage_width_and_reject_count_mismatch"
       ]
     },
@@ -1839,7 +1844,7 @@
         "-E",
         "test(=bf16_add_agrees_with_evaluator)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::dtype_matrix_bf16_f16::bf16_add_agrees_with_evaluator"
       ]
     },
@@ -1853,7 +1858,7 @@
         "-E",
         "test(=fused_in_place_compile_run_reuses_program_owned_storage)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::fused_in_place_exec::fused_in_place_compile_run_reuses_program_owned_storage"
       ]
     },
@@ -1867,7 +1872,7 @@
         "-E",
         "test(=cbackend_cast_tensor_f32_to_f64)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cbackend_cast_memcpy::cbackend_cast_tensor_f32_to_f64"
       ]
     },
@@ -1881,7 +1886,7 @@
         "-E",
         "test(=cbackend_add_of_two_casts_f64_from_f32)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cbackend_cast_arithmetic_composition::cbackend_add_of_two_casts_f64_from_f32"
       ]
     },
@@ -1895,7 +1900,7 @@
         "-E",
         "test(=cbackend_reshape_tensor_f64)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::cbackend_reshape_memcpy::cbackend_reshape_tensor_f64"
       ]
     },
@@ -1909,7 +1914,7 @@
         "-E",
         "test(=issue_616_multi_axis_runtime_pad_matches_c)"
       ],
-      "selected": [
+      "required": [
         "chelis-cli::issue_616_runtime_movement_c_parity::issue_616_multi_axis_runtime_pad_matches_c"
       ]
     },
@@ -1922,7 +1927,7 @@
         "-E",
         "test(=tests::generated_code_compiles_with_platform_parallelism)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::tests::generated_code_compiles_with_platform_parallelism"
       ]
     },
@@ -1935,7 +1940,7 @@
         "-E",
         "test(=tests::canonical_matmul_numerics_ignore_blas_hint)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::tests::canonical_matmul_numerics_ignore_blas_hint"
       ]
     },
@@ -1949,7 +1954,7 @@
         "-E",
         "test(=bf16_matmul_agrees_with_evaluator)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::dtype_matrix_bf16_f16::bf16_matmul_agrees_with_evaluator"
       ]
     },
@@ -1963,7 +1968,7 @@
         "-E",
         "test(=c_fused_codegen_compiles)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::fused_compile::c_fused_codegen_compiles"
       ]
     },
@@ -1977,7 +1982,7 @@
         "-E",
         "test(=c_fused_reduce_compiles)"
       ],
-      "selected": [
+      "required": [
         "chelis-backend-c::fused_compile::c_fused_reduce_compiles"
       ]
     }

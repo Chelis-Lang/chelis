@@ -19,7 +19,7 @@ from scripts.dtype_builtin_atom_closure_oracle import source_identity
 ROOT = phase1.ROOT
 OracleFailure = phase1.OracleFailure
 MANIFEST = ROOT / "spec/design/runtime_representation_phase2_tests.json"
-MANIFEST_SHA256 = "58c9eed782f55fabf9e3c6576205f6da4fe8a8f0180541583088f03c5fd7ea1b"
+MANIFEST_SHA256 = "77dcf3c3237c1da355d139ceef2cf0b97150602fd5a0d6c59296489874cc5e6f"
 
 PYTHON_BOUNDARY_BINARIES = (
     "binding_payloads",
@@ -133,20 +133,6 @@ def manual_exclusions():
     )
 
 
-def selection_digest(selected):
-    return hashlib.sha256(("\n".join(selected) + "\n").encode()).hexdigest()
-
-
-def require_frozen_selection(selected, expected_count, expected_digest):
-    if (
-        expected_count <= 0
-        or len(selected) != expected_count
-        or len(set(selected)) != len(selected)
-        or selection_digest(selected) != expected_digest
-    ):
-        raise OracleFailure("Phase 2 exact frozen test selection drifted")
-
-
 def frozen_manifest(data, digest):
     if hashlib.sha256(data).hexdigest() != digest:
         raise OracleFailure("Phase 2 reviewed selection digest differs")
@@ -155,15 +141,17 @@ def frozen_manifest(data, digest):
 
 def validate_manifest(packet):
     legs = phase2_legs()
-    if packet.get("schema") != 1:
+    if packet.get("schema") != 2:
         raise OracleFailure("unknown Phase 2 manifest schema")
     if packet.get("manual_exclusions") != list(manual_exclusions()):
         raise OracleFailure("Phase 2 manual hardware boundary drifted")
-    python_selected = packet.get("python_selected")
+    python_required = packet.get("python_required")
     if (
-        not isinstance(python_selected, list)
-        or not python_selected
-        or len(set(python_selected)) != len(python_selected)
+        not isinstance(python_required, list)
+        or not python_required
+        or not all(isinstance(identity, str) and identity for identity in python_required)
+        or len(set(python_required)) != len(python_required)
+        or python_required != sorted(python_required)
     ):
         raise OracleFailure("Phase 2 Python self-test selection is empty or duplicate")
     rows = packet.get("legs")
@@ -172,15 +160,15 @@ def validate_manifest(packet):
     for row, (name, args) in zip(rows, legs, strict=True):
         if row.get("name") != name or row.get("args") != list(args):
             raise OracleFailure("Phase 2 frozen command drifted")
-        count = row.get("selected_count")
-        digest = row.get("selected_sha256")
+        required = row.get("required")
         if (
-            not isinstance(count, int)
-            or count <= 0
-            or not isinstance(digest, str)
-            or len(digest) != 64
+            not isinstance(required, list)
+            or not required
+            or not all(isinstance(identity, str) and identity for identity in required)
+            or len(set(required)) != len(required)
+            or required != sorted(required)
         ):
-            raise OracleFailure("Phase 2 frozen selection count/digest is invalid")
+            raise OracleFailure("Phase 2 frozen identity selection is invalid")
 
 
 def python_suite():
@@ -189,8 +177,8 @@ def python_suite():
     )
 
 
-def execute_leg(name, args, expected_count, expected_digest, directory):
-    print(f"+ {name}: list and execute {expected_count} frozen tests", flush=True)
+def execute_leg(name, args, required, directory):
+    print(f"+ {name}: list and execute {len(required)} required tests", flush=True)
     listed = phase1.command(
         [*phase1.nextest_command("list", args), "--message-format", "json"],
         ROOT,
@@ -198,7 +186,11 @@ def execute_leg(name, args, expected_count, expected_digest, directory):
         "list",
     )
     selected, artifacts = phase1.selection(phase1.load_json(listed), ROOT)
-    require_frozen_selection(selected, expected_count, expected_digest)
+    additions = phase1.require_frozen_selection(selected, required)
+    if additions:
+        print(f"+ {name}: execute {len(additions)} added tests", flush=True)
+        for identity in additions:
+            print(f"  + {identity}", flush=True)
     junit = phase1.junit_path()
     junit.unlink(missing_ok=True)
     phase1.command(
@@ -220,7 +212,9 @@ def execute_leg(name, args, expected_count, expected_digest, directory):
     phase1.verify_artifacts(artifacts)
     return {
         "name": name,
+        "required": required,
         "selected": selected,
+        "additions": additions,
         "executed": [{"id": identity, "outcome": "passed"} for identity in executed],
         "artifacts": artifacts,
     }
@@ -234,7 +228,7 @@ def run() -> Path:
     run_id = str(uuid.uuid4())
     directory = ROOT / "target/runtime-representation-phase2" / run_id
     directory.mkdir(parents=True, exist_ok=False)
-    python_cases = phase1.python_execution(python_suite(), packet["python_selected"])
+    python_receipt = phase1.python_execution(python_suite(), packet["python_required"])
     phase1_receipt = phase1.run()
     executions = []
     with phase1.runtime_pin(directory / "runtime-build") as runtime_receipt:
@@ -245,24 +239,27 @@ def run() -> Path:
                 execute_leg(
                     name,
                     args,
-                    row["selected_count"],
-                    row["selected_sha256"],
+                    row["required"],
                     directory / str(index),
                 )
             )
     if source_identity(ROOT) != identity:
         raise OracleFailure("source changed during Phase 2 execution")
     receipt = {
-        "schema": 1,
+        "schema": 2,
         "head": identity[0],
         "source_digest": identity[1],
         "run_id": run_id,
         "manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
         "phase1_receipt": str(phase1_receipt),
         "runtime": runtime_receipt,
-        "python_executed": [
-            {"id": name, "outcome": "passed"} for name in python_cases
-        ],
+        "python": {
+            **{key: value for key, value in python_receipt.items() if key != "executed"},
+            "executed": [
+                {"id": name, "outcome": "passed"}
+                for name in python_receipt["executed"]
+            ],
+        },
         "manual_exclusions": list(manual_exclusions()),
         "legs": executions,
     }

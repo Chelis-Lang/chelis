@@ -1,5 +1,7 @@
 """Spec-derived Phase 1 receipt controls: selection is not execution."""
 import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -82,6 +84,39 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(oracle.OracleFailure):
                 oracle.frozen_manifest(changed, digest)
 
+    def test_manifest_requires_schema_two_sorted_identity_floors(self):
+        packet = oracle.frozen_manifest(
+            oracle.MANIFEST.read_bytes(),
+            oracle.MANIFEST_SHA256,
+        )
+        oracle.validate_manifest(packet)
+        for mutation in (
+            'schema',
+            'command',
+            'empty',
+            'legacy',
+            'unsorted',
+            'nonstring',
+            'python',
+        ):
+            changed = copy.deepcopy(packet)
+            if mutation == 'schema':
+                changed['schema'] = 1
+            elif mutation == 'command':
+                changed['legs'][0]['args'].append('--changed')
+            elif mutation == 'empty':
+                changed['legs'][0]['required'] = []
+            elif mutation == 'legacy':
+                changed['legs'][0]['selected'] = changed['legs'][0].pop('required')
+            elif mutation == 'unsorted':
+                changed['legs'][0]['required'] = ['z', 'a']
+            elif mutation == 'nonstring':
+                changed['legs'][0]['required'] = [1]
+            else:
+                changed['python_required'] = []
+            with self.subTest(mutation=mutation), self.assertRaises(oracle.OracleFailure):
+                oracle.validate_manifest(changed)
+
     def test_failed_process_cannot_publish_a_passing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -134,21 +169,44 @@ class ReceiptTests(unittest.TestCase):
                 1,
             )
 
-    def test_python_skip_missing_and_duplicate_success_fail_receipts(self):
+    def test_python_selection_executes_and_reports_additions_but_blocks_every_nonpass(self):
         class Fixture(unittest.TestCase):
             def test_positive(self):
                 self.assertEqual(1 + 1, 2)
+            def test_addition(self):
+                self.assertEqual(2 + 2, 4)
+            def test_failure(self):
+                self.fail('wrong outcome')
             @unittest.skip('cannot count')
             def test_ignored(self):
                 pass
         positive = Fixture('test_positive')
-        oracle.python_execution(unittest.TestSuite([positive]), [positive.id()])
-        with self.assertRaises(oracle.OracleFailure):
-            oracle.python_execution(unittest.TestSuite([Fixture('test_ignored')]), [Fixture('test_ignored').id()])
-        with self.assertRaises(oracle.OracleFailure):
-            oracle.python_execution(unittest.TestSuite(), [positive.id()])
-        with self.assertRaises(oracle.OracleFailure):
-            oracle.python_execution(unittest.TestSuite([Fixture('test_positive'), Fixture('test_positive')]), [positive.id()])
+        addition = Fixture('test_addition')
+        receipt = oracle.python_execution(
+            unittest.TestSuite([positive, addition]),
+            [positive.id()],
+        )
+        self.assertEqual(receipt, {
+            'required': [positive.id()],
+            'selected': sorted([positive.id(), addition.id()]),
+            'additions': [addition.id()],
+            'executed': sorted([positive.id(), addition.id()]),
+        })
+        invalid = (
+            unittest.TestSuite([Fixture('test_addition')]),
+            unittest.TestSuite([Fixture('test_positive'), Fixture('test_ignored')]),
+            unittest.TestSuite([Fixture('test_positive'), Fixture('test_failure')]),
+            unittest.TestSuite(),
+            unittest.TestSuite([Fixture('test_positive'), Fixture('test_positive')]),
+        )
+        for suite in invalid:
+            with (
+                self.subTest(suite=suite),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(oracle.OracleFailure),
+            ):
+                oracle.python_execution(suite, [positive.id()])
 
     def test_fresh_execution_cannot_reuse_old_junit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -175,6 +233,132 @@ class ReceiptTests(unittest.TestCase):
                 self.assertEqual(oracle.junit_path(), workspace)
             self.assertEqual(foreign.read_bytes(), b'foreign receipt')
 
+    def test_frozen_selection_accepts_additions_but_blocks_loss_or_rename(self):
+        frozen = ['p::contract::negative', 'p::contract::positive']
+        addition = 'p::contract::new_negative'
+        self.assertEqual(oracle.require_frozen_selection(frozen, frozen), [])
+        self.assertEqual(
+            oracle.require_frozen_selection(sorted([*frozen, addition]), frozen),
+            [addition],
+        )
+        for selected in (
+            frozen[1:],
+            [frozen[1], addition],
+            [*frozen, frozen[0]],
+            list(reversed(frozen)),
+        ):
+            with self.subTest(selected=selected), self.assertRaises(oracle.OracleFailure):
+                oracle.require_frozen_selection(selected, frozen)
+        for invalid_frozen in (
+            [],
+            [frozen[0], frozen[0]],
+            list(reversed(frozen)),
+            [1],
+        ):
+            with self.subTest(frozen=invalid_frozen), self.assertRaises(oracle.OracleFailure):
+                oracle.require_frozen_selection(frozen, invalid_frozen)
+
+    def test_native_and_mutation_selections_remain_exact(self):
+        expected = ['p::contract::negative']
+        oracle.require_exact_selection(expected, expected)
+        for selected in (
+            [],
+            [*expected, 'p::contract::addition'],
+            [expected[0], expected[0]],
+        ):
+            with self.subTest(selected=selected), self.assertRaises(oracle.OracleFailure):
+                oracle.require_exact_selection(selected, expected)
+
+    def test_execution_receipt_names_and_reports_an_added_test(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            junit = root / 'junit.xml'
+            frozen = ['p::contract::negative']
+            addition = 'p::contract::new_negative'
+            selected = sorted([*frozen, addition])
+            xml = (
+                '<testsuites><testsuite name="p::contract">'
+                '<testcase name="negative"/><testcase name="new_negative"/>'
+                '</testsuite></testsuites>'
+            )
+
+            def command(argv, command_root, evidence, label):
+                self.assertEqual(command_root, root)
+                evidence.mkdir(parents=True, exist_ok=True)
+                if label == 'run':
+                    junit.write_text(xml)
+                return '{}'
+
+            with (
+                mock.patch.object(oracle, 'ROOT', root),
+                mock.patch.object(oracle, 'command', side_effect=command),
+                mock.patch.object(oracle, 'selection', return_value=(selected, {})),
+                mock.patch.object(oracle, 'junit_path', return_value=junit),
+            ):
+                receipt = oracle.execute_leg(
+                    'fixture',
+                    (),
+                    frozen,
+                    root / 'evidence',
+                )
+
+            self.assertEqual(receipt['selected'], selected)
+            self.assertEqual(receipt['additions'], [addition])
+            self.assertEqual(
+                receipt['executed'],
+                [{'id': identity, 'outcome': 'passed'} for identity in selected],
+            )
+
+    def test_added_test_binary_is_hashed_and_checked_after_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            required_binary = root / 'target/debug/deps/required'
+            added_binary = root / 'target/debug/deps/added'
+            required_binary.parent.mkdir(parents=True)
+            required_binary.write_bytes(b'required')
+            added_binary.write_bytes(b'added')
+
+            def suite(identity, binary, package, case):
+                return {
+                    'binary-id': identity,
+                    'binary-path': str(binary),
+                    'package-name': package,
+                    'cwd': str(root / 'crates' / package),
+                    'status': 'listed',
+                    'testcases': {
+                        case: {
+                            'ignored': False,
+                            'filter-match': {'status': 'matches'},
+                        },
+                    },
+                }
+
+            packet = {
+                'rust-build-meta': {'target-directory': str(root / 'target')},
+                'rust-suites': {
+                    'p::required': suite(
+                        'p::required', required_binary, 'p', 'negative'
+                    ),
+                    'q::added': suite('q::added', added_binary, 'q', 'new_negative'),
+                },
+            }
+            selected, artifacts = oracle.selection(packet, root)
+            self.assertEqual(
+                oracle.require_frozen_selection(
+                    selected,
+                    ['p::required::negative'],
+                ),
+                ['q::added::new_negative'],
+            )
+            self.assertEqual(
+                set(artifacts),
+                {str(required_binary.resolve()), str(added_binary.resolve())},
+            )
+            oracle.verify_artifacts(artifacts)
+            added_binary.write_bytes(b'changed')
+            with self.assertRaises(oracle.OracleFailure):
+                oracle.verify_artifacts(artifacts)
+
     def test_selection_requires_current_binary_and_exact_nonempty_census(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -189,7 +373,7 @@ class ReceiptTests(unittest.TestCase):
                                       'negative': {'ignored': False, 'filter-match': {'status': 'matches'}}}}}}
             expected = ['p::contract::negative', 'p::contract::positive']
             self.assertEqual(oracle.selection(packet, root, expected)[0], expected)
-            for change in ('empty', 'ignored', 'missing', 'external', 'wrong_census'):
+            for change in ('empty', 'ignored', 'missing', 'external', 'wrong_census', 'addition'):
                 changed = copy.deepcopy(packet)
                 suite = changed['rust-suites']['p::contract']
                 if change == 'empty': suite['testcases'] = {}
@@ -197,6 +381,11 @@ class ReceiptTests(unittest.TestCase):
                 if change == 'missing': suite['binary-path'] += '-missing'
                 if change == 'external': suite['cwd'] = '/elsewhere/crates/p'
                 if change == 'wrong_census': del suite['testcases']['negative']
+                if change == 'addition':
+                    suite['testcases']['addition'] = {
+                        'ignored': False,
+                        'filter-match': {'status': 'matches'},
+                    }
                 with self.subTest(change=change), self.assertRaises(oracle.OracleFailure):
                     oracle.selection(changed, root, expected)
 
