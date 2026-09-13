@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -152,6 +153,128 @@ class BaselineTests(unittest.TestCase):
         mutated["coverage_manifest"] = oracle.coverage_manifest()
         with self.assertRaisesRegex(oracle.OracleFailure, "top-level fields"):
             oracle.validate_baseline(mutated, self.rows)
+
+    def test_active_debt_rejects_ignored_authority_fields(self) -> None:
+        for field, value in (
+            ("coverage_manifest", {"acceptance": "ALWAYS PASS"}),
+            ("authority", "trusted"),
+        ):
+            with self.subTest(field=field):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated["active_debt"][0][field] = value
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"active_debt\[0\].*exact fields",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_every_persisted_row_requires_exact_fields_and_types(self) -> None:
+        cases = (
+            ("foundation extra", "foundation_rows", 0, "authority", "trusted"),
+            ("foundation missing", "foundation_rows", 0, "deletion_phase", None),
+            ("foundation identity type", "foundation_rows", 0, "identity", 7),
+            ("foundation phase type", "foundation_rows", 0, "deletion_phase", "4"),
+            ("foundation bool phase", "foundation_rows", 0, "deletion_phase", True),
+            ("foundation phase value", "foundation_rows", 0, "deletion_phase", 0),
+            ("active missing", "active_debt", 0, "sample", None),
+            ("active identity type", "active_debt", 0, "identity", 7),
+            ("active sample type", "active_debt", 0, "sample", {"text": "stored"}),
+        )
+        for name, row_class, index, field, value in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                row = mutated[row_class][index]
+                if "missing" in name:
+                    del row[field]
+                else:
+                    row[field] = value
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    rf"{row_class}\[{index}\]",
+                ):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_duplicate_identities_are_rejected_before_digest_comparison(self) -> None:
+        for row_class in ("foundation_rows", "active_debt"):
+            with self.subTest(row_class=row_class):
+                mutated = json.loads(json.dumps(self.baseline))
+                mutated[row_class][1]["identity"] = mutated[row_class][0]["identity"]
+                with self.assertRaisesRegex(oracle.OracleFailure, "duplicate identity"):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_top_level_fields_require_exact_types_before_digest_validation(self) -> None:
+        cases = (
+            ("missing freeze", "freeze_sha256", None),
+            ("schema string", "schema_version", "5"),
+            ("schema bool", "schema_version", True),
+            ("freeze type", "freeze_sha256", 7),
+            ("freeze spelling", "freeze_sha256", "not-a-sha"),
+        )
+        for name, field, value in cases:
+            with self.subTest(name=name):
+                mutated = json.loads(json.dumps(self.baseline))
+                if name.startswith("missing"):
+                    del mutated[field]
+                else:
+                    mutated[field] = value
+                with self.assertRaisesRegex(oracle.OracleFailure, field):
+                    oracle.validate_baseline(mutated, self.rows)
+
+    def test_load_rejects_duplicate_json_object_keys(self) -> None:
+        duplicates = (
+            (
+                "top-level",
+                '{"schema_version":5,"freeze_sha256":"'
+                + oracle.FREEZE_SHA256
+                + '","foundation_rows":[],"active_debt":[],'
+                '"active_debt":[{"identity":"x","sample":""}]}',
+                "active_debt",
+            ),
+            (
+                "nested",
+                '{"schema_version":5,"freeze_sha256":"'
+                + oracle.FREEZE_SHA256
+                + '","foundation_rows":[],'
+                '"active_debt":[{"identity":"x","identity":"y","sample":""}]}',
+                "identity",
+            ),
+        )
+        for name, duplicate, key in duplicates:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "baseline.json"
+                path.write_text(duplicate, encoding="utf-8")
+                with mock.patch.object(oracle, "BASELINE_PATH", path):
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        f"duplicate JSON object key: {key}",
+                    ):
+                        oracle.load_baseline()
+
+    def test_schema_accepts_supported_neighbor_rows(self) -> None:
+        supported = json.loads(json.dumps(self.baseline))
+        supported["active_debt"][0]["sample"] = "a different reviewed sample"
+        supported["foundation_rows"][0]["deletion_phase"] = 1
+        oracle._validate_baseline_schema(supported)
+
+    def test_regeneration_rejects_ignored_fields_before_deriving_or_writing(
+        self,
+    ) -> None:
+        mutated = json.loads(json.dumps(self.baseline))
+        mutated["active_debt"][0]["authority"] = "trusted"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "baseline.json"
+            with (
+                mock.patch.object(oracle, "load_baseline", return_value=mutated),
+                mock.patch.object(oracle, "BASELINE_PATH", output),
+                mock.patch.object(oracle, "inventory_rows") as inventory_rows,
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    r"active_debt\[0\].*exact fields",
+                ):
+                    oracle.regenerate()
+            inventory_rows.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_regeneration_preserves_retired_foundation_rows(self) -> None:
         foundation = self.baseline["foundation_rows"]

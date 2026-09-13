@@ -792,14 +792,125 @@ def build_foundation_baseline(
     }
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON keys instead of silently keeping the last value."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OracleFailure(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
 def load_baseline() -> dict[str, object]:
     try:
-        loaded = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        loaded = json.loads(
+            BASELINE_PATH.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_json_object,
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise OracleFailure(f"cannot read Phase 0 inventory baseline: {error}") from error
     if not isinstance(loaded, dict):
         raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
     return loaded
+
+
+def _validate_exact_fields(
+    row: object,
+    *,
+    expected: set[str],
+    location: str,
+) -> dict[str, object]:
+    if not isinstance(row, dict):
+        raise OracleFailure(f"{location} must be an object")
+    actual = set(row)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        raise OracleFailure(
+            f"{location} must have exact fields {', '.join(sorted(expected))}; "
+            + "; ".join(details)
+        )
+    return row
+
+
+def _validate_baseline_schema(baseline: object) -> None:
+    """Validate every persisted field before digest or inventory semantics."""
+
+    expected_fields = {
+        "schema_version",
+        "freeze_sha256",
+        "foundation_rows",
+        "active_debt",
+    }
+    if not isinstance(baseline, dict):
+        raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
+    if set(baseline) != expected_fields:
+        raise OracleFailure(
+            "Phase 0 inventory has unsupported top-level fields: "
+            + ", ".join(sorted(set(baseline) ^ expected_fields))
+        )
+
+    schema_version = baseline["schema_version"]
+    if type(schema_version) is not int or schema_version != 5:
+        raise OracleFailure("schema_version must be the integer 5")
+    freeze_sha256 = baseline["freeze_sha256"]
+    if (
+        not isinstance(freeze_sha256, str)
+        or len(freeze_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in freeze_sha256)
+    ):
+        raise OracleFailure("freeze_sha256 must be a lowercase 64-digit SHA-256")
+
+    foundation = baseline["foundation_rows"]
+    active = baseline["active_debt"]
+    if not isinstance(foundation, list):
+        raise OracleFailure("foundation_rows must be a list")
+    if not isinstance(active, list):
+        raise OracleFailure("active_debt must be a list")
+
+    foundation_ids: list[str] = []
+    for index, untyped_row in enumerate(foundation):
+        location = f"foundation_rows[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "deletion_phase"},
+            location=location,
+        )
+        identity = row["identity"]
+        deletion_phase = row["deletion_phase"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if type(deletion_phase) is not int or deletion_phase not in (1, 2, 3, 4):
+            raise OracleFailure(f"{location}.deletion_phase must be one of 1, 2, 3, 4")
+        foundation_ids.append(identity)
+
+    active_ids: list[str] = []
+    for index, untyped_row in enumerate(active):
+        location = f"active_debt[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "sample"},
+            location=location,
+        )
+        identity = row["identity"]
+        sample = row["sample"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if not isinstance(sample, str):
+            raise OracleFailure(f"{location}.sample must be a string")
+        active_ids.append(identity)
+
+    if len(foundation_ids) != len(set(foundation_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 foundation_rows")
+    if len(active_ids) != len(set(active_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 active_debt")
 
 
 def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow]) -> None:
@@ -810,25 +921,9 @@ def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow])
     every active identity must already be in the reviewed foundation.
     """
 
-    if baseline.get("schema_version") != 5:
-        raise OracleFailure("unsupported Phase 0 inventory schema")
-    expected_fields = {
-        "schema_version",
-        "freeze_sha256",
-        "foundation_rows",
-        "active_debt",
-    }
-    if set(baseline) != expected_fields:
-        raise OracleFailure(
-            "Phase 0 inventory has unsupported top-level fields: "
-            + ", ".join(sorted(set(baseline) ^ expected_fields))
-        )
-    foundation = baseline.get("foundation_rows")
-    active = baseline.get("active_debt")
-    if not isinstance(foundation, list) or not all(isinstance(row, dict) for row in foundation):
-        raise OracleFailure("foundation_rows must be a list of objects")
-    if not isinstance(active, list) or not all(isinstance(row, dict) for row in active):
-        raise OracleFailure("active_debt must be a list of objects")
+    _validate_baseline_schema(baseline)
+    foundation = baseline["foundation_rows"]
+    active = baseline["active_debt"]
 
     computed_digest = _freeze_digest(foundation)
     if baseline.get("freeze_sha256") != computed_digest or computed_digest != FREEZE_SHA256:
@@ -836,14 +931,6 @@ def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow])
 
     foundation_ids = [row.get("identity") for row in foundation]
     active_ids = [row.get("identity") for row in active]
-    if not all(isinstance(value, str) for value in foundation_ids):
-        raise OracleFailure("every foundation row must have an identity")
-    if not all(isinstance(value, str) for value in active_ids):
-        raise OracleFailure("every active-debt row must have an identity")
-    if len(foundation_ids) != len(set(foundation_ids)):
-        raise OracleFailure("duplicate identity in Phase 0 foundation")
-    if len(active_ids) != len(set(active_ids)):
-        raise OracleFailure("duplicate identity in active transition debt")
 
     foundation_set = set(foundation_ids)
     active_set = set(active_ids)
@@ -2133,16 +2220,9 @@ def regenerate() -> None:
     """
 
     existing = load_baseline()
-    foundation = existing.get("foundation_rows")
-    active_debt = existing.get("active_debt")
-    if not isinstance(foundation, list) or not all(
-        isinstance(row, dict) for row in foundation
-    ):
-        raise OracleFailure("existing foundation_rows must be a list of objects")
-    if not isinstance(active_debt, list) or not all(
-        isinstance(row, dict) for row in active_debt
-    ):
-        raise OracleFailure("existing active_debt must be a list of objects")
+    _validate_baseline_schema(existing)
+    foundation = existing["foundation_rows"]
+    active_debt = existing["active_debt"]
     baseline = build_foundation_baseline(
         inventory_rows(REPO_ROOT),
         foundation_rows=foundation,
