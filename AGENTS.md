@@ -363,10 +363,15 @@ numeric data, whether or not you have read that document:
   device-owner operations, discovered through the complete HIP support root
   under the committed Phase-0 SDK stubs, a fixed target and freestanding
   standard-library-free include search. Canonical include attribution fails if
-  it escapes that declared universe. The complete recursively discovered
-  published Metal header set exports no ABI row today; an executable enrollment
-  gate scans every `.h` and fails when any first does, so no vacuous Metal lane
-  or workstation SDK can stand in for coverage. A bare
+  it escapes that declared universe. The recursively discovered HIP header set,
+  not a basename allowlist, selects attributed files before row extraction, so
+  every declaration in a reached nested support header reaches authority
+  comparison while SDK fixtures remain inputs only. The complete recursively
+  discovered published Metal header set exports no ABI row today; an executable
+  enrollment gate scans every `.h` with the shared C-family lexer and fails when
+  any first does, so braces in comments or literal payloads cannot hide a later
+  declaration and no vacuous Metal lane or workstation SDK can stand in for
+  coverage. A bare
   numeric carrier has no citation or maintainer-override path:
   redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
   authorize capacity debt. No grandfather, permanent-disposition,

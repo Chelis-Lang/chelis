@@ -2762,9 +2762,10 @@ fn coverage_manifest() -> CoverageManifest {
                            Phase 0 SDK stubs; recursively discovered published Metal `.h` \
                            zero-ABI enrollment set"
                 .to_string(),
-                enumerator: "backend_headers::scan -> closed attributed preprocess_root -> \
-                             header_rows; published_headers_on_disk(Metal runtime) -> sorted raw \
-                             header rows -> enrollment assertion"
+                enumerator: "backend_headers::scan_published_backend_rows -> closed attributed \
+                             preprocess_root -> complete recursively discovered HIP owner set -> \
+                             header_rows; published_headers_on_disk(Metal runtime) -> shared \
+                             lexical header_rows -> sorted raw header rows -> enrollment assertion"
                     .to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'".to_string(),
                 expected_success: "backend_runtime_headers_match_the_reviewed_final_authority passes".to_string(),
@@ -2773,6 +2774,9 @@ fn coverage_manifest() -> CoverageManifest {
                     "backend_include_resolving_outside_declared_universe_fails_closed".to_string(),
                     "backend_roots_cannot_omit_an_unreached_generated_header".to_string(),
                     "backend_environments_cannot_change_a_public_numeric_signature".to_string(),
+                    "reached_nested_hip_header_survives_backend_authority_selection".to_string(),
+                    "hip_sdk_stub_rows_remain_nonpublished_inputs".to_string(),
+                    "metal_literal_payloads_cannot_change_declaration_depth".to_string(),
                     "generated_device_descriptor_requires_exact_tagged_transport_authority".to_string(),
                     "device_owner_callables_require_exact_op33_authority".to_string(),
                 ],
@@ -3772,30 +3776,37 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
         .collect::<Vec<_>>()
         .join("\n")
         .replace("extern \"C\" {", "");
+    let tokens = c_lexical::lex_c_tokens(&text);
 
     let mut rows = Vec::new();
-    let mut seg = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '{' => {
-                let head = normalize_ws(&seg);
+    let mut seg = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "{" => {
+                let head = seg.join(" ");
                 // Consume the brace-matched body in every case; what differs
                 // is whether the construct publishes ABI.
                 let mut depth = 1usize;
-                let mut body = String::new();
-                for c2 in chars.by_ref() {
-                    match c2 {
-                        '{' => depth += 1,
-                        '}' => {
+                let mut body = Vec::new();
+                index += 1;
+                while index < tokens.len() {
+                    match tokens[index].as_str() {
+                        "{" => {
+                            depth += 1;
+                            body.push(tokens[index].clone());
+                        }
+                        "}" => {
                             depth -= 1;
                             if depth == 0 {
+                                index += 1;
                                 break;
                             }
+                            body.push(tokens[index].clone());
                         }
-                        _ => {}
+                        _ => body.push(tokens[index].clone()),
                     }
-                    body.push(c2);
+                    index += 1;
                 }
                 if head.starts_with("static") {
                     // A `static inline` definition carries no ABI export.
@@ -3804,19 +3815,17 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     // { ... } name;` and its untypedef'd forms. Capture the
                     // trailing declarator too - without it the `enum` tail
                     // would fall through to the statement arm as a bare name.
-                    let mut tail = String::new();
-                    for c2 in chars.by_ref() {
-                        if c2 == ';' {
+                    let mut tail = Vec::new();
+                    while index < tokens.len() {
+                        if tokens[index] == ";" {
+                            index += 1;
                             break;
                         }
-                        tail.push(c2);
+                        tail.push(tokens[index].clone());
+                        index += 1;
                     }
-                    let declaration = format!(
-                        "{} {{ {} }} {}",
-                        head,
-                        normalize_ws(&body),
-                        normalize_ws(&tail)
-                    );
+                    let declaration =
+                        format!("{} {{ {} }} {}", head, body.join(" "), tail.join(" "));
                     let flags = classify(&declaration, typedefs);
                     rows.push(Row {
                         kind: "header-struct".to_string(),
@@ -3832,13 +3841,15 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                 }
                 seg.clear();
             }
-            '}' => {
+            "}" => {
                 // Orphaned closer from the neutralized extern "C" block.
                 seg.clear();
+                index += 1;
             }
-            ';' => {
-                let stmt = normalize_ws(&seg);
+            ";" => {
+                let stmt = seg.join(" ");
                 seg.clear();
+                index += 1;
                 if stmt.is_empty() || stmt.starts_with("typedef") || stmt.starts_with("static") {
                     continue;
                 }
@@ -3859,7 +3870,10 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     });
                 }
             }
-            _ => seg.push(c),
+            _ => {
+                seg.push(tokens[index].clone());
+                index += 1;
+            }
         }
     }
     rows

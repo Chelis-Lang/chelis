@@ -926,10 +926,15 @@ descriptor authority. The checked-in C fragments are generated artifacts with
 byte-for-byte freshness tests. Every published host runtime header remains
 reachable from `chelis_runtime.h`. The HIP support root is staged as a complete
 published closure and preprocessed only under the committed Phase-0 SDK stubs.
+Its recursively discovered source-header set selects attributed files before
+row extraction, so nested reached support declarations cannot be removed by a
+basename filter and SDK declarations remain non-published inputs.
 The recursively discovered published Metal header set currently has no
 attributable ABI row and is guarded by an explicit enrollment tripwire instead
-of a vacuous census lane. The public-header census sees the same canonical
-declarations in every declared preprocessing context.
+of a vacuous census lane. That tripwire uses the shared C-family lexer, so braces
+inside comments, strings, characters, and raw literals cannot swallow a later
+public declaration. The public-header census sees the same canonical declarations
+in every declared preprocessing context.
 
 `cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
 fragments; without `--write` it checks freshness. The host-view fragment lives
@@ -1643,12 +1648,15 @@ copy, and have no fixed array or narrow mirror left.
 **Also delivers:** the backend runtime-header capacity-census leg. The HIP
 support root uses the tagged device packet and is inventoried under a fixed,
 freestanding clang target with the committed Phase-0 SDK stubs and closed
-canonical include attribution. Its ten final rows have their own baseline and
-`coverage_manifest()` entry. The recursively discovered published Metal `.h`
-set exports only `static inline` definitions, so it has no capacity-census row
-and no fake SDK lane. Instead an executable enrollment gate aggregates and
-sorts raw attributable rows from every published header and fails as soon as
-one gains a public declaration, requiring a hermetic Metal lane and exact
+canonical include attribution. Its recursively discovered support-header set is
+the structural owner selection before row extraction, so every reached nested
+declaration reaches final-authority comparison while SDK rows remain inputs.
+Its ten final rows have their own baseline and `coverage_manifest()` entry. The
+recursively discovered published Metal `.h` set exports only `static inline`
+definitions, so it has no capacity-census row and no fake SDK lane. Instead an
+executable enrollment gate parses every published header with the shared
+C-family lexer, aggregates and sorts raw attributable rows, and fails as soon
+as one gains a public declaration, requiring a hermetic Metal lane and exact
 authority in that change. Phase 2 is not complete while any generated device
 header carries numeric surface no census enumerates.
 
@@ -1663,9 +1671,9 @@ Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 The implementation is `scripts/runtime_representation_phase2.py`.
 `runtime_representation_phase2_tests.json` stores seven required Python contract
-identities and 240 explicit required Rust identities: 33 shared-ABI tests, six
+identities and 243 explicit required Rust identities: 33 shared-ABI tests, six
 metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
-Python binding tests, and thirteen backend-header census/enrollment tests. Counts
+Python binding tests, and sixteen backend-header census/enrollment tests. Counts
 and digests are derived summaries, not membership authority. The Python leg names its
 integration binaries and relevant internal ownership tests explicitly rather
 than freezing platform-only package tests. The command first obtains a complete

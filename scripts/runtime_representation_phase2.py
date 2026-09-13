@@ -19,7 +19,7 @@ from scripts.dtype_builtin_atom_closure_oracle import source_identity
 ROOT = phase1.ROOT
 OracleFailure = phase1.OracleFailure
 MANIFEST = ROOT / "spec/design/runtime_representation_phase2_tests.json"
-MANIFEST_SHA256 = "d2126cdcc29f4c2874ecb3e0e4b3245cc0869a9499c577fd8af8fdf628b02961"
+MANIFEST_SHA256 = "51c38b8f148f86e1571f67a3995d4df6e96cc7749ec19e745a035862381b5c14"
 
 PYTHON_BOUNDARY_BINARIES = (
     "binding_payloads",

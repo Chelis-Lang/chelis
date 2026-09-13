@@ -61,7 +61,7 @@
       {
         "leg": "backend-runtime-headers",
         "artifact": "complete chelis_hip_runtime.h published closure under the committed Phase 0 SDK stubs; recursively discovered published Metal `.h` zero-ABI enrollment set",
-        "enumerator": "backend_headers::scan -> closed attributed preprocess_root -> header_rows; published_headers_on_disk(Metal runtime) -> sorted raw header rows -> enrollment assertion",
+        "enumerator": "backend_headers::scan_published_backend_rows -> closed attributed preprocess_root -> complete recursively discovered HIP owner set -> header_rows; published_headers_on_disk(Metal runtime) -> shared lexical header_rows -> sorted raw header rows -> enrollment assertion",
         "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'",
         "expected_success": "backend_runtime_headers_match_the_reviewed_final_authority passes",
         "mutations": [
@@ -69,6 +69,9 @@
           "backend_include_resolving_outside_declared_universe_fails_closed",
           "backend_roots_cannot_omit_an_unreached_generated_header",
           "backend_environments_cannot_change_a_public_numeric_signature",
+          "reached_nested_hip_header_survives_backend_authority_selection",
+          "hip_sdk_stub_rows_remain_nonpublished_inputs",
+          "metal_literal_payloads_cannot_change_declaration_depth",
           "generated_device_descriptor_requires_exact_tagged_transport_authority",
           "device_owner_callables_require_exact_op33_authority"
         ]
