@@ -170,8 +170,9 @@ impl CExpressionBuiltin {
 use crate::emit::CEmitter;
 use crate::emitted_expr::{BinaryOperator, EmittedExpr, UnaryOperator};
 use crate::host_abi::{
-    HostAbiCallback as HostCallback, HostAbiCallbackKind as HostCallbackKind,
-    HostAbiExpr as HostExpr, HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
+    HostAbiBinding as HostBinding, HostAbiCallback as HostCallback,
+    HostAbiCallbackKind as HostCallbackKind, HostAbiExpr as HostExpr,
+    HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
@@ -357,6 +358,7 @@ pub(crate) fn emit_host_abi_program(
         match emit_function(
             &mut fn_buf,
             function,
+            &program.functions,
             emitted_name,
             &internal_names,
             &function_specializations,
@@ -1857,9 +1859,93 @@ fn append_unreachable_fn_abort_stub(
     Ok(())
 }
 
-/// chelis#1739. A host-lane function whose declared result carries a literal
-/// extent gets that extent compared against the tensor it actually produces,
-/// at the function's return boundary.
+/// How far the declared-result producer walk follows let chains and callee
+/// bodies before giving up. The interpreter's
+/// `runtime::eval::RESULT_PRODUCER_DEPTH` is the same budget, so both lanes
+/// stop naming a producer at the same nesting.
+const RESULT_PRODUCER_DEPTH: usize = 32;
+
+/// Resolve a returned alias outside its local let chain. Consuming bindings
+/// backwards preserves the scope in which each initializer read its value.
+fn host_tail_binding_name(body: &HostExpr) -> Option<&str> {
+    let mut current = body;
+    let mut visible: Vec<&HostBinding> = Vec::new();
+    'value: loop {
+        match &current.kind {
+            HostExprKind::Var(name, _) => {
+                while let Some(binding) = visible.pop() {
+                    if binding.name == *name {
+                        current = &binding.value;
+                        continue 'value;
+                    }
+                }
+                return Some(name.as_str());
+            }
+            HostExprKind::Let { bindings, body, .. } => {
+                visible.extend(bindings);
+                current = body;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Select the original producing binding through sequential value aliases.
+/// Producer naming and guard placement both consume this same selection.
+fn host_result_binding_index(bindings: &[HostBinding], body: &HostExpr) -> Option<usize> {
+    let mut name = host_tail_binding_name(body)?;
+    let mut found = None;
+    for (index, binding) in bindings.iter().enumerate().rev() {
+        if binding.name == name {
+            found = Some(index);
+            match host_tail_binding_name(&binding.value) {
+                Some(alias) => name = alias,
+                None => break,
+            }
+        }
+    }
+    found
+}
+
+/// The canonical primitive name that produces `expr`'s value, resolving through
+/// let bindings and callee bodies (chelis#1771).
+///
+/// `[04-NUM-9]` requires the LOWERED primitive name and forbids renaming it to
+/// the composed source operation, so a block, a binding and a user call are all
+/// transparent here.
+///
+/// A `TensorCall` is deliberately NOT transparent: a lowered helper carries the
+/// DAG lane's own literal-result claim, and descending into it would place a
+/// second guard on one obligation.
+fn host_result_producer_op<'f>(
+    expr: &'f HostExpr,
+    functions: &'f [HostFunction],
+    depth: usize,
+) -> Option<&'f str> {
+    if depth == 0 {
+        return None;
+    }
+    match &expr.kind {
+        HostExprKind::Builtin { name, .. } => Some(name.as_str()),
+        HostExprKind::Let { bindings, body, .. } => {
+            match host_result_binding_index(bindings, body) {
+                Some(index) => {
+                    host_result_producer_op(&bindings[index].value, functions, depth - 1)
+                }
+                None => host_result_producer_op(body, functions, depth - 1),
+            }
+        }
+        HostExprKind::Call { function, .. } => {
+            let callee = functions.iter().find(|other| other.name == *function)?;
+            host_result_producer_op(&callee.body, functions, depth - 1)
+        }
+        _ => None,
+    }
+}
+
+/// chelis#1739 and chelis#1771. A host-lane function whose declared result
+/// carries a literal extent owes that extent a runtime verdict against the
+/// tensor it actually produces.
 ///
 /// The host lane has no `ExtentWitness`: `diagonal`, `sort`, `where` and the
 /// rest of `HOST_ONLY_BUILTINS` never reach a `RiscOp`, so the DAG lane's
@@ -1867,45 +1953,64 @@ fn append_unreachable_fn_abort_stub(
 /// satisfy executed silently. The guard belongs here rather than inside a
 /// `chelis_tensor_*` kernel, because the literal lives on the enclosing
 /// signature and a per-builtin check would be a second guard model.
-///
-/// `[04-NUM-9]`'s `<op>` slot is the canonical name of the operation that
-/// introduces the guarded extent, so the guard is emitted only when the body IS
-/// a direct builtin application and that name is known. A block-bodied or
-/// call-bodied return has no such name and is deliberately left unguarded
-/// (chelis#1771);
-/// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs` locks that
-/// residual on both lanes.
-fn declared_result_extent_guard(function: &HostFunction) -> Vec<String> {
-    let HostAbiType::Tensor(ty) = &function.ret_ty else {
-        return Vec::new();
-    };
-    let HostExprKind::Builtin { name, .. } = &function.body.kind else {
-        return Vec::new();
-    };
-    let op = chelis_ir::span_sanitize::sanitize_for_format_string(name);
-    let mut lines = Vec::new();
-    for (axis, dim) in ty.dims.iter().enumerate() {
-        let DimInfo::Lit(required) = dim else {
-            continue;
+struct HostResultClaim {
+    /// `(axis, required)` for every literal declared dimension.
+    axes: Vec<(usize, usize)>,
+    /// `[04-NUM-9]`'s `<op>` slot, already sanitized for a format string.
+    op: String,
+}
+
+impl HostResultClaim {
+    /// The claim a function's declared result makes, or `None` when the
+    /// declaration carries no literal extent or the producing primitive cannot
+    /// be named.
+    fn of(function: &HostFunction, functions: &[HostFunction]) -> Option<Self> {
+        let HostAbiType::Tensor(ty) = &function.ret_ty else {
+            return None;
         };
-        lines.push(format!(
-            "    if (chelis_tensor_shape(__result, {axis}) != {required}) {{"
-        ));
-        lines.push(format!(
-            "        fprintf(stderr, \"extent `{required}`: claimed = {required}, {op} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape(__result, {axis}));"
-        ));
-        lines.push(format!(
-            "        chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
-        ));
-        lines.push("    }".to_string());
+        let axes: Vec<(usize, usize)> = ty
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| match dim {
+                DimInfo::Lit(required) => Some((axis, *required)),
+                _ => None,
+            })
+            .collect();
+        if axes.is_empty() {
+            return None;
+        }
+        let op = host_result_producer_op(&function.body, functions, RESULT_PRODUCER_DEPTH)?;
+        Some(Self {
+            axes,
+            op: chelis_ir::span_sanitize::sanitize_for_format_string(op).into_owned(),
+        })
     }
-    lines
+
+    fn guard_lines(&self, indent: &str, target: &str) -> Vec<String> {
+        let op = &self.op;
+        let mut lines = Vec::new();
+        for &(axis, required) in &self.axes {
+            lines.push(format!(
+                "{indent}if (chelis_tensor_shape({target}, {axis}) != {required}) {{"
+            ));
+            lines.push(format!(
+                "{indent}    fprintf(stderr, \"extent `{required}`: claimed = {required}, {op} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape({target}, {axis}));"
+            ));
+            lines.push(format!(
+                "{indent}    chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+            ));
+            lines.push(format!("{indent}}}"));
+        }
+        lines
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
+    all_functions: &[HostFunction],
     emitted_name: &str,
     internal_names: &UnordMap<String, String>,
     function_specializations: &UnordMap<String, HostFunctionSpecialization>,
@@ -2001,7 +2106,22 @@ fn emit_function(
             )
         })?;
     emitter.emit_entry_terminals(entry, authored)?;
+    // chelis#1771: the declared-result guard travels with the expression that
+    // produces the returned value. `emit_expr_to_var` hands the flag to
+    // `assign_expr`, which either discharges the claim at `__result` or
+    // forwards it into the let chain.
+    emitter.result_claim = HostResultClaim::of(function, all_functions);
+    emitter.claim_on_spine = emitter.result_claim.is_some();
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
+    if emitter.result_claim.is_some() {
+        return Err(invalid_abi_shape(
+            format!(
+                "declared-result claim on `{}` reached no producing expression",
+                function.name
+            ),
+            "verified C host ownership emission",
+        ));
+    }
     let terminal = ownership_sites
         .iter()
         .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
@@ -2014,7 +2134,6 @@ fn emit_function(
     emitter.emit_terminal_site(terminal, Some("__result"))?;
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
-    out.extend(declared_result_extent_guard(function));
     #[cfg(feature = "native-random-observer")]
     out.push(
         "    __chelis_random_pop_function(__chelis_observer, __chelis_source_function);".into(),
@@ -2655,6 +2774,15 @@ struct HostEmitter<'a> {
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
     temp_counter: usize,
+    /// chelis#1771. The declared-result claim this function still owes a
+    /// guard, taken by the expression that actually produces the returned
+    /// value. `None` once the guard has been emitted.
+    result_claim: Option<HostResultClaim>,
+    /// Set immediately before emitting the expression that carries the
+    /// function's returned value, and consumed by `assign_expr`. A `Let` on
+    /// that spine re-sets it for the binding it forwards to, so the guard
+    /// lands at the producing operation rather than at the return boundary.
+    claim_on_spine: bool,
 }
 
 /// Resolve the one verifier-authorized direct call at a host `Call` site.
@@ -2719,6 +2847,8 @@ impl<'a> HostEmitter<'a> {
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
             temp_counter: 0,
+            result_claim: None,
+            claim_on_spine: false,
         }
     }
 
@@ -3548,6 +3678,10 @@ impl<'a> HostEmitter<'a> {
         expr: &HostExpr,
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        // chelis#1771. Taken here rather than read, so exactly one expression
+        // per forwarding step is on the result spine: a nested argument or a
+        // sibling binding cannot inherit the flag.
+        let on_result_spine = std::mem::take(&mut self.claim_on_spine);
         let site = self.next_expression_site()?;
         #[cfg(feature = "native-random-observer")]
         let call_frame = {
@@ -3577,13 +3711,21 @@ impl<'a> HostEmitter<'a> {
                 None
             }
         };
-        self.assign_expr_at_site(target, expr, ty, &site)?;
+        self.assign_expr_at_site(target, expr, ty, &site, on_result_spine)?;
         #[cfg(feature = "native-random-observer")]
         if let Some(frame) = call_frame {
             self.lines.push(crate::random_observer::pop_source_call(
                 &self.indent,
                 &frame,
             ));
+        }
+        // The claim is still pending only when this expression, and not a
+        // binding it forwarded to, produced the returned value. Section 4.7
+        // puts the guard at that operation's source position, so it is emitted
+        // here rather than after the function's return terminals.
+        if on_result_spine && let Some(claim) = self.result_claim.take() {
+            let lines = claim.guard_lines(&self.indent, target);
+            self.lines.extend(lines);
         }
         Ok(())
     }
@@ -3594,6 +3736,7 @@ impl<'a> HostEmitter<'a> {
         expr: &HostExpr,
         ty: &HostType,
         site: &ProjectedHostSite<'a>,
+        on_result_spine: bool,
     ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
@@ -3847,16 +3990,24 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "let expression")?;
+                // chelis#1771: when this let is on the result spine, the guard
+                // belongs at the binding whose value the let returns, not at
+                // the let's own end, so an effect bound after that binding runs
+                // only when the guard passes.
+                let spine_binding = on_result_spine
+                    .then(|| host_result_binding_index(bindings, body))
+                    .flatten();
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                for binding in bindings {
+                for (index, binding) in bindings.iter().enumerate() {
                     // Compute the value into a temp before declaring the binding name.
                     // If the compiler inlines a recursive call that reuses a binding
                     // name from the outer scope (e.g. two nested `let jtj_new = ...`),
                     // declaring the inner name first would shadow the outer variable
                     // before its value is read, yielding a NULL pointer at runtime.
                     let temp = self.next_temp("let");
+                    self.claim_on_spine = spine_binding == Some(index);
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
                         "{}{};",
@@ -3872,6 +4023,7 @@ impl<'a> HostEmitter<'a> {
                         temp
                     ));
                 }
+                self.claim_on_spine = on_result_spine && spine_binding.is_none();
                 self.assign_expr(target, body, ty)?;
                 self.emit_expression_site(site, target)?;
                 self.indent = previous;

@@ -1175,6 +1175,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
         ),
+        # chelis#1771. A declared literal result extent reached through a block
+        # tail, a let binding or a callee body. The `<op>` slot resolves to the
+        # lowered primitive and the guard takes that primitive's source
+        # position, so an effect bound after it is observed only when the guard
+        # passes. All six were `silent_unguarded`: both lanes printed the
+        # produced extent under a denying declaration and exited zero.
+        _row(
+            "return.block_bodied.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_on_a_block_bodied_return",
+        ),
+        _row(
+            "return.block_bodied.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_on_a_block_bodied_return",
+        ),
+        _row(
+            "return.block_bodied.effect_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_before_an_effect_that_follows_the_producing_operation",
+        ),
+        _row(
+            "return.block_bodied.effect_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_before_an_effect_that_follows_the_producing_operation",
+        ),
+        _row(
+            "return.call_bodied.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_on_a_call_bodied_return",
+        ),
+        _row(
+            "return.call_bodied.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_on_a_call_bodied_return",
+        ),
         # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
         # rank-0 placeholder whose contract is to be refused so the definition
         # routes to the host lane. chelis#1693's staged host-source partition

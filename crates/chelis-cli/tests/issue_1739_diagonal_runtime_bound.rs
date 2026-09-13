@@ -11,9 +11,9 @@
 //! `diagonal` is a host-lane builtin (`crates/chelis-ir/src/host.rs`'s
 //! `HOST_ONLY_BUILTINS`), so `expr_is_dag_lowerable` is false for the witness
 //! and the DAG lane's `ExtentWitness` claim never reaches it. The guard is
-//! therefore at the host function's RETURN boundary, in both host lanes: the
-//! interpreter's closure-return path and the C host emitter's function
-//! epilogue. It is not a per-builtin check inside a `tensor_*_host` kernel.
+//! therefore a host-lane guard, in both host lanes: the interpreter's closure
+//! application path and the C host emitter. It is not a per-builtin check
+//! inside a `tensor_*_host` kernel.
 //!
 //! Rendering: `[04-NUM-9]` freezes the trap line and requires, on separate
 //! accompanying lines, the disagreeing source names, the axis and each observed
@@ -23,11 +23,28 @@
 //! than an interface value, so the slot is `diagonal`. That is the same shape
 //! the sibling local guards print (`domain in reshape`, `domain in shrink`).
 //!
-//! Because the slot names an operation, the guard fires only where that
-//! operation is known: when the function's return expression IS a direct
-//! builtin application. A block-bodied or call-bodied return is deliberately
-//! left unguarded here and tracked as chelis#1771, which
-//! `a_block_bodied_return_is_not_guarded_and_is_residual` and its C twin lock.
+//! chelis#1771 is the widening of that slot. `[04-NUM-9]` requires the lowered
+//! primitive name and forbids renaming it to the composed source operation, so
+//! the name resolves THROUGH a block tail, a let binding and a callee body:
+//! `{ y = diagonal(x, 0, 1); y }` and `def d(x) -> tensor[3, f32] = inner(x)`
+//! name `diagonal` exactly as the direct application does. Section 4.7 also
+//! fixes WHERE the guard runs, at the source position of the operation that
+//! introduces the extent, so an effect bound after the producing binding is
+//! observed only when the guard passes.
+//!
+//! That holds WITHIN the guarded function's own body. Across a function
+//! boundary it does not: a call-bodied return is guarded AT THE CALL in the
+//! caller's body, and the callee's own effects after the producing operation
+//! are observed first. `an_effect_inside_the_callee_after_the_producing_operation_is_still_observed`
+//! measures that on both lanes and chelis#1945 tracks it; it is not repaired
+//! here because threading a caller's claim into a callee is unbounded on the C
+//! lane, where a callee is emitted once as a shared function and two callers
+//! with different declared literals would need two specializations of it.
+//!
+//! A branchy tail names no single
+//! primitive and stays the residual `a_branchy_tail_is_not_guarded_and_is_residual`
+//! locks; so does a NAMED (non-literal) declared result on the host lane, which
+//! `a_symbolic_declared_result_is_not_guarded` locks and chelis#1900 tracks.
 //!
 //! # Evidentiary status
 //!
@@ -107,13 +124,64 @@ fn alias_root(declared: usize, operand: &str) -> String {
 }
 
 /// Root form: the same declaration on a function whose return expression is a
-/// BLOCK rather than a direct builtin application. The residual witness.
+/// BLOCK rather than a direct builtin application. chelis#1771's first witness.
 fn block_bodied_root(declared: usize, operand: &str) -> String {
     format!(
         "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = {{\n  \
          y = diagonal(x, 0, 1)\n  y\n}}\n\
          m = to_tensor({operand})\n\
          out = d(m)\n"
+    )
+}
+
+/// Root form: the declaration sits on a function whose body is a CALL to
+/// another def, so the producing primitive is one body further in.
+/// chelis#1771's second witness. `inner`'s own result is symbolic, so it
+/// carries no claim of its own and the only verdict owed is `d`'s.
+fn call_bodied_root(declared: usize, operand: &str) -> String {
+    format!(
+        "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] = diagonal(x, 0, 1)\n\
+         def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = inner(x)\n\
+         m = to_tensor({operand})\n\
+         out = d(m)\n"
+    )
+}
+
+/// Root form: an independent effect sits BETWEEN the producing binding and the
+/// block tail. Section 4.7 makes it observable only when the guard passes, so
+/// `after` must not reach stdout on either lane.
+fn effect_order_root(declared: usize, operand: &str) -> String {
+    format!(
+        "def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = {{\n  \
+         y = diagonal(x, 0, 1)\n  _ = print(\"after\")\n  y\n}}\n\
+         m = to_tensor({operand})\n\
+         out = d(m)\n"
+    )
+}
+
+/// Root form: the producing operation is inside the CALLEE, and an independent
+/// effect sits between it and the callee's own tail. `inner`'s result is
+/// symbolic, so the only claim owed is `d`'s, and `d`'s body is the call.
+/// chelis#1945's witness.
+fn callee_effect_root(declared: usize, operand: &str) -> String {
+    format!(
+        "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n  \
+         z = diagonal(x, 0, 1)\n  _ = print(\"inside-after\")\n  z\n}}\n\
+         def d(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] ! {{ IO }} = inner(x)\n\
+         m = to_tensor({operand})\n\
+         out = d(m)\n"
+    )
+}
+
+/// Root form: the return expression is an `if`, whose two branches are two
+/// different applications of the producing primitive. The walk names no single
+/// producer for a branchy tail, so no guard is emitted. chelis#1771's residual.
+fn branchy_root(declared: usize, operand: &str) -> String {
+    format!(
+        "def d(x: tensor[n, 4, f32], flag: bool) -> tensor[{declared}, f32] = \
+         if flag then diagonal(x, 0, 1) else diagonal(x, 0, 1)\n\
+         m = to_tensor({operand})\n\
+         out = d(m, true)\n"
     )
 }
 
@@ -286,37 +354,309 @@ fn both_lanes_execute_exactly_through_an_alias_when_the_extents_agree() {
     );
 }
 
-/// RESIDUAL LOCK, not a regression test, and a PASS HERE IS NOT A GUARANTEE OF
-/// CORRECTNESS. `[04-NUM-9]`'s `<op>` slot needs the operation that introduces
-/// the guarded extent, and a block-bodied return does not name one, so this
-/// pull request emits no guard for it: the same disagreement that traps through
-/// a direct builtin return still executes silently here. The row exists so the
-/// gap is measured rather than assumed, and so that closing it turns this test
-/// red on purpose. Tracked as chelis#1771.
+/// REGRESSION TEST, chelis#1771. Measured on `0820ee28e`, this row printed
+/// `out = tensor(shape=[2], data=[1.0, 6.0])` and exited zero: the declaration
+/// the direct form traps on executed silently through a block tail. It was the
+/// residual `a_block_bodied_return_is_not_guarded_and_is_residual` locked.
 #[test]
-fn a_block_bodied_return_is_not_guarded_and_is_residual() {
+fn eval_traps_on_a_block_bodied_return() {
     let dir = tempdir().expect("tempdir");
     let source = block_bodied_root(3, TWO_BY_FOUR);
-    check_scores_one(&dir, "residual-block", &source);
-    let (ok, stdout, stderr) = eval_source(&dir, "residual-block", &source);
-    assert!(ok, "the residual path still executes; stderr was {stderr}");
+    check_scores_one(&dir, "block-below", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "block-below", &source);
     assert!(
-        stdout.contains("out = tensor(shape=[2], data=[1.0, 6.0])"),
-        "the unguarded residual returns the produced extent under a declared 3, \
-         got {stdout}"
+        !ok,
+        "eval must trap through the block tail; stdout was {stdout}"
     );
+    assert!(
+        !stdout.contains("out = tensor(shape=[2]"),
+        "eval must not print a result whose extent the declaration denies, got {stdout}"
+    );
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
 }
 
-/// RESIDUAL LOCK, C lane, chelis#1771, and A PASS HERE IS NOT EVIDENCE OF
-/// CORRECTNESS EITHER. The same gap, lane-symmetric: neither lane guards a
-/// block-bodied return, so the two lanes still agree on the wrong answer.
+/// REGRESSION TEST, C lane, chelis#1771. The lane-symmetric half: measured on
+/// `0820ee28e` the linked binary printed `shape=[2], data=[1.0, 6.0]` and
+/// exited zero, and the two lanes agreed on the wrong answer.
 #[test]
-fn the_c_lane_leaves_a_block_bodied_return_unguarded_too() {
+fn the_c_lane_traps_on_a_block_bodied_return() {
     if !gcc_available() {
         return;
     }
     let dir = tempdir().expect("tempdir");
-    let (ran, output) = build_link_run(&dir, "c_residual", &block_bodied_root(3, TWO_BY_FOUR));
+    let (ran, output) = build_link_run(&dir, "c_block", &block_bodied_root(3, TWO_BY_FOUR));
+    assert!(
+        !ran,
+        "the C lane must abort through the block tail: {output}"
+    );
+    assert_bound_trap(&output, 3, 0, 2, "the C lane");
+}
+
+/// DISPOSITION LOCK, both lanes. The negative twin of the two rows above: the
+/// block-bodied declaration the runtime DOES satisfy executes exactly, so the
+/// widened guard is a verdict on disagreement rather than a refusal of block
+/// tails. Green on `0820ee28e` and after.
+#[test]
+fn both_lanes_execute_exactly_on_an_agreeing_block_bodied_return() {
+    let dir = tempdir().expect("tempdir");
+    let source = block_bodied_root(3, THREE_BY_FOUR);
+    let (ok, stdout, stderr) = eval_source(&dir, "block-equal", &source);
+    assert!(ok, "eval must execute; stderr was {stderr}");
+    assert!(
+        stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
+        "the satisfied block-bodied claim must produce its exact result, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_block_equal", &source);
+    assert!(ran, "the C lane must execute: {output}");
+    assert!(
+        output.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+        "the C lane must agree with the evaluator, got {output}"
+    );
+}
+
+/// REGRESSION TEST, chelis#1771. The producing primitive is one callee body
+/// further in. Measured on `0820ee28e`, eval printed
+/// `out = tensor(shape=[2], data=[1.0, 6.0])` and exited zero.
+#[test]
+fn eval_traps_on_a_call_bodied_return() {
+    let dir = tempdir().expect("tempdir");
+    let source = call_bodied_root(3, TWO_BY_FOUR);
+    check_scores_one(&dir, "call-below", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "call-below", &source);
+    assert!(
+        !ok,
+        "eval must trap through the callee; stdout was {stdout}"
+    );
+    assert!(
+        !stdout.contains("out = tensor(shape=[2]"),
+        "eval must not print a result whose extent the declaration denies, got {stdout}"
+    );
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
+}
+
+/// REGRESSION TEST, C lane, chelis#1771. Measured on `0820ee28e` the linked
+/// binary printed `shape=[2], data=[1.0, 6.0]` and exited zero. `<op>` must be
+/// the lowered `diagonal` and not the composed callee name, which is
+/// `assert_bound_trap`'s own assertion.
+#[test]
+fn the_c_lane_traps_on_a_call_bodied_return() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let (ran, output) = build_link_run(&dir, "c_call", &call_bodied_root(3, TWO_BY_FOUR));
+    assert!(!ran, "the C lane must abort through the callee: {output}");
+    assert_bound_trap(&output, 3, 0, 2, "the C lane");
+}
+
+/// DISPOSITION LOCK, both lanes. The call-bodied declaration the runtime does
+/// satisfy executes exactly. Green on `0820ee28e` and after.
+#[test]
+fn both_lanes_execute_exactly_on_an_agreeing_call_bodied_return() {
+    let dir = tempdir().expect("tempdir");
+    let source = call_bodied_root(3, THREE_BY_FOUR);
+    let (ok, stdout, stderr) = eval_source(&dir, "call-equal", &source);
+    assert!(ok, "eval must execute; stderr was {stderr}");
+    assert!(
+        stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
+        "the satisfied call-bodied claim must produce its exact result, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_call_equal", &source);
+    assert!(ran, "the C lane must execute: {output}");
+    assert!(
+        output.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+        "the C lane must agree with the evaluator, got {output}"
+    );
+}
+
+/// REGRESSION TEST, chelis#1771, and the row that decides guard PLACEMENT
+/// rather than the `<op>` slot. Section 4.7: an independent effect that follows
+/// the producing operation in source order is observed only if the guard
+/// passes. Measured on `0820ee28e`, eval printed `after` and exited zero, which
+/// a guard sited at the return boundary would still do.
+#[test]
+fn eval_traps_before_an_effect_that_follows_the_producing_operation() {
+    let dir = tempdir().expect("tempdir");
+    let source = effect_order_root(3, TWO_BY_FOUR);
+    check_scores_one(&dir, "effect-below", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "effect-below", &source);
+    assert!(!ok, "eval must trap; stdout was {stdout}");
+    assert!(
+        !stdout.contains("after"),
+        "the effect bound after the producing operation must not be observed, got {stdout}"
+    );
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
+}
+
+/// REGRESSION TEST, C lane, chelis#1771 placement. Measured on `0820ee28e` the
+/// linked binary printed `after` and exited zero.
+#[test]
+fn the_c_lane_traps_before_an_effect_that_follows_the_producing_operation() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let (ran, output) = build_link_run(&dir, "c_effect", &effect_order_root(3, TWO_BY_FOUR));
+    assert!(!ran, "the C lane must abort: {output}");
+    assert!(
+        !output.contains("after"),
+        "the effect bound after the producing operation must not be observed, got {output}"
+    );
+    assert_bound_trap(&output, 3, 0, 2, "the C lane");
+}
+
+/// DISPOSITION LOCK, both lanes, and the positive control for the row above:
+/// when the claim holds, the effect DOES run and the result prints. Without it,
+/// "no `after`" could equally mean the fixture never printed at all.
+#[test]
+fn both_lanes_observe_the_following_effect_when_the_guard_passes() {
+    let dir = tempdir().expect("tempdir");
+    let source = effect_order_root(3, THREE_BY_FOUR);
+    let (ok, stdout, stderr) = eval_source(&dir, "effect-equal", &source);
+    assert!(ok, "eval must execute; stderr was {stderr}");
+    assert!(
+        stdout.contains("after")
+            && stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
+        "a passing guard observes the following effect and returns its result, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_effect_equal", &source);
+    assert!(ran, "the C lane must execute: {output}");
+    assert!(
+        output.contains("after") && output.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+        "the C lane must agree with the evaluator, got {output}"
+    );
+}
+
+/// Returning an alias does not move the producing operation or its guard.
+/// Sequential shadowing resolves each alias in the scope of its initializer.
+#[test]
+fn value_aliases_keep_the_guard_at_the_original_producer() {
+    for aliases in [
+        "z = y\n _ = print(\"after\")\n z",
+        "z = y\n w = z\n _ = print(\"after\")\n w",
+        "z = y\n y = to_tensor([9.0f32])\n _ = print(\"after\")\n z",
+        "y = y\n _ = print(\"after\")\n y",
+    ] {
+        for (operand, agrees) in [(TWO_BY_FOUR, false), (THREE_BY_FOUR, true)] {
+            let dir = tempdir().expect("tempdir");
+            let source = format!(
+                "def d(x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = {{\n \
+                 _ = print(\"before\")\n y = diagonal(x, 0, 1)\n {aliases}\n}}\n\
+                 out = d(to_tensor({operand}))\n"
+            );
+            let input = dir.path().join("alias-input.ch");
+            fs::write(&input, &source).expect("write source");
+            let formatted = Command::cargo_bin("chelis")
+                .expect("chelis")
+                .arg("fmt")
+                .arg(&input)
+                .output()
+                .expect("fmt");
+            assert!(formatted.status.success(), "{formatted:?}");
+            let source = String::from_utf8(formatted.stdout).expect("formatted source");
+            check_scores_one(&dir, "alias-producer", &source);
+            let (ok, stdout, stderr) = eval_source(&dir, "alias-producer", &source);
+            assert_eq!(ok, agrees, "{source}\n{stdout}\n{stderr}");
+            assert!(stdout.contains("before"), "{stdout}");
+            assert_eq!(stdout.contains("after"), agrees, "{stdout}");
+            if agrees {
+                assert!(
+                    stdout.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+                    "{stdout}"
+                );
+            } else {
+                assert_bound_trap(&stderr, 3, 0, 2, "eval");
+            }
+            if gcc_available() {
+                let (ok, output) = build_link_run(&dir, "alias-producer-c", &source);
+                assert_eq!(ok, agrees, "{source}\n{output}");
+                assert!(output.contains("before"), "{output}");
+                assert_eq!(output.contains("after"), agrees, "{output}");
+                if agrees {
+                    assert!(
+                        output.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+                        "{output}"
+                    );
+                } else {
+                    assert_bound_trap(&output, 3, 0, 2, "C");
+                }
+            }
+        }
+    }
+}
+
+/// RESIDUAL LOCK, chelis#1945, and A PASS HERE IS NOT EVIDENCE OF CORRECTNESS.
+/// The guard's `<op>` name resolves into the callee, but its POSITION is the
+/// call in the caller's body, so an effect the callee runs after the producing
+/// operation is observed before the trap. Section 4.7's placement sentence says
+/// it should not be. The row exists so the divergence is measured rather than
+/// assumed, and so that closing it turns this test red on purpose.
+///
+/// Both halves matter. The trap assertions prove the guard still fires through
+/// the callee, so this is a placement residual and not an unguarded one; the
+/// `inside-after` assertions record exactly which placement ships. The
+/// companion row `eval_traps_before_an_effect_that_follows_the_producing_operation`
+/// proves the same effect IS suppressed when it sits in the caller's body,
+/// which is what locates the gap at the function boundary rather than in the
+/// guard.
+#[test]
+fn an_effect_inside_the_callee_after_the_producing_operation_is_still_observed() {
+    let dir = tempdir().expect("tempdir");
+    let source = callee_effect_root(3, TWO_BY_FOUR);
+    check_scores_one(&dir, "residual-callee-effect", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "residual-callee-effect", &source);
+    assert!(
+        !ok,
+        "the refuted claim is still guarded through the callee; stdout was {stdout}"
+    );
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
+    assert!(
+        stdout.contains("inside-after"),
+        "the residual: the callee's own effect after the producing operation is \
+         observed before the trap, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_residual_callee_effect", &source);
+    assert!(!ran, "the C lane traps through the callee too: {output}");
+    assert_bound_trap(&output, 3, 0, 2, "the C lane");
+    assert!(
+        output.contains("inside-after"),
+        "and both lanes agree on the residual, got {output}"
+    );
+}
+
+/// RESIDUAL LOCK, chelis#1771, and A PASS HERE IS NOT EVIDENCE OF CORRECTNESS.
+/// A branchy tail has one producing primitive per branch, so the walk names
+/// none for the return as a whole and emits no guard: the same disagreement
+/// that traps through a block tail still executes silently here, on both lanes.
+/// The row exists so the residual is measured rather than assumed, and so that
+/// closing it turns this test red on purpose.
+#[test]
+fn a_branchy_tail_is_not_guarded_and_is_residual() {
+    let dir = tempdir().expect("tempdir");
+    let source = branchy_root(3, TWO_BY_FOUR);
+    check_scores_one(&dir, "residual-branchy", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "residual-branchy", &source);
+    assert!(ok, "the residual path still executes; stderr was {stderr}");
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[1.0, 6.0])"),
+        "the unguarded residual returns the produced extent under a declared 3, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_residual_branchy", &source);
     assert!(ran, "the residual path still executes on C: {output}");
     assert!(
         output.contains("shape=[2], data=[1.0, 6.0]"),
@@ -431,32 +771,51 @@ fn a_symbolic_declared_result_is_not_guarded() {
 }
 
 // ---------------------------------------------------------------------------
-// The census. Which shipped code gains a return-boundary guard?
+// The census. Which shipped code gains a declared-result guard?
 // ---------------------------------------------------------------------------
 
-/// Every emitted return-boundary guard in one C source, as
-/// `(enclosing function, axis, required extent)`.
+/// Every emitted declared-result guard in one C source, as
+/// `(enclosing function, guarded variable, axis, required extent)`.
 ///
 /// Read back out of the SHIPPED artifact rather than recomputed from the
 /// declaration, so the census cannot drift from the emitter's own decision.
-fn emitted_guards(c_source: &str) -> Vec<(String, String, String)> {
+///
+/// chelis#1771 moved the guard off the return boundary, so the variable is no
+/// longer always `__result`: a block-bodied return guards the let temporary the
+/// producing operation wrote. The reader therefore captures the variable
+/// instead of matching one spelling, which is also what keeps it from silently
+/// stopping to find guards it used to find.
+fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
     let mut found = Vec::new();
-    let mut enclosing = String::from("<none>");
+    let mut enclosing: Option<String> = None;
     for line in c_source.lines() {
         if let Some(head) = line.split("__chelis_owned_body(").next()
             && line.contains("__chelis_owned_body(")
             && line.trim_end().ends_with('{')
         {
-            enclosing = head
-                .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .next()
-                .unwrap_or("<none>")
-                .to_string();
+            enclosing = Some(
+                head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("<none>")
+                    .to_string(),
+            );
+            continue;
         }
-        let Some(rest) = line
-            .trim()
-            .strip_prefix("if (chelis_tensor_shape(__result, ")
-        else {
+        if line == "}" {
+            // A closing brace at column zero ends the emitted function. The
+            // scope matters: the DAG lane emits its own `chelis_tensor_shape`
+            // comparisons into the `__with_rng` kernel helpers, and those are
+            // a different guard model with a different owner.
+            enclosing = None;
+            continue;
+        }
+        let Some(function) = enclosing.as_ref() else {
+            continue;
+        };
+        let Some(rest) = line.trim().strip_prefix("if (chelis_tensor_shape(") else {
+            continue;
+        };
+        let Some((target, rest)) = rest.split_once(", ") else {
             continue;
         };
         let Some((axis, tail)) = rest.split_once(") != ") else {
@@ -465,8 +824,19 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String)> {
         let Some(required) = tail.split(')').next() else {
             continue;
         };
+        // Only a declared-result guard compares against a LITERAL. This is not
+        // what excludes the chelis#1788 entry-obligation guard, which the
+        // prefix match above already misses because that guard opens with its
+        // null and rank preconditions rather than with `chelis_tensor_shape`.
+        // It is here for the next guard whose left side IS a bare shape read
+        // and whose right side is another one, so the census cannot silently
+        // start counting a guard it does not own.
+        if required.trim().parse::<i64>().is_err() {
+            continue;
+        }
         found.push((
-            enclosing.clone(),
+            function.clone(),
+            target.to_string(),
             axis.to_string(),
             required.trim().to_string(),
         ));
@@ -533,18 +903,56 @@ fn the_census_reader_finds_a_guard_that_is_there() {
     );
     assert_eq!(
         emitted_guards(&source),
-        vec![("d".to_string(), "0".to_string(), "3".to_string())],
-        "the witness emits exactly one guard, on axis 0 of `d`, claiming 3"
+        vec![(
+            "d".to_string(),
+            "__result".to_string(),
+            "0".to_string(),
+            "3".to_string()
+        )],
+        "the witness emits exactly one guard, on axis 0 of `d`'s result, claiming 3"
+    );
+}
+
+/// POSITIVE CONTROL for the chelis#1771 half of the census. A block-bodied
+/// return still emits exactly one guard, and it names the let temporary the
+/// producing operation wrote rather than `__result`: that is the placement
+/// section 4.7 requires, read back out of the shipped artifact.
+#[test]
+fn the_census_reader_finds_the_guard_a_block_tail_moved() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("block_witness.ch");
+    fs::write(&path, block_bodied_root(3, TWO_BY_FOUR)).expect("write fixture");
+    let source = emit_c(
+        path.to_str().expect("UTF-8 path"),
+        &dir.path().join("block-witness-out"),
+    );
+    let guards = emitted_guards(&source);
+    assert_eq!(
+        guards.len(),
+        1,
+        "the witness emits exactly one guard, got {guards:?}"
+    );
+    let (enclosing, target, axis, required) = &guards[0];
+    assert_eq!(
+        (enclosing.as_str(), axis.as_str(), required.as_str()),
+        ("d", "0", "3"),
+        "the guard sits in `d`, on axis 0, claiming 3, got {guards:?}"
+    );
+    assert_ne!(
+        target, "__result",
+        "a block-bodied return guards the producing binding, not the return boundary"
     );
 }
 
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
-/// capability refusals are asserted; every successfully emitted
-/// return-boundary guard is collected. The guard fires
-/// only where a host-lane function's return expression is a direct builtin
-/// application AND its declared tensor result carries a literal extent, which
-/// no shipped example does today, so this change adds no guard to the corpus
-/// and surfaces no pre-existing declaration divergence.
+/// capability refusals are asserted; every successfully emitted host-lane
+/// declared-result guard is collected. The guard fires only where a host-lane
+/// function's returned value resolves to a named primitive AND its declared
+/// tensor result carries a literal extent, which no shipped example does today,
+/// so this change adds no guard to the corpus and surfaces no pre-existing
+/// declaration divergence. chelis#1771 widened the resolution through block
+/// tails, bindings and callees and this census stayed empty, which is the
+/// measured blast radius of that widening on the shipped corpus.
 ///
 /// A function the checker already proved statically (two literal selected axes)
 /// still gets a compare it cannot fail. That is kept rather than special-cased:
@@ -583,7 +991,7 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 /// here naming the example it lost. That is an independent fact about the
 /// directory, which a count derived from the same `read_dir` would not be.
 #[test]
-fn no_shipped_example_gains_a_return_boundary_guard() {
+fn no_shipped_example_gains_a_host_lane_guard() {
     let dir = tempdir().expect("tempdir");
     let examples = executable_examples();
 
@@ -609,8 +1017,10 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
             continue;
         }
         let source = emit_c(path, &out);
-        for (function, axis, required) in emitted_guards(&source) {
-            census.push(format!("{stem}: {function} axis {axis} claims {required}"));
+        for (function, target, axis, required) in emitted_guards(&source) {
+            census.push(format!(
+                "{stem}: {function} guards {target} axis {axis} claiming {required}"
+            ));
         }
     }
 
@@ -632,7 +1042,7 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
     assert_eq!(
         census,
         Vec::<String>::new(),
-        "these shipped defs gained a return-boundary guard and each one needs a \
+        "these shipped defs gained a host-lane guard and each one needs a \
          both-lane check before it lands"
     );
 }

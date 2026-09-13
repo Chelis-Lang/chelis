@@ -20,24 +20,69 @@ use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
-/// The canonical builtin name a host function's return expression applies, when
-/// the return expression IS a direct builtin application.
-///
-/// `[04-NUM-9]`'s `<op>` slot takes the canonical name of the operation that
-/// introduces the guarded extent. A body that returns a block, a user call, or
-/// a variable has no such name, so the return-boundary guard does not fire for
-/// it (chelis#1771, locked on both lanes by
-/// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs`).
-fn direct_builtin_head(body: &Expr) -> Option<&str> {
-    let Some((DeepTag::App, kids)) = tagged_expr_children(body) else {
-        return None;
-    };
-    builtin_name(kids.first()?)
+/// How far the declared-result producer walk follows let chains and callee
+/// bodies before giving up. A mutually recursive pair of defs would otherwise
+/// walk forever. A body that needs a deeper walk names no producing primitive,
+/// so it emits no guard and stays a residual.
+const RESULT_PRODUCER_DEPTH: usize = 32;
+
+/// Resolve a returned alias to the name it reads outside its local let chain.
+/// Bindings are consumed backwards so every initializer sees only earlier
+/// bindings; an alias retains its producer even after that name is shadowed.
+fn tail_binding_name(body: &Expr) -> Option<&str> {
+    let mut current = body;
+    let mut visible = Vec::new();
+    'value: loop {
+        let (current_tag, kids) = tagged_expr_children(current)?;
+        match current_tag {
+            DeepTag::Var => {
+                let name = kids.first().and_then(symbol_name)?;
+                while let Some((bound, value)) = visible.pop() {
+                    if bound == name {
+                        current = value;
+                        continue 'value;
+                    }
+                }
+                return Some(name);
+            }
+            DeepTag::Let => {
+                let (DeepTag::Bind, bind_kids) = tagged_expr_children(kids.first()?)? else {
+                    return None;
+                };
+                for pair in bind_kids.as_chunks::<2>().0 {
+                    visible.push((symbol_name(&pair[0])?, &pair[1]));
+                }
+                current = kids.get(1)?;
+            }
+            DeepTag::Block => current = kids.last()?,
+            _ => return None,
+        }
+    }
 }
 
-/// chelis#1739. Compare a host function's declared literal result extents
-/// against the tensor it produced, and render the `[04-NUM-9]` `Domain` trap on
-/// disagreement.
+/// Select the original producing binding, following aliases in sequential
+/// scope. The naming walk and the guard-placement walk use this same result.
+fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
+    let mut name = tail_binding_name(body)?;
+    let (DeepTag::Bind, bind_kids) = tagged_expr_children(bind_list)? else {
+        return None;
+    };
+    let mut found = None;
+    for (index, pair) in bind_kids.as_chunks::<2>().0.iter().enumerate().rev() {
+        if symbol_name(&pair[0]) == Some(name) {
+            found = Some(index * 2);
+            match tail_binding_name(&pair[1]) {
+                Some(alias) => name = alias,
+                None => break,
+            }
+        }
+    }
+    found
+}
+
+/// chelis#1739 and chelis#1771. A host function's declared literal result
+/// extents, and the canonical name of the primitive whose value has to satisfy
+/// them.
 ///
 /// `diagonal` and the rest of `HOST_ONLY_BUILTINS` never become a `RiscOp`, so
 /// `expr_is_dag_lowerable` is false for a def that calls one and the DAG lane's
@@ -45,22 +90,46 @@ fn direct_builtin_head(body: &Expr) -> Option<&str> {
 /// them. Without this, `def d(x: tensor[n, 4, f32]) -> tensor[3, f32] =
 /// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
 /// three-element declaration, on both lanes and with no diagnostic.
-///
-/// A rank disagreement is NOT this guard's business: the checker owns rank, and
-/// reporting it here would duplicate a verdict with a worse message.
+struct DeclaredResultClaim {
+    /// Declared rank. A rank disagreement is NOT this guard's business: the
+    /// checker owns rank, and reporting it here would duplicate a verdict with
+    /// a worse message.
+    rank: usize,
+    /// `(axis, required)` for every literal declared dimension.
+    axes: Vec<(usize, i64)>,
+    /// `[04-NUM-9]`'s `<op>` slot: the canonical name of the primitive that
+    /// produced the returned value.
+    op: String,
+}
+
+impl DeclaredResultClaim {
+    fn verdict(&self, produced: &RuntimeValue) -> Result<(), String> {
+        let RuntimeValue::Tensor(tensor) = produced else {
+            return Ok(());
+        };
+        if tensor.value.shape.len() != self.rank {
+            return Ok(());
+        }
+        let op = &self.op;
+        for &(axis, required) in &self.axes {
+            let observed = tensor.value.shape[axis];
+            if required < 0 || required as usize != observed {
+                return Err(format!(
+                    "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
+                     numeric trap: domain in {op} at int64"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The declared rank and literal declared extents of a host function's result.
 ///
 /// `declared` is the CHECKED result type where one exists, not the syntactic
 /// annotation, so an aliased declaration carries the same verdict as its
 /// expansion and agrees with the C emitter, which reads the resolved ABI type.
-fn declared_result_extent_trap(
-    declared: Option<&Expr>,
-    body: &Expr,
-    produced: &RuntimeValue,
-) -> Option<String> {
-    let RuntimeValue::Tensor(tensor) = produced else {
-        return None;
-    };
-    let op = direct_builtin_head(body)?;
+fn declared_literal_result_extents(declared: Option<&Expr>) -> Option<(usize, Vec<(usize, i64)>)> {
     let stripped = strip_type_wrappers(declared?);
     let list = as_list(stripped)?;
     if tag(list) != Some(DeepTag::TTensor) {
@@ -68,28 +137,19 @@ fn declared_result_extent_trap(
     }
     let kids = children(list);
     let (_, dim_exprs) = kids.split_last()?;
-    if dim_exprs.len() != tensor.value.shape.len() {
-        return None;
-    }
-    for (axis, (dim_expr, observed)) in dim_exprs.iter().zip(tensor.value.shape.iter()).enumerate()
-    {
+    let mut axes = Vec::new();
+    for (axis, dim_expr) in dim_exprs.iter().enumerate() {
         let Some(dim_list) = as_list(dim_expr) else {
             continue;
         };
         if tag(dim_list) != Some(DeepTag::DLit) {
             continue;
         }
-        let Some(required) = children(dim_list).first().and_then(int_value) else {
-            continue;
-        };
-        if required < 0 || required as usize != *observed {
-            return Some(format!(
-                "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
-                 numeric trap: domain in {op} at int64"
-            ));
+        if let Some(required) = children(dim_list).first().and_then(int_value) {
+            axes.push((axis, required));
         }
     }
-    None
+    (!axes.is_empty()).then_some((dim_exprs.len(), axes))
 }
 
 /// [05-HOST-4]: choose the first invalid host name in the declared order.
@@ -1456,6 +1516,162 @@ impl<'a> EvalContext<'a> {
         }
     }
 
+    /// The canonical primitive name that produces `expr`'s value, resolving
+    /// through block tails, let bindings and callee bodies (chelis#1771).
+    ///
+    /// `[04-NUM-9]` requires the LOWERED primitive name and forbids renaming it
+    /// to the composed source operation, so a block, a binding and a user call
+    /// are all transparent here: the name is `diagonal` whether the return
+    /// expression applies it directly, reaches it through
+    /// `{ y = diagonal(...) ; y }`, or reaches it through `inner(x)`.
+    ///
+    /// A branchy tail (`if`, `match`) names no single primitive and is
+    /// deliberately `None`: it emits no guard and stays a residual rather than
+    /// picking one branch's name for the other's value.
+    fn result_producer_op(&self, expr: &Expr, depth: usize) -> Option<String> {
+        if depth == 0 {
+            return None;
+        }
+        let (expr_tag, kids) = tagged_expr_children(expr)?;
+        match expr_tag {
+            DeepTag::Let => {
+                let bind_list = kids.first()?;
+                let body = kids.get(1)?;
+                match let_result_binding_index(bind_list, body) {
+                    Some(index) => {
+                        let (_, bind_kids) = tagged_expr_children(bind_list)?;
+                        self.result_producer_op(bind_kids.get(index + 1)?, depth - 1)
+                    }
+                    None => self.result_producer_op(body, depth - 1),
+                }
+            }
+            DeepTag::Block => self.result_producer_op(kids.last()?, depth - 1),
+            DeepTag::App => {
+                let head = kids.first()?;
+                if let Some(name) = builtin_name(head) {
+                    return Some(name.to_string());
+                }
+                let callee = var_name(head)?;
+                // A local binding wins, exactly as `eval_var` resolves one. A
+                // sibling top-level def is NOT in the closure's captured
+                // environment, so the static walk reads its DEFINITION rather
+                // than requiring a callable value to already exist.
+                if let Some(RuntimeValue::Closure { body, .. }) = self.bindings.get(callee) {
+                    return self.result_producer_op(body, depth - 1);
+                }
+                let (_, definition) = self.lookup_top_level_def(callee)?;
+                let (DeepTag::Fn, fn_kids) = tagged_expr_children(&definition)? else {
+                    return None;
+                };
+                self.result_producer_op(fn_kids.last()?, depth - 1)
+            }
+            _ => None,
+        }
+    }
+
+    /// The declared-result claim a host function owes a runtime verdict on, or
+    /// `None` when the declaration carries no literal extent or the producing
+    /// primitive cannot be named.
+    fn declared_result_claim(
+        &self,
+        declared: Option<&Expr>,
+        body: &Expr,
+    ) -> Option<DeclaredResultClaim> {
+        let (rank, axes) = declared_literal_result_extents(declared)?;
+        let op = self.result_producer_op(body, RESULT_PRODUCER_DEPTH)?;
+        Some(DeclaredResultClaim { rank, axes, op })
+    }
+
+    /// Evaluate a host function's body and discharge its declared-result claim
+    /// at the source position of the operation that produces the returned
+    /// value, which is what `spec/04-type-system.md` section 4.7's placement
+    /// rule requires of a guard over a locally computed value: an independent
+    /// effect that precedes that operation is observed first, and one that
+    /// follows it is observed only if the guard passes.
+    fn eval_under_result_claim(
+        &mut self,
+        expr: &Expr,
+        claim: &DeclaredResultClaim,
+    ) -> Result<RuntimeValue, String> {
+        match tagged_expr_children(expr) {
+            Some((DeepTag::Block, kids)) => {
+                if let Some((last, init)) = kids.split_last() {
+                    for child in init {
+                        self.eval_expr(child)?;
+                    }
+                    return self.eval_under_result_claim(last, claim);
+                }
+            }
+            Some((DeepTag::Let, _)) => {
+                if let Some(list) = as_list(expr) {
+                    return self.eval_let_under_result_claim(list, claim);
+                }
+                if let Expr::Node(node, span) = expr {
+                    let bridged = node.to_list(*span);
+                    return self.eval_let_under_result_claim(&bridged, claim);
+                }
+            }
+            _ => {}
+        }
+        let value = self.eval_expr(expr)?;
+        claim.verdict(&value)?;
+        Ok(value)
+    }
+
+    /// [`Self::eval_let`], forwarding a declared-result claim to the binding
+    /// whose value the let returns.
+    ///
+    /// This walk and [`Self::result_producer_op`] must agree on which binding
+    /// that is, and they do: both route through
+    /// [`let_result_binding_index`], so the guard lands exactly where the
+    /// `<op>` name came from.
+    fn eval_let_under_result_claim(
+        &mut self,
+        list: &List,
+        claim: &DeclaredResultClaim,
+    ) -> Result<RuntimeValue, String> {
+        let kids = children(list);
+        let (Some(bind_list_expr), Some(body)) = (kids.first(), kids.get(1)) else {
+            // A malformed let has no producing binding to guard; `eval_let`
+            // owns the diagnostic.
+            return self.eval_let(list);
+        };
+        let Some(bind_list) = as_list(bind_list_expr) else {
+            return self.eval_let(list);
+        };
+        if tag(bind_list) != Some(DeepTag::Bind) {
+            return self.eval_let(list);
+        }
+        let guarded = let_result_binding_index(bind_list_expr, body);
+        let saved = self.bindings.clone();
+        let saved_types = self.binding_types.clone();
+        let result = (|| {
+            let bind_kids = children(bind_list);
+            let mut index = 0;
+            while index + 1 < bind_kids.len() {
+                let name = symbol_name(&bind_kids[index])
+                    .ok_or_else(|| "let binding must bind a name".to_string())?;
+                let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
+                let value = if guarded == Some(index) {
+                    self.eval_under_result_claim(&bind_kids[index + 1], claim)?
+                } else {
+                    self.eval_expr(&bind_kids[index + 1])?
+                };
+                self.binding_types.insert(name.to_string(), static_ty);
+                self.bindings.insert(name.to_string(), value);
+                index += 2;
+            }
+            if guarded.is_some() {
+                self.eval_expr(body)
+            } else {
+                self.eval_under_result_claim(body, claim)
+            }
+        })();
+        self.bindings = saved;
+        self.binding_types = saved_types;
+        result
+    }
+
     fn eval_let(&mut self, list: &List) -> Result<RuntimeValue, String> {
         let kids = children(list);
         let bind_list = kids
@@ -1866,34 +2082,40 @@ impl<'a> EvalContext<'a> {
                         self.binding_types.insert(param.clone(), declared);
                         self.bindings.insert(param, arg);
                     }
-                    self.eval_expr(&body)
+                    // chelis#1739 and chelis#1771: a declared literal result
+                    // extent is a claim the host lane owes a runtime verdict
+                    // on, and section 4.7 places that verdict at the source
+                    // position of the operation that produces the returned
+                    // value rather than at the return boundary. That is why the
+                    // body is evaluated through `eval_under_result_claim`
+                    // instead of being checked after it returns: a block-bodied
+                    // return whose producing binding is followed by a `print`
+                    // must trap before the print runs.
+                    //
+                    // The CHECKED signature's result wins over the syntactic
+                    // annotation, because the two spell the same declaration
+                    // differently: `-> Row` for `type Row = tensor[3, f32]`
+                    // reaches `return_type` as a bare name and reaches the
+                    // checked signature as the resolved `t-tensor`. The C
+                    // emitter reads the resolved `HostAbiType::Tensor`, so
+                    // reading the syntax here made the two lanes disagree on
+                    // exactly the alias spelling (round 1 P1). `return_type`
+                    // remains the fallback for a closure the checker recorded
+                    // no signature for.
+                    let declared_result = checked_signature
+                        .as_ref()
+                        .and_then(checked_function_children)
+                        .and_then(<[Expr]>::last)
+                        .or(return_type.as_ref());
+                    match self.declared_result_claim(declared_result, &body) {
+                        Some(claim) => self.eval_under_result_claim(&body, &claim),
+                        None => self.eval_expr(&body),
+                    }
                 })();
                 self.bindings = saved;
                 self.binding_types = saved_types;
                 self.precision_bindings = saved_precisions;
-                let produced = value?;
-                // chelis#1739: the host lane's return boundary is where a
-                // declared literal extent meets the value that has to satisfy
-                // it. See `declared_result_extent_trap`.
-                //
-                // The CHECKED signature's result wins over the syntactic
-                // annotation, because the two spell the same declaration
-                // differently: `-> Row` for `type Row = tensor[3, f32]` reaches
-                // `return_type` as a bare name and reaches the checked
-                // signature as the resolved `t-tensor`. The C emitter reads the
-                // resolved `HostAbiType::Tensor`, so reading the syntax here
-                // made the two lanes disagree on exactly the alias spelling
-                // (round 1 P1). `return_type` remains the fallback for a
-                // closure the checker recorded no signature for.
-                let declared_result = checked_signature
-                    .as_ref()
-                    .and_then(checked_function_children)
-                    .and_then(<[Expr]>::last)
-                    .or(return_type.as_ref());
-                if let Some(trap) = declared_result_extent_trap(declared_result, &body, &produced) {
-                    return Err(trap);
-                }
-                Ok(produced)
+                value
             }
             RuntimeValue::Transform {
                 kind,

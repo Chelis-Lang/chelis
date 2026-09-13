@@ -1593,7 +1593,8 @@ A `cast` takes the placement of the value it casts. Guards ready at the same
 source position are evaluated in declaration order. These constraints are the
 complete observable contract; a guard and an operation related by neither data
 dependence nor source order may be evaluated in either order.
-Every execution mode places guards by this rule.
+Every execution mode places guards by this rule. (This placement rule is not
+yet fully implemented across function boundaries; chelis#1945.)
 
 A runtime extent guard is a typed operation-precondition guard under
 [04-NUM-9] and is therefore itself the trap-producing primitive. A failing
@@ -1602,7 +1603,9 @@ Its `<op>` slot is the canonical name of the operation that introduces the
 guarded extent: for a guard whose operands are all interface values, the
 `load` primitive of the later witness in signature order
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
-movement operation. Its `<prim>` slot is `int64`, because the result this
+movement operation; for a declared-result guard, the primitive that produced
+the returned value, whether the return expression names it directly or reaches
+it through a block tail, a binding, or a callee. Its `<prim>` slot is `int64`, because the result this
 guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
 complete user-facing line is therefore
 `numeric trap: domain in <op> at int64`, and [04-NUM-9] permits it no prefix
