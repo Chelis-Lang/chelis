@@ -685,17 +685,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                 .map(|value| stamp_def_closure(value, name, body))
         });
         let applied = callable.and_then(|closure| {
-            // Some fixed dropout bodies (for example a negated literal rate)
-            // retain the legacy Host lane. Bind their declared selected-call
-            // inputs explicitly; never substitute Unit for an entered operand.
-            // Other Host APIs keep their existing argument disposition.
-            let fixed = match &closure {
-                RuntimeValue::Closure { body, .. } => {
-                    ctx.execution_profile(body, &ctx.top_level_defs)
-                        == chelis_ir::evaluation::EvaluationProfile::FixedControl
-                }
-                _ => false,
-            };
+            // Admission and required-input filtering already selected this
+            // call. Deliver its supplied tensor actuals independently of the
+            // body's execution profile, retaining evaluated-root precedence.
             let args = match &closure {
                 RuntimeValue::Closure { params, .. } => params
                     .iter()
@@ -705,9 +697,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                             .cloned()
                             .map(RuntimeValue::Tensor)
                             .or_else(|| {
-                                fixed
-                                    .then(|| bound_evaluation_inputs?.get(param).cloned())
-                                    .flatten()
+                                bound_evaluation_inputs?
+                                    .get(param)
+                                    .cloned()
                                     .map(RuntimeTensorValue::new)
                                     .map(RuntimeValue::Tensor)
                             })
