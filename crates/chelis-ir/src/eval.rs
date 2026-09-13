@@ -2008,7 +2008,7 @@ fn resolve_load_inputs<F>(
     mut load_input: F,
 ) -> Result<UnordMap<String, TensorValue>, String>
 where
-    F: FnMut(&str) -> Option<TensorValue>,
+    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
 {
     let mut inputs = UnordMap::new();
     for node in dag.nodes() {
@@ -2026,7 +2026,7 @@ where
         if inputs.contains_key(name.as_str()) {
             continue;
         }
-        match load_input(name.as_str()) {
+        match load_input(name.as_str())? {
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
             }
@@ -2058,16 +2058,20 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     live
 }
 
-fn eval_tensor_internal<F>(
+struct PreparedTensorInputs {
+    inputs: UnordMap<String, TensorValue>,
+    required_symbols: UnordSet<String>,
+    needs_symbolic_binding: bool,
+}
+
+fn prepare_tensor_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
-    random_counter: u64,
-    mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     mut load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+) -> Result<PreparedTensorInputs, String>
 where
-    F: FnMut(&str) -> Option<TensorValue>,
+    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
 {
     // chelis#1277 C4.1: eval is a production path, so the source check runs
     // here too, before `bind_symbolic_dims` resolves any extent.
@@ -2076,7 +2080,6 @@ where
     {
         return Err(unsupported.to_string());
     }
-    let mut path_random_counter = random_counter;
     let required_symbols = required_symbolic_dims(dag, live);
     let needs_symbolic_binding = !required_symbols.is_empty()
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
@@ -2136,6 +2139,30 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
+    Ok(PreparedTensorInputs {
+        inputs: resolved_inputs,
+        required_symbols,
+        needs_symbolic_binding,
+    })
+}
+
+fn eval_tensor_internal<F>(
+    dag: &Dag,
+    live: Option<&[bool]>,
+    strict_loads: bool,
+    random_counter: u64,
+    mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
+    mut load_input: F,
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let PreparedTensorInputs {
+        inputs: resolved_inputs,
+        required_symbols,
+        needs_symbolic_binding,
+    } = prepare_tensor_inputs(dag, live, strict_loads, |name| Ok(load_input(name)))?;
+    let mut path_random_counter = random_counter;
     // Guard claims come from the unbound DAG; observed extents come from
     // actual caller inputs. Both host lanes consume the same individual
     // schedule before symbolic inference or dependent operations. Missing
@@ -3212,6 +3239,9 @@ fn local_guard_verdict(
 
 /// Evaluate a source-owned plan. The context records the executed prefix on
 /// both success and failure; legacy Dag-only entrypoints remain unchanged.
+///
+/// Inputs may first be resolved with [`prepare_tensor_plan_inputs`]. Execute
+/// the same plan using a lookup into that map to avoid repeating provider effects.
 pub fn eval_tensor_plan_with_strict<F>(
     plan: &crate::evaluation::EvaluationPlan,
     context: &mut crate::evaluation::RandomExecutionContext,
@@ -3235,6 +3265,51 @@ where
         load_input,
     )
     .map(|(values, _)| values)
+}
+
+/// Resolve the inputs selected by strict root evaluation, without evaluating
+/// graph nodes. Empty roots select the whole DAG, as in
+/// [`eval_tensor_roots_with_strict`]. Shape dependencies and optional symbolic
+/// dimension declarers follow the same selection rules as evaluation.
+///
+/// Providers run in DAG order. Successful names are requested once; absent
+/// optional names may be requested repeatedly. Provider errors propagate
+/// unchanged. Axis-source and Drop-root validation precede provider calls;
+/// rank, extent, dtype and numeric validation remain evaluation's responsibility.
+/// Execute the same DAG/roots with a lookup into the returned map to avoid
+/// repeating provider effects. The map is not a certificate of successful execution.
+pub fn prepare_tensor_roots_inputs<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+{
+    reject_drop_roots(dag, roots)?;
+    let live = (!roots.is_empty()).then(|| live_mask_for_roots(dag, roots));
+    prepare_tensor_inputs(dag, live.as_deref(), true, load_input).map(|prepared| prepared.inputs)
+}
+
+/// Resolve every selected plan input, including value-dead executed loads,
+/// without starting an execution frame or advancing `context`.
+///
+/// Plan integrity and inherited seed are validated before provider effects.
+/// Provider ordering, errors and deferred value validation follow
+/// [`prepare_tensor_roots_inputs`]. Execute this same plan with a map lookup;
+/// the caller may first incorporate provider effects into its execution context.
+pub fn prepare_tensor_plan_inputs<F>(
+    plan: &crate::evaluation::EvaluationPlan,
+    context: &crate::evaluation::RandomExecutionContext,
+    load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+{
+    plan.validate_for_context(context)?;
+    let dag = plan.dag_for_inspection();
+    let live = vec![true; dag.len()];
+    prepare_tensor_inputs(dag, Some(&live), true, load_input).map(|prepared| prepared.inputs)
 }
 
 pub(crate) fn eval_tensor_segment_with_strict<F>(

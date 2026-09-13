@@ -3487,7 +3487,7 @@ module_prefix = "Graph"
         &root.join("src/b.ch"),
         "module Graph.B\n\
          import Graph.A (a_cycle, through_b)\n\
-         export (same, from_b)\n\
+         export (same, from_b, b_cycle)\n\
          dim rows\n\
          type Wrapped =\n\
            | Wrapped { value: f32 }\n\
