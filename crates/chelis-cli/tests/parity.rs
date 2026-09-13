@@ -437,6 +437,11 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_grad_fused_zero() {
+    drive_parity(&examples_root().join("grad_fused_zero.ch"), true);
+}
+
+#[test]
 fn parity_vmap_shape_value() {
     let path = examples_root().join("vmap_shape_value.ch");
     drive_parity(&path, true);
@@ -791,6 +796,7 @@ fn parity_corpus_is_complete() {
         "generic_explicit_shape.ch",
         "generic_value_roots.ch",
         "grad_wrt_order.ch",
+        "grad_fused_zero.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",

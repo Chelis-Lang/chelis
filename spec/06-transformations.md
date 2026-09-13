@@ -415,6 +415,15 @@ vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
 
+Fusing `vmap(grad(f))` does not remove §2.3's shape-preserving zero
+cotangents or change §2.2's selected-parameter order. An absent adjoint after
+lowering a complete body gives an exact positive-zero tensor of the batched
+actual's shape and precision; an unresolved live callable is not evidence
+of a constant body. Forward dependencies required by §5.2 remain observable.
+The executable [`grad_fused_zero.ch`](../examples/grad_fused_zero.ch) demonstrates
+a single batched zero cotangent; it does not demonstrate native export of
+multi-result fused gradients.
+
 ### 3.3 DAG Rewrite Rules
 
 For each node in the original DAG, the vmap transformation adds the batch dimension as follows:
