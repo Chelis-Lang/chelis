@@ -1576,6 +1576,27 @@ type CliLoweredBuildProgram = (
     Option<chelis_ir::host::HostExecutionPlan>,
 );
 
+fn compiled_host_lowering_error_for_cli(diagnostic: chelis_ir::lower::LowerDiagnostic) -> String {
+    let is_cross_lane_nonliteral_window = diagnostic.unsupported().is_some_and(|unsupported| {
+        let identity = unsupported.identity();
+        identity.stage == chelis_types::unsupported::Stage::Lowering
+            && identity.context == "the compiled-backend lowering of `reduce_window_*`"
+            && matches!(
+                identity.what,
+                chelis_types::unsupported::UnsupportedKind::Construct(ref what)
+                    if what == "a non-literal window list for `reduce_window_max`"
+            )
+            && identity
+                .tracking_issue
+                .is_some_and(|issue| issue.number() == 1058)
+    });
+    if is_cross_lane_nonliteral_window {
+        diagnostic.to_string()
+    } else {
+        format!("Lowering error: {diagnostic}")
+    }
+}
+
 fn lower_build_program_for_cli(
     checked: &chelis_compiler_api::pipeline::CheckedCompilation,
     manifest: &chelis_types::manifest::RootManifest,
@@ -1610,7 +1631,8 @@ fn lower_build_program_for_cli(
         Ok((lowered.into_dag(), ordinary_host, plan))
     } else {
         let mut compiled =
-            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)?;
+            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
+                .map_err(compiled_host_lowering_error_for_cli)?;
         emit_summary_rejections(compiled.host.as_ref());
         let dag = lower_checked_for_cli(checked.clone(), compiled.host.as_ref())?;
         if let Some(host) = compiled.host.as_mut() {

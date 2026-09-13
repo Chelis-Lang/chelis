@@ -302,7 +302,7 @@ fn cross_lane_rejection_comparison_rejects_a_lane_specific_wrapper() {
 /// C, HIP, and Metal; it does not claim device execution.
 #[test]
 fn nonliteral_window_rejection_is_equal_across_build_lanes() {
-    let (name, program, _, _) = BUILD_REJECTION_ROWS
+    let (name, program, _, expected) = BUILD_REJECTION_ROWS
         .iter()
         .find(|(name, _, _, _)| *name == "c_nonliteral_window")
         .expect("nonliteral-window corpus row");
@@ -310,6 +310,16 @@ fn nonliteral_window_rejection_is_equal_across_build_lanes() {
     let (c_ok, c_stderr, c_emitted) = build_target(program, &format!("{name}_c"), "c");
     assert!(!c_ok, "c: lowering must reject before code generation");
     assert!(c_emitted.is_empty(), "c: rejection emitted an artifact");
+    compare_exact_observations(
+        "reviewed C nonliteral-window rejection",
+        expected,
+        &c_stderr,
+    )
+    .unwrap_or_else(|error| panic!("c: {error}"));
+    assert!(
+        !c_stderr.contains("Lowering error:"),
+        "the explicitly cross-lane nonliteral-window identity stays wrapper-free: {c_stderr}"
+    );
 
     for target in ["hip", "metal"] {
         let (ok, stderr, emitted) = build_target(program, &format!("{name}_{target}"), target);
@@ -318,9 +328,36 @@ fn nonliteral_window_rejection_is_equal_across_build_lanes() {
             emitted.is_empty(),
             "{target}: rejection emitted an artifact"
         );
+        assert!(
+            !stderr.contains("Lowering error:"),
+            "{target}: the explicitly cross-lane nonliteral-window identity stays wrapper-free: \
+             {stderr}"
+        );
         compare_cross_lane_rejection("c", &c_stderr, target, &stderr)
             .unwrap_or_else(|error| panic!("{target}: {error}"));
     }
+}
+
+/// Chelis#1870 changes only the named nonliteral-window rendering. Other
+/// failures crossing the HIP/Metal compiled-host lowering adapter retain their
+/// existing `Lowering error:` compatibility wrapper.
+#[test]
+fn unrelated_lowering_rejection_retains_the_legacy_wrapper() {
+    let program = "def loss(x: tensor[4, f32]) -> f32 = \
+         tensor_to_scalar(sum(cast(cos(cast(x, int32)), f32), 0))\n\
+         def dloss(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)\n\
+         out = dloss(to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
+    let (ok, stderr, emitted) = build_target(program, "hip_int_tensor_cos_wrapper", "hip");
+    assert!(!ok, "HIP integer-tensor cos must be rejected");
+    assert!(emitted.is_empty(), "rejected HIP build wrote: {emitted}");
+    assert!(
+        stderr.starts_with("error: Lowering error: unsupported:"),
+        "an unrelated lowering rejection lost its compatibility wrapper: {stderr}"
+    );
+    assert!(
+        stderr.contains("`Cos`") || stderr.contains("`cos`"),
+        "the production witness must remain the integer-tensor cos rejection: {stderr}"
+    );
 }
 
 /// The Metal rank-2 gap is a typed build rejection. No aborting artifact may

@@ -54,11 +54,20 @@ fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
         entry_name: None,
     })
     .expect_err("compiled lowering must reject a runtime window list");
+    assert_eq!(error.stage, "lower");
     let diagnostic = error.errors.first().expect("one diagnostic");
+    assert_eq!(
+        diagnostic.message,
+        "unsupported: a non-literal window list for `reduce_window_max` on the \
+         compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
+         chelis#1058: window and stride lists must be integer literals for the compiled \
+         lane today; a runtime-parameterized window previously lowered to a silent no-op; \
+         chelis#1058 owns compiled runtime-list support at source span `surf:86..89`"
+    );
     let identity = diagnostic
         .unsupported_identity()
         .expect("lowering must preserve the typed unsupported value");
-    assert_eq!(identity.kind.as_str(), "unsupported_feature");
+    assert_eq!(identity.kind.as_str(), "lower_error");
     assert_eq!(identity.payload.stage, Stage::Lowering);
     assert_eq!(
         identity.payload.disposition,
@@ -74,5 +83,35 @@ fn lowering_rejection_retains_stage_span_and_tracking_metadata() {
     assert_eq!(
         identity.payload.supported_alternative.as_deref(),
         Some("use integer literal window and stride lists")
+    );
+}
+
+#[test]
+fn tensor_scan_exposes_its_rendered_supported_alternative_as_typed_data() {
+    let source = "def gen() -> tensor[5, f32] = \
+                  tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), \
+                  cast(5, int64))\n\
+                  out = gen()\n";
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .expect_err("compiled targets must reject tensor_scan");
+    let diagnostic = error.errors.first().expect("one diagnostic");
+    let identity = diagnostic
+        .unsupported_identity()
+        .expect("the production tensor_scan rejection retains typed identity");
+    assert_eq!(
+        identity.payload.what,
+        UnsupportedKind::Builtin("tensor_scan".into())
+    );
+    assert_eq!(
+        identity.payload.supported_alternative.as_deref(),
+        Some(
+            "run under `chelis eval` or `chelis test`, or rewrite the caller to use \
+             tensor-lane primitives"
+        )
     );
 }

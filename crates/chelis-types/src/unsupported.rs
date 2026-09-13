@@ -587,6 +587,9 @@ impl Unsupported {
                 "host-runtime builders are intentionally excluded from compiled targets; run under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives"
             ),
         )
+        .with_supported_alternative(
+            "run under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives",
+        )
     }
 
     /// Attach a span reference.

@@ -251,6 +251,10 @@ impl Diagnostic {
         })
     }
 
+    pub(crate) fn retain_unsupported(&mut self, unsupported: Unsupported) {
+        self.unsupported = Some(Box::new(unsupported));
+    }
+
     pub(crate) fn general(
         kind: GeneralKind,
         message: impl Into<String>,

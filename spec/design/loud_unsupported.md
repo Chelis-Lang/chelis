@@ -226,27 +226,30 @@ not satisfy the normative surface contract.
 pub struct Unsupported {
     /// What was encountered: an op, builtin name, dtype, tag, effect
     /// kind, or construct. Closed enum + payload, not a bare string.
-    pub what: UnsupportedKind,
+    pub what: Box<UnsupportedKind>,
     /// The context of the encounter (the op family, target lane, or
     /// call position) - the `on <context>` clause of the rendering.
     /// (Added at Phase 1 ratification: the branded message format always
     /// carried a context clause; the struct now carries it explicitly.)
-    pub context: String,
+    pub context: Box<str>,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
-    pub span: Option<SpanRef>,
-    /// Opaque typed authority plus the supported alternative. Construction
-    /// distinguishes a numbered-spec decision from tracked implementation
-    /// work and rejects empty or unregistered citations.
+    pub span: Option<Box<SpanRef>>,
+    /// Opaque typed authority. Construction distinguishes a numbered-spec
+    /// decision from tracked implementation work and rejects empty or
+    /// unregistered citations.
     pub authority: RejectionAuthority,
+    /// A supported route the caller can select, when one exists.
+    pub supported_alternative: Option<Box<str>>,
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported`. The span field is
-boxed so the `Err` variant stays small on Result-typed emission paths; this is
-a representation detail, not a contract change.
+Implemented as `chelis_types::unsupported::Unsupported`. The subject, context,
+span, and supported-alternative storage shown above are boxed so the `Err`
+variant stays small on Result-typed emission paths; these are representation
+details, not changes to their projected values.
 
 **Message format:**
 `unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
@@ -285,6 +288,9 @@ lowering producers, and `unsupported_identity()` projects the exact
 `unsupported:` brand/prefix, diagnostic
 kind, subject, context, stage, span association, disposition, atom or tracking
 issue, and supported alternative without parsing prose. The
+three compiler-API adapters that flatten `LowerDiagnostic` retain their prior
+public stage, diagnostic kind, and rendered message while attaching that
+off-wire sidecar. The
 `c_nonliteral_window` witness proves identical production stderr through the
 C, HIP, and Metal CLI build entry paths; it is lowering and host-process
 evidence, not device execution.
