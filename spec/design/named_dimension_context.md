@@ -122,6 +122,15 @@ non-wildcard *named* checker-annotated call-result axis as a caller-side label.
 Resolve that axis in the saved caller substitutions before transporting a
 remaining name. A caller binder already actualized to a literal must not
 reappear as an unbound runtime symbol at an inlined root (#1917).
+Transport labels on a fresh rank-preserving `Reshape` value whose target
+extents are exact `Shape` reads of the produced value. Do not rewrite the
+producer's output type: an elementwise node must retain shape agreement with
+its inputs, and independent helper invocations must retain their own extent
+sources (#1977, #1978). The existing reshape operation supplies the runtime
+declaration and its adjoint restores the original input shape, as required by
+[05-OP-49]. This single return boundary serves subsequent named reductions,
+named inserts, and rank-spread helper arguments; consumers need no metadata
+fallback. Existing ambiguous-reorder rejection remains unchanged.
 The label is not resolved against the callee's signature: the same spelling
 may name an unrelated callee parameter. Label transport creates no equality
 claim and imports neither checker-substituted literals nor optional extents;

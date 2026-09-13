@@ -9529,7 +9529,7 @@ impl<'program> LowerCtx<'program> {
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
+        let mut result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
             self.lower_expr_with_claim(body, Some(&declared_result))
         });
         if let Some(ret_ty_expr) = fn_expr.result_type() {
@@ -9557,6 +9557,8 @@ impl<'program> LowerCtx<'program> {
             && expected_return_ty.dims.len()
                 == self.dag.get(id).expect("result").output_type.dims.len()
         {
+            let produced_ty = self.dag.get(id).expect("result").output_type.clone();
+            let mut labelled_ty = produced_ty.clone();
             for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
                 // Resolve a monomorphized caller binder in its own saved
                 // namespace, before considering a new result-axis label.
@@ -9568,8 +9570,11 @@ impl<'program> LowerCtx<'program> {
                 };
                 if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
                 {
-                    self.refine_checked_result_axis_name(id, axis, checked_dim);
+                    Self::refine_checked_result_axis_name(&mut labelled_ty, axis, checked_dim);
                 }
+            }
+            if labelled_ty != produced_ty {
+                result = LoweredValue::Node(self.checked_result_axis_view(id, labelled_ty));
             }
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
@@ -14374,30 +14379,43 @@ impl<'program> LowerCtx<'program> {
             )
     }
 
-    /// Transport only a checker-established caller-side axis name onto an
-    /// already-lowered result. The authored result's claim has already run;
+    /// Copy a checker-established caller-side name into a detached result
+    /// type. The authored result's claim has already run;
     /// this must not create a second named equality or borrow a known extent
     /// from the checked annotation. A concrete extent already present on the
     /// produced axis remains useful information and is retained under the new
     /// spelling.
-    fn refine_checked_result_axis_name(&mut self, id: NodeId, axis: usize, checked: &DimInfo) {
+    fn refine_checked_result_axis_name(ty: &mut TensorType, axis: usize, checked: &DimInfo) {
         let DimInfo::Named(name, _) = checked else {
             return;
         };
-        let Some(existing) = self
-            .dag
-            .get(id)
-            .and_then(|node| node.output_type.dims.get(axis))
-            .cloned()
-        else {
+        let Some(existing) = ty.dims.get(axis).cloned() else {
             return;
         };
         let known_extent = match existing {
             DimInfo::Named(_, extent) => extent,
             DimInfo::Lit(extent) => Some(extent),
         };
-        self.dag.node_mut(id).expect("result").output_type.dims[axis] =
-            DimInfo::Named(name.clone(), known_extent);
+        ty.dims[axis] = DimInfo::Named(name.clone(), known_extent);
+    }
+
+    /// A checked label belongs to this returned value, not to its producer.
+    /// Exact shape reads make the view rank/extent preserving without borrowing
+    /// an extent from checked metadata or introducing an equality obligation.
+    /// The existing reshape adjoint restores the producer's original type.
+    fn checked_result_axis_view(&mut self, id: NodeId, ty: TensorType) -> NodeId {
+        let mut inputs = vec![id];
+        let new_shape = (0..ty.dims.len()).map(|axis| {
+            let shape = self.dag.add_node(
+                RiscOp::Shape { axis },
+                vec![id],
+                TensorType { dims: vec![], precision: Prim::Int64 },
+                self.current_span_id.clone(),
+            );
+            inputs.push(shape);
+            RtDim::Node(inputs.len() - 1)
+        }).collect();
+        self.dag.add_node(RiscOp::Reshape { new_shape }, inputs, ty, self.current_span_id.clone())
     }
 
     /// chelis#1397's declaration half: keep a declared result dimension over an
@@ -20247,20 +20265,42 @@ mod tests {
             },
             None,
         );
-        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        let mut labelled = ctx.dag.get(id).unwrap().output_type.clone();
+        LowerCtx::refine_checked_result_axis_name(&mut labelled, 0, &DimInfo::Named("fixed".into(), Some(2)));
         assert_eq!(
-            ctx.dag.get(id).expect("result").output_type.dims,
+            labelled.dims,
             vec![DimInfo::Named("fixed".into(), Some(7))],
             "checked optional size is not an imported claim"
         );
 
-        ctx.dag.node_mut(id).expect("result").output_type.dims = vec![DimInfo::Lit(3)];
-        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        labelled.dims = vec![DimInfo::Lit(3)];
+        LowerCtx::refine_checked_result_axis_name(&mut labelled, 0, &DimInfo::Named("fixed".into(), Some(2)));
         assert_eq!(
-            ctx.dag.get(id).expect("result").output_type.dims,
+            labelled.dims,
             vec![DimInfo::Named("fixed".into(), Some(3))],
             "a produced concrete extent survives the caller-side label"
         );
+    }
+
+    #[test]
+    fn checked_result_axis_view_does_not_retype_elementwise_producer() {
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let original = TensorType { dims: vec![DimInfo::Named("raw".into(), None)], precision: Prim::F32 };
+        let input = ctx.dag.add_node(RiscOp::Load { name: "x".into() }, vec![], original.clone(), None);
+        let relu = ctx.dag.add_node(RiscOp::Relu, vec![input], original.clone(), None);
+        let labelled = TensorType { dims: vec![DimInfo::Named("fixed".into(), None)], precision: Prim::F32 };
+        let view = ctx.checked_result_axis_view(relu, labelled.clone());
+        assert_ne!(view, relu);
+        assert_eq!(ctx.dag.get(input).unwrap().output_type, original);
+        assert_eq!(ctx.dag.get(relu).unwrap().output_type, original);
+        assert_eq!(ctx.dag.get(view).unwrap().output_type, labelled);
+        assert_eq!(crate::dag::op_declarable_axes(&ctx.dag, ctx.dag.get(view).unwrap()), vec![0]);
+        let Some(crate::axis_sources::ExtentOrigin::ScalarInput { value, .. }) = crate::axis_sources::resolve_axis_extent(&ctx.dag, view, 0) else {
+            panic!("the view must carry an explicit runtime extent source");
+        };
+        let extent = ctx.dag.get(value).unwrap();
+        assert!(matches!(extent.op, RiscOp::Shape { axis: 0 }));
+        assert_eq!(extent.inputs, vec![relu], "the extent is observed from this producer, not inferred from a label");
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits

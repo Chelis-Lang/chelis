@@ -274,6 +274,10 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
                    def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
                    def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
                    def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
+                   def anchored() = insert(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fresh, 2i64, fixed)\n\
+                   def insert_rank(x: &tensor[..pre, fixed, ..post, f32]) = insert(x, fresh, 2i64, fixed)\n\
+                   def through_rank() = insert_rank(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])))\n\
+                   def matrix_anchored() = insert_rank(aligned_matrix(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), to_tensor([[1.0f32, 1.0f32, 1.0f32], [1.0f32, 1.0f32, 1.0f32]])))\n\
                    def mixed_axes() = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), fixed), 0i32)\n\
                    def scale_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
                    def keep_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
@@ -289,6 +293,9 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
         "direct",
         "alias",
         "reversed",
+        "anchored",
+        "through_rank",
+        "matrix_anchored",
         "mixed_axes",
         "scaled",
         "kept",
@@ -311,6 +318,14 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     for name in ["direct", "alias", "reversed"] {
         assert_eq!(raw_results[name], expected, "{name}");
     }
+    for name in ["anchored", "through_rank"] {
+        assert_eq!(
+            raw_results[name],
+            r#"{"type":"tensor","value":{"shape":[2,2],"data":{"dtype":"f32","bits":["3f800000","40800000","3f800000","40800000"]}}}"#,
+            "{name}: a checked helper label must reach insert and rank-spread consumers"
+        );
+    }
+    assert_eq!(raw_results["matrix_anchored"], r#"{"type":"tensor","value":{"shape":[2,2,3],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000","40a00000","40c00000","3f800000","40000000","40400000","40800000","40a00000","40c00000"]}}}"#);
     assert_eq!(
         raw_results["mixed_axes"],
         r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41200000"]}}}"#,
@@ -421,6 +436,27 @@ fn checked_result_name_transport_resolves_monomorphized_caller_scope() {
                 "{messages}"
             );
         }
+    }
+}
+
+#[test]
+fn checked_result_axis_view_keeps_invalid_named_insert_rejection() {
+    for (new_axis, anchor) in [("fixed", "fixed"), ("fresh", "missing")] {
+        let error = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: format!(
+                "def aligned[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
+                 def main() = insert(aligned(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), {new_axis}, 2i64, {anchor})\n"
+            ),
+            bindings: BTreeMap::new(),
+        }).expect_err("duplicate inserted names and absent anchors remain errors");
+        let messages = error.errors.iter().map(|diagnostic| diagnostic.message.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(messages.contains(if new_axis == "fixed" {
+            "inserted axis `fixed` already names an axis"
+        } else {
+            "anchor `missing` is not a named axis"
+        }), "{messages}");
+        assert!(!messages.contains("internal compiler error"), "{messages}");
     }
 }
 
