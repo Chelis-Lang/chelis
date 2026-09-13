@@ -4138,6 +4138,247 @@ mod legacy_capture_order_tests {
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 
+    // #1956: unlike a concrete-rank helper, this signature cannot take a
+    // standalone def kernel. The ordinary checked call must enter site B.
+    #[test]
+    fn declaration_spread_formal_uses_actual_named_axis_route() {
+        let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+        let library = checked_library(&format!(
+            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }}\ndef total(weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\ndef main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        ));
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        assert!(ctx.def_kernel("total").unwrap().is_none());
+        assert!(ctx.def_kernel("main").unwrap().is_none());
+        assert!(!ctx.named_axis_route_cache.contains_key("total"));
+        let main = ctx.resolve_top_level("main").unwrap();
+        let input = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![7.0, 11.0]).unwrap(),
+        );
+        let value = ctx.apply_resolved_callable(main, vec![input]).unwrap();
+        assert_eq!(ctx.named_axis_route_cache.get("total"), Some(&true));
+        let RuntimeValue::Tuple(values) = value else {
+            panic!("checked main returns two tensors")
+        };
+        assert_eq!(
+            bits(&values[0]),
+            serde_json::json!({"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41900000"]}}})
+        );
+        assert_eq!(bits(&values[1]), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 5);
+        assert_eq!(
+            bits(&admitted_call(&mut ctx, "next_draw").unwrap()),
+            bits(&expected_draw(42, 5))
+        );
+        assert_eq!(ctx.random_counter, 6);
+        assert_eq!(ctx.transcript, ["entry"]);
+    }
+
+    fn named_axis_capture_case(
+        initializer: &str,
+        body: &str,
+        expected: Result<&str, &str>,
+        transcript: &[&str],
+    ) {
+        let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+        let library = checked_library(&format!(
+            "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
+             def total(x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n\
+             def main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\n\
+             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        ));
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        assert!(ctx.def_kernel("total").unwrap().is_none());
+        assert!(ctx.def_kernel("main").unwrap().is_none());
+        assert!(!ctx.named_axis_route_cache.contains_key("total"));
+        let main = ctx.resolve_top_level("main").unwrap();
+        let input = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![7.0, 11.0]).unwrap(),
+        );
+        let result = ctx.apply_resolved_callable(main, vec![input]);
+        assert_eq!(ctx.named_axis_route_cache.get("total"), Some(&true));
+        assert_eq!(ctx.random_counter, 5);
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        match expected {
+            Ok(expected_bits) => {
+                let RuntimeValue::Tuple(values) = result.unwrap() else {
+                    panic!("checked main returns two tensors")
+                };
+                let RuntimeValue::Tuple(captures) = &values[0] else {
+                    panic!("routed total returns its input and capture reductions")
+                };
+                assert_eq!(
+                    bits(&captures[0]),
+                    serde_json::json!({"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41900000"]}}})
+                );
+                assert_eq!(
+                    bits(&captures[1]),
+                    serde_json::json!({"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":[expected_bits]}}})
+                );
+                assert_eq!(bits(&values[1]), bits(&expected_draw(42, 5)));
+            }
+            Err(error) => {
+                assert_eq!(result.unwrap_err(), error);
+                assert!(!ctx.bindings.contains_key("weights"));
+            }
+        }
+        assert_eq!(ctx.transcript, transcript);
+    }
+
+    #[test]
+    fn named_axis_selected_capture_keeps_initializer_and_next_draw() {
+        named_axis_capture_case(
+            "to_tensor([3.0f32, 5.0f32])",
+            "(sum(x, seq), sum(weights, 0i32))",
+            Ok("41000000"),
+            &["entry", "initialize"],
+        );
+    }
+
+    #[test]
+    fn named_axis_dead_capture_does_not_initialize() {
+        named_axis_capture_case(
+            "to_tensor([3.0f32, 5.0f32])",
+            "(sum(x, seq), if true then sum(baseline, 0i32) else sum(weights, 0i32))",
+            Ok("41900000"),
+            &["entry"],
+        );
+    }
+
+    #[test]
+    fn named_axis_capture_error_preserves_original_trap_and_parent() {
+        named_axis_capture_case(
+            &format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])"),
+            "(sum(x, seq), sum(weights, 0i32))",
+            Err("numeric trap: division by zero in floor_div at int32"),
+            &["entry", "initialize"],
+        );
+    }
+
+    #[test]
+    fn named_axis_available_shape_never_enters_failing_initializer() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let initializer =
+            format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
+        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        for required in [RequiredShape, Selected] {
+            let mut ctx = context(&library, &tensors);
+            assert!(
+                ctx.prepare_named_axis_input("weights", AvailableShape, &staged)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(ctx.transcript.is_empty());
+            assert!(!ctx.bindings.contains_key("weights"));
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert_eq!(
+                ctx.prepare_named_axis_input("weights", required, &staged)
+                    .unwrap_err(),
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_eq!(ctx.transcript, ["initialize"]);
+            assert!(!ctx.bindings.contains_key("weights"));
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert!(
+                ctx.prepare_named_axis_input("weights", AvailableShape, &staged)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                bits(&admitted_call(&mut ctx, "next_draw").unwrap()),
+                bits(&expected_draw(42, 5))
+            );
+            assert_eq!(ctx.random_counter, 6);
+            assert_eq!(ctx.transcript, ["initialize"]);
+        }
+    }
+
+    #[test]
+    fn named_axis_input_roles_preserve_available_tensor_precedence() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensor = |ordinal| {
+            let RuntimeValue::Tensor(value) = expected_draw(42, ordinal) else {
+                panic!("draw is a tensor")
+            };
+            value
+        };
+        for role in [AvailableShape, RequiredShape, Selected] {
+            for level in 0..3 {
+                let mut tensors = UnordMap::new();
+                let mut staged = UnordMap::new();
+                if level >= 1 {
+                    tensors.insert("weights".to_owned(), tensor(1));
+                }
+                if level == 2 {
+                    staged.insert("weights".to_owned(), tensor(2).value);
+                }
+                let mut ctx = context(&library, &tensors);
+                ctx.bindings
+                    .insert("weights".to_owned(), RuntimeValue::Tensor(tensor(0)));
+                let actual = ctx
+                    .prepare_named_axis_input("weights", role, &staged)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
+                    bits(&expected_draw(42, level))
+                );
+                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+                assert!(ctx.transcript.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn named_axis_input_roles_do_not_observe_callables_or_unknown_names() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let library = checked_library(&format!(
+            "def sample() -> tensor[2, f32] = with seed(17i64) {{ _ = print(\"observe\")\n {DRAW} }}\nalias = sample\n"
+        ));
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        for role in [AvailableShape, RequiredShape, Selected] {
+            for name in ["sample", "alias", "unknown"] {
+                assert!(
+                    ctx.prepare_named_axis_input(name, role, &staged)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(!ctx.bindings.contains_key(name));
+            }
+        }
+        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn named_axis_required_shape_initializes_once_then_available_can_serve() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape};
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        for role in [RequiredShape, AvailableShape] {
+            let actual = ctx
+                .prepare_named_axis_input("weights", role, &staged)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
+                bits(&expected_draw(17, 0))
+            );
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert_eq!(ctx.transcript, ["initialize"]);
+        }
+    }
+
     #[test]
     fn declaration_cold_warm_builtin_and_local_shadow_control() {
         // Top-level builtin-name declarations are rejected by the checker;

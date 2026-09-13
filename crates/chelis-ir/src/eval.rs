@@ -1742,8 +1742,7 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
-    required_symbols: &UnordSet<String>,
-    live: Option<&[bool]>,
+    selection: &SymbolicInputSelection,
 ) -> Result<(UnordMap<String, usize>, UnordSet<String>), String> {
     let mut bindings = UnordMap::new();
     let mut load_types = UnordMap::<String, TensorType>::new();
@@ -1762,16 +1761,6 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    let live_loads = dag
-        .nodes()
-        .iter()
-        .filter(|node| live.is_none_or(|mask| mask[node.id.0]))
-        .filter_map(|node| match &node.op {
-            RiscOp::Load { name } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect::<UnordSet<_>>();
-
     let read_axis = |label: &str, axis: usize, claim: &str| -> Result<usize, String> {
         let value = inputs.get(label).ok_or_else(|| {
             format!("missing required input `{label}` for symbolic dimension `{claim}`")
@@ -1781,99 +1770,24 @@ fn infer_symbolic_bindings_from_inputs(
         })
     };
 
-    // One entry per SCOPE, folded into one entry per name afterwards.
     let mut per_scope: Vec<(String, usize)> = Vec::new();
-    // Every required name some class ANSWERED for, whether by binding it or
-    // by deliberately declining to. The source fallback below must not
-    // overrule an answer; it exists for names no class spoke for at all.
-    let mut claimed: Vec<String> = Vec::new();
-    // The names `bind_symbolic_dims` tolerates unbound because the evaluator
-    // computes them from actual values (chelis#616). Declining to bind one is
-    // an answer; declining to bind anything else would just be a hole, so the
-    // two decisions stay keyed on the same set.
-    let op_declared = crate::dag::op_declared_dim_names(dag);
-    for class in crate::axis_sources::derive_dim_witnesses(dag) {
-        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
-            continue;
-        };
-        if !required_symbols.contains(&name) {
-            continue;
-        }
-
-        // "An input tensor's axis" has two spellings in the DAG, and
-        // `member_load_axis` accepts both: a `Load`'s own output axis and a
-        // folded `shape(t, k)` read of that same tensor.
-        let mut witnesses = class
-            .members
-            .iter()
-            .filter_map(|member| {
-                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
-                let RiscOp::Load { name: label } = &dag.get(load)?.op else {
-                    return None;
-                };
-                Some((label.as_str(), axis))
-            })
-            .collect::<Vec<_>>();
-        // chelis#616: a locally computed extent has no external input; the
-        // evaluator resolves it from the owning operation's actual values.
-        let has_live_local_source = class.members.iter().any(|member| {
-            matches!(
-                member.source,
-                crate::axis_sources::AxisSource::OpComputed { .. }
-                    | crate::axis_sources::AxisSource::ScalarInput { .. }
-            ) && live.is_none_or(|mask| mask[member.node.0])
-        });
-        let live_witnesses = witnesses
-            .iter()
-            .copied()
-            .filter(|(label, _)| live_loads.contains(label))
-            .collect::<Vec<_>>();
-        if !live_witnesses.is_empty() {
-            witnesses = live_witnesses;
-        } else if has_live_local_source && op_declared.contains(&name) {
-            if !claimed.contains(&name) {
-                claimed.push(name);
-            }
-            continue;
-        } else {
-            // chelis#351: a shape-only dependency Load can be outside the
-            // value-live mask. With exactly one declaration its shape is the
-            // required source. Two dead declarations reusing the same symbol
-            // are indistinguishable after lowering; accepting whichever input
-            // happens to be supplied lets an unrelated declaration satisfy a
-            // live shape obligation (chelis#991). Fail closed on that
-            // ambiguity instead of guessing from caller inputs.
-            let mut dead_loads = witnesses
-                .iter()
-                .map(|(label, _)| *label)
-                .collect::<Vec<_>>();
-            dead_loads.sort_unstable();
-            dead_loads.dedup();
-            if dead_loads.len() > 1 {
-                return Err(format!(
-                    "ambiguous dead-load sources {dead_loads:?} for live symbolic dimension `{name}`"
-                ));
-            }
-        }
-
-        let Some((canonical_label, canonical_axis)) = witnesses.first().copied() else {
-            continue;
-        };
-        let value = read_axis(canonical_label, canonical_axis, &name)?;
-        for (label, axis) in witnesses.iter().skip(1) {
-            let other = read_axis(label, *axis, &name)?;
+    for choice in &selection.witnesses {
+        let SymbolicWitnesses {
+            name,
+            canonical: (canonical_label, canonical_axis),
+            remaining,
+        } = choice.as_ref().map_err(Clone::clone)?;
+        let value = read_axis(canonical_label, *canonical_axis, name)?;
+        for (label, axis) in remaining {
+            let other = read_axis(label, *axis, name)?;
             if other != value {
                 return Err(format!(
                     "symbolic dimension `{name}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {label}[{axis}] = {other}",
                 ));
             }
         }
-        if !claimed.contains(&name) {
-            claimed.push(name.clone());
-        }
-        per_scope.push((name, value));
+        per_scope.push((name.clone(), value));
     }
-
     let mut folded: Vec<(String, Option<usize>)> = Vec::new();
     for (name, value) in per_scope {
         match folded.iter_mut().find(|(existing, _)| *existing == name) {
@@ -1897,24 +1811,10 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    // A required symbol the classes did not cover still needs its value, and
-    // the axis SOURCE supplies it. Two kinds reach here and neither is a
-    // witness of anything: a name carried only by an op-INTERNAL field (a
-    // `Reshape` target's `RtDim::Sym`, one of `BlasMatmul`'s dimension
-    // expressions) has no output axis to form a class from, and a name whose
-    // every output axis is statically bound (`Named(name, Some(4))`) carries
-    // no runtime claim for a class to group. The legacy walk reached both
-    // through `bind_symbol_from_any_load`, which searched every `Load` for a
-    // matching string; resolving the origin names the exact declaring input
-    // instead.
-    for (name, origin) in crate::axis_sources::dim_extent_origins(dag) {
-        if !required_symbols.contains(&name)
-            || bindings.contains_key(&name)
-            || claimed.contains(&name)
-        {
-            continue;
-        }
-        match origin {
+    // Class-answered names were excluded by the same selection consumed above.
+    // In particular fallback cannot overrule deliberately differing scopes.
+    for (name, origin) in &selection.fallback {
+        match *origin {
             crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
                 let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
                     continue;
@@ -1925,12 +1825,12 @@ fn infer_symbolic_bindings_from_inputs(
                 if let Some(value) = inputs.get(label.as_str())
                     && let Some(extent) = value.shape.get(axis)
                 {
-                    bindings.insert(name, *extent);
+                    bindings.insert(name.clone(), *extent);
                 }
             }
             crate::axis_sources::ExtentOrigin::Literal(extent) => {
                 if let Ok(extent) = usize::try_from(extent) {
-                    bindings.insert(name, extent);
+                    bindings.insert(name.clone(), extent);
                 }
             }
             crate::axis_sources::ExtentOrigin::OpComputed { .. }
@@ -1939,6 +1839,137 @@ fn infer_symbolic_bindings_from_inputs(
     }
 
     Ok((bindings, deliberately_unbound))
+}
+
+#[derive(Default)]
+struct SymbolicInputSelection {
+    witnesses: Vec<Result<SymbolicWitnesses, String>>,
+    fallback: Vec<(String, crate::axis_sources::ExtentOrigin)>,
+    required_shape_inputs: UnordSet<String>,
+}
+
+struct SymbolicWitnesses {
+    name: String,
+    canonical: (String, usize),
+    remaining: Vec<(String, usize)>,
+}
+
+/// Extract the inference's structural choice once. Errors are pending actions:
+/// ingress validation and provider effects still precede inference diagnostics.
+fn select_symbolic_inputs(
+    dag: &Dag,
+    required_symbols: &UnordSet<String>,
+    live: Option<&[bool]>,
+) -> SymbolicInputSelection {
+    let mut selected = SymbolicInputSelection::default();
+    if required_symbols.is_empty() {
+        return selected;
+    }
+    let live_loads = dag
+        .nodes()
+        .iter()
+        .filter(|node| live.is_none_or(|mask| mask[node.id.0]))
+        .filter_map(|node| match &node.op {
+            RiscOp::Load { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<UnordSet<_>>();
+    let op_declared = crate::dag::op_declared_dim_names(dag);
+    let mut claimed = UnordSet::new();
+    for class in crate::axis_sources::derive_dim_witnesses(dag) {
+        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+            continue;
+        };
+        if !required_symbols.contains(&name) {
+            continue;
+        }
+        let mut witnesses = class
+            .members
+            .iter()
+            .filter_map(|member| {
+                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                    return None;
+                };
+                Some((label.as_str(), axis))
+            })
+            .collect::<Vec<_>>();
+        let has_live_local_source = class.members.iter().any(|member| {
+            matches!(
+                member.source,
+                crate::axis_sources::AxisSource::OpComputed { .. }
+                    | crate::axis_sources::AxisSource::ScalarInput { .. }
+            ) && live.is_none_or(|mask| mask[member.node.0])
+        });
+        let live_witnesses = witnesses
+            .iter()
+            .copied()
+            .filter(|(label, _)| live_loads.contains(label))
+            .collect::<Vec<_>>();
+        if !live_witnesses.is_empty() {
+            witnesses = live_witnesses;
+        } else if has_live_local_source && op_declared.contains(&name) {
+            claimed.insert(name);
+            continue;
+        } else {
+            let mut dead_loads = witnesses
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>();
+            dead_loads.sort_unstable();
+            dead_loads.dedup();
+            if dead_loads.len() > 1 {
+                selected.witnesses.push(Err(format!(
+                    "ambiguous dead-load sources {dead_loads:?} for live symbolic dimension `{name}`"
+                )));
+                // Later witnesses/fallback cannot authorize initialization:
+                // inference will stop at this action, after earlier reads.
+                return selected;
+            }
+        }
+        let Some((canonical, remaining)) = witnesses.split_first() else {
+            continue;
+        };
+        claimed.insert(name.clone());
+        for (label, _) in &witnesses {
+            if !live_loads.contains(label) {
+                selected.required_shape_inputs.insert((*label).to_owned());
+            }
+        }
+        selected.witnesses.push(Ok(SymbolicWitnesses {
+            name,
+            canonical: (canonical.0.to_owned(), canonical.1),
+            remaining: remaining
+                .iter()
+                .map(|(label, axis)| ((*label).to_owned(), *axis))
+                .collect(),
+        }));
+    }
+    selected.fallback = crate::axis_sources::dim_extent_origins(dag)
+        .into_iter()
+        .filter(|(name, _)| required_symbols.contains(name) && !claimed.contains(name))
+        .collect();
+    // Observe the ACTUAL binder traversal only when an uncovered external
+    // source could demand an otherwise unselected input.
+    let mut prebinding = None;
+    for (name, origin) in &selected.fallback {
+        let crate::axis_sources::ExtentOrigin::ExternalAxis { load, .. } = origin else {
+            continue;
+        };
+        let Some(RiscOp::Load { name: label }) = dag.get(*load).map(|node| &node.op) else {
+            continue;
+        };
+        if !live_loads.contains(label.as_str())
+            && prebinding
+                .get_or_insert_with(|| crate::dag::required_prebinding_symbols(dag))
+                .contains(name)
+        {
+            selected
+                .required_shape_inputs
+                .insert(label.as_str().to_owned());
+        }
+    }
+    selected
 }
 
 fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
@@ -2005,10 +2036,11 @@ fn resolve_load_inputs<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     symbolic_dim_load_inputs: &UnordSet<&str>,
+    required_shape_inputs: &UnordSet<String>,
     mut load_input: F,
 ) -> Result<UnordMap<String, TensorValue>, String>
 where
-    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     let mut inputs = UnordMap::new();
     for node in dag.nodes() {
@@ -2026,7 +2058,14 @@ where
         if inputs.contains_key(name.as_str()) {
             continue;
         }
-        match load_input(name.as_str())? {
+        let demand = if is_live {
+            TensorInputDemand::Selected
+        } else if required_shape_inputs.contains(name.as_str()) {
+            TensorInputDemand::RequiredShape
+        } else {
+            TensorInputDemand::AvailableShape
+        };
+        match load_input(name.as_str(), demand)? {
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
             }
@@ -2062,6 +2101,7 @@ struct PreparedTensorInputs {
     inputs: UnordMap<String, TensorValue>,
     required_symbols: UnordSet<String>,
     needs_symbolic_binding: bool,
+    symbolic_selection: SymbolicInputSelection,
 }
 
 fn prepare_tensor_inputs<F>(
@@ -2071,7 +2111,7 @@ fn prepare_tensor_inputs<F>(
     mut load_input: F,
 ) -> Result<PreparedTensorInputs, String>
 where
-    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     // chelis#1277 C4.1: eval is a production path, so the source check runs
     // here too, before `bind_symbolic_dims` resolves any extent.
@@ -2132,17 +2172,20 @@ where
     } else {
         UnordSet::new()
     };
+    let symbolic_selection = select_symbolic_inputs(dag, &required_symbols, live);
     let resolved_inputs = resolve_load_inputs(
         dag,
         live,
         strict_loads,
         &symbolic_dim_load_inputs,
+        &symbolic_selection.required_shape_inputs,
         &mut load_input,
     )?;
     Ok(PreparedTensorInputs {
         inputs: resolved_inputs,
         required_symbols,
         needs_symbolic_binding,
+        symbolic_selection,
     })
 }
 
@@ -2161,7 +2204,8 @@ where
         inputs: resolved_inputs,
         required_symbols,
         needs_symbolic_binding,
-    } = prepare_tensor_inputs(dag, live, strict_loads, |name| Ok(load_input(name)))?;
+        symbolic_selection,
+    } = prepare_tensor_inputs(dag, live, strict_loads, |name, _| Ok(load_input(name)))?;
     let mut path_random_counter = random_counter;
     // Guard claims come from the unbound DAG; observed extents come from
     // actual caller inputs. Both host lanes consume the same individual
@@ -2259,7 +2303,7 @@ where
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let (mut bindings, deliberately_unbound) =
-            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
+            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &symbolic_selection)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
         // though their nodes cannot execute under this root mask. Live names
@@ -3267,6 +3311,21 @@ where
     .map(|(values, _)| values)
 }
 
+/// Why a selected-input preparation callback is being queried.
+/// This is an input obligation, not declaration identity or a cache certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorInputDemand {
+    /// An executed Load, including shape dependencies and plan-retained Loads.
+    /// Strict preparation refuses absence immediately.
+    Selected,
+    /// An exact external shape source needed outside the execution mask.
+    /// Absence keeps the existing deferred inference/binding diagnostic.
+    RequiredShape,
+    /// A surplus symbolic declarer: return a value only if already available.
+    /// This query does not authorize evaluating an unresolved initializer.
+    AvailableShape,
+}
+
 /// Resolve the inputs selected by strict root evaluation, without evaluating
 /// graph nodes. Empty roots select the whole DAG, as in
 /// [`eval_tensor_roots_with_strict`]. Shape dependencies and optional symbolic
@@ -3281,10 +3340,24 @@ where
 pub fn prepare_tensor_roots_inputs<F>(
     dag: &Dag,
     roots: &[NodeId],
-    load_input: F,
+    mut load_input: F,
 ) -> Result<UnordMap<String, TensorValue>, String>
 where
     F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+{
+    prepare_tensor_roots_inputs_with_demand(dag, roots, |name, _| load_input(name))
+}
+
+/// Role-aware form of [`prepare_tensor_roots_inputs`], with identical selection,
+/// ordering, deduplication and validation stages. RequiredShape absence remains
+/// deferred; AvailableShape is an available-value query, not initializer demand.
+pub fn prepare_tensor_roots_inputs_with_demand<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     reject_drop_roots(dag, roots)?;
     let live = (!roots.is_empty()).then(|| live_mask_for_roots(dag, roots));
@@ -3301,10 +3374,24 @@ where
 pub fn prepare_tensor_plan_inputs<F>(
     plan: &crate::evaluation::EvaluationPlan,
     context: &crate::evaluation::RandomExecutionContext,
-    load_input: F,
+    mut load_input: F,
 ) -> Result<UnordMap<String, TensorValue>, String>
 where
     F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+{
+    prepare_tensor_plan_inputs_with_demand(plan, context, |name, _| load_input(name))
+}
+
+/// Role-aware form of [`prepare_tensor_plan_inputs`]. Every retained plan Load
+/// is Selected, even if value-dead. Plan/seed validation precedes the provider;
+/// preparation does not start a frame or advance the supplied context.
+pub fn prepare_tensor_plan_inputs_with_demand<F>(
+    plan: &crate::evaluation::EvaluationPlan,
+    context: &crate::evaluation::RandomExecutionContext,
+    load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     plan.validate_for_context(context)?;
     let dag = plan.dag_for_inspection();
