@@ -1,0 +1,1 @@
+Regular pull-request CI now requires every added or directly modified default-enabled integration target, while a separate informational lane measures broader changed-package coverage without changing the required verdict.

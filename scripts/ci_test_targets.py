@@ -10,32 +10,25 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
-import tomllib
+
+if __package__:
+    from . import ci_change_owned
+else:
+    import ci_change_owned
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 
 
 def read_targets(path: Path) -> list[tuple[str, str]]:
-    data = tomllib.loads(path.read_text())
-    if set(data) != {"version", "target"} or type(data["version"]) is not int or data["version"] != 1:
-        raise ValueError("selection requires version = 1 and target rows")
-    rows = data["target"]
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("selection must contain at least one integration target")
-    result = []
-    for row in rows:
-        if not isinstance(row, dict) or set(row) != {"package", "name"}:
-            raise ValueError("each target must name exactly its package and name")
-        for value in row.values():
-            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", value):
-                raise ValueError(f"invalid package/target identity: {value!r}")
-        result.append((row["package"], row["name"]))
-    return result
+    config = ci_change_owned.read_config(path)
+    return [
+        (identity.package, identity.target)
+        for identity in config.standing_targets
+    ]
 
 
 def packages(metadata: dict) -> list[dict]:
