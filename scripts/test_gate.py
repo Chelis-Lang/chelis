@@ -618,6 +618,14 @@ GATE_WORKER_RUN_COMMANDS = {
 NON_GATE_JOBS = {
     # CI-owned Python unit coverage; it runs no canonical gate stage.
     "script-unit",
+    # chelis#1824 derives and executes package-qualified integration targets
+    # from the pull request or main-push change set. These jobs own CI
+    # selection and receipts; they are not developer gate stages.
+    "integration-plan",
+    "change-owned-shard",
+    "change-owned-report",
+    "package-expansion-shard",
+    "package-expansion-summary",
     # Stable branch-protection aggregates, not command-producing workers.
     "lint-and-unit",
     "integration",
@@ -2145,7 +2153,7 @@ class CiParityTests(unittest.TestCase):
             oracle_block.index(oracle_command),
         )
         self.assertIn(
-            "needs: [changes, ci-fast]",
+            "needs: [changes, ci-fast, change-owned-report]",
             workspace_block,
         )
         self.assertNotIn("    needs:", oracle_block)
@@ -2154,7 +2162,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
-            "needs: [changes, ci-fast]",
+            "needs: [changes, ci-fast, change-owned-report]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -2327,7 +2335,10 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("--support-only", worker)
         self.assertNotIn("ProfilePartitionTests", worker)
         _assert_support_slice_contract(_ci_job_block("integration-support"))
-        self.assertIn("needs: [changes, ci-fast]", _ci_job_block("integration"))
+        self.assertIn(
+            "needs: [changes, ci-fast, change-owned-report]",
+            _ci_job_block("integration"),
+        )
 
     def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
         block = _ci_job_block("integration-support")
@@ -2555,6 +2566,8 @@ class CiParityTests(unittest.TestCase):
             _ci_job_block("ci-fast")
         )
         read_only_jobs = (
+            "change-owned-shard",
+            "package-expansion-shard",
             "dtype-phase3-oracle",
             "faithful-observation-phase2-oracle",
             "compiled-value-ownership-phase0-oracle",
@@ -2607,6 +2620,10 @@ class CiParityTests(unittest.TestCase):
         )
         execution_steps = {
             "ci-fast": "Gate (units and reviewed integrations)",
+            "change-owned-shard": "Execute the exact change-owned shard",
+            "package-expansion-shard": (
+                "Execute the informational package-expansion shard"
+            ),
             "dtype-phase3-oracle": "Dtype Phase 0-3 oracle",
             "faithful-observation-phase2-oracle": (
                 "Faithful observation Phase 2 oracle"
@@ -3883,19 +3900,30 @@ class DocsOnlySkipTests(unittest.TestCase):
         "lint-rust",
         "script-unit",
         "ci-fast",
-                            "backend-sanitizers",
+        "integration-plan",
+        "backend-sanitizers",
         "smt-build",
         "smt-build-glibc231",
+    }
+    # These workers inherit the docs-only disposition through a required
+    # upstream job rather than reading `docs_only` directly.
+    DEPENDENCY_GATED_JOBS = {
+        "change-owned-shard",
+        "package-expansion-shard",
     }
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {
         "lint-and-unit",
-            "integration",
+        "change-owned-report",
+        "integration",
     }
     # Best-effort reporting aggregates run after failed dependencies but may
     # skip on cancellation because they are not required status contexts.
     HEAVY_REPORT_JOBS = {"test-telemetry"}
+    # The package-expansion summary must run after cancelled/missing workers
+    # so those states become telemetry, but it never feeds a required status.
+    ALWAYS_REPORT_JOBS = {"package-expansion-summary"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -3965,12 +3993,32 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
 
+    def test_change_owned_workers_inherit_the_docs_disposition(self):
+        attrs = _parse_job_attrs()
+        required = attrs["change-owned-shard"]
+        self.assertEqual(required.get("needs"), "[changes, integration-plan]")
+        self.assertIn(
+            "needs.integration-plan.result == 'success'",
+            required.get("if", ""),
+        )
+        expansion = attrs["package-expansion-shard"]
+        self.assertEqual(
+            expansion.get("needs"),
+            "[changes, integration-plan, change-owned-report]",
+        )
+        self.assertIn(
+            "needs.change-owned-report.result == 'success'",
+            expansion.get("if", ""),
+        )
+        for job in self.DEPENDENCY_GATED_JOBS:
+            self.assertIn("!cancelled()", attrs[job].get("if", ""))
+
     def test_integration_aggregator_is_fail_closed_and_docs_gated(self):
         attrs = _parse_job_attrs()
         integration = attrs["integration"]
         self.assertEqual(
             integration.get("needs"),
-            "[changes, ci-fast]",
+            "[changes, ci-fast, change-owned-report]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)
@@ -3979,6 +4027,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("integration")
         self.assertIn("needs.ci-fast.result", block)
+        self.assertIn("needs.change-owned-report.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_generalize_sweep_aggregator_is_fail_closed_nightly(self):
@@ -4010,6 +4059,21 @@ class DocsOnlySkipTests(unittest.TestCase):
                 cond = attrs[job].get("if", "")
                 self.assertIn("!cancelled()", cond)
                 self.assertNotIn("always()", cond)
+
+    def test_informational_expansion_summary_records_cancelled_workers(self):
+        attrs = _parse_job_attrs()
+        summary = attrs["package-expansion-summary"]
+        self.assertEqual(
+            summary.get("needs"),
+            (
+                "[changes, integration-plan, change-owned-report, "
+                "package-expansion-shard]"
+            ),
+        )
+        cond = summary.get("if", "")
+        self.assertIn("always()", cond)
+        self.assertNotIn("!cancelled()", cond)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
 
     def test_telemetry_skips_unless_every_junit_producer_succeeded(self):
         _assert_telemetry_skips_without_every_junit(_parse_job_attrs())
@@ -4076,8 +4140,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         attrs = _parse_job_attrs()
         classified = (
             self.HEAVY_GATED_JOBS
+            | self.DEPENDENCY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
             | self.HEAVY_REPORT_JOBS
+            | self.ALWAYS_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
             | self.ALWAYS_RUN_JOBS
         )

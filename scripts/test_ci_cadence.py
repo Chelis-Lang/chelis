@@ -136,7 +136,10 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("--support-only", str(pr))
     test.assertNotIn("ProfilePartitionTests", str(pr))
     test.assertIn("ProfilePartitionTests", str(full))
-    test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
+    test.assertEqual(
+        pr["jobs"]["integration"]["needs"],
+        ["changes", "ci-fast", "change-owned-report"],
+    )
     # chelis#1742: the runtime-extent oracle runs in this workflow and
     # nowhere else, so the nightly is the only place its receipts are
     # enforced. Since the B2b-3 flip that is ONE command, `--phase final`,

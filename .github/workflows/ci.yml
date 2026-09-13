@@ -618,19 +618,337 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  integration-plan:
+    name: Plan Changed Integration Tests
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Derive the change-owned and package-expansion plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py plan
+          --event-name "$EVENT_NAME"
+          --pr-head "$PR_HEAD"
+          --before "$BEFORE"
+          --after "$AFTER"
+          --output target/integration-change/plan.json
+
+      - name: Upload integration change plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  change-owned-shard:
+    name: Change-Owned Integration Tests (bucket ${{ matrix.shard }})
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, integration-plan]
+    if: ${{ !cancelled() && needs.integration-plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Restore cargo registry and build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Execute the exact change-owned shard
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py run-shard
+          --plan target/integration-change/plan.json
+          --lane change-owned
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/change-owned-${{ matrix.shard }}
+
+      - name: Upload change-owned shard receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-change-owned-${{ matrix.shard }}
+          path: target/integration-change/change-owned-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 14
+
+  change-owned-report:
+    name: Change-Owned Integration Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, integration-plan, change-owned-shard]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Require the planner and every change-owned shard
+        run: >-
+          python3 scripts/ci_require_success.py
+          integration-plan=${{ needs.integration-plan.result }}
+          change-owned-shard=${{ needs.change-owned-shard.result }}
+
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Download change-owned shard receipts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: integration-change-owned-*
+          path: target/integration-change/receipts/change-owned
+
+      - name: Validate required change-owned execution
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py report
+          --plan target/integration-change/plan.json
+          --lane change-owned
+          --receipts-root target/integration-change/receipts/change-owned
+          --output target/integration-change/change-owned-report
+          --required
+
+      - name: Publish required change-owned summary
+        if: always()
+        run: |
+          if [ -f target/integration-change/change-owned-report/summary.md ]; then
+            cat target/integration-change/change-owned-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload required change-owned report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-change-owned-report
+          path: target/integration-change/change-owned-report
+          if-no-files-found: warn
+          retention-days: 14
+
 
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, ci-fast]
+    needs: [changes, ci-fast, change-owned-report]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py ci-fast=${{ needs.ci-fast.result }}
+        run: >-
+          python3 scripts/ci_require_success.py
+          ci-fast=${{ needs.ci-fast.result }}
+          change-owned-report=${{ needs.change-owned-report.result }}
+
+  package-expansion-shard:
+    name: Informational Package Expansion (bucket ${{ matrix.shard }})
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, integration-plan, change-owned-report]
+    if: ${{ !cancelled() && needs.change-owned-report.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Restore cargo registry and build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Execute the informational package-expansion shard
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py run-shard
+          --plan target/integration-change/plan.json
+          --lane package-expansion
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/package-expansion-${{ matrix.shard }}
+
+      - name: Upload package-expansion shard receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-package-expansion-${{ matrix.shard }}
+          path: target/integration-change/package-expansion-${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-expansion-summary:
+    name: Informational Package Expansion Summary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, integration-plan, change-owned-report, package-expansion-shard]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Download integration change plan
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Download available package-expansion receipts
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: integration-package-expansion-*
+          path: target/integration-change/receipts/package-expansion
+
+      - name: Summarize the informational package expansion
+        env:
+          PLANNER_RESULT: ${{ needs.integration-plan.result }}
+          REQUIRED_RESULT: ${{ needs.change-owned-report.result }}
+          EXPANSION_RESULT: ${{ needs.package-expansion-shard.result }}
+        run: |
+          mkdir -p target/integration-change/package-expansion-summary
+          if [ -f target/integration-change/plan.json ]; then
+            .venv/bin/python scripts/ci_change_owned.py report \
+              --plan target/integration-change/plan.json \
+              --lane package-expansion \
+              --receipts-root target/integration-change/receipts/package-expansion \
+              --output target/integration-change/package-expansion-summary
+          else
+            {
+              echo "# Informational package expansion"
+              echo
+              echo "Planner: ${PLANNER_RESULT}"
+              echo "Required change-owned report: ${REQUIRED_RESULT}"
+              echo "Expansion workers: ${EXPANSION_RESULT}"
+              echo
+              echo "No plan artifact was available, so package expansion did not run."
+            } > target/integration-change/package-expansion-summary/summary.md
+          fi
+
+      - name: Publish informational package-expansion summary
+        if: always()
+        run: |
+          if [ -f target/integration-change/package-expansion-summary/summary.md ]; then
+            cat target/integration-change/package-expansion-summary/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload informational package-expansion summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-package-expansion-summary
+          path: target/integration-change/package-expansion-summary
+          if-no-files-found: error
+          retention-days: 14
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
