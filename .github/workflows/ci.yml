@@ -1141,6 +1141,22 @@ jobs:
       - name: Install uv for focused documentation contracts
         uses: astral-sh/setup-uv@v8.1.0
 
+      - name: Create uv-managed venv for the Phase 3 report
+        run: uv venv --python 3.11
+
+      - name: Report Phase 3 required-test changes
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --output target/phase3-test-changes.json
+
+      - name: Publish Phase 3 required-test changes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase3-test-changes
+          path: target/phase3-test-changes.json
+          if-no-files-found: error
+
       - name: Validate CI topology documentation
         run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
 

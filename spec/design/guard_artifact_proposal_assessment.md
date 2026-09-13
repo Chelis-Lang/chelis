@@ -274,6 +274,15 @@ provided no value; it is that a derived changed-test report can provide the
 same cue without allowing a stale hash to certify a stale definition. The
 replacement must make that review step unavoidable and durable.
 
+The first trial runs `scripts/phase3_test_change_report.py` in the required
+Docs job and publishes its committed merge-base comparison as an artifact.
+It reads both literal required-test inventories, so removing a requirement
+cannot hide the old identity from the report. Changed definitions and
+membership are named with source locations and the guard doctrine. Missing
+comparison evidence or candidate required definitions fails closed. This is
+the review cue beside the existing digests; it does not retire them or replace
+the comparator, receipt, example-derivation, or mutation obligations above.
+
 ### Phase 4B atom and region digests: replace only with an owning report
 
 Retire `FROZEN_ATOM_DIGESTS` and `FROZEN_REGION_DIGESTS` only if the replacement:
