@@ -550,9 +550,9 @@
         "argument_precision_respects_sequential_and_top_level_binding_scopes",
         "bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation",
         "every_family_policy_route_rejects_an_inadmissible_instantiation",
-        "the_spellings_the_argument_reader_does_not_resolve_remain_unreached",
+        "every_family_route_checks_concrete_helper_instantiations",
         "restricted_body_precision_follows_lexical_bindings",
-        "every_family_route_checks_concrete_helper_instantiations"
+        "the_spellings_the_argument_reader_does_not_resolve_remain_unreached"
       ],
       "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own. chelis#1805 adds the listed precision-policy receipts, signature-bound controls, lexical-scope and bool-arithmetic pairs, full family-instantiation matrix, and measured residual locks. All are checker verdicts with exact named test receipts."
     }
