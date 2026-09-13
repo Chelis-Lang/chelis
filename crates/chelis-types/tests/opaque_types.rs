@@ -797,11 +797,11 @@ fn macro_expansion_attributes_to_call_site_module() {
     // Macro expansion is in-place: the expanded `record` node lands
     // inside the CALLER's module subtree and is checked under the
     // caller's module key (survey section 3, fail-closed). The macro
-    // here is visible to both modules (top-level defmacro); the
-    // defined-in-the-defining-module variant is exercised end-to-end
-    // by the reef-package fixture in
-    // crates/chelis-cli/tests/opaque_check.rs, because the lexical
-    // expander scopes a module's macros to that module.
+    // here is visible to both modules (top-level defmacro). The Reef fixture
+    // in crates/chelis-cli/tests/opaque_check.rs instead pins private-import
+    // rejection before expansion. End-to-end expansion of a macro exported
+    // from its defining Reef module is not covered while Reef macro exports
+    // remain unsupported; the lexical expander scopes module-local macros.
     let program = r#"(defmacro {} forge_prob (params {} x) (record {} Probability (kv {} value (var {} x))))
 (module {}
   stats.prob
