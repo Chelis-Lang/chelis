@@ -7592,12 +7592,14 @@ fn lower_host_expr_kind(
                          (chelis#744, chelis#730 census row 13)"
                     ),
                 );
-                crate::lower::raise_fatal_lowering_diagnostic(crate::lower::LowerDiagnostic {
-                    message: unsupported.to_string(),
-                    span: None,
-                    span_id: expr.span_id().map(ToOwned::to_owned),
-                    fatal: true,
-                });
+                crate::lower::raise_fatal_lowering_diagnostic(
+                    crate::lower::LowerDiagnostic::from_unsupported(
+                        unsupported,
+                        None,
+                        expr.span_id().map(ToOwned::to_owned),
+                    )
+                    .fatal(),
+                );
             }
             let operand = children(list)
                 .first()
@@ -7671,12 +7673,12 @@ fn lower_host_expr_kind(
                          handler silently (chelis#730 census rows 9/20)"
                     ),
                 );
-                crate::lower::LowerDiagnostic {
-                    message: unsupported.to_string(),
-                    span: None,
-                    span_id: expr.span_id().map(ToOwned::to_owned),
-                    fatal: true,
-                }
+                crate::lower::LowerDiagnostic::from_unsupported(
+                    unsupported,
+                    None,
+                    expr.span_id().map(ToOwned::to_owned),
+                )
+                .fatal()
             })?;
             let body = kids.get(1).or_else(|| kids.first()).ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `handle-effect` node has no body")

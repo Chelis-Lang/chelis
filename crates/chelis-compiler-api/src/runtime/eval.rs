@@ -3977,6 +3977,361 @@ fn stage_kernel_argument(
 }
 
 #[cfg(test)]
+mod legacy_capture_order_tests {
+    use super::*;
+    use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+
+    const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
+    const LIVE: &str = "add(x, uniform_like(weights, 0.0f32, 1.0f32))";
+
+    fn checked_library(source: &str) -> crate::pipeline::CheckedLibrary {
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, source, None)
+                .expect("source fixture parses and expands");
+        crate::pipeline::check_prepared_library(prepared)
+            .expect("real library fixture passes type, effect and linearity checks")
+    }
+
+    fn library(initializer: &str, params: &str, body: &str) -> crate::pipeline::CheckedLibrary {
+        let source = format!(
+            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
+             def sample({params}) -> tensor[2, f32] = {body}\n\
+             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        );
+        checked_library(&source)
+    }
+
+    fn context<'a>(
+        library: &'a crate::pipeline::CheckedLibrary,
+        tensors: &'a UnordMap<String, RuntimeTensorValue>,
+    ) -> EvalContext<'a> {
+        let checked = library.program();
+        let mut definitions = UnordMap::new();
+        let mut eager = Vec::new();
+        // The production library registration path omits eager initialization.
+        register_top_level_defs(
+            checked.exprs(),
+            &BTreeMap::new(),
+            None,
+            &mut definitions,
+            &mut eager,
+            false,
+        );
+        assert!(eager.is_empty());
+        let mut signatures = UnordMap::new();
+        register_declared_signatures(checked.exprs(), &mut signatures);
+        EvalContext {
+            bindings: UnordMap::new(),
+            binding_types: UnordMap::new(),
+            precision_bindings: UnordMap::new(),
+            named_axis_route_cache: UnordMap::new(),
+            named_axis_route_visiting: UnordSet::new(),
+            top_level_defs: definitions,
+            declared_signatures: signatures,
+            type_env: checked
+                .type_env()
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
+            adt_fields: collect_adt_ctor_fields(checked.exprs()),
+            adt_registry: checked.adt_registry().clone(),
+            tensor_bindings: tensors,
+            session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
+            def_kernels: UnordMap::new(),
+            transcript: Vec::new(),
+            transcript_capture: None,
+            resolving_top_levels: Vec::new(),
+            random_seed: Some(42),
+            random_counter: 5,
+            execution_exclusion: None,
+            cancel: None,
+        }
+    }
+
+    fn zeros() -> RuntimeValue {
+        RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+            vec![2],
+            chelis_types::dtype_semantics::finalize_tensor(
+                "test",
+                Prim::F32,
+                chelis_types::dtype_semantics::RawTensor::Float(vec![0.0, 0.0]),
+            )
+            .unwrap(),
+        )))
+    }
+
+    fn bits(value: &RuntimeValue) -> serde_json::Value {
+        serde_json::to_value(runtime_value_to_schema(value).unwrap()).unwrap()
+    }
+
+    fn expected_draw(seed: u64, counter: u64) -> RuntimeValue {
+        let RuntimeValue::Tensor(template) = zeros() else {
+            unreachable!()
+        };
+        RuntimeValue::Tensor(uniform_like_value(
+            &template,
+            0.0,
+            1.0,
+            seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        ))
+    }
+
+    fn admitted_call(ctx: &mut EvalContext<'_>, name: &str) -> Result<RuntimeValue, String> {
+        let closure = ctx.resolve_top_level(name)?;
+        let RuntimeValue::Closure {
+            def_name, params, ..
+        } = &closure
+        else {
+            panic!("checked named helper is a closure")
+        };
+        assert_eq!(def_name.as_deref(), Some(name));
+        assert_eq!(params.len(), 1);
+        let before = (ctx.random_counter, ctx.transcript.clone());
+        let kernel = ctx
+            .def_kernel(name)?
+            .expect("baseline admits real helper kernel");
+        let DefEvaluationKernel::Planned(product) = kernel.as_ref() else {
+            panic!("ordinary admission must retain the profile wrapper")
+        };
+        assert_eq!(
+            product.profile(),
+            EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
+        );
+        assert!(kernel.plan().is_none() && kernel.staged_plan().is_none());
+        let graph = kernel.kernel_for_inspection();
+        assert!(graph.staged.is_none());
+        let draws: Vec<_> = graph
+            .dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::UniformLike { .. }))
+            .collect();
+        assert_eq!(draws.len(), 1);
+        assert_eq!(
+            draws[0].inputs.len(),
+            1,
+            "legacy baked-key UniformLike, not activated path"
+        );
+        assert_eq!(
+            (ctx.random_counter, ctx.transcript.clone()),
+            before,
+            "lowering does not initialize captures"
+        );
+        // This named closure dispatches through def_kernel then apply_def_kernel.
+        ctx.apply_resolved_callable(closure, vec![zeros()])
+    }
+
+    #[test]
+    fn legacy_capture_order_preinitialized_admission_control() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        assert!(!ctx.bindings.contains_key("weights"));
+        let initialized = ctx.resolve_top_level("weights").unwrap();
+        assert_eq!(bits(&initialized), bits(&expected_draw(17, 0)));
+        assert_eq!(ctx.random_counter, 5);
+        let actual = admitted_call(&mut ctx, "sample").unwrap();
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
+        assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
+        assert_eq!(ctx.random_counter, 7);
+        assert_eq!(ctx.transcript, ["initialize"]);
+    }
+
+    #[test]
+    fn legacy_capture_order_valid_lazy_handler_does_not_advance_parent() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        assert!(!ctx.bindings.contains_key("weights"));
+        let actual = admitted_call(&mut ctx, "sample").unwrap();
+        let after_helper = ctx.random_counter;
+        let initialized = ctx
+            .bindings
+            .get("weights")
+            .expect("capture initialized lazily");
+        assert_eq!(bits(initialized), bits(&expected_draw(17, 0)));
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(
+            (
+                bits(&actual),
+                bits(&next),
+                after_helper,
+                ctx.random_counter,
+                &ctx.transcript
+            ),
+            (
+                bits(&expected_draw(42, 5)),
+                bits(&expected_draw(42, 6)),
+                6,
+                7,
+                &vec!["initialize".to_owned()]
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_capture_order_initializer_failure_retains_only_entered_prefix() {
+        let initializer =
+            format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
+        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let error = admitted_call(&mut ctx, "sample").unwrap_err();
+        let after_failure = ctx.random_counter;
+        assert!(!ctx.bindings.contains_key("weights"));
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(
+            error,
+            "numeric trap: division by zero in floor_div at int32"
+        );
+        assert_eq!(after_failure, 5);
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_eq!(ctx.transcript, ["initialize"]);
+    }
+
+    #[test]
+    fn legacy_capture_order_dead_and_formal_shadow_do_not_initialize_library_value() {
+        for (params, body) in [
+            (
+                "x: tensor[2, f32]",
+                "if true then uniform_like(x, 0.0f32, 1.0f32) else uniform_like(weights, 0.0f32, 1.0f32)",
+            ),
+            (
+                "weights: tensor[2, f32]",
+                "uniform_like(weights, 0.0f32, 1.0f32)",
+            ),
+        ] {
+            let library = library(DRAW, params, body);
+            let tensors = UnordMap::new();
+            let mut ctx = context(&library, &tensors);
+            let actual = admitted_call(&mut ctx, "sample").unwrap();
+            let next = admitted_call(&mut ctx, "next_draw").unwrap();
+            assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
+            assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
+            assert_eq!(ctx.random_counter, 7);
+            assert!(ctx.transcript.is_empty() && !ctx.bindings.contains_key("weights"));
+        }
+    }
+
+    #[test]
+    fn legacy_capture_order_nullary_tensor_observation_boundary() {
+        let source = format!(
+            "def weights() -> tensor[2, f32] = {{ _ = print(\"initialize\")\n {DRAW} }}\n\
+             def sample(x: tensor[2, f32]) -> tensor[2, f32] = {LIVE}\n"
+        );
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
+                .unwrap();
+        let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
+        let crate::pipeline::LibraryRejection::Type { report } = error else {
+            panic!("a nullary callable template must fail type checking");
+        };
+        assert!(report.errors.iter().any(|error| {
+            matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::TypeMismatch
+            ) && error.message
+                == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
+        }));
+        let declaration = source.split("def sample").next().unwrap();
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, declaration, None)
+                .unwrap();
+        let library = crate::pipeline::check_prepared_library(prepared).unwrap();
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let closure = ctx.resolve_top_level("weights").unwrap();
+        assert!(matches!(closure, RuntimeValue::Closure { .. }));
+        let error = stage_kernel_argument("sample", "weights", &closure, Prim::F32).unwrap_err();
+        assert!(error.contains("expects a tensor or scalar argument"));
+        assert_eq!(ctx.random_counter, 5);
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn legacy_capture_order_transform_failure_does_not_charge_unentered_draw() {
+        let source = format!(
+            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n _ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32]) }}\n\
+             def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, uniform_like(weights, 0.0f32, 1.0f32)), 0)\n\
+             def derivative() = grad(loss)\n\
+             def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        );
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
+                .unwrap();
+        let library = crate::pipeline::check_prepared_library(prepared)
+            .expect("transform fixture passes real type, effect and linearity admission");
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let factory = ctx.resolve_top_level("derivative").unwrap();
+        let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        assert!(matches!(callable, RuntimeValue::Transform { .. }));
+        assert_eq!(ctx.random_counter, 5);
+        assert!(ctx.transcript.is_empty() && !ctx.bindings.contains_key("weights"));
+        let error = ctx
+            .apply_resolved_callable(callable, vec![zeros()])
+            .unwrap_err();
+        let after_failure = ctx.random_counter;
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert!(!ctx.bindings.contains_key("weights"));
+        assert_eq!(after_failure, 5, "callee draw was not entered");
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_eq!(
+            error,
+            "numeric trap: division by zero in floor_div at int32"
+        );
+    }
+
+    #[test]
+    fn transform_preparation_retains_vmap_capture_rank_refusal() {
+        let library = checked_library(
+            "weights = { _ = print(\"initialize\")\n scalar_to_tensor(3.0f32) }\n\
+             def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
+             def mapped() = vmap(weighted)\n",
+        );
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let factory = ctx.resolve_top_level("mapped").unwrap();
+        let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        let error = ctx
+            .apply_resolved_callable(callable, vec![zeros()])
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "host runtime: `vmap(...)` over a def capturing top-level binding `weights` is unsupported: the transform types the capture as rank 1 (batched) but the binding is rank 0. vmap-with-captures must broadcast the capture across the batch axis, not batch it (tracked residual, chelis#377)."
+        );
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!(ctx.random_counter, 5);
+    }
+
+    #[test]
+    fn legacy_capture_order_unhandled_library_initializer_is_not_admitted() {
+        for source in [
+            format!("weights = {{ _ = print(\"initialize\")\n {DRAW} }}"),
+            "def draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\nweights = draw(to_tensor([0.0f32, 0.0f32]))".to_owned(),
+            format!("def draw() -> tensor[2, f32] = {DRAW}\nweights = draw()"),
+            format!("weights = with seed(numel({DRAW})) {{ {DRAW} }}"),
+        ] {
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
+                .unwrap();
+        let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
+        let crate::pipeline::LibraryRejection::Effects { errors } = error else {
+            panic!("an unhandled Random initializer must fail effect checking");
+        };
+        assert!(errors.iter().any(|error| {
+            error.kind == chelis_effects::EffectErrorKind::UnhandledEffect
+                && error.message.starts_with("Function `weights` has unhandled effect `Random`")
+        }));
+        }
+    }
+}
+
+#[cfg(test)]
 mod list_dir_conversion_tests {
     use super::list_dir_names_to_strings;
     use std::ffi::OsString;

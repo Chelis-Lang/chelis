@@ -887,6 +887,20 @@ driver, or an eval test that emits a forged producer-authored receipt fail
 before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
 evidence; they are not trusted as evidence of their own free-form detail.
 
+Chelis#1870 trials structured unsupported identity beside this frozen
+comparison rather than weakening it. The rejected-cell exact comparator and
+its mutations remain, including the Phase 3 definition digest. The actual
+nonliteral-window lowering witness additionally compares C, HIP, and Metal CLI
+stderr byte-for-byte because all three entry paths reject before
+target-specific code generation. Wording evidence shared by the two
+chelis#1918 softmax sites is one generated reviewed snapshot from a canonical
+reviewed row, owned by `scripts/regen_all.py --tier 0`; it is not
+production-derived because that Python-only tier cannot execute the Rust
+renderer, and source parsing or re-rendering would duplicate the prose
+implementation. The in-process typed identity is the prospective semantic
+blocker. Unimplemented identities still lack an exact capability-table key, so
+this trial does not authorize retiring the old pins.
+
 PR #1204 adds `parity_recursive_generic` to this frozen inventory. Its independent evidence is the 22-case `recursive_generic_monomorphization` suite. Fresh-context red-team round 3 accepted its implementation and boundary controls. The corpus guard adds only `recursive_generic.ch`.
 
 PR #1406 adds `parity_kinded_nominal_dimensions` and

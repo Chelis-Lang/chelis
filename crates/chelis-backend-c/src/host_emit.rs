@@ -161,7 +161,8 @@ impl CExpressionBuiltin {
                         "the checked builtin vocabulary and C expression vocabulary disagree; \
                          no fallback expression is permitted"
                     ),
-                ));
+                )
+                .with_supported_alternative("run this program with `chelis eval`"));
             }
         })
     }
@@ -9265,8 +9266,8 @@ mod expression_dispatch_tests {
         let error = CExpressionBuiltin::decode("future_unimplemented_builtin")
             .expect_err("an open-set name has no expression identity by default");
         assert_eq!(
-            error.what,
-            UnsupportedKind::Builtin("future_unimplemented_builtin".into())
+            error.what.as_ref(),
+            &UnsupportedKind::Builtin("future_unimplemented_builtin".into())
         );
     }
 

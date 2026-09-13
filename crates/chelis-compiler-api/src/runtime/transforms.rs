@@ -430,10 +430,7 @@ impl<'a> EvalContext<'a> {
         let path_sensitive_random = dag.nodes().iter().any(|node| {
             matches!(node.op, chelis_ir::dag::RiscOp::UniformLike { .. }) && node.inputs.len() == 2
         });
-        if execution_plan.is_none() && !path_sensitive_random {
-            // The ordinary baked-seed lane computes progression statically.
-            self.random_counter = next_random_counter;
-        }
+        let baked_random_progress = execution_plan.is_none() && !path_sensitive_random;
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -443,6 +440,12 @@ impl<'a> EvalContext<'a> {
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
         let mut empty_packed = None;
         if roots.is_empty() {
+            // Preserve the historical empty-root early-return behavior. In
+            // particular, [] must not turn an empty legacy grad into ALL-node
+            // input preparation. A source-owned plan still executes below.
+            if baked_random_progress {
+                self.random_counter = next_random_counter;
+            }
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
                 && arg_repacks.iter().all(
@@ -499,25 +502,58 @@ impl<'a> EvalContext<'a> {
         // inside another def's body (`def fv(xs) = xs |> vmap(dot_w)`), the
         // `captured_env` is that body's local scope (`xs`), so a TOP-LEVEL
         // tensor binding the inner fn captures (`dot_w` referencing top-level
-        // `w`) is in neither `captured_env` nor `tensor_bindings`. Walk the
-        // lowered DAG's still-unsatisfied `Load` names and resolve each as a
-        // top-level binding, so the captured `w` Load is served. This reuses
-        // the same `resolve_top_level` path a plain reference would take.
-        for node in dag.nodes() {
-            let chelis_ir::dag::RiscOp::Load { name } = &node.op else {
-                continue;
-            };
-            let name = name.as_str();
-            if placeholder_tensors.contains_key(name)
-                || tensor_bindings.contains_key(name)
-                || captured_tensors.contains_key(name)
+        // `w`) is in neither `captured_env` nor `tensor_bindings`. Resolve only
+        // inputs requested by the same selection authority as execution.
+        // A provider error is an entered initializer's error, not an evaluator
+        // missing-input diagnostic; preserve it without the legacy prefix.
+        let preparation_context = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let mut provider_failed = false;
+        let prepare_input = |name: &str| {
+            if let Some(value) = placeholder_tensors
+                .get(name)
+                .cloned()
+                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                .or_else(|| captured_tensors.get(name).cloned())
             {
-                continue;
+                return Ok(Some(value));
             }
-            if let Ok(RuntimeValue::Tensor(tensor)) = self.resolve_top_level(name) {
-                captured_tensors.insert(name.to_string(), tensor.value.clone());
+            // Unknown or ambiguous names may be optional shape declarers.
+            // Do not confuse this absence with an error *inside* a known
+            // initializer, even if that error also names an unknown binding.
+            if !self.bindings.contains_key(name) && self.lookup_top_level_def(name).is_none() {
+                return Ok(None);
             }
+            match self.resolve_top_level(name) {
+                Ok(RuntimeValue::Tensor(tensor)) => {
+                    captured_tensors.insert(name.to_string(), tensor.value.clone());
+                    Ok(Some(tensor.value))
+                }
+                Ok(_) => Ok(None),
+                Err(error) => {
+                    provider_failed = true;
+                    Err(error)
+                }
+            }
+        };
+        let prepared_inputs = if let Some(plan) = &execution_plan {
+            chelis_ir::eval::prepare_tensor_plan_inputs(plan, &preparation_context, prepare_input)
+        } else {
+            chelis_ir::eval::prepare_tensor_roots_inputs(&dag, &roots, prepare_input)
         }
+        .map_err(|error| {
+            if provider_failed || execution_plan.is_some() {
+                error
+            } else {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                format!("host runtime `{kind_label}` evaluation failed: {error}")
+            }
+        })?;
         // chelis#377: a served capture's value must match the rank its `Load`
         // node was typed with. The vmap lane prepends the batch axis to a
         // captured binding's `Load` (typing top-level `w` as `[batch, ..]`)
@@ -552,13 +588,13 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         }
-        let load = |name: &str| {
-            placeholder_tensors
-                .get(name)
-                .cloned()
-                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
-                .or_else(|| captured_tensors.get(name).cloned())
-        };
+        // Preparation and capture validation can fail before the callee is
+        // entered. Publish the baked lane's existing static progression only
+        // once those fallible steps have succeeded; its sampler is unchanged.
+        if baked_random_progress {
+            self.random_counter = next_random_counter;
+        }
+        let load = |name: &str| prepared_inputs.get(name).cloned();
         let result = if let Some(plan) = &execution_plan {
             let mut context = RandomExecutionContext::new(RandomLoweringState {
                 seed: self.random_seed,

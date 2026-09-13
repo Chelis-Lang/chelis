@@ -151,12 +151,7 @@ fn finish_c_execution_lowering(
             })
             .transpose()
             .map_err(|message| {
-                CoreLowerError::Lower(LowerDiagnostic {
-                    message,
-                    span: None,
-                    span_id: None,
-                    fatal: true,
-                })
+                CoreLowerError::Lower(LowerDiagnostic::new(message, None, None).fatal())
             })?;
         Ok((lowered, ordinary, None))
     }
@@ -180,12 +175,14 @@ pub fn lower_checked_with_evaluation_context(
     if evaluation.library_for_inspection().library_proof_id()
         != checked.library().program().library_proof_id()
     {
-        return Err(CoreLowerError::Lower(LowerDiagnostic {
-            message: "the evaluation library does not match its checked context".into(),
-            span: None,
-            span_id: None,
-            fatal: true,
-        }));
+        return Err(CoreLowerError::Lower(
+            LowerDiagnostic::new(
+                "the evaluation library does not match its checked context",
+                None,
+                None,
+            )
+            .fatal(),
+        ));
     }
     chelis_ir::lower::try_lower_program_with_evaluation_context(
         evaluation,
@@ -263,12 +260,14 @@ pub fn lower_checked_with_context(
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     if library.library_proof_id() != checked.library().program().library_proof_id() {
-        return Err(CoreLowerError::Lower(LowerDiagnostic {
-            message: "the lowered library does not match the context-checked program".to_string(),
-            span: None,
-            span_id: None,
-            fatal: true,
-        }));
+        return Err(CoreLowerError::Lower(
+            LowerDiagnostic::new(
+                "the lowered library does not match the context-checked program",
+                None,
+                None,
+            )
+            .fatal(),
+        ));
     }
     let mut checked = checked.into_extension();
     let lowered_map = chelis_ir::lower::top_level_lowering_map_with_context(
@@ -499,12 +498,7 @@ mod tests {
         let checked = checked_compilation(
             "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
         );
-        let diagnostic = LowerDiagnostic {
-            message: "host backend required".to_string(),
-            span: None,
-            span_id: None,
-            fatal: false,
-        };
+        let diagnostic = LowerDiagnostic::new("host backend required", None, None);
 
         let lowered =
             finish_isolated_lowering(checked, LoweringMode::AllowHostBackend, Err(diagnostic))
@@ -524,12 +518,7 @@ mod tests {
             !tensor_names.is_empty(),
             "the fixture must carry a tensor root name so the arm is not vacuous"
         );
-        let diagnostic = LowerDiagnostic {
-            message: "host backend required".to_string(),
-            span: None,
-            span_id: None,
-            fatal: false,
-        };
+        let diagnostic = LowerDiagnostic::new("host backend required", None, None);
 
         let lowered = finish_contextual_lowering(
             checked,
@@ -550,12 +539,7 @@ mod tests {
             "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
         );
         let tensor_names = checked.root_metadata().tensor_names().clone();
-        let diagnostic = LowerDiagnostic {
-            message: "host backend required".to_string(),
-            span: None,
-            span_id: None,
-            fatal: false,
-        };
+        let diagnostic = LowerDiagnostic::new("host backend required", None, None);
 
         let error = finish_contextual_lowering(
             checked,

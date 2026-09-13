@@ -308,7 +308,9 @@ impl Expander {
         if kids.len() < 2 {
             return Ok(Expr::List(list.clone(), span));
         }
-        let mut elements = list.elements.clone();
+        // Preserve the header, but do not clone the entire unvisited body
+        // before replacing it with its expansion at every nested binding.
+        let mut elements = list.elements[..2].to_vec();
         if let Expr::List(bind_list, bind_span) = &kids[0] {
             let bind_kids = children(bind_list);
             let mut scope_for_values = scope.clone();
@@ -324,13 +326,16 @@ impl Expander {
                 new_bind_children.push(value_expr);
                 i += 2;
             }
-            elements[2] = node_with_meta(
+            elements.push(node_with_meta(
                 DeepTag::Bind,
                 bind_list.elements[1].clone(),
                 new_bind_children,
                 *bind_span,
-            );
-            elements[3] = self.expand_expr(&kids[1], macros, &scope_for_values)?;
+            ));
+            elements.push(self.expand_expr(&kids[1], macros, &scope_for_values)?);
+            elements.extend(list.elements[4..].iter().cloned());
+        } else {
+            return Ok(Expr::List(list.clone(), span));
         }
         Ok(Expr::List(List { elements }, span))
     }

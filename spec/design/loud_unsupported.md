@@ -226,27 +226,30 @@ not satisfy the normative surface contract.
 pub struct Unsupported {
     /// What was encountered: an op, builtin name, dtype, tag, effect
     /// kind, or construct. Closed enum + payload, not a bare string.
-    pub what: UnsupportedKind,
+    pub what: Box<UnsupportedKind>,
     /// The context of the encounter (the op family, target lane, or
     /// call position) - the `on <context>` clause of the rendering.
     /// (Added at Phase 1 ratification: the branded message format always
     /// carried a context clause; the struct now carries it explicitly.)
-    pub context: String,
+    pub context: Box<str>,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
-    pub span: Option<SpanRef>,
-    /// Opaque typed authority plus the supported alternative. Construction
-    /// distinguishes a numbered-spec decision from tracked implementation
-    /// work and rejects empty or unregistered citations.
+    pub span: Option<Box<SpanRef>>,
+    /// Opaque typed authority. Construction distinguishes a numbered-spec
+    /// decision from tracked implementation work and rejects empty or
+    /// unregistered citations.
     pub authority: RejectionAuthority,
+    /// A supported route the caller can select, when one exists.
+    pub supported_alternative: Option<Box<str>>,
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported`. The span field is
-boxed so the `Err` variant stays small on Result-typed emission paths; this is
-a representation detail, not a contract change.
+Implemented as `chelis_types::unsupported::Unsupported`. The subject, context,
+span, and supported-alternative storage shown above are boxed so the `Err`
+variant stays small on Result-typed emission paths; these are representation
+details, not changes to their projected values.
 
 **Message format:**
 `unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
@@ -274,22 +277,40 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (updated 2026-08-01): the structured `chelis check` surface above is
-still the TARGET, not current behavior.** The `Unsupported` object now carries
-the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
+**STATUS (updated 2026-09-13): the complete structured `chelis check` and wire
+surface above is still the TARGET, not current behavior.** The `Unsupported`
+object now carries the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
 (`chelis check` never reaches lowering or codegen, so no `Unsupported` can
-arrive there), no type on the `Unsupported` path derives `Serialize`, and
-the build surface renders the branded string into a flat
-`kind: "unsupported_feature"` envelope
-(`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
-Consumers - including this plan's own rejected-cells corpus - match prose
-today. Three prerequisites, in order: [#729] Phase 4C populates capability
-Table A; Phase 4D derives `check` reporting from its target-independent
-rejections (`capability_table.md` §Derivations); then the structured payload
-must be plumbed onto `schema::Diagnostic`. Until both land, the
-`unsupported:` brand is the machine surface and tests may match it. The
-byte-for-byte per-lane corpus assertions likewise arrive with [#732]
-Phase 3; today's corpus is deliberately substring-level and says so.
+arrive there), and no type on the `Unsupported` path derives `Serialize`.
+Chelis#1870 adds a bounded in-process trial: `schema::Diagnostic` retains the
+actual typed value off-wire, `LowerDiagnostic` retains it for selected
+lowering producers, and `unsupported_identity()` projects the exact
+`unsupported:` brand/prefix, diagnostic
+kind, subject, context, stage, span association, disposition, atom or tracking
+issue, and supported alternative without parsing prose. The
+three compiler-API adapters that flatten `LowerDiagnostic` retain their prior
+public stage, diagnostic kind, and rendered message while attaching that
+off-wire sidecar. The
+`c_nonliteral_window` witness proves identical production stderr through the
+C, HIP, and Metal CLI build entry paths; it is lowering and host-process
+evidence, not device execution.
+
+That trial is not replacement coverage yet. In particular, the current
+unimplemented authority stores an issue number but has no exact capability
+Table A/B key; the issue remains nonsemantic tracking metadata. The existing
+exact rejected-cell pins, mutations, and Phase 3 definition digests therefore
+remain blocking. The two chelis#1918 softmax consumers read one generated
+reviewed snapshot from a canonical reviewed row, owned by
+`scripts/regen_all.py --tier 0`, while their structured identity is checked
+separately. This tier-0 snapshot is not production-derived: tier 0 cannot
+execute the Rust renderer, and parsing or re-rendering Rust source would create
+a second prose implementation. A production-derived snapshot therefore waits
+for a built-tier Rust generator or a production-owned declarative source that
+does not duplicate rendering. Remaining prerequisites are [#729] Phase 4C's
+capability tables, Phase 4D's target-independent checker derivation, and a
+complete serialized diagnostic payload. Until they land, branded prose remains
+a sanctioned compatibility surface beside, not instead of, the structured
+trial.
 
 **This is a normative relaxation, recorded as a decision.** Naming it
 rather than leaving a later reader to discover it: the surfacing bullet
@@ -419,12 +440,24 @@ REGISTRIES of what actually exists:
   it preserves the existing conservative liveness behavior: whenever
   triggered it verifies EVERY standing manifest row against the live tracker
   (exists, is an issue, is open), not only rows changed by the PR. The
-  proposed changed-row PR narrowing and §C7.5 scheduled
-  standing-manifest canary remain later #1870 slices; this source-derivation
-  prerequisite implements neither. Until the canary lands, standing-state
-  drift remains a named pending control rather than an implied daily
-  guarantee. Membership answers the compile-time question; the change-gated
-  job answers the truth question on each run.
+  proposed changed-row PR narrowing remains a later #1870 slice. The first
+  scheduled §C7.5 slice is now delivered by
+  `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
+  check out `main`, freshly rederive the complete standing manifest, and fail
+  closed while resolving every row through the issue API. A constant
+  workflow-level concurrency group serializes the complete validation/report
+  pair across scheduled and manual dispatches without cancelling a running
+  run. GitHub retains at most one additional pending member of that group, so
+  dispatch bursts may coalesce by replacing an older pending run with the
+  newest; the group is not a FIFO queue, and report scripts do not overlap.
+  The `always()` report job opens or updates one `nightly-failure` issue for
+  every executed non-success result (including cancelled or skipped),
+  collapses any exact-title duplicates to one issue while failing, and closes
+  every exact-title match on the next success. This is the standing
+  issue-authority canary only; it does not
+  deliver the pending exclusion/census/oracle matrix or complete §C7.5.
+  Membership answers the compile-time question; the change-gated and
+  scheduled jobs answer the truth question at their respective executions.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
@@ -450,8 +483,8 @@ REGISTRIES of what actually exists:
 **Calibrated claim:** construction proves only citation IDENTITY and
 last-verified tracker STATE - an existing atom, or a manifest member
 that was live-verified as an open ISSUE by the last successful liveness
-execution. Without the pending scheduled canary, the issue manifest means
-"open at last verification", never "open this instant".
+execution. The issue manifest means "open at last verification", never
+"open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -1617,6 +1650,29 @@ both halves:
    not anticipate, and the standing proof that the full matrix still
    completes. The workflow file is added to `NON_GATE_WORKFLOWS` in
    `scripts/test_gate.py` in the same change.
+
+   **Delivery status (2026-09-13; partial, not Phase 4 completion).** The
+   contract-named workflow and its `NON_GATE_WORKFLOWS` classification now
+   exist, but its one delivered validation job is deliberately narrower than
+   this full-matrix contract: it freshly runs
+   `scripts/validate_rejection_issue_manifest.py` over the complete derived
+   standing manifest on `main`, with issue-read permission and fail-closed
+   tracker access. A constant workflow-level concurrency group prevents
+   scheduled/manual validation and report scripts from overlapping and does
+   not cancel a running member. GitHub keeps at most one further pending
+   member, so a dispatch burst may replace an older pending run with the
+   newest rather than execute every queued dispatch; ordering is not FIFO. The
+   `always()` report job uses the repository's open/update-on-non-success and
+   close-on-success `nightly-failure` pattern; cancelled and skipped are
+   non-success, never green. It also consolidates every open exact-title
+   duplicate into one canonical issue on failure and closes every exact-title
+   match on success, so a legacy or race-created duplicate cannot survive
+   recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
+   loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
+   and the capacity-census liveness sweep remain pending. The changed-row
+   regular-PR narrowing also remains pending. Therefore this delivered slice
+   is only the standing rejection-authority drift canary; neither execution
+   half nor §C7.5 as a whole is complete.
 
 Neither half alone satisfies this section: the gated job without the
 nightly leaves unfiltered drift invisible; the nightly without the
