@@ -1133,6 +1133,228 @@ mod input_preparation_tests {
         assert_eq!(actual[&root], value());
     }
 
+    // #1956 demand-role stubs will reuse these graphs, not another selector.
+    fn shape_only_fixture(names: &[&str]) -> (Dag, NodeId) {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        for name in names {
+            dag.add_node(
+                RiscOp::Load {
+                    name: (*name).into(),
+                },
+                vec![],
+                symbolic.clone(),
+                None,
+            );
+        }
+        let one = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 1.0]),
+            vec![],
+            ty(),
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![crate::dag::RtDim::Sym("n".into())],
+            },
+            vec![one],
+            symbolic,
+            None,
+        );
+        (dag, root)
+    }
+
+    #[test]
+    fn input_preparation_shape_witness_is_required_but_its_missing_error_is_deferred() {
+        let (dag, root) = shape_only_fixture(&["shape"]);
+        for supplied in [false, true] {
+            let mut calls = Vec::new();
+            let prepared = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+                calls.push(name.to_owned());
+                Ok(supplied.then(value))
+            })
+            .unwrap();
+            assert_eq!(calls, ["shape"]);
+            let actual =
+                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned());
+            let mut old_calls = Vec::new();
+            let old = eval_tensor_roots_with_strict(&dag, &[root], |name| {
+                old_calls.push(name.to_owned());
+                supplied.then(value)
+            });
+            assert_eq!(calls, old_calls);
+            assert_eq!(actual, old);
+            if supplied {
+                assert_eq!(actual.unwrap()[&root].shape, [2]);
+            } else {
+                assert_eq!(
+                    actual.unwrap_err(),
+                    "missing required input `shape` for symbolic dimension `n`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_preparation_ambiguous_dead_sources_preserve_provider_and_error_order() {
+        let (dag, root) = shape_only_fixture(&["a", "b"]);
+        for supplied in [false, true] {
+            let mut calls = Vec::new();
+            let prepared = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+                calls.push(name.to_owned());
+                Ok(supplied.then(value))
+            })
+            .unwrap();
+            assert_eq!(calls, ["a", "b"]);
+            let old =
+                eval_tensor_roots_with_strict(&dag, &[root], |_| supplied.then(value)).unwrap_err();
+            assert_eq!(
+                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                    .unwrap_err(),
+                old
+            );
+            assert_eq!(
+                old,
+                "ambiguous dead-load sources [\"a\", \"b\"] for live symbolic dimension `n`"
+            );
+        }
+        let mut calls = Vec::new();
+        let error = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+            calls.push(name.to_owned());
+            Err("provider failed before inference".into())
+        })
+        .unwrap_err();
+        assert_eq!(calls, ["a"]);
+        assert_eq!(error, "provider failed before inference");
+    }
+
+    fn computed_shape_fixture() -> (Dag, NodeId) {
+        let (mut dag, _) = shape_only_fixture(&["shape"]);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty(), None);
+        let root = dag.add_node(
+            RiscOp::Stride {
+                strides: vec![crate::dag::RtDim::Lit(2)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        (dag, root)
+    }
+
+    #[test]
+    fn input_preparation_computed_extent_does_not_need_surplus_declarer() {
+        let (dag, root) = computed_shape_fixture();
+        assert!(crate::dag::op_declared_dim_names(&dag).contains("n"));
+        let mut calls = Vec::new();
+        let prepared = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+            calls.push(name.to_owned());
+            Ok((name == "x").then(value))
+        })
+        .unwrap();
+        assert_eq!(calls, ["shape", "x"]);
+        assert!(!prepared.contains_key("shape"));
+        let actual =
+            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                .unwrap();
+        assert_eq!(actual[&root].shape, [1]);
+        assert_eq!(
+            actual[&root].storage().scalar_at(0),
+            value().storage().scalar_at(0)
+        );
+        assert_eq!(
+            actual,
+            eval_tensor_roots_with_strict(&dag, &[root], |name| (name == "x").then(value)).unwrap()
+        );
+    }
+
+    fn internal_shape_fixture() -> (Dag, NodeId) {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load {
+                name: "shape".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), Some(2))],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty(), None);
+        let root = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![crate::dag::RtDim::Sym("n".into())],
+            },
+            vec![x],
+            ty(),
+            None,
+        );
+        (dag, root)
+    }
+
+    #[test]
+    fn input_preparation_internal_symbol_requires_exact_fallback_source() {
+        let (dag, root) = internal_shape_fixture();
+        for supplied in [false, true] {
+            let mut calls = Vec::new();
+            let prepared = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+                calls.push(name.to_owned());
+                Ok((supplied || name == "x").then(value))
+            })
+            .unwrap();
+            assert_eq!(calls, ["shape", "x"]);
+            let actual =
+                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned());
+            assert_eq!(
+                actual,
+                eval_tensor_roots_with_strict(&dag, &[root], |name| (supplied || name == "x")
+                    .then(value))
+            );
+            if supplied {
+                assert_eq!(actual.unwrap()[&root], value());
+            } else {
+                assert_eq!(
+                    actual.unwrap_err(),
+                    "missing symbolic dimension binding `n`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_preparation_optional_none_may_precede_same_named_required_load() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic.clone(),
+            None,
+        );
+        let root = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        let mut calls = Vec::new();
+        let prepared = prepare_tensor_roots_inputs(&dag, &[root], |name| {
+            calls.push(name.to_owned());
+            Ok((calls.len() == 2).then(value))
+        })
+        .unwrap();
+        assert_eq!(calls, ["x", "x"]);
+        let actual =
+            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                .unwrap();
+        assert_eq!(actual[&root], value());
+    }
+
     #[test]
     fn input_preparation_provider_errors_and_missing_live_inputs_stop_in_order() {
         let dag = loads(&["first", "broken", "later"]);
