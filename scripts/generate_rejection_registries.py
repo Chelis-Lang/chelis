@@ -57,6 +57,14 @@ class ProductionSource:
     source: str
 
 
+@dataclass(frozen=True)
+class ProductionWorkspace:
+    """Cargo-owned package and target identities for production scanning."""
+
+    package_ids: frozenset[str]
+    target_roots: tuple[str, ...]
+
+
 def discover_atoms(spec_dir: Path) -> list[str]:
     """Return every normative atom declared by the numbered specs."""
     atoms: list[str] = []
@@ -74,10 +82,10 @@ PRODUCTION_TARGET_KINDS = frozenset(
 )
 
 
-def production_target_roots_from_metadata(
+def production_workspace_from_metadata(
     root: Path, metadata: object
-) -> list[str]:
-    """Select only non-test workspace crate target roots from Cargo metadata."""
+) -> ProductionWorkspace:
+    """Select repository-local workspace packages and production target roots."""
     if not isinstance(metadata, dict):
         raise RegistryError("cargo metadata output is not an object")
     packages = metadata.get("packages")
@@ -85,11 +93,23 @@ def production_target_roots_from_metadata(
     if not isinstance(packages, list) or not isinstance(members, list):
         raise RegistryError("cargo metadata lacks packages or workspace_members")
     member_ids = set(members)
+    package_ids: set[str] = set()
     roots: set[str] = set()
     canonical_root = root.resolve()
     for package in packages:
-        if not isinstance(package, dict) or package.get("id") not in member_ids:
+        if not isinstance(package, dict):
+            raise RegistryError("cargo metadata has an invalid package")
+        package_id = package.get("id")
+        if package_id not in member_ids:
             continue
+        manifest = package.get("manifest_path")
+        if not isinstance(package_id, str) or not isinstance(manifest, str):
+            raise RegistryError("workspace package has invalid id or manifest_path")
+        try:
+            Path(manifest).resolve().relative_to(canonical_root)
+        except ValueError:
+            continue
+        package_ids.add(package_id)
         targets = package.get("targets")
         if not isinstance(targets, list):
             raise RegistryError("workspace package has invalid targets")
@@ -113,16 +133,26 @@ def production_target_roots_from_metadata(
                 raise RegistryError(
                     f"production target root resolves outside repository: {source}"
                 ) from error
-            rendered = relative.as_posix()
-            if rendered.startswith("crates/"):
-                roots.add(rendered)
+            roots.add(relative.as_posix())
+    if not package_ids:
+        raise RegistryError("cargo metadata names no repository-local workspace packages")
     if not roots:
-        raise RegistryError("cargo metadata names no production crate target roots")
-    return sorted(roots)
+        raise RegistryError("cargo metadata names no production workspace target roots")
+    return ProductionWorkspace(
+        package_ids=frozenset(package_ids),
+        target_roots=tuple(sorted(roots)),
+    )
 
 
-def discover_production_target_roots(root: Path) -> list[str]:
-    """Ask Cargo for the actual workspace library and binary roots."""
+def production_target_roots_from_metadata(
+    root: Path, metadata: object
+) -> list[str]:
+    """Compatibility wrapper for the Cargo-owned production target roots."""
+    return list(production_workspace_from_metadata(root, metadata).target_roots)
+
+
+def discover_production_workspace(root: Path) -> ProductionWorkspace:
+    """Ask Cargo for repository-local package and production-target identities."""
     completed = subprocess.run(
         ("cargo", "metadata", "--no-deps", "--format-version", "1"),
         cwd=root,
@@ -139,7 +169,12 @@ def discover_production_target_roots(root: Path) -> list[str]:
         metadata = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise RegistryError(f"cargo metadata returned invalid JSON: {error}") from error
-    return production_target_roots_from_metadata(root, metadata)
+    return production_workspace_from_metadata(root, metadata)
+
+
+def discover_production_target_roots(root: Path) -> list[str]:
+    """Ask Cargo for the actual workspace library and binary roots."""
+    return list(discover_production_workspace(root).target_roots)
 
 
 def compiler_source_closure_problems(
@@ -150,85 +185,16 @@ def compiler_source_closure_problems(
     return sorted(compiler_sources - parser_sources - excluded)
 
 
-def discover_compiler_production_sources(root: Path) -> set[str]:
-    """Ask rustc dep-info which files default production targets read.
-
-    This is the exact mechanism owned by ``check_configuration_closure.py``.
-    Cargo JSON selects only non-test artifacts for workspace packages rooted
-    below ``crates/``; their matching dep-info files supply the source set.
-    """
-    metadata_completed = subprocess.run(
-        ("cargo", "metadata", "--no-deps", "--format-version", "1"),
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if metadata_completed.returncode != 0:
-        raise RegistryError(
-            f"cargo metadata failed with exit {metadata_completed.returncode}: "
-            f"{metadata_completed.stderr.strip()}"
-        )
-    try:
-        metadata = json.loads(metadata_completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RegistryError(f"cargo metadata returned invalid JSON: {error}") from error
-    if not isinstance(metadata, dict):
-        raise RegistryError("cargo metadata output is not an object")
-    members = metadata.get("workspace_members")
-    packages = metadata.get("packages")
-    if not isinstance(members, list) or not isinstance(packages, list):
-        raise RegistryError("cargo metadata lacks packages or workspace_members")
-    member_ids = set(members)
-    package_ids: set[str] = set()
-    canonical_root = root.resolve()
-    for package in packages:
-        if not isinstance(package, dict) or package.get("id") not in member_ids:
-            continue
-        manifest = package.get("manifest_path")
-        package_id = package.get("id")
-        if not isinstance(manifest, str) or not isinstance(package_id, str):
-            raise RegistryError("workspace package has invalid id or manifest_path")
-        try:
-            relative = Path(manifest).resolve().relative_to(canonical_root)
-        except ValueError:
-            continue
-        if relative.as_posix().startswith("crates/"):
-            package_ids.add(package_id)
-
-    environment = dict(os.environ)
-    environment["PYO3_PYTHON"] = sys.executable
-    completed = subprocess.run(
-        (
-            "cargo",
-            "check",
-            "--workspace",
-            "--lib",
-            "--bins",
-            "--message-format=json",
-        ),
-        cwd=root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise RegistryError(
-            f"cargo production source inventory failed with exit "
-            f"{completed.returncode}: {completed.stderr.strip()}"
-        )
-
+def production_dep_info_files(
+    messages: list[object], workspace: ProductionWorkspace
+) -> set[Path]:
+    """Select dep-info for non-test artifacts in the shared Cargo package set."""
     dep_info_files: set[Path] = set()
-    for line in completed.stdout.splitlines():
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for message in messages:
         if (
             not isinstance(message, dict)
             or message.get("reason") != "compiler-artifact"
-            or message.get("package_id") not in package_ids
+            or message.get("package_id") not in workspace.package_ids
         ):
             continue
         profile = message.get("profile")
@@ -257,8 +223,54 @@ def discover_compiler_production_sources(root: Path) -> set[str]:
                 f"cargo artifact `{target.get('name', '?')}` has no readable dep-info"
             )
         dep_info_files.update(candidates)
+    return dep_info_files
+
+
+def discover_compiler_production_sources(
+    root: Path, workspace: ProductionWorkspace | None = None
+) -> set[str]:
+    """Ask rustc dep-info which files default production targets read.
+
+    This is the exact mechanism owned by ``check_configuration_closure.py``.
+    Cargo JSON selects only non-test artifacts for the same repository-local
+    package identity set that owns the structural target roots; their matching
+    dep-info files independently supply the compiler-read source closure.
+    """
+    workspace = workspace or discover_production_workspace(root)
+    canonical_root = root.resolve()
+
+    environment = dict(os.environ)
+    environment["PYO3_PYTHON"] = sys.executable
+    completed = subprocess.run(
+        (
+            "cargo",
+            "check",
+            "--workspace",
+            "--lib",
+            "--bins",
+            "--message-format=json",
+        ),
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RegistryError(
+            f"cargo production source inventory failed with exit "
+            f"{completed.returncode}: {completed.stderr.strip()}"
+        )
+
+    messages: list[object] = []
+    for line in completed.stdout.splitlines():
+        try:
+            messages.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    dep_info_files = production_dep_info_files(messages, workspace)
     if not dep_info_files:
-        raise RegistryError("cargo reported no production crate dep-info")
+        raise RegistryError("cargo reported no production workspace dep-info")
 
     sources: set[str] = set()
     for dep_info in dep_info_files:
@@ -275,7 +287,9 @@ def discover_compiler_production_sources(root: Path) -> set[str]:
     return sources
 
 
-def discover_production_sources(root: Path) -> list[ProductionSource]:
+def discover_production_sources(
+    root: Path, workspace: ProductionWorkspace | None = None
+) -> list[ProductionSource]:
     """Return parser-confirmed sources reachable from production Cargo targets.
 
     Cargo owns target-root discovery. The existing ``syn`` inventory owner
@@ -283,7 +297,7 @@ def discover_production_sources(root: Path) -> list[ProductionSource]:
     with ``cfg(test)`` false, follows literal ``#[path]`` edges inside the
     repository, and fails closed on ambiguous or unsupported module wiring.
     """
-    target_roots = discover_production_target_roots(root)
+    workspace = workspace or discover_production_workspace(root)
     completed = subprocess.run(
         (
             "cargo",
@@ -298,7 +312,7 @@ def discover_production_sources(root: Path) -> list[ProductionSource]:
             str(root),
         ),
         cwd=root,
-        input=json.dumps(target_roots),
+        input=json.dumps(workspace.target_roots),
         check=False,
         capture_output=True,
         text=True,
@@ -337,12 +351,14 @@ def discover_production_sources(root: Path) -> list[ProductionSource]:
 
 
 def verify_compiler_source_closure(
-    root: Path, sources: list[ProductionSource]
+    root: Path,
+    sources: list[ProductionSource],
+    workspace: ProductionWorkspace | None = None,
 ) -> None:
     """Require the parser graph to contain every rustc-read production file."""
     parser_paths = {source.path.as_posix() for source in sources}
     missing = compiler_source_closure_problems(
-        parser_paths, discover_compiler_production_sources(root)
+        parser_paths, discover_compiler_production_sources(root, workspace)
     )
     if missing:
         raise RegistryError(
@@ -659,7 +675,8 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
-    sources = discover_production_sources(root)
+    workspace = discover_production_workspace(root)
+    sources = discover_production_sources(root, workspace)
     citations = parse_production_issue_citations(sources)
     issues = derive_issue_numbers(citations)
     rendered_manifest = render_issue_manifest(issues)
@@ -669,11 +686,11 @@ def main() -> int:
     if args.write:
         manifest.write_text(rendered_manifest)
         output.write_text(rendered_registry)
-        verify_compiler_source_closure(root, sources)
+        verify_compiler_source_closure(root, sources, workspace)
         print(f"wrote {manifest.relative_to(root)}")
         print(f"wrote {output.relative_to(root)}")
         return 0
-    verify_compiler_source_closure(root, sources)
+    verify_compiler_source_closure(root, sources, workspace)
     manifest_issues = load_issue_manifest(manifest)
     problems = manifest_derivation_problems(manifest_issues, issues)
     if problems:

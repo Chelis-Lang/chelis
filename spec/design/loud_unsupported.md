@@ -364,19 +364,28 @@ REGISTRIES of what actually exists:
 - `IssueRef` wraps `NonZeroU32` AND validates membership in a checked-in,
   source-derived issue manifest recording, per number: it is an ISSUE (not a
   PR), and it is OPEN. `scripts/generate_rejection_registries.py` discovers
-  Cargo's non-test library and binary target roots, then the existing
-  `chelis-repr-inventory` `syn` parser follows their inline, ordinary external,
-  and literal `#[path]` module edges. It excludes every module or item whose
-  `cfg` cannot be true with `test=false`, so `src/tests.rs` and inline
-  `#[cfg(test)]` citations are not authority, while a production `#[path]`
-  source outside `src` is. Ambiguous ordinary module paths, conditional or
-  malformed path wiring, `include!`, and macro definitions that directly emit
-  module wiring fail closed. The defining
+  one Cargo-owned production workspace: every repository-local workspace
+  member, regardless of directory, contributes its non-test library and
+  binary-like target roots and its exact package identity. The existing
+  `chelis-repr-inventory` `syn` parser follows those roots through inline,
+  ordinary external, and literal `#[path]` module edges. Before validating
+  `include!`, macro, or module wiring, it forms one `test=false` source view by
+  excluding test-only items, statements, expressions, arms, fields, arguments,
+  and generic parameters. Thus `src/tests.rs`, inline `#[cfg(test)]`, and
+  test-only expression citations are not authority, while a production
+  `#[path]` source outside its target directory is. Ambiguous ordinary module
+  paths, conditional or malformed path wiring, production `include!`, and
+  production macro definitions that directly emit module wiring fail closed.
+  The defining
   `crates/chelis-types/src/unsupported.rs` remains the sole citation
-  exclusion. The generator also runs Cargo's non-test production targets and
-  reuses `check_configuration_closure.py`'s rustc dep-info parser; every
-  compiler-read repository source must appear in the structural graph. Thus
-  the parser does not self-certify module closure.
+  exclusion. The direct-construction boundary checker consumes this exact
+  source view rather than owning a second filesystem glob. The generator also
+  runs Cargo's non-test production targets and reuses
+  `check_configuration_closure.py`'s rustc dep-info parser; dep-info selection
+  uses the same Cargo package identity set while remaining an independent
+  compiler-read closure observation. Every compiler-read repository source
+  must appear in the structural graph. Thus the parser does not self-certify
+  module closure.
   Every resulting production `unimplemented_rejection!` invocation is parsed.
   The first argument accepts Rust's full unsuffixed decimal token grammar
   (leading zeroes and arbitrary/trailing underscores), then must decode to a
@@ -391,18 +400,21 @@ REGISTRIES of what actually exists:
   generator writes both `spec/design/loud_unsupported_issue_manifest.json`
   and the Rust membership artifact, while `--check` rejects a cited issue
   missing from the manifest, an uncited stale row, or byte drift in either
-  generated artifact. Tests freeze Cargo target-kind selection, the structural
-  module and test-exclusion contract, the sole citation exclusion, exact
-  parsing, both drift directions, duplicate handling, and Rust byte agreement.
+  generated artifact. Tests freeze Cargo target-kind and repository-local
+  package selection (including members outside `crates/`), dep-info package
+  selection, the structural module and test-exclusion contract, the shared
+  boundary source owner, the sole citation exclusion, exact parsing, both drift
+  directions, duplicate handling, and Rust byte agreement.
 - **A source-derived manifest is still self-authorizing with respect to live
   tracker state** - the same PR can cite a closed issue, a PR number, or a
   nonexistent number and regenerate a structurally valid row. Every
   construction, registry, validator, imported liveness-helper, detector, and
   workflow input therefore remains in the `Rejection Authority Liveness`
-  change set. Every Rust source path and workspace crate manifest
-  conservatively triggers that job, including a newly added crate or a
-  production `#[path]` target outside `src`; the job reruns structural source
-  and generated-byte agreement before tracker validation. As of 2026-09-13,
+  change set. Every `.rs` path and every file named `Cargo.toml` anywhere in
+  the repository conservatively triggers that job, including a newly added
+  workspace member or a production `#[path]` target outside its target
+  directory; the job reruns structural source and generated-byte agreement
+  before tracker validation. As of 2026-09-13,
   it preserves the existing conservative liveness behavior: whenever
   triggered it verifies EVERY standing manifest row against the live tracker
   (exists, is an issue, is open), not only rows changed by the PR. The

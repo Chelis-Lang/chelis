@@ -153,7 +153,12 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
                 self.assertTrue(m.rejection_authority_changed([path]))
 
     def test_workspace_manifest_edits_require_validation(self):
-        for path in ("Cargo.toml", "crates/brand-new/Cargo.toml"):
+        for path in (
+            "Cargo.toml",
+            "crates/brand-new/Cargo.toml",
+            "tree-sitter-chelis/Cargo.toml",
+            "arbitrary/location/Cargo.toml",
+        ):
             with self.subTest(path=path):
                 self.assertTrue(m.rejection_authority_changed([path]))
 

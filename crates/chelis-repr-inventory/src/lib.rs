@@ -480,17 +480,76 @@ fn foreign_item_attributes(item: &syn::ForeignItem) -> &[syn::Attribute] {
     }
 }
 
+fn expression_attributes(expression: &syn::Expr) -> &[syn::Attribute] {
+    match expression {
+        syn::Expr::Array(expression) => &expression.attrs,
+        syn::Expr::Assign(expression) => &expression.attrs,
+        syn::Expr::Async(expression) => &expression.attrs,
+        syn::Expr::Await(expression) => &expression.attrs,
+        syn::Expr::Binary(expression) => &expression.attrs,
+        syn::Expr::Block(expression) => &expression.attrs,
+        syn::Expr::Break(expression) => &expression.attrs,
+        syn::Expr::Call(expression) => &expression.attrs,
+        syn::Expr::Cast(expression) => &expression.attrs,
+        syn::Expr::Closure(expression) => &expression.attrs,
+        syn::Expr::Const(expression) => &expression.attrs,
+        syn::Expr::Continue(expression) => &expression.attrs,
+        syn::Expr::Field(expression) => &expression.attrs,
+        syn::Expr::ForLoop(expression) => &expression.attrs,
+        syn::Expr::Group(expression) => &expression.attrs,
+        syn::Expr::If(expression) => &expression.attrs,
+        syn::Expr::Index(expression) => &expression.attrs,
+        syn::Expr::Infer(expression) => &expression.attrs,
+        syn::Expr::Let(expression) => &expression.attrs,
+        syn::Expr::Lit(expression) => &expression.attrs,
+        syn::Expr::Loop(expression) => &expression.attrs,
+        syn::Expr::Macro(expression) => &expression.attrs,
+        syn::Expr::Match(expression) => &expression.attrs,
+        syn::Expr::MethodCall(expression) => &expression.attrs,
+        syn::Expr::Paren(expression) => &expression.attrs,
+        syn::Expr::Path(expression) => &expression.attrs,
+        syn::Expr::Range(expression) => &expression.attrs,
+        syn::Expr::RawAddr(expression) => &expression.attrs,
+        syn::Expr::Reference(expression) => &expression.attrs,
+        syn::Expr::Repeat(expression) => &expression.attrs,
+        syn::Expr::Return(expression) => &expression.attrs,
+        syn::Expr::Struct(expression) => &expression.attrs,
+        syn::Expr::Try(expression) => &expression.attrs,
+        syn::Expr::TryBlock(expression) => &expression.attrs,
+        syn::Expr::Tuple(expression) => &expression.attrs,
+        syn::Expr::Unary(expression) => &expression.attrs,
+        syn::Expr::Unsafe(expression) => &expression.attrs,
+        syn::Expr::While(expression) => &expression.attrs,
+        syn::Expr::Yield(expression) => &expression.attrs,
+        syn::Expr::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
 #[derive(Default)]
 struct TestItemSpans {
-    spans: Vec<proc_macro2::Span>,
+    spans: Vec<ExcludedSpan>,
     error: Option<ScanError>,
 }
 
+struct ExcludedSpan {
+    span: proc_macro2::Span,
+    consume_trailing_comma: bool,
+}
+
 impl TestItemSpans {
-    fn exclude(&mut self, attributes: &[syn::Attribute], span: proc_macro2::Span) -> bool {
+    fn exclude(
+        &mut self,
+        attributes: &[syn::Attribute],
+        span: proc_macro2::Span,
+        consume_trailing_comma: bool,
+    ) -> bool {
         match item_is_test_only(attributes) {
             Ok(true) => {
-                self.spans.push(span);
+                self.spans.push(ExcludedSpan {
+                    span,
+                    consume_trailing_comma,
+                });
                 true
             }
             Ok(false) => false,
@@ -504,38 +563,141 @@ impl TestItemSpans {
 
 impl<'ast> Visit<'ast> for TestItemSpans {
     fn visit_item(&mut self, item: &'ast syn::Item) {
-        if !self.exclude(item_attributes(item), item.span()) {
+        if !self.exclude(item_attributes(item), item.span(), false) {
             visit::visit_item(self, item);
         }
     }
 
     fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
-        if !self.exclude(impl_item_attributes(item), item.span()) {
+        if !self.exclude(impl_item_attributes(item), item.span(), false) {
             visit::visit_impl_item(self, item);
         }
     }
 
     fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
-        if !self.exclude(trait_item_attributes(item), item.span()) {
+        if !self.exclude(trait_item_attributes(item), item.span(), false) {
             visit::visit_trait_item(self, item);
         }
     }
 
     fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
-        if !self.exclude(foreign_item_attributes(item), item.span()) {
+        if !self.exclude(foreign_item_attributes(item), item.span(), false) {
             visit::visit_foreign_item(self, item);
         }
     }
 
     fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
         let excluded = match statement {
-            syn::Stmt::Local(local) => self.exclude(&local.attrs, local.span()),
-            syn::Stmt::Macro(item_macro) => self.exclude(&item_macro.attrs, item_macro.span()),
+            syn::Stmt::Local(local) => self.exclude(&local.attrs, local.span(), false),
+            syn::Stmt::Macro(item_macro) => {
+                self.exclude(&item_macro.attrs, item_macro.span(), false)
+            }
             syn::Stmt::Item(_) | syn::Stmt::Expr(_, _) => false,
         };
         if !excluded {
             visit::visit_stmt(self, statement);
         }
+    }
+
+    fn visit_expr(&mut self, expression: &'ast syn::Expr) {
+        if !self.exclude(expression_attributes(expression), expression.span(), false) {
+            visit::visit_expr(self, expression);
+        }
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if !self.exclude(&arm.attrs, arm.span(), true) {
+            visit::visit_arm(self, arm);
+        }
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if !self.exclude(&field.attrs, field.span(), true) {
+            visit::visit_field(self, field);
+        }
+    }
+
+    fn visit_field_value(&mut self, field: &'ast syn::FieldValue) {
+        if !self.exclude(&field.attrs, field.span(), true) {
+            visit::visit_field_value(self, field);
+        }
+    }
+
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        if !self.exclude(&variant.attrs, variant.span(), true) {
+            visit::visit_variant(self, variant);
+        }
+    }
+
+    fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
+        let attributes = match argument {
+            syn::FnArg::Receiver(receiver) => &receiver.attrs,
+            syn::FnArg::Typed(argument) => &argument.attrs,
+        };
+        if !self.exclude(attributes, argument.span(), true) {
+            visit::visit_fn_arg(self, argument);
+        }
+    }
+
+    fn visit_generic_param(&mut self, parameter: &'ast syn::GenericParam) {
+        let attributes = match parameter {
+            syn::GenericParam::Lifetime(parameter) => &parameter.attrs,
+            syn::GenericParam::Type(parameter) => &parameter.attrs,
+            syn::GenericParam::Const(parameter) => &parameter.attrs,
+        };
+        if !self.exclude(attributes, parameter.span(), true) {
+            visit::visit_generic_param(self, parameter);
+        }
+    }
+}
+
+fn after_optional_trailing_comma(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = start;
+    loop {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if source
+            .get(cursor..)
+            .is_some_and(|tail| tail.starts_with("//"))
+        {
+            cursor += 2;
+            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor += 1;
+            }
+            continue;
+        }
+        if source
+            .get(cursor..)
+            .is_some_and(|tail| tail.starts_with("/*"))
+        {
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() && depth > 0 {
+                if source
+                    .get(cursor..)
+                    .is_some_and(|tail| tail.starts_with("/*"))
+                {
+                    depth += 1;
+                    cursor += 2;
+                } else if source
+                    .get(cursor..)
+                    .is_some_and(|tail| tail.starts_with("*/"))
+                {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            continue;
+        }
+        return if bytes.get(cursor) == Some(&b',') {
+            cursor + 1
+        } else {
+            start
+        };
     }
 }
 
@@ -564,10 +726,15 @@ pub fn production_rust_source(source: &str) -> Result<String, ScanError> {
             .and_then(|start| start.checked_add(location.column))
     };
     let mut bytes = source.as_bytes().to_vec();
-    for span in visitor.spans {
-        let (Some(start), Some(end)) = (offset(span.start()), offset(span.end())) else {
+    for excluded in visitor.spans {
+        let (Some(start), Some(mut end)) =
+            (offset(excluded.span.start()), offset(excluded.span.end()))
+        else {
             continue;
         };
+        if excluded.consume_trailing_comma {
+            end = after_optional_trailing_comma(source, end);
+        }
         for byte in bytes.get_mut(start..end).into_iter().flatten() {
             if *byte != b'\n' {
                 *byte = b' ';
@@ -750,9 +917,11 @@ impl<'a> ProductionGraph<'a> {
         let source = fs::read_to_string(path).map_err(|error| {
             ScanError::new(format!("read production module `{relative}`: {error}"))
         })?;
-        let file = syn::parse_file(&source).map_err(|error| {
+        let production = production_rust_source(&source)
+            .map_err(|error| ScanError::new(format!("production module `{relative}`: {error}")))?;
+        let file = syn::parse_file(&production).map_err(|error| {
             ScanError::new(format!(
-                "cannot parse production module `{relative}`: {error}"
+                "cannot parse filtered production module `{relative}`: {error}"
             ))
         })?;
         let mut include = IncludeMacroFinder::default();
@@ -763,8 +932,6 @@ impl<'a> ProductionGraph<'a> {
             )));
         }
         validate_item_macro_module_wiring(&file.items)?;
-        let production = production_rust_source(&source)
-            .map_err(|error| ScanError::new(format!("production module `{relative}`: {error}")))?;
         self.module_directories
             .insert(relative.clone(), module_directory.clone());
         self.sources.insert(

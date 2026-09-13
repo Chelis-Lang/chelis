@@ -11,6 +11,7 @@ from pathlib import Path
 from generate_rejection_registries import (
     MANIFEST_REL,
     OUTPUT_REL,
+    ProductionWorkspace,
     RegistryError,
     compiler_source_closure_problems,
     derive_issue_numbers,
@@ -20,7 +21,9 @@ from generate_rejection_registries import (
     load_issue_manifest,
     manifest_derivation_problems,
     parse_issue_citations,
+    production_dep_info_files,
     production_target_roots_from_metadata,
+    production_workspace_from_metadata,
     render_issue_manifest,
     render_registry,
 )
@@ -52,15 +55,16 @@ class DiscoverAtoms(unittest.TestCase):
 
 
 class ProductionSources(unittest.TestCase):
-    def test_cargo_target_roots_exclude_tests_examples_benches_and_build_scripts(
+    def test_cargo_workspace_includes_repository_members_outside_crates_and_excludes_nonproduction_targets(
         self,
     ) -> None:
         root = Path("/repo")
         metadata = {
-            "workspace_members": ["example 0.1.0"],
+            "workspace_members": ["example 0.1.0", "tree-sitter-chelis 0.1.0"],
             "packages": [
                 {
                     "id": "example 0.1.0",
+                    "manifest_path": "/repo/crates/example/Cargo.toml",
                     "targets": [
                         {
                             "kind": ["lib"],
@@ -87,22 +91,85 @@ class ProductionSources(unittest.TestCase):
                             "src_path": "/repo/crates/example/build.rs",
                         },
                     ],
-                }
+                },
+                {
+                    "id": "tree-sitter-chelis 0.1.0",
+                    "manifest_path": "/repo/tree-sitter-chelis/Cargo.toml",
+                    "targets": [
+                        {
+                            "kind": ["lib"],
+                            "src_path": "/repo/tree-sitter-chelis/src/lib.rs",
+                        }
+                    ],
+                },
             ],
         }
+        workspace = production_workspace_from_metadata(root, metadata)
+        self.assertEqual(
+            workspace,
+            ProductionWorkspace(
+                package_ids=frozenset(
+                    {"example 0.1.0", "tree-sitter-chelis 0.1.0"}
+                ),
+                target_roots=(
+                    "crates/example/src/lib.rs",
+                    "crates/example/src/main.rs",
+                    "tree-sitter-chelis/src/lib.rs",
+                ),
+            ),
+        )
         self.assertEqual(
             production_target_roots_from_metadata(root, metadata),
             [
                 "crates/example/src/lib.rs",
                 "crates/example/src/main.rs",
+                "tree-sitter-chelis/src/lib.rs",
             ],
         )
+
+    def test_dep_info_selection_uses_the_same_outside_crates_package_set(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            selected_artifact = root / "target/debug/libtree_sitter_chelis.rlib"
+            selected_dep_info = root / "target/debug/tree_sitter_chelis.d"
+            selected_dep_info.parent.mkdir(parents=True)
+            selected_dep_info.write_text("target: tree-sitter-chelis/src/lib.rs\n")
+            ignored_artifact = root / "target/debug/libexternal.rlib"
+            ignored_dep_info = root / "target/debug/external.d"
+            ignored_dep_info.write_text("target: external/src/lib.rs\n")
+            workspace = ProductionWorkspace(
+                package_ids=frozenset({"tree-sitter-chelis 0.1.0"}),
+                target_roots=("tree-sitter-chelis/src/lib.rs",),
+            )
+            messages = [
+                {
+                    "reason": "compiler-artifact",
+                    "package_id": "tree-sitter-chelis 0.1.0",
+                    "profile": {"test": False},
+                    "target": {"name": "tree-sitter-chelis", "kind": ["lib"]},
+                    "filenames": [str(selected_artifact)],
+                },
+                {
+                    "reason": "compiler-artifact",
+                    "package_id": "external 0.1.0",
+                    "profile": {"test": False},
+                    "target": {"name": "external", "kind": ["lib"]},
+                    "filenames": [str(ignored_artifact)],
+                },
+            ]
+            self.assertEqual(
+                production_dep_info_files(messages, workspace),
+                {selected_dep_info},
+            )
 
     def test_real_production_graph_includes_path_reached_source_outside_src(
         self,
     ) -> None:
         paths = {source.path for source in discover_production_sources(ROOT)}
         self.assertIn(Path("tests/support/c_lexical.rs"), paths)
+        self.assertIn(Path("tree-sitter-chelis/bindings/rust/lib.rs"), paths)
         self.assertNotIn(Path("crates/chelis-types/src/unsupported.rs"), paths)
 
     def test_compiler_source_missing_from_parser_graph_fails_closure(self) -> None:

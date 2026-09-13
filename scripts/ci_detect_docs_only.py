@@ -167,8 +167,7 @@ def rejection_authority_changed(paths: list[str]) -> bool:
     return any(
         path in REJECTION_AUTHORITY_PATHS
         or path.endswith(".rs")
-        or path == "Cargo.toml"
-        or (path.startswith("crates/") and path.endswith("/Cargo.toml"))
+        or PurePosixPath(path).name == "Cargo.toml"
         for path in cleaned
     )
 

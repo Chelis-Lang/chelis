@@ -17,6 +17,7 @@ from generate_rejection_registries import (
     MANIFEST_REL,
     derive_issue_numbers,
     discover_production_sources,
+    discover_production_workspace,
     load_issue_manifest,
     manifest_derivation_problems,
     parse_production_issue_citations,
@@ -50,8 +51,9 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     manifest_path = root / MANIFEST_REL
     numbers = load_issue_manifest(manifest_path)
-    sources = discover_production_sources(root)
-    verify_compiler_source_closure(root, sources)
+    workspace = discover_production_workspace(root)
+    sources = discover_production_sources(root, workspace)
+    verify_compiler_source_closure(root, sources, workspace)
     source_numbers = derive_issue_numbers(parse_production_issue_citations(sources))
     derivation_problems = manifest_derivation_problems(numbers, source_numbers)
     if derivation_problems:

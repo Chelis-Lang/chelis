@@ -27,9 +27,24 @@ fn test_only_item() {
     unimplemented_rejection!(600, "test-only item");
 }
 
+struct ProductionCarrier {
+    #[cfg(test)]
+    test_only_field: unimplemented_rejection!(424244, "test-only field"),
+    live: u32,
+}
+
 fn production_item() {
     #[cfg(test)]
     unimplemented_rejection!(705, "test-only statement");
+    #[cfg(test)]
+    {
+        unimplemented_rejection!(424242, "test-only expression statement");
+    }
+    let _ = match 0 {
+        #[cfg(test)]
+        0 => unimplemented_rejection!(424243, "test-only match arm"),
+        _ => 1,
+    };
     unimplemented_rejection!(879, "production item");
 }
 "#,
@@ -59,11 +74,49 @@ fn production_item() {
     let root = &sources[0].source;
     assert!(!root.contains("test-only item"));
     assert!(!root.contains("test-only statement"));
+    assert!(!root.contains("test-only expression statement"));
+    assert!(!root.contains("test-only match arm"));
+    assert!(!root.contains("test-only field"));
     assert!(root.contains("production item"));
 }
 
 #[test]
-fn production_path_module_outside_src_is_included() {
+fn cfg_test_include_and_macro_wiring_are_filtered_before_validation() {
+    let fixture = tempdir().expect("temporary fixture");
+    write(
+        fixture.path(),
+        "crates/example/src/lib.rs",
+        r#"
+#[cfg(test)]
+mod tests {
+    include!("missing_test_only.rs");
+
+    macro_rules! hidden_module {
+        () => { mod hidden; };
+    }
+    hidden_module!();
+}
+
+fn production_item() {
+    #[cfg(test)]
+    include!("missing_expression_only.rs");
+    unimplemented_rejection!(879, "production item");
+}
+"#,
+    );
+
+    let sources =
+        discover_production_rust_sources(fixture.path(), &["crates/example/src/lib.rs".into()])
+            .expect("test-only wiring must be absent from the production graph");
+    assert_eq!(sources.len(), 1);
+    assert!(!sources[0].source.contains("missing_test_only.rs"));
+    assert!(!sources[0].source.contains("missing_expression_only.rs"));
+    assert!(!sources[0].source.contains("hidden_module"));
+    assert!(sources[0].source.contains("production item"));
+}
+
+#[test]
+fn production_path_module_outside_target_directory_is_included() {
     let fixture = tempdir().expect("temporary fixture");
     write(
         fixture.path(),
@@ -76,7 +129,7 @@ mod outside;
     write(
         fixture.path(),
         "tests/support/outside.rs",
-        "fn outside() { unimplemented_rejection!(1277, \"production path module\"); }\n",
+        "fn outside(issue: u32) {\n    chelis_types::unsupported::__build_unimplemented_rejection(issue, \"dynamic\");\n}\n",
     );
 
     let sources =
@@ -88,6 +141,11 @@ mod outside;
             .map(|source| source.path.as_str())
             .collect::<Vec<_>>(),
         ["crates/example/src/lib.rs", "tests/support/outside.rs",]
+    );
+    assert!(
+        sources[1]
+            .source
+            .contains("__build_unimplemented_rejection")
     );
 }
 

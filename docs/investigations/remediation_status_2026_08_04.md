@@ -420,12 +420,16 @@ pending decision 3.
 
 `spec/design/loud_unsupported_issue_manifest.json` is generated from the exact
 literal issue identities cited by production `unimplemented_rejection!`
-invocations. Cargo supplies the non-test crate target roots and the existing
-`syn` inventory owner follows their production module graph, including
-literal `#[path]` sources outside `src`, while excluding `cfg(test)`-only
-modules/items and failing closed on ambiguous or unsupported module wiring.
-Rustc dep-info from non-test production targets is then reconciled against
-that graph through the repository's existing configuration-closure parser.
+invocations. Cargo supplies one package/target view for every repository-local
+workspace member, including members outside `crates/`; the existing `syn`
+inventory owner follows each non-test library or binary-like target's
+production module graph, including literal `#[path]` sources outside the
+target directory. One `test=false` source view excludes test-only items,
+statements, expressions, arms, fields, arguments, and generic parameters
+before include, macro, or module-wiring validation. The direct-construction
+boundary consumes that same view. Rustc dep-info selects the same Cargo package
+identities and is then independently reconciled against the graph through the
+repository's existing configuration-closure parser.
 Its current set is **#600, #689, #729, #759, #829, #879, #912,
 #951, #1058, #1059, #1138, #1192, #1277, #1298, #1306, #1364, #1383, #1482,
 and #1844**. Repeated citation sites collapse to one row; a missing cited row,
@@ -434,10 +438,11 @@ generator. The first regeneration removed #1291 because no production
 rejection cites it; #1291's remaining hardware work and closing condition are
 unchanged and no longer masquerade as rejection-construction authority.
 
-Every Rust-source or crate-manifest edit conservatively triggers Rejection
-Authority Liveness, which first rechecks structural citation/generated-byte
-agreement and then checks every standing row, so closing any listed issue
-reddens that run. The #1870 changed-row PR narrowing and scheduled
+Every `.rs` edit and every `Cargo.toml` edit anywhere in the repository
+conservatively triggers Rejection Authority Liveness, which first rechecks
+structural citation/generated-byte agreement and then checks every standing
+row, so closing any listed issue reddens that run. The #1870 changed-row PR
+narrowing and scheduled
 standing-state canary are not part of this prerequisite slice. (#691 and #714 left the set via PR
 #1164; their one-time closure by #1151 and un-closure by the #1159 revert is
 the worked example of why closing a pinned issue from the roadmap top-down
