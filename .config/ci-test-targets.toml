@@ -8,6 +8,11 @@ version = 2
 package = "chelis-compiler-api"
 name = "recursive_profile_allocations"
 
+# chelis#2023: builtin-spelled lexical inputs agree in eval and native C.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "builtin_named_kernel_inputs"
+
 # chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
 [[standing_target]]
 package = "chelis-compiler-api"
@@ -618,6 +623,79 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "workspace shard 1 runs the real standing-selection versus unfiltered-nightly listing comparison"
 tracking_issue = "chelis#1824"
+
+# Rejection authority row admission and standing-canary controls.
+[[path_rule]]
+prefix = "spec/design/loud_unsupported.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the Phase 4B freeze and per-file contract acknowledgement run in the required Docs job"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/generate_rejection_registries.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "manifest schema and source derivation controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_generate_rejection_registries.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "manifest parser and production source graph tests run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/validate_rejection_issue_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "changed-row and standing liveness controls run in script-unit; the dedicated PR job also executes source derivation"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_validate_rejection_issue_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "real Git comparison and authority admission controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/ci_detect_docs_only.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "change detection and liveness input closure tests run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_ci_detect_docs_only.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "liveness input trigger controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_loud_unsupported_nightly_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR admission and nightly standing workflow controls run in script-unit"
+tracking_issue = "chelis#1870"
 
 # Stable root controls with direct standing owners.
 [[path_rule]]

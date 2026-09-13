@@ -436,11 +436,20 @@ REGISTRIES of what actually exists:
   the repository conservatively triggers that job, including a newly added
   workspace member or a production `#[path]` target outside its target
   directory; the job reruns structural source and generated-byte agreement
-  before tracker validation. As of 2026-09-13,
-  it preserves the existing conservative liveness behavior: whenever
-  triggered it verifies EVERY standing manifest row against the live tracker
-  (exists, is an issue, is open), not only rows changed by the PR. The
-  proposed changed-row PR narrowing remains a later #1870 slice. The first
+  before tracker validation, even when no authority row changes. The PR job
+  verifies only added or modified authority rows against the live tracker
+  (exists, is an issue, is open). It checks out the synthetic merge with full
+  history and passes the event's exact PR head to the validator. The candidate
+  must have two parents and its second parent must match that head; the first
+  parent supplies the committed base manifest. Missing history, a mismatched
+  head, or an unreadable or invalid base manifest fails closed. Both manifests
+  use the same strict schema parser. In schema 1 every row has fixed
+  `kind=issue` and `state=open`, so a valid modified identity is a renumbered
+  row: its successor requires live validation. Removed rows need no lookup,
+  and repeated source sites do not create additional rows. Unchanged rows,
+  including an additional source site citing an existing authority, remain
+  owned by the standing canary. The validator prints the compared commits
+  and selected issue numbers. Without `--pr-head`, it checks every row. The first
   scheduled §C7.5 slice is now delivered by
   `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
   check out `main`, freshly rederive the complete standing manifest, and fail
@@ -1669,8 +1678,8 @@ both halves:
    match on success, so a legacy or race-created duplicate cannot survive
    recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
    loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
-   and the capacity-census liveness sweep remain pending. The changed-row
-   regular-PR narrowing also remains pending. Therefore this delivered slice
+   and the capacity-census liveness sweep remain pending. Regular PRs validate
+   changed issue-authority rows under §C2.1. Therefore this scheduled slice
    is only the standing rejection-authority drift canary; neither execution
    half nor §C7.5 as a whole is complete.
 
