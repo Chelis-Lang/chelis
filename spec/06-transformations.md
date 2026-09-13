@@ -70,6 +70,10 @@ When `wrt` is specified, the gradient result contains entries only for the liste
 parameters, in the order they appear in `wrt`. One listed parameter returns one
 gradient value directly; multiple listed parameters return a flat tuple.
 
+The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
+distinguishes written target order from declaration order using unequal
+cotangents.
+
 ### 2.3 Algorithm: Reverse-Mode AD
 
 **Input:** A forward DAG `G` with its canonical node sequence
