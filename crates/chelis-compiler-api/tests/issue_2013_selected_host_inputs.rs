@@ -17,6 +17,10 @@ const LIBRARY: &str = "weights = with seed(17i64) { _ = print(\"initialize\")\n\
 
 // Reuse the owning public prepared-context harness, with a parameterized root.
 fn prepare(client: &str) -> PreparedEvalInContext {
+    prepare_with_library(LIBRARY, client)
+}
+
+fn prepare_with_library(library: &str, client: &str) -> PreparedEvalInContext {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(directory.path().join("reef.toml"), format!(
@@ -24,7 +28,7 @@ fn prepare(client: &str) -> PreparedEvalInContext {
     )).unwrap();
     std::fs::write(
         directory.path().join("src/values.ch"),
-        format!("module Probe.Values\nexport (total)\n{LIBRARY}"),
+        format!("module Probe.Values\nexport (total)\n{library}"),
     )
     .unwrap();
     let context = compile_reef_context(directory.path(), directory.path()).unwrap();
@@ -52,6 +56,15 @@ fn tagged(shape: &[i64], dtype: &str, bits: &[&str]) -> Value {
 }
 
 fn assert_host(result: &EvalResult, expected: &[(&str, Value)], transcript: &[&str]) {
+    assert_host_with_inputs(result, expected, transcript, &["x"]);
+}
+
+fn assert_host_with_inputs(
+    result: &EvalResult,
+    expected: &[(&str, Value)],
+    transcript: &[&str],
+    required_inputs: &[&str],
+) {
     assert_eq!(result.roots.len(), expected.len(), "{result:?}");
     assert_eq!(
         result
@@ -72,7 +85,7 @@ fn assert_host(result: &EvalResult, expected: &[(&str, Value)], transcript: &[&s
             .find(|entry| entry.name == *name)
             .unwrap();
         assert_eq!(entry.lane, Lane::Host, "{result:?}");
-        assert_eq!(entry.required_inputs, ["x"], "{result:?}");
+        assert_eq!(entry.required_inputs, required_inputs, "{result:?}");
         assert_eq!(serde_json::to_value(&root.value).unwrap(), *value);
     }
     assert_eq!(result.transcript, transcript);
@@ -243,12 +256,39 @@ fn fixed_control_host_keeps_its_existing_supplied_input_route() {
     let prepared = prepare(
         "def main(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) { dropout(x, -0.0f32) }\n",
     );
-    let result = prepared
-        .eval_root(input(&["40e00000", "41300000"]), "main")
-        .unwrap();
-    assert_host(
-        &result,
-        &[("main", tagged(&[2], "f32", &["40e00000", "41300000"]))],
-        &[],
+    for bits in [
+        ["40e00000", "41300000"],
+        ["40400000", "40a00000"],
+        ["40e00000", "41300000"],
+    ] {
+        let result = prepared.eval_root(input(&bits), "main").unwrap();
+        assert_host(&result, &[("main", tagged(&[2], "f32", &bits))], &[]);
+    }
+}
+
+#[test]
+fn prepared_library_shape_demand_preserves_repeated_and_changed_actuals() {
+    let prepared = prepare_with_library(
+        "def total(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1, shape(x, 0))\n",
+        "import Probe.Values (total)\ndef main(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = total(x, y)\n",
     );
+    for bits in [
+        ["3f800000", "40000000"],
+        ["40400000", "40800000"],
+        ["3f800000", "40000000"],
+    ] {
+        let mut bindings = input(&bits);
+        bindings.insert("y".into(), tensor(&[2], "f32", &["40400000", "40800000"]));
+        bindings.insert("unrelated".into(), tensor(&[-1], "f32", &[]));
+        let result = prepared.eval_root(bindings, "main").unwrap();
+        assert_host_with_inputs(
+            &result,
+            &[(
+                "main",
+                tagged(&[2, 2], "f32", &[bits[0], bits[0], bits[1], bits[1]]),
+            )],
+            &[],
+            &["x", "y"],
+        );
+    }
 }

@@ -90,6 +90,8 @@ fn bound_parameterized_entry_uses_supplied_host_inputs() {
     )
     .unwrap();
     assert_eq!(lane_of(&result, "f"), Lane::Host);
+    assert_eq!(result.manifest.entries.len(), 1);
+    assert_eq!(result.manifest.entries[0].required_inputs, ["x", "y"]);
     assert_eq!(result.roots.len(), 1);
     assert_eq!(
         serde_json::to_value(&result.roots[0].value).unwrap(),
@@ -131,6 +133,100 @@ fn bound_parameterized_mismatch_names_the_disagreeing_sources() {
         messages.ends_with("numeric trap: domain in load at int64"),
         "{messages}"
     );
+}
+
+/// A shape-only actual is required before the selected call becomes owed.
+#[test]
+fn missing_shape_only_parameter_does_not_enter_selected_host_call() {
+    let result = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: CALLEE_1376.into(),
+            bindings: BTreeMap::from([("x".into(), f32_tensor(&[2], &[1.0, 2.0]))]),
+        },
+        &["f".into()],
+    )
+    .unwrap();
+    assert!(result.manifest.entries.is_empty(), "{result:?}");
+    assert!(result.roots.is_empty(), "{result:?}");
+    assert!(result.transcript.is_empty(), "{result:?}");
+}
+
+#[test]
+fn required_shape_only_parameter_rejects_invalid_wire_extent() {
+    let error = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: CALLEE_1376.into(),
+            bindings: BTreeMap::from([
+                ("x".into(), f32_tensor(&[2], &[1.0, 2.0])),
+                (
+                    "y".into(),
+                    TensorValue {
+                        shape: vec![-1],
+                        data: wire_values::storage_f32(vec![]),
+                    },
+                ),
+            ]),
+        },
+        &["f".into()],
+    )
+    .unwrap_err();
+    assert_eq!(error.stage, "eval");
+    assert!(error.transcript.is_empty(), "{error:?}");
+    assert_eq!(error.errors.len(), 1);
+    assert_eq!(
+        error.errors[0].message,
+        "binding `y`: tensor extent must be a nonnegative int64"
+    );
+}
+
+#[test]
+fn host_shape_demand_preserves_dead_parameter_slots_and_input_filtering() {
+    for dead_y in [false, true] {
+        let mut source = CALLEE_1376.replace("def f(", "def f(dead: tensor[p, f32], ");
+        if dead_y {
+            source = source.replace("-> tensor[n, m, f32]", "-> tensor[n, n, f32]");
+        }
+        let invalid = TensorValue {
+            shape: vec![-1],
+            data: wire_values::storage_f32(vec![]),
+        };
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source,
+                bindings: BTreeMap::from([
+                    ("x".into(), f32_tensor(&[2], &[1.0, 2.0])),
+                    (
+                        "y".into(),
+                        if dead_y {
+                            invalid.clone()
+                        } else {
+                            f32_tensor(&[2], &[3.0, 4.0])
+                        },
+                    ),
+                    ("dead".into(), invalid.clone()),
+                    ("unrelated".into(), invalid),
+                ]),
+            },
+            &["f".into()],
+        )
+        .unwrap();
+        assert_eq!(result.manifest.entries.len(), 1);
+        assert_eq!(lane_of(&result, "f"), Lane::Host);
+        assert_eq!(
+            result.manifest.entries[0].required_inputs,
+            if dead_y { vec!["x"] } else { vec!["x", "y"] }
+        );
+        assert_eq!(result.roots.len(), 1);
+        assert_eq!(result.roots[0].name.as_deref(), Some("f"));
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap(),
+            serde_json::json!({"type":"tensor","value":{"shape":[2,2],"data":{"dtype":"f32","bits":["3f800000","3f800000","40000000","40000000"]}}})
+        );
+        assert!(result.transcript.is_empty(), "{result:?}");
+    }
 }
 
 /// A matching call still routes the nullary main through the host lane.
