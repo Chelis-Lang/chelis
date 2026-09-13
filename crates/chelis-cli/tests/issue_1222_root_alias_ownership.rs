@@ -503,18 +503,55 @@ fn conditional_over_existing_bindings_claims_no_third_allocation() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = to_tensor([1.0f32, 2.0f32])\n\
-                  d = to_tensor([3.0f32, 4.0f32])\n\
-                  c = if true then a else d\n";
-    let (stdout, emitted) = build_run_and_emit(source, "alias_if");
-    assert_retain_release_counts(
-        &emitted,
-        "chelis_tensor_retain(",
-        "chelis_tensor_release(",
-        (5, 6),
-        "two allocations, the two emitted arm clones, and three artifact roots stay exact",
-    );
-    assert_line_matches_eval(source, "alias_if", &stdout, "c");
+    // [04-LIN-5..6]: each selected arm provides one owner while both input
+    // roots stay live. A literal condition folds away the arm clones, so it
+    // cannot exercise this control-flow ownership join (chelis#1776).
+    for condition in ["3i64 > 2i64", "3i64 < 2i64"] {
+        let source = format!(
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             d = to_tensor([3.0f32, 4.0f32])\n\
+             flag = {condition}\n\
+             c = if flag then a else d\n"
+        );
+        let (stdout, emitted) = build_run_and_emit(&source, "alias_if");
+        assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+        assert_retain_release_counts(
+            &emitted,
+            "chelis_tensor_retain(",
+            "chelis_tensor_release(",
+            (5, 6),
+            "two allocations, the two emitted arm clones, and three artifact roots stay exact",
+        );
+        for root in ["a", "d", "c"] {
+            assert_line_matches_eval(&source, "alias_if", &stdout, root);
+        }
+    }
+}
+
+#[test]
+fn folded_conditional_preserves_both_input_roots_without_arm_clones() {
+    if skip_without_cc() {
+        return;
+    }
+    for condition in ["true", "false"] {
+        let source = format!(
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             d = to_tensor([3.0f32, 4.0f32])\n\
+             c = if {condition} then a else d\n"
+        );
+        let (stdout, emitted) = build_run_and_emit(&source, "folded_alias_if");
+        assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+        assert_retain_release_counts(
+            &emitted,
+            "chelis_tensor_retain(",
+            "chelis_tensor_release(",
+            (3, 5),
+            "constant folding removes arm clones, not either input allocation or a root owner",
+        );
+        for root in ["a", "d", "c"] {
+            assert_line_matches_eval(&source, "folded_alias_if", &stdout, root);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -622,14 +659,39 @@ fn seeded_block_returning_an_outer_binding_claims_no_second_allocation() {
     }
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with seed(1i64) { a }\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_with_seed");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_retain_release_counts(
         &emitted,
         "chelis_tensor_retain(",
         "chelis_tensor_release(",
-        (2, 3),
-        "a seed scope changes the RNG while two artifact roots remain balanced",
+        (3, 4),
+        "one allocation, two artifact roots, and the seed block's temporary owner balance",
     );
+    assert_line_matches_eval(source, "alias_with_seed", &stdout, "a");
     assert_line_matches_eval(source, "alias_with_seed", &stdout, "b");
+}
+
+/// Negative parity: a seed scope that constructs a tensor must not be
+/// mistaken for the alias above and lose its independent allocation.
+#[test]
+fn seeded_block_constructing_a_tensor_keeps_its_independent_allocation() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "a = to_tensor([1.0f32, 2.0f32])\n\
+                  b = with seed(1i64) { to_tensor([3.0f32, 4.0f32]) }\n";
+    let (stdout, emitted) = build_run_and_emit(source, "fresh_with_seed");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 4),
+        "the fresh result transfers directly out of the seed scope; two allocations and two roots balance",
+    );
+    for root in ["a", "b"] {
+        assert_line_matches_eval(source, "fresh_with_seed", &stdout, root);
+    }
 }
 
 // ---------------------------------------------------------------------------
