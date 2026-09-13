@@ -35,6 +35,7 @@ use smt_lower::{
 };
 
 mod injection;
+mod beacon;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -61,6 +62,8 @@ pub enum PropertyTier {
     Smt,
     /// Mathematical induction with separately dispatched base and step SMT goals.
     Induction,
+    /// Scalar real-arithmetic relaxation through the external Beacon engine.
+    Beacon,
     Fuzz,
     /// No tier ran (a sampling/declaration error).
     None,
@@ -71,6 +74,7 @@ impl PropertyTier {
         match self {
             PropertyTier::Smt => "smt",
             PropertyTier::Induction => "induction",
+            PropertyTier::Beacon => "beacon",
             PropertyTier::Fuzz => "fuzz",
             PropertyTier::None => "none",
         }
@@ -140,6 +144,8 @@ pub struct PropertyOutcome {
     /// Present only after the induction classifier constructed and dispatched
     /// real base and step obligations.
     pub induction_evidence: Option<InductionEvidence>,
+    /// Exact external-engine report, including hull, reason, tree and request binding.
+    pub engine_evidence: Option<serde_json::Value>,
 }
 
 impl PropertyOutcome {
@@ -214,6 +220,7 @@ impl PropertyOutcome {
             accepted_samples: 0,
             rejected_samples: 0,
             induction_evidence: None,
+            engine_evidence: None,
         }
     }
 
@@ -252,7 +259,7 @@ impl PropertyOutcome {
             return None;
         }
         match self.proof_tier {
-            PropertyTier::Smt | PropertyTier::Induction => self.base_discharge.clone(),
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => self.base_discharge.clone(),
             PropertyTier::Fuzz if self.samples > 0 => Some((
                 crate::discharge::Soundness::Empirical,
                 QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
@@ -315,7 +322,7 @@ impl PropertyOutcome {
             return false;
         }
         self.status == PropertyStatus::Passed
-            && (matches!(self.proof_tier, PropertyTier::Smt | PropertyTier::Induction)
+            && (matches!(self.proof_tier, PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon)
                 || self.samples > 0)
     }
 
@@ -382,7 +389,7 @@ fn base_verdict(
             // Beacon interval discharge reads `sound_approximate`. A green base
             // MUST carry its discharge; a missing one is a covered-or-rejected
             // `Unsupported`, never a silent proof.
-            PropertyTier::Smt | PropertyTier::Induction => match base_discharge {
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => match base_discharge {
                 Some((soundness, qualifiers)) => {
                     base_verdict_from_discharge(*soundness, qualifiers)
                 }
@@ -436,6 +443,10 @@ pub struct PropertyRunOptions {
     pub seed: u64,
     pub samples: usize,
     pub smt_timeout_ms: u64,
+    /// Engine-owned search budget; the outer deadline adds a response margin.
+    pub beacon_budget: std::time::Duration,
+    /// Optional caller wall deadline, including compiler preparation.
+    pub beacon_deadline: Option<std::time::Instant>,
     /// `"auto"` (Tier B then C), `"smt-only"`, `"induction-only"`, `"fuzz-only"`.
     pub tier: String,
     /// Property-name selector (`--only`); `None` runs all.
@@ -452,6 +463,8 @@ impl Default for PropertyRunOptions {
             seed: 0,
             samples: 100,
             smt_timeout_ms: 5000,
+            beacon_budget: std::time::Duration::from_secs(60),
+            beacon_deadline: None,
             tier: "auto".to_string(),
             only: None,
             invariant_min_rate: 0.01,
@@ -672,6 +685,9 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
+    if options.tier == "beacon-only" {
+        return beacon::prove(decls, property, options);
+    }
     let seed = options.effective_seed(property.seed);
     let contract_assumptions = match contract_assumptions(property) {
         Ok(records) => records,

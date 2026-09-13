@@ -129,6 +129,12 @@ pub enum GoalShape {
         inputs: IntervalBox,
         output: OutputRange,
     },
+    /// Real-arithmetic scalar output bounded above by an exact tagged f64.
+    /// See `docs/design/beacon_scalar_range.md`.
+    ScalarUpperBound {
+        inputs: IntervalBox,
+        upper: chelis_types::ScalarValue,
+    },
 }
 
 /// A canonical, engine-independent goal to discharge.
@@ -162,6 +168,22 @@ fn interval_is_non_empty(lo: f64, hi: f64) -> bool {
 }
 
 impl Goal {
+    /// Construct a finite named scalar box and a one-sided output bound.
+    pub fn scalar_upper_bound(
+        inputs: IntervalBox,
+        upper: chelis_types::ScalarValue,
+    ) -> Result<Self, GoalError> {
+        let mut names = std::collections::BTreeSet::new();
+        for (name, lo, hi) in &inputs.dims {
+            if name.is_empty() || !names.insert(name) || !lo.is_finite() || !hi.is_finite() || lo > hi {
+                return Err(GoalError::IllFormed(format!("invalid or duplicate scalar input `{name}`")));
+            }
+        }
+        if upper.prim() != chelis_types::types::Prim::F64 || !upper.as_f64_lossy().is_finite() {
+            return Err(GoalError::IllFormed("scalar upper bound must be a finite tagged f64".into()));
+        }
+        Ok(Self { shape: GoalShape::ScalarUpperBound { inputs, upper }, ir: IrHandle::unpopulated() })
+    }
     /// Build a structured-SMT goal from an existing [`SmtProperty`]. The IR
     /// handle is left unpopulated (the Phase 1 cvc5 path).
     pub fn smt(property: SmtProperty) -> Self {
@@ -207,7 +229,7 @@ impl Goal {
     pub fn as_smt(&self) -> Option<&SmtProperty> {
         match &self.shape {
             GoalShape::Smt(p) => Some(p),
-            GoalShape::BoxRange { .. } => None,
+            GoalShape::BoxRange { .. } | GoalShape::ScalarUpperBound { .. } => None,
         }
     }
 }
@@ -234,7 +256,7 @@ pub enum Soundness {
     Exact,
 }
 
-/// One guarantee kind an engine can attach to a discharge. The seven kinds are
+/// One guarantee kind an engine can attach to a discharge. The nine kinds are
 /// incomparable on a single axis, so a discharge carries a [`QualifierSet`] and
 /// the WI-6 algebra unions them across a dependency set.
 #[derive(
@@ -861,7 +883,7 @@ mod tests {
     /// Exhaustive integrity oracle for the per-qualifier minimum-soundness map.
     ///
     /// This is the primitive every later no-laundering guarantee rests on, so it
-    /// gets its own table-driven negative+positive oracle: for each of the seven
+    /// gets its own table-driven negative+positive oracle: for each of the nine
     /// qualifiers, `Discharge::new` must be REJECTED at every soundness strictly
     /// below the qualifier's minimum, and ACCEPTED at/above it.
     ///
@@ -878,13 +900,14 @@ mod tests {
             Soundness::Exact,
         ];
 
-        // (qualifier, its expected minimum soundness floor) for all 7 kinds.
+        // (qualifier, its expected minimum soundness floor) for all 9 kinds.
         // The minimums are written out by hand, NOT read from `min_soundness`,
         // so a silent edit to the production map is caught here.
         let table = [
             (Qualifier::Exact, Soundness::Exact),
             (Qualifier::CertificateBearing, Soundness::Exact),
             (Qualifier::DeltaComplete, Soundness::SoundApproximate),
+            (Qualifier::RealArith, Soundness::SoundApproximate),
             (
                 Qualifier::SpecialFunctionCertified,
                 Soundness::SoundApproximate,
@@ -894,15 +917,29 @@ mod tests {
                 Soundness::SoundApproximate,
             ),
             (Qualifier::Fuzz, Soundness::Empirical),
+            (Qualifier::FuzzBase, Soundness::Empirical),
             (Qualifier::Axiom, Soundness::Untrusted),
         ];
+
+        // Read the actual enum, so adding a kind cannot silently leave this
+        // supposedly exhaustive table incomplete (the NN landing found two).
+        let file = syn::parse_file(include_str!("discharge.rs")).unwrap();
+        let vocabulary = file.items.iter().find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "Qualifier" => Some(item),
+            _ => None,
+        }).unwrap();
+        let defined: std::collections::BTreeSet<_> = vocabulary.variants.iter()
+            .map(|variant| variant.ident.to_string()).collect();
+        let covered: std::collections::BTreeSet<_> = table.iter()
+            .map(|(qualifier, _)| format!("{qualifier:?}")).collect();
+        assert_eq!(covered, defined, "minimum-soundness oracle must cover the actual enum");
 
         // Guard: the table must cover every qualifier kind exactly once, so a
         // newly added qualifier cannot slip past this oracle uncovered.
         assert_eq!(
             table.len(),
-            7,
-            "the qualifier vocabulary is closed at 7 kinds; update the table if it changes"
+            9,
+            "the qualifier vocabulary is closed at 9 kinds; update the table if it changes"
         );
 
         for (qualifier, expected_min) in table {

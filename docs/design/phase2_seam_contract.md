@@ -92,6 +92,7 @@ validated DAG before a handle is created.
 pub enum GoalShape {
     Smt(SmtProperty),
     BoxRange { inputs: IntervalBox, output: OutputRange },
+    ScalarUpperBound { inputs: IntervalBox, upper: chelis_types::ScalarValue },
 }
 
 pub struct IntervalBox { pub dims: Vec<(String, f64, f64)> }   // (name, lo, hi) per input
@@ -100,6 +101,13 @@ pub struct OutputRange { pub output: String, pub lo: f64, pub hi: f64 }
 
 Per-named-dim `[lo, hi]` input box; a single named output asserted within
 `[lo, hi]`. `f64` bounds.
+
+The additive scalar-network lane uses `ScalarUpperBound` for a one-sided
+output inequality, with an explicit finite f64 `ScalarValue` threshold and
+distinct named scalar input intervals. It does not invent a finite lower
+output limit. [Scalar range properties](beacon_scalar_range.md) specify its
+source subset, exact graph transport, budgets and real-arithmetic qualification.
+The historical `BoxRange` lane and its dispatch policy remain separate.
 
 **② Is this shape what Beacon's interval evaluator actually consumes?** Specifically:
 - Per-named-scalar-dim boxes sufficient, or do you need affine / zonotope input

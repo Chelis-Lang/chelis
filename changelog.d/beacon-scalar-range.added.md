@@ -1,0 +1,1 @@
+`chelis prove --tier beacon-only` and the Tide prove tool can dispatch self-contained scalar network bounds to Beacon, retaining real-arithmetic qualification, search bounds, unknown reasons and split trees. Search and caller wall budgets are explicit; float execution is not covered.

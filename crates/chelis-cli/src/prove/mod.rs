@@ -37,6 +37,8 @@ pub struct ProveOptions<'a> {
     pub tier: &'a str,
     #[allow(dead_code)]
     pub smt_timeout_ms: u64,
+    pub beacon_budget: std::time::Duration,
+    pub beacon_deadline: Option<std::time::Instant>,
     /// Floor for invariant rejection-sampling acceptance rate before the
     /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
     /// classifier and preserves the legacy exhaustion => Error path.
@@ -3276,13 +3278,15 @@ pub fn prove_capabilities() -> serde_json::Value {
     // conjunction makes Beacon "available", so `beacon_available` keeps its
     // name and its "can I use it" meaning instead of reporting env-var presence.
     let beacon_binary_present = std::env::var("CHELIS_BEACON_BIN").is_ok();
-    let beacon_wired = beacon_is_wired();
+    let beacon_contract_wired = beacon_is_wired();
+    let beacon_scalar_wired = cfg!(feature = "chelis-prove");
+    let beacon_wired = beacon_contract_wired || beacon_scalar_wired;
     let beacon_available = beacon_binary_present && beacon_wired;
     let dispatcher_available = cfg!(feature = "chelis-prove");
     let obligation_engine_available = cfg!(feature = "chelis-prove");
     // chelis#674: report whether the beacon contract prover can upgrade
     // fuzz-discharged contracts to certified-envelope proofs.
-    let beacon_contract_prover_available = beacon_available;
+    let beacon_contract_prover_available = beacon_binary_present && beacon_contract_wired;
     let reachable_tier = if beacon_contract_prover_available {
         "certified_envelope"
     } else {
@@ -3304,18 +3308,19 @@ pub fn prove_capabilities() -> serde_json::Value {
     // check for fields they know handle this additively (new fields are ignored).
     // The version bump signals that the contract prover capability exists.
     json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "prove_json_schema_version": 1,
-        "supported_tiers": ["type_system", "smt", "fuzz", "certified_envelope"],
+        "supported_tiers": ["type_system", "smt", "fuzz", "certified_envelope", "beacon_scalar_real"],
         "smt_available": smt_available,
         "beacon_available": beacon_available,
         "beacon_binary_present": beacon_binary_present,
         "beacon_wired": beacon_wired,
+        "beacon_scalar_available": beacon_binary_present && beacon_scalar_wired,
         "beacon_contract_prover_available": beacon_contract_prover_available,
         "reachable_bs_tier": reachable_tier,
         "dispatcher_available": dispatcher_available,
         "obligation_engine_available": obligation_engine_available,
-        "supported_flags": ["--json", "--only", "--samples", "--seed", "--tier", "--smt-timeout", "--package"],
+        "supported_flags": ["--json", "--only", "--samples", "--seed", "--tier", "--smt-timeout", "--beacon-budget", "--beacon-wall-budget", "--package"],
         "engine_registry": engine_registry
     })
 }

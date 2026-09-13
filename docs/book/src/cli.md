@@ -349,6 +349,17 @@ consumers do not need a second plain-text run to diagnose the mismatch.
 
 ## Property Proof Loop
 
+For self-contained scalar neural networks, `chelis prove file.ch --tier
+beacon-only --beacon-budget 60000` dispatches rank-zero `tensor[f64]` range
+properties to the executable named by `CHELIS_BEACON_BIN`. Bounds use explicit
+f64 literals and `tensor_to_scalar` in the property. The result includes the
+folded goal, input box, bounds, split tree and always-visible real-arithmetic
+qualification. Float execution is not covered. `--beacon-wall-budget 90000`
+includes compiler preparation when limiting the remaining search time. The
+explicit Beacon lane does not fall back to SMT or fuzz. See
+[the scalar range contract](../../../docs/design/beacon_scalar_range.md) and
+`examples/beacon_scalar_range.ch` for the supported subset.
+
 `chelis prove` runs first-class Surf properties and bridge-emitted Deep property
 witnesses:
 

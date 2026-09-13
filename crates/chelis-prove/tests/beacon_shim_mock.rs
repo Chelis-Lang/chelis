@@ -754,6 +754,16 @@ fn large_request_proved_verdict_is_delivered_not_lost() {
     );
 }
 
+#[test]
+fn large_tree_response_does_not_fill_the_child_stdout_pipe() {
+    crate::support::isolate();
+    let _g = with_scenario("large_report");
+    let shim = BeaconShim::new(MOCK_BIN, large_populated_store());
+    let discharge = shim.discharge(&large_box_goal(), FAST_TIMEOUT_MS);
+    assert_eq!(*discharge.result(), TierBResult::Proved, "large report was lost: {discharge:?}");
+    assert_eq!(discharge.evidence()["beacon_evidence"]["tree_payload"].as_str().unwrap().len(), 256 * 1024);
+}
+
 /// NEGATIVE/positive twin of the deadlock fix: a SMALL stdin request still uses
 /// the stdin transport (the fallback is a ceiling, not an always-tempfile
 /// switch) and maps proved identically. (Observed indirectly: the small request

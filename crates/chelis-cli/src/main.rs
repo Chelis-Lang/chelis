@@ -420,12 +420,18 @@ enum Command {
         /// Override bridge span manifest for a single `.dp` input
         #[clap(long)]
         spans: Option<PathBuf>,
-        /// Verification tier: auto (A→B→C), fuzz-only, smt-only, induction-only, type-only
+        /// Verification tier: auto (A→B→C), fuzz-only, smt-only, induction-only, type-only, beacon-only
         #[clap(long, default_value = "auto")]
         tier: String,
         /// SMT solver timeout in milliseconds (default 5000)
         #[clap(long, default_value = "5000")]
         smt_timeout: u64,
+        /// Beacon search budget in milliseconds, excluding compiler preparation.
+        #[clap(long, default_value = "60000")]
+        beacon_budget: u64,
+        /// Optional wall budget in milliseconds including compiler preparation (maximum one day)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(..=86_400_000))]
+        beacon_wall_budget: Option<u64>,
         /// Floor for invariant rejection-sampling acceptance rate before
         /// the generator-starvation classifier fires (RFC D-STARVE). 0.0
         /// disables the classifier (legacy exhaustion => error path).
@@ -1022,6 +1028,8 @@ fn main() {
             spans,
             tier: _tier,
             smt_timeout: _smt_timeout,
+            beacon_budget,
+            beacon_wall_budget,
             invariant_min_rate,
             package,
             capabilities,
@@ -1041,6 +1049,8 @@ fn main() {
                 spans: spans.as_deref(),
                 tier: &_tier,
                 smt_timeout_ms: _smt_timeout,
+                beacon_budget: std::time::Duration::from_millis(beacon_budget),
+                beacon_deadline: beacon_wall_budget.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
                 invariant_min_rate,
                 package: package.as_deref(),
             }) {

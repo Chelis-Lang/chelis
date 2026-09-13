@@ -61,6 +61,36 @@ use sha2::{Digest, Sha256};
 
 use crate::discharge::{Goal, GoalError, IntervalBox, IrHandle, OutputRange};
 
+/// Retain the selected scalar output's exact dependency closure. Function
+/// definition roots and their placeholder Loads must not enter its input box.
+pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,u64),String> {
+    wire.validate_wire_contract().map_err(|e| e.to_string())?;
+    let mut retained = std::collections::BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if retained.insert(id) {
+            let index = usize::try_from(id).map_err(|_| "node ID exceeds host size")?;
+            let node = wire.nodes.get(index).ok_or("root dependency outside graph")?;
+            if node.id != id || !node.shape_deps.is_empty() {
+                return Err("scalar closure requires dense IDs and no shape dependencies".into());
+            }
+            pending.extend(node.inputs.iter().copied());
+        }
+    }
+    let mapping: std::collections::BTreeMap<_,_> = retained.iter().enumerate().map(|(new,old)| (*old,new as u64)).collect();
+    let mut dag = wire.clone();
+    dag.nodes = retained.iter().map(|id| {
+        let mut node = wire.nodes[*id as usize].clone();
+        node.id = mapping[id];
+        node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
+        node
+    }).collect();
+    let root = mapping[&root];
+    dag.roots = vec![root];
+    dag.validate_wire_contract().map_err(|e| e.to_string())?;
+    Ok((dag,root))
+}
+
 /// A box/range [`Goal`] produced from real source, plus the serialized
 /// exact-version `WireDag` v9 artifact its [`IrHandle`] addresses.
 ///

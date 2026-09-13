@@ -292,13 +292,15 @@ fn serialize_payload<T: serde::Serialize>(value: T) -> Value {
 fn prove_tool_schema() -> Value {
     json!({
         "name": "chelis_prove",
-        "description": "Verify Chelis properties via three-tier dispatch (type check → SMT → fuzz)",
+        "description": "Verify Chelis properties via automatic dispatch or explicit Beacon scalar real-arithmetic bounds",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "source_kind": { "type": "string", "enum": ["surf", "deep"] },
                 "source": { "type": "string", "description": "Chelis source containing @property declarations" },
-                "tier": { "type": "string", "enum": ["auto", "fuzz-only", "smt-only", "induction-only", "type-only"], "default": "auto" },
+                "tier": { "type": "string", "enum": ["auto", "fuzz-only", "smt-only", "induction-only", "type-only", "beacon-only"], "default": "auto" },
+                "beacon_budget": { "type": "integer", "minimum": 0, "description": "Beacon search budget in ms, excluding compiler preparation", "default": 60000 },
+                "beacon_wall_budget": { "type": "integer", "minimum": 0, "maximum": 86400000, "description": "Optional wall budget in ms, including compiler preparation" },
                 "amenability": { "type": "string", "enum": ["linear", "polynomial", "transcendental", "opaque"], "description": "SMT amenability classification" },
                 "smt_timeout": { "type": "integer", "description": "SMT timeout in ms (default 5000)", "default": 5000 },
                 "samples": { "type": "integer", "description": "Fuzz samples per property (default 100)", "default": 100 },
@@ -311,6 +313,7 @@ fn prove_tool_schema() -> Value {
 }
 
 fn handle_prove_tool(args: &Value) -> Value {
+    let started = std::time::Instant::now();
     let source = match args.get("source").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None => {
@@ -344,13 +347,21 @@ fn handle_prove_tool(args: &Value) -> Value {
     // shared property runner classifies amenability internally).
     if !matches!(
         tier,
-        "auto" | "fuzz-only" | "smt-only" | "induction-only" | "type-only"
+        "auto" | "fuzz-only" | "smt-only" | "induction-only" | "type-only" | "beacon-only"
     ) {
         return json!({
             "ok": false,
             "stage": "mcp",
             "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{tier}`"), "severity": 1.0, "suggestions": []}]
         });
+    }
+    if args.get("beacon_budget").is_some_and(|value| value.as_u64().is_none()) {
+        return json!({"ok":false,"stage":"mcp","errors":[{"kind":"invalid_arguments",
+            "message":"beacon_budget must be an unsigned integer in milliseconds","severity":1.0,"suggestions":[]}]});
+    }
+    if args.get("beacon_wall_budget").is_some_and(|value| !value.as_u64().is_some_and(|ms| ms <= 86_400_000)) {
+        return json!({"ok":false,"stage":"mcp","errors":[{"kind":"invalid_arguments",
+            "message":"beacon_wall_budget must be an integer from 0 to 86400000 milliseconds","severity":1.0,"suggestions":[]}]});
     }
     if !matches!(source_kind.as_str(), "surf" | "deep") {
         return json!({
@@ -390,6 +401,8 @@ fn handle_prove_tool(args: &Value) -> Value {
         seed,
         samples,
         smt_timeout_ms: smt_timeout,
+        beacon_budget: std::time::Duration::from_millis(args.get("beacon_budget").and_then(Value::as_u64).unwrap_or(60000)),
+        beacon_deadline: args.get("beacon_wall_budget").and_then(Value::as_u64).map(|ms| started + std::time::Duration::from_millis(ms)),
         tier: tier.to_string(),
         only: None,
         invariant_min_rate,
@@ -571,11 +584,15 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
         o.proof_tier,
         chelis_prove::property_runner::PropertyTier::Smt
             | chelis_prove::property_runner::PropertyTier::Induction
+            | chelis_prove::property_runner::PropertyTier::Beacon
     ) {
         value["arith_model"] = json!("real");
     }
     if let Some(evidence) = &o.induction_evidence {
         value["induction"] = json!(evidence);
+    }
+    if let Some(evidence) = &o.engine_evidence {
+        value["engine_evidence"] = evidence.clone();
     }
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();
