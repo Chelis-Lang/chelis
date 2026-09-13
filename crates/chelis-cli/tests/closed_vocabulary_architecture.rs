@@ -391,8 +391,42 @@ fn is_cxx_raw_literal(spelling: &str) -> bool {
         .any(|prefix| spelling.starts_with(prefix))
 }
 
+fn splice_c_line_continuations(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut spliced = String::with_capacity(source.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some(Ok(raw_end)) = c_lexical::cxx_raw_string_end(&chars, index) {
+            spliced.extend(chars[index..raw_end].iter());
+            index = raw_end;
+            continue;
+        }
+
+        let splice_end = if chars[index] == '\\' && chars.get(index + 1) == Some(&'\n') {
+            Some(index + 2)
+        } else if chars[index] == '\\'
+            && chars.get(index + 1) == Some(&'\r')
+            && chars.get(index + 2) == Some(&'\n')
+        {
+            Some(index + 3)
+        } else {
+            None
+        };
+
+        if let Some(splice_end) = splice_end {
+            index = splice_end;
+        } else {
+            spliced.push(chars[index]);
+            index += 1;
+        }
+    }
+    spliced
+}
+
 fn lex_c_family_tokens(source: &str) -> Vec<SourceToken> {
-    c_lexical::lex_c_tokens(source)
+    let spliced = splice_c_line_continuations(source);
+    c_lexical::lex_c_tokens(&spliced)
         .into_iter()
         .map(|spelling| {
             if is_cxx_raw_literal(&spelling) {
@@ -984,6 +1018,125 @@ fn escaped_literals_and_include_operands_keep_language_semantics() {
     assert!(
         forbidden.is_empty(),
         "escaped ordinary literal payload is not active token structure: {forbidden:?}"
+    );
+}
+
+#[test]
+fn c_family_line_splicing_exposes_forbidden_macro_tokens() {
+    for (label, newline) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let continued = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/macro-{label}.h")),
+            &format!("#define WIDTH() return \\{newline}sizeof(float);{newline}"),
+        );
+        let forbidden =
+            forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[continued]);
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "{label} line splicing must expose the active macro body: {forbidden:?}"
+        );
+
+        let joined_tokens = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/joined-{label}.h")),
+            &format!("#define WIDTH() ret\\{newline}urn size\\{newline}of(float);{newline}"),
+        );
+        let forbidden =
+            forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[joined_tokens]);
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "{label} splicing must join preprocessing-token characters before lexing: \
+             {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn c_family_line_splicing_preserves_continued_include_evidence() {
+    for (label, newline) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let source = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/continued-{label}.h")),
+            &format!("#include \\{newline}\"chelis_runtime_dtype.h\"{newline}"),
+        );
+        let missing = missing_required_evidence(
+            "example",
+            "continued include control",
+            &["#include \"chelis_runtime_dtype.h\""],
+            &[source],
+        );
+        assert!(
+            missing.is_empty(),
+            "{label} continued include operands remain positive evidence: {missing:?}"
+        );
+    }
+}
+
+#[test]
+fn c_family_line_splicing_precedes_line_comment_projection() {
+    for (label, newline) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let continued_comment = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/comment-{label}.h")),
+            &format!("// generated note \\{newline}return sizeof(float);{newline}"),
+        );
+        let forbidden = forbidden_occurrences(
+            "RuntimeDType",
+            &["return sizeof(float);"],
+            &[continued_comment],
+        );
+        assert!(
+            forbidden.is_empty(),
+            "{label} splicing extends a line comment across the next physical line: \
+             {forbidden:?}"
+        );
+
+        let formed_comment = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/formed-comment-{label}.h")),
+            &format!("/\\{newline}/ return sizeof(float);{newline}"),
+        );
+        let forbidden = forbidden_occurrences(
+            "RuntimeDType",
+            &["return sizeof(float);"],
+            &[formed_comment],
+        );
+        assert!(
+            forbidden.is_empty(),
+            "{label} splicing can form a line-comment opener before comment removal: \
+             {forbidden:?}"
+        );
+
+        let active_next_line = ScannedSource::new(
+            PathBuf::from(format!("crates/example/include/active-{label}.h")),
+            &format!("// generated note{newline}return sizeof(float);{newline}"),
+        );
+        let forbidden = forbidden_occurrences(
+            "RuntimeDType",
+            &["return sizeof(float);"],
+            &[active_next_line],
+        );
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "without a splice, the next {label} physical line remains active: {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn c_family_line_splicing_preserves_cxx_raw_string_payloads() {
+    let source = ScannedSource::new(
+        PathBuf::from("crates/example/include/raw-splice.cpp"),
+        r####"
+static const char *notes = R"x(
+)\
+x" if effect == "random"
+)x";
+"####,
+    );
+    let forbidden = forbidden_occurrences("EffectKind", &["if effect == \"random\""], &[source]);
+    assert!(
+        forbidden.is_empty(),
+        "a physical splice inside a C++ raw-string payload must not create an early delimiter: \
+         {forbidden:?}"
     );
 }
 

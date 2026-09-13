@@ -61,7 +61,7 @@ pub const NON_NUMERIC_C_TYPE_WORDS: &[&str] = &[
     "__restrict__",
 ];
 
-fn cxx_raw_string_end(chars: &[char], start: usize) -> Option<Result<usize, ()>> {
+pub(crate) fn cxx_raw_string_end(chars: &[char], start: usize) -> Option<Result<usize, ()>> {
     let prefixes: &[&[char]] = &[
         &['R'],
         &['u', '8', 'R'],
