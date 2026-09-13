@@ -703,6 +703,10 @@ all before the application itself. Observable effects occur in that order,
 and the first argument whose evaluation traps determines the trap the
 application raises; later arguments are not evaluated after a trap.
 
+Every argument expression resolves its names in the caller's scope. Callee
+parameter bindings do not enter that scope while later arguments are being
+evaluated; renaming callee parameters therefore cannot change argument values.
+
 This order is a semantic contract in every executable lane, not an
 implementation convenience. Value-level rewrites — a derived built-in's
 lowering to RISC primitives (`spec/05-risc-primitives.md` §3), constant

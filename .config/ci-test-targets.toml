@@ -2,6 +2,11 @@
 # New integration targets run in the unfiltered nightly unless added here.
 version = 1
 
+# chelis#1915: caller/formal scope, exact eval/native values and rejection control.
+[[target]]
+package = "chelis-cli"
+name = "issue_1915_caller_actual_scope"
+
 [[target]]
 package = "chelis-ir"
 name = "issue_1753_grad_result_order_ir"
