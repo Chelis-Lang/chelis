@@ -9343,9 +9343,20 @@ impl<'program> LowerCtx<'program> {
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
-        for (((name, arg_expr), param_ty), formal_expr) in param_names
+        // Prepare every actual in caller scope, in written order. Installing
+        // a formal early can change the value or static fact of a later actual.
+        let actuals = args
             .iter()
-            .zip(args.iter())
+            .map(|arg| {
+                let static_size = self.fold_static_size(arg);
+                let callable = self.resolve_callable_expr(arg);
+                let value = callable.is_none().then(|| self.lower_expr(arg));
+                (static_size, callable, value)
+            })
+            .collect::<Vec<_>>();
+        for (((name, (static_size, callable, value)), param_ty), formal_expr) in param_names
+            .iter()
+            .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
         {
@@ -9353,7 +9364,6 @@ impl<'program> LowerCtx<'program> {
             // name. This is required by the [05-OP-35] wrappers: their public
             // count parameter is renamed once more before the builtin
             // index/take/drop app reaches the staged List rewrite.
-            let static_size = self.fold_static_size(arg_expr);
             // Item 2-extended: shadowing; the inlined fn's param name
             // is bound to a fresh value (either a `local_callable` or a
             // `bindings` entry). Drop any outer-scope
@@ -9368,7 +9378,6 @@ impl<'program> LowerCtx<'program> {
             // same-named formal shadows it. Removing the marker first would
             // erase the only evidence that `model` in `apply(model, x)` is an
             // unresolved outer callable.
-            let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
             if let Some(value) = static_size {
                 self.static_size_bindings.insert(name.clone(), value);
@@ -9392,7 +9401,7 @@ impl<'program> LowerCtx<'program> {
                     }
                 }
             } else {
-                let arg_id = self.lower_expr(arg_expr);
+                let arg_id = value.expect("non-callable actual was lowered in caller scope");
                 if let LoweredValue::Node(node_id) = &arg_id
                     && let Some(actual_ty) =
                         self.dag.get(*node_id).map(|node| node.output_type.clone())
@@ -19759,6 +19768,65 @@ mod tests {
             "the unreachable-by-construction panic must not be the user-facing \
              message; got: {message}"
         );
+    }
+
+    #[test]
+    fn issue_1915_actual_values_precede_formals_and_restore_caller() {
+        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        for (params, body) in [("x y", "x) (var {} y"), ("a b", "a) (var {} b")] {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    "first".into(),
+                    parse(&format!(
+                        "(fn {{}} (params {{}} {params}) (app {{}} (var {{}} sub) (var {{}} {body})))"
+                    )),
+                )]),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
+            let caller = ctx.lower_expr(&parse("(lit {} 2.0)"));
+            ctx.bindings.insert("x".into(), caller.clone());
+            let result = ctx.lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"));
+            let root = result.expect_node("scalar result");
+            let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
+                .expect("all actuals were lowered in caller scope");
+            assert_eq!(values[&root].to_f64_lossy_vec(), vec![8.0]);
+            assert_eq!(ctx.bindings["x"].as_single_node(), caller.as_single_node());
+            assert!(!ctx.bindings.contains_key("y"));
+            assert!(!ctx.bindings.contains_key("a"));
+            assert!(!ctx.bindings.contains_key("b"));
+        }
+    }
+
+    #[test]
+    fn issue_1915_static_size_actual_precedes_formal_and_restores() {
+        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "repeat".into(),
+                parse(
+                    "(fn {} (params {} n count) (app {} (var {} insert) (lit {} 7.0) (cast {} (lit {} 0) int32) (var {} count)))",
+                ),
+            )]),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) int64)"));
+        ctx.bindings.insert("n".into(), caller.clone());
+        ctx.static_size_bindings.insert("n".into(), 3);
+        let root = ctx
+            .lower_expr(&parse(
+                "(app {} (var {} repeat) (cast {} (lit {} 1) int64) (var {} n))",
+            ))
+            .expect_node("expanded result");
+        let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
+            .expect("static count remains caller-owned");
+        assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
+        assert_eq!(ctx.static_size_bindings["n"], 3);
+        assert!(!ctx.static_size_bindings.contains_key("count"));
+        assert_eq!(ctx.bindings["n"].as_single_node(), caller.as_single_node());
     }
 
     #[test]

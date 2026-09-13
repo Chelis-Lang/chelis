@@ -210,6 +210,7 @@ pub fn balanced(summary: &Value) {
 
 const PRELUDE: &str = r#"
 #include <assert.h>
+#include <inttypes.h>
 #include <string.h>
 static chelis_tensor *input(int64_t n) {
     chelis_tensor *x = chelis_alloc(1, &n, CHELIS_DTYPE_F32);
