@@ -4,7 +4,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 
 | Owner | Cadence | Coverage |
 |---|---|---|
-| `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the 17 package/target identities in `.config/ci-test-targets.toml`; 20-minute limit |
+| `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed package/target identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and rejection liveness |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
 | `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
