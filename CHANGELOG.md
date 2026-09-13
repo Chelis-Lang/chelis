@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.8] - 2026-09-13
+
+### Changed
+
+- Regular pull-request CI now requires every added or directly modified default-enabled integration target, while a separate informational lane measures broader changed-package coverage without changing the required verdict.
+
+### Fixed
+
+- The host evaluator now keeps successful declaration initialization separate from
+  caller locals, reusing it within an evaluation context without caching failures
+  or function-call results. Ordinary named and named-axis calls retain declaration
+  scope; anonymous host closures retain lexical shadows. Caller argument order and
+  handled Random streams are preserved. Ordinary host requests start fresh caches;
+  invariant predicates keep separate contexts. This repairs the host declaration
+  slice of [#1956](https://github.com/Chelis-Lang/chelis/issues/1956), not general
+  named-gradient capture behavior.
+
+- Named-axis host evaluation now prepares selected tensor inputs and required shape
+  witnesses on the lowered graph before execution, instead of pre-initializing
+  syntactically referenced library values. Statically dead captures and same-named
+  formals no longer trigger unrelated initializers; optional shape witnesses only
+  use available tensors. Entered initializer errors and existing input precedence
+  are preserved. This does not change general declaration caching or caller-frame
+  ownership.
+
+- Freeze mutation target paths, expected seam kinds, and required rejection owners
+  in the runtime representation oracle so changing a witness's rejection obligation
+  requires a reviewed baseline update.
+
+- Recursive host evaluation reuses an inherited execution-profile exclusion without
+  copying every top-level function body at each nested call. The admission result
+  and random stream behavior are unchanged. An allocation regression bounds the
+  additional allocation for 64 recursive calls in a program with unrelated helpers.
+  See [#2020](https://github.com/Chelis-Lang/chelis/issues/2020).
+
+- Tensor helpers accept typed scalar and tensor parameters whose names also name
+  builtins, such as `mean` or `fold`. Kernel admission checks the lexical input
+  scope before treating a Load as an unresolved builtin, preserving lexical
+  precedence in the evaluator and generated C. Unresolved builtin Loads remain
+  rejected. See [#2023](https://github.com/Chelis-Lang/chelis/issues/2023).
+
 ## [0.18.7] - 2026-09-13
 
 ### Added
