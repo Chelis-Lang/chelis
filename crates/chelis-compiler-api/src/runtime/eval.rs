@@ -4132,14 +4132,6 @@ mod legacy_capture_order_tests {
         assert_eq!(ctx.random_counter, 5);
         let actual = admitted_call(&mut ctx, "sample").unwrap();
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        eprintln!(
-            "preinitialized initializer={} helper={} next={} counter={} transcript={:?}",
-            bits(&initialized),
-            bits(&actual),
-            bits(&next),
-            ctx.random_counter,
-            ctx.transcript
-        );
         assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
         assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
         assert_eq!(ctx.random_counter, 7);
@@ -4160,15 +4152,6 @@ mod legacy_capture_order_tests {
             .expect("capture initialized lazily");
         assert_eq!(bits(initialized), bits(&expected_draw(17, 0)));
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        eprintln!(
-            "lazy helper={} expected={} next={} expected_next={} counters={after_helper}/{} transcript={:?}",
-            bits(&actual),
-            bits(&expected_draw(42, 5)),
-            bits(&next),
-            bits(&expected_draw(42, 6)),
-            ctx.random_counter,
-            ctx.transcript
-        );
         assert_eq!(
             (
                 bits(&actual),
@@ -4198,12 +4181,6 @@ mod legacy_capture_order_tests {
         let after_failure = ctx.random_counter;
         assert!(!ctx.bindings.contains_key("weights"));
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        eprintln!(
-            "initializer error={error:?} prefix={after_failure} next={} counter={} transcript={:?}",
-            bits(&next),
-            ctx.random_counter,
-            ctx.transcript
-        );
         assert_eq!(
             error,
             "numeric trap: division by zero in floor_div at int32"
@@ -4231,13 +4208,6 @@ mod legacy_capture_order_tests {
             let mut ctx = context(&library, &tensors);
             let actual = admitted_call(&mut ctx, "sample").unwrap();
             let next = admitted_call(&mut ctx, "next_draw").unwrap();
-            eprintln!(
-                "unselected {params}: helper={} next={} counter={} transcript={:?}",
-                bits(&actual),
-                bits(&next),
-                ctx.random_counter,
-                ctx.transcript
-            );
             assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
             assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
             assert_eq!(ctx.random_counter, 7);
@@ -4255,12 +4225,16 @@ mod legacy_capture_order_tests {
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
                 .unwrap();
         let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
-        let rejection = format!("{error:?}");
-        eprintln!("nullary template rejection: {rejection}");
-        assert!(
-            rejection
-                .contains("uniform_like expects tensor template input, got () -> tensor[2, f32]")
-        );
+        let crate::pipeline::LibraryRejection::Type { report } = error else {
+            panic!("a nullary callable template must fail type checking");
+        };
+        assert!(report.errors.iter().any(|error| {
+            matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::TypeMismatch
+            ) && error.message
+                == "uniform_like expects tensor template input, got () -> tensor[2, f32]"
+        }));
         let declaration = source.split("def sample").next().unwrap();
         let prepared =
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, declaration, None)
@@ -4271,10 +4245,6 @@ mod legacy_capture_order_tests {
         let closure = ctx.resolve_top_level("weights").unwrap();
         assert!(matches!(closure, RuntimeValue::Closure { .. }));
         let error = stage_kernel_argument("sample", "weights", &closure, Prim::F32).unwrap_err();
-        eprintln!(
-            "checked nullary closure staging: {error}; counter={} transcript={:?}",
-            ctx.random_counter, ctx.transcript
-        );
         assert!(error.contains("expects a tensor or scalar argument"));
         assert_eq!(ctx.random_counter, 5);
         assert!(ctx.transcript.is_empty());
@@ -4305,13 +4275,6 @@ mod legacy_capture_order_tests {
             .unwrap_err();
         let after_failure = ctx.random_counter;
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        eprintln!(
-            "transform error={error:?} prefix={after_failure} next={} expected_next={} final={} transcript={:?}",
-            bits(&next),
-            bits(&expected_draw(42, 5)),
-            ctx.random_counter,
-            ctx.transcript
-        );
         assert_eq!(ctx.transcript, ["initialize"]);
         assert!(!ctx.bindings.contains_key("weights"));
         assert_eq!(after_failure, 5, "callee draw was not entered");
@@ -4337,7 +4300,6 @@ mod legacy_capture_order_tests {
         let error = ctx
             .apply_resolved_callable(callable, vec![zeros()])
             .unwrap_err();
-        eprintln!("vmap rank error={error:?} transcript={:?}", ctx.transcript);
         assert_eq!(
             error,
             "host runtime: `vmap(...)` over a def capturing top-level binding `weights` is unsupported: the transform types the capture as rank 1 (batched) but the binding is rank 0. vmap-with-captures must broadcast the capture across the batch axis, not batch it (tracked residual, chelis#377)."
@@ -4358,13 +4320,13 @@ mod legacy_capture_order_tests {
             crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, &source, None)
                 .unwrap();
         let error = crate::pipeline::check_prepared_library(prepared).unwrap_err();
-        let actual = format!("{error:?}");
-        eprintln!("unhandled initializer rejection: {actual}");
-        assert!(actual.contains("UnhandledEffect"), "{actual}");
-        assert!(
-            actual.contains("Function `weights` has unhandled effect `Random`"),
-            "{actual}"
-        );
+        let crate::pipeline::LibraryRejection::Effects { errors } = error else {
+            panic!("an unhandled Random initializer must fail effect checking");
+        };
+        assert!(errors.iter().any(|error| {
+            error.kind == chelis_effects::EffectErrorKind::UnhandledEffect
+                && error.message.starts_with("Function `weights` has unhandled effect `Random`")
+        }));
         }
     }
 }
