@@ -235,6 +235,12 @@ unimported module cannot change that verdict. The qualified forms above remain
 available after importing the declaring module, and naming the value in a
 selective import brings it into unqualified scope.
 
+Function calls do not give a named declaration access to its caller's locals.
+Its free references keep their declaration scope; an anonymous `fn` instead
+captures the lexical bindings at its creation site, including local shadows of
+declarations. Arguments are evaluated left-to-right in the caller's scope before
+the callee's parameters are installed ([04-LIN-1], [04-LIN-2]).
+
 **Constructor scope (unqualified references).** A bare (unqualified)
 constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
 `Alpha { ... }`) or in a `match` **pattern** (`| Alpha => ...`) — is in scope

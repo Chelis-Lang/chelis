@@ -523,7 +523,7 @@ impl<'a> EvalContext<'a> {
             // Unknown or ambiguous names may be optional shape declarers.
             // Do not confuse this absence with an error *inside* a known
             // initializer, even if that error also names an unknown binding.
-            if !self.bindings.contains_key(name) && self.lookup_top_level_def(name).is_none() {
+            if self.lookup_top_level_def(name).is_none() {
                 return Ok(None);
             }
             match self.resolve_top_level(name) {
