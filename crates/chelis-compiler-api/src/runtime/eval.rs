@@ -4138,6 +4138,90 @@ mod legacy_capture_order_tests {
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 
+    #[test]
+    fn declaration_cold_warm_builtin_and_local_shadow_control() {
+        // Top-level builtin-name declarations are rejected by the checker;
+        // warm a legal declaration, never manufacture a cached builtin.
+        let library = checked_library(
+            "marker = 7\nplain = relu(-2.0f64)\nshadowed = { relu = fn (v: f64) -> add(v, 100.0f64)\n relu(-2.0f64) }\n",
+        );
+        let tensors = UnordMap::new();
+        for warm in [false, true] {
+            let mut ctx = context(&library, &tensors);
+            if warm {
+                ctx.resolve_top_level("marker").unwrap();
+            }
+            let plain = ctx.lookup_top_level_def("plain").unwrap().1;
+            let shadowed = ctx.lookup_top_level_def("shadowed").unwrap().1;
+            assert!(ctx.active_builtin_symbol("relu"));
+            let zero = bits(&ctx.eval_expr(&plain).unwrap());
+            let local = bits(&ctx.eval_expr(&shadowed).unwrap());
+            assert_eq!(zero, bits(&RuntimeValue::float64(0.0)));
+            assert_eq!(local, bits(&RuntimeValue::float64(98.0)));
+            assert!(ctx.active_builtin_symbol("relu"));
+            assert_eq!(bits(&ctx.eval_expr(&plain).unwrap()), zero);
+            assert!(ctx.transcript.is_empty());
+        }
+    }
+
+    #[test]
+    fn declaration_cold_warm_dropout_specialization_and_local_shadow_control() {
+        // Reuse #1764's admitted generic/static-rate and local-shadow shapes.
+        // Evaluating the checked value body directly reaches eval_app rather
+        // than lowering a whole main wrapper. Warming resolves the same keep.
+        let tensors = UnordMap::new();
+        for local in [false, true] {
+            let shadow = if local {
+                "keep = fn (v: tensor[4, f32]) -> v\n"
+            } else {
+                ""
+            };
+            let library = checked_library(&format!(
+                "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\nout = with seed(42i64) {{ {shadow}x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n first = keep(copy(x))\n next = dropout(x, 0.5f32)\n (first, next) }}\n"
+            ));
+            for warm in [false, true] {
+                let mut ctx = context(&library, &tensors);
+                let declaration = ctx.lookup_top_level_def("keep").unwrap().1;
+                assert_eq!(
+                    chelis_ir::lower::evaluation_profile(&declaration, &ctx.top_level_defs),
+                    EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate)
+                );
+                if warm {
+                    let closure = ctx.resolve_top_level("keep").unwrap();
+                    assert!(
+                        matches!(closure, RuntimeValue::Closure { def_name: Some(ref name), .. } if name == "keep")
+                    );
+                }
+                let body = ctx.lookup_top_level_def("out").unwrap().1;
+                let RuntimeValue::Tuple(values) = ctx.eval_expr(&body).unwrap() else {
+                    panic!("checked output is a pair")
+                };
+                assert_eq!(values.len(), 2);
+                // Independent fixed-stream ordinals 0=[0,2,0,0], 1=[2,0,0,0].
+                let expected = if local {
+                    [
+                        ["3f800000"; 4],
+                        ["00000000", "40000000", "00000000", "00000000"],
+                    ]
+                } else {
+                    [
+                        ["00000000", "40000000", "00000000", "00000000"],
+                        ["40000000", "00000000", "00000000", "00000000"],
+                    ]
+                };
+                for (value, expected_bits) in values.iter().zip(expected) {
+                    assert_eq!(
+                        bits(value),
+                        serde_json::json!({"type":"tensor", "value":{"shape":[4], "data":{"dtype":"f32", "bits":expected_bits}}})
+                    );
+                }
+                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+                assert!(ctx.execution_exclusion.is_none());
+                assert!(ctx.transcript.is_empty());
+            }
+        }
+    }
+
     // #1956: these are real checked library contexts, with the production
     // session and resolver. Caller-only entries model an already-entered
     // lexical frame; none is inserted into the declaration environment.
