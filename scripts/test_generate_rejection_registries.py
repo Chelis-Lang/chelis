@@ -20,6 +20,7 @@ from generate_rejection_registries import (
     discover_atoms,
     discover_production_workspace,
     load_issue_manifest,
+    parse_issue_manifest,
     manifest_derivation_problems,
     parse_issue_citations,
     parse_production_issue_citations,
@@ -458,6 +459,15 @@ class IssueCitations(unittest.TestCase):
 
 
 class IssueManifest(unittest.TestCase):
+    def test_committed_manifest_parser_matches_file_parser(self) -> None:
+        source = render_issue_manifest([705, 879])
+        self.assertEqual(parse_issue_manifest(source), [705, 879])
+
+    def test_non_object_or_malformed_committed_manifest_is_rejected(self) -> None:
+        for source in ["[]", "null", "{", '{"schema": 1, "issues": null}']:
+            with self.subTest(source=source), self.assertRaises(RegistryError):
+                parse_issue_manifest(source)
+
     def write_manifest(self, root: Path, issues: list[dict]) -> Path:
         path = root / "issues.json"
         path.write_text(json.dumps({"schema": 1, "issues": issues}))
