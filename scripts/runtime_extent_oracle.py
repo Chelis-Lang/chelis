@@ -1063,6 +1063,81 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
         ),
+        # chelis#1801. A nullary root whose extent arrives through a nested
+        # helper's claim: the callee's instantiation variable met the inner
+        # helper's runtime extent, nothing bound it, and def-level
+        # generalization quantified it, so the root had no ABI and both lanes
+        # dropped it in silence. `spec/04-type-system.md` section 3.2 now
+        # makes that variable denote the extent it met.
+        _row(
+            "root.dim_variable.nested_helper.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.nested_helper.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval",
+        ),
+        # The same root reached through a polymorphic named def passed as an
+        # ARGUMENT, so the callee variable this application minted aliases to
+        # one the argument's own instantiation minted and that root is what
+        # denotes the extent. chelis#1925's round 1 found this spelling still
+        # dropped after the first repair.
+        _row(
+            "root.dim_variable.polymorphic_argument.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.polymorphic_argument.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval",
+        ),
+        # The same root whose extent a RESULT-ONLY binder names, which
+        # chelis#1925's round-1 verification found LANE DIVERGENT on
+        # `0820ee28e`: the C lane emitted an entry point and printed the value
+        # while eval refused the same program with `missing symbolic dimension
+        # binding \`seq\``. Both halves therefore start `lane_divergent` and
+        # both now print the same line. Section 4.7 requires that agreement and
+        # section 4.7.3 forbids a verdict that turns on a function boundary;
+        # `main` already absorbed the one-call-shallower spelling.
+        _row(
+            "root.dim_variable.result_only_binder.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.result_only_binder.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval",
+        ),
+        # The same root through a THREE-member alias class, which is
+        # chelis#1925's round-2 P1. `apply3` carries two polymorphic function
+        # arguments beside the data one, so where the runtime-extent argument
+        # sits decides which member roots the class when the meeting is
+        # recorded. Every ordering was dropped in silence on `main`; the
+        # receipt asserts the three render IDENTICALLY, because an
+        # order-dependent absorption is the defect section 4.7.3 forbids and
+        # three separate rows could all stay green through it.
+        _row(
+            "root.dim_variable.argument_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c",
+        ),
+        _row(
+            "root.dim_variable.argument_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

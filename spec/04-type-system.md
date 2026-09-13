@@ -925,6 +925,13 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     Γ ⊢ (app {} f a₁ a₂ ... aₙ) : τᵣ
 ```
 
+A dimension variable minted by an application's instantiation that unifies
+with a runtime extent `*` and that no argument of that application binds to a
+literal or named dimension denotes that runtime extent and is `*` in the
+application's result; a literal or name another argument of the same
+application binds to it is a claim on the runtime extent, checked by a §4.7
+guard.
+
 **Lambda:**
 ```
     Γ, x₁:τ₁, ..., xₙ:τₙ ⊢ body : τᵣ

@@ -7464,3 +7464,325 @@ fn a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1801: a root whose extent arrives through a nested helper's claim.
+// ---------------------------------------------------------------------------
+
+/// `g` resolves its declared result extent only at run time, and `h` claims
+/// one extent for its parameter and its result. On the base sha `h`'s
+/// instantiation variable met `g`'s runtime extent, `unify_dim` left it free,
+/// and def-level generalization quantified it, so `main` checked as `() ->
+/// tensor[d0, f32]`: a root with no ABI, which both lanes dropped in silence.
+/// `spec/04-type-system.md` section 3.2 now makes that variable denote the
+/// extent it met.
+const NESTED_HELPER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
+
+/// The rendering both lanes owe. `g` keeps the last two of three elements and
+/// `h` doubles them.
+const NESTED_HELPER_ROOT_RENDERING: &str = "main = tensor(shape=[2], data=[4.0, 6.0])";
+
+/// Receipt for corpus row `root.dim_variable.nested_helper.eval`.
+///
+/// Regression test. On the base sha `ae9260727` this program evaluated to
+/// nothing: eval printed the `input contains only def declarations; nothing to
+/// evaluate` warning on stderr, nothing on stdout, and exited 0.
+#[test]
+fn a_nested_helper_claim_sizes_a_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "nested_helper_root.ch", NESTED_HELPER_ROOT);
+
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("nothing to evaluate"),
+        "the root is realizable and must not be dropped: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "the root is sized from the extent `h`'s claim absorbed"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.nested_helper.c`.
+///
+/// Regression test. On the base sha the emitted translation unit contained no
+/// `int main(`, so the program linked to an object with no entry point and
+/// the lane reported success having run nothing. The C rendering is asserted
+/// byte-identical to the eval one above.
+#[test]
+fn a_nested_helper_claim_sizes_a_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "nested_helper_root_c", NESTED_HELPER_ROOT);
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    assert!(ok, "the sized root must build, link and run: {out}");
+    assert_eq!(
+        out.trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "C renders the root exactly as eval does"
+    );
+}
+
+/// The same root reached through a POLYMORPHIC named def passed as an
+/// argument, which is chelis#1925's round-1 P1.
+///
+/// `apply1` mints its own dimension variable for the shared extent and `h`
+/// mints one too, while the ARGUMENT is inferred rather than the callee, so
+/// unification makes `h`'s the alias class's root. Absorbing the variable the
+/// application itself minted left that root free, the result kept a quantified
+/// dimension, and the root was dropped exactly as in the row above. The
+/// absorption reaches the class rather than the one variable.
+const POLYMORPHIC_HELPER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+     def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
+
+/// Receipt for corpus row `root.dim_variable.polymorphic_argument.eval`.
+///
+/// Regression test. On the base sha AND on this change's first head
+/// `f2238550d` this evaluated to nothing: `main :: () -> tensor[d0, f32]`,
+/// the `nothing to evaluate` warning on stderr, empty stdout, exit 0.
+#[test]
+fn a_polymorphic_argument_claim_sizes_a_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "polymorphic_helper_root.ch", POLYMORPHIC_HELPER_ROOT);
+
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("nothing to evaluate"),
+        "the root is realizable and must not be dropped: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "the root is sized from the extent the alias class absorbed"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.polymorphic_argument.c`.
+///
+/// Regression test. On the base sha and at `f2238550d` the emitted translation
+/// unit contained no `int main(`, so the lane reported success having run
+/// nothing. The rendering is byte-identical to the eval one above and to the
+/// simpler row's.
+#[test]
+fn a_polymorphic_argument_claim_sizes_a_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "polymorphic_helper_root_c", POLYMORPHIC_HELPER_ROOT);
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    assert!(ok, "the sized root must build, link and run: {out}");
+    assert_eq!(
+        out.trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "C renders the root exactly as eval does"
+    );
+}
+
+/// The same root whose extent a RESULT-ONLY binder names: `outer` declares
+/// `-> tensor[seq, f32]` and no parameter binds `seq`, so nothing supplies a
+/// value for that name. chelis#1925's round-1 verification found the LANE
+/// DIVERGENCE this left on `main` `0820ee28e`: the C lane emitted an entry
+/// point and printed the correct line, while eval refused the same program
+/// with `error: missing symbolic dimension binding \`seq\``. The absorption
+/// binds the alias class before the declared result unifies with it, and
+/// `Dim::Name` unifies permissively with the `*` already there, so the
+/// published signature reads `tensor[*, f32]` and both lanes agree.
+///
+/// `spec/04-type-system.md` section 4.7 requires that agreement ("Every
+/// execution mode observes the same values and traps"), section 4.7.4 repeats
+/// it for the lanes by name, and section 4.7.3 forbids a verdict that turns on
+/// a function boundary. `main` itself already absorbed the one-call-shallower
+/// `def bare(t: tensor[3, f32]) -> tensor[seq, f32] = g(t)` to
+/// `tensor[*, f32]` on both lanes, so retaining the name here would make the
+/// answer depend on how many calls the extent crossed.
+const RESULT_ONLY_BINDER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+     def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))\n\
+     def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// Receipt for corpus row `root.dim_variable.result_only_binder.eval`.
+///
+/// Regression test. On `0820ee28e` this printed nothing on stdout and
+/// `error: missing symbolic dimension binding \`seq\`` on stderr at exit 1,
+/// while the C half below already printed the value: the divergence is the
+/// defect this row records.
+#[test]
+fn a_result_only_binder_claim_sizes_a_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "result_only_binder_root.ch", RESULT_ONLY_BINDER_ROOT);
+
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("missing symbolic dimension binding"),
+        "a binder no parameter binds denotes the extent it met: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "eval renders the root exactly as the C half does"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.result_only_binder.c`.
+///
+/// Disposition lock, unlike its eval twin: this half already built, linked and
+/// printed this line on `0820ee28e`, and the repair must keep it. The two
+/// assertions together are what makes the row a lane-agreement receipt rather
+/// than a one-lane improvement.
+#[test]
+fn a_result_only_binder_claim_sizes_a_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "result_only_binder_root_c", RESULT_ONLY_BINDER_ROOT);
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    assert!(ok, "the sized root must build, link and run: {out}");
+    assert_eq!(
+        out.trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "C renders the root exactly as eval does"
+    );
+}
+
+/// The same root reached through an alias class with THREE dimension-variable
+/// members, which is chelis#1925's round-2 P1. `apply3` takes two polymorphic
+/// function arguments beside the data one, so all three of its instantiation's
+/// variables land in one class, and where the runtime-extent argument sits
+/// decides which member roots the class when the meeting is recorded.
+///
+/// `unify_dim` resolves through `constraint_dim` before it matches, so the
+/// meeting is recorded on whatever rooted the class at that moment, and a
+/// later `bind_dvar` in the same call re-roots the class over it. Asking two
+/// ends of the class then missed a meeting recorded on the middle member, so
+/// the middle ordering alone stayed dropped while the other two absorbed: an
+/// argument-order disagreement `main` did not have. `spec/04-type-system.md`
+/// section 4.7.3 forbids a verdict that turns on the spelling, so the receipt
+/// asserts the three orderings render IDENTICALLY rather than asserting each
+/// one separately.
+const THREE_MEMBER_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
+
+/// The runtime-extent argument first, in the middle, and last. Every other
+/// token is identical, so the three differ only in argument order.
+fn three_member_orderings() -> [(&'static str, String); 3] {
+    [
+        (
+            "first",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h, h2)\n"
+            ),
+        ),
+        (
+            "middle",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2)\n"
+            ),
+        ),
+        (
+            "last",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(h, h2, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
+            ),
+        ),
+    ]
+}
+
+/// The rendering all three orderings owe: `g` keeps the last two of three
+/// elements and each of `h` and `h2` doubles them.
+const THREE_MEMBER_RENDERING: &str = "main = tensor(shape=[2], data=[8.0, 12.0])";
+
+/// Receipt for corpus row `root.dim_variable.argument_order.eval`.
+///
+/// Regression test. On `main` all three orderings printed nothing and exited
+/// 0; at `dd0f92fd8` the middle one still did while the other two printed
+/// this line, which is the order dependence this row exists to forbid.
+#[test]
+fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rendered = Vec::new();
+    for (name, source) in three_member_orderings() {
+        let path = fixture(&dir, &format!("three_member_{name}.ch"), &source);
+        let evaluated = eval(&path);
+        let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+        assert!(evaluated.status.success(), "{name}: {stderr}");
+        assert!(
+            !stderr.contains("nothing to evaluate"),
+            "{name}: the root is realizable and must not be dropped: {stderr}"
+        );
+        rendered.push(
+            String::from_utf8_lossy(&evaluated.stdout)
+                .trim_end()
+                .to_string(),
+        );
+    }
+    assert_eq!(rendered[0], THREE_MEMBER_RENDERING, "first");
+    assert_eq!(
+        rendered[1], rendered[0],
+        "the middle ordering must render exactly as the first"
+    );
+    assert_eq!(
+        rendered[2], rendered[0],
+        "and so must the last: argument order may not change the verdict"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.argument_order.c`.
+///
+/// Regression test, and the same three orderings on the compiled lane. Each
+/// owes a `int main(` and the rendering eval printed, byte for byte.
+#[test]
+fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rendered = Vec::new();
+    for (name, source) in three_member_orderings() {
+        let (ok, out, emitted) =
+            c_run_result_with_source(&dir, &format!("three_member_{name}_c"), &source);
+        assert!(
+            emitted.contains("int main("),
+            "{name}: a realizable root owes a C entry point:\n{emitted}"
+        );
+        assert!(ok, "{name}: the sized root must build, link and run: {out}");
+        rendered.push(out.trim_end().to_string());
+    }
+    assert_eq!(rendered[0], THREE_MEMBER_RENDERING, "first");
+    assert_eq!(rendered[1], rendered[0], "middle renders as first on C too");
+    assert_eq!(rendered[2], rendered[0], "and last");
+}

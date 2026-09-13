@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "c5a95d5e4e5fd2bb18ce2e965d9faef24f45b8865c399bc433f1c5eb84983e61",
+  "corpus_sha256": "dd31a50181c95454e34396e4a12aa85217cbfb32808dd5d20f11b37bbb5eeb95",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -529,6 +529,54 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
+    },
+    {
+      "id": "root.dim_variable.argument_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c"
+    },
+    {
+      "id": "root.dim_variable.argument_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval"
     },
     {
       "id": "route.untied.gather.gate",

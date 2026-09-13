@@ -532,62 +532,43 @@ fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
     );
 }
 
-/// Disposition lock for chelis#1801, not a regression test: this is the current
-/// behaviour on both lanes and it was the same before this change.
+/// The chelis#1801 receipt this row's former disposition lock promised.
 ///
-/// A nullary root whose result keeps an unresolved dim *variable* is still
-/// dropped. `h`'s claim `k` unifies with `g`'s runtime extent and the call site
-/// generalizes, so `main` checks as `() -> tensor[d0, f32]` even though it is
-/// applied to concrete operands. `type_expr_has_unresolved_observation_parameter`
-/// refuses that root through its `DeepTag::DVar` arm, which this change keeps:
-/// an uninstantiated variable has no ABI, and the repair belongs in the checker
-/// that left the variable free. The correct output would be
-/// `main = tensor(shape=[2], data=[4.0, 6.0])`; when chelis#1801 is fixed this
-/// test flips and is the receipt for it.
+/// Regression test on both lanes. The lock recorded that a nullary root whose
+/// result kept an unresolved dim *variable* was dropped: `h`'s claim `k`
+/// unified with `g`'s runtime extent, `unify_dim` left the variable free, and
+/// def-level generalization quantified it, so `main` checked as `() ->
+/// tensor[d0, f32]` even though it is applied to concrete operands, and
+/// `type_expr_has_unresolved_observation_parameter` refused that root through
+/// its `DeepTag::DVar` arm. That arm is unchanged and still correct: an
+/// uninstantiated variable has no ABI. The repair was where the lock said it
+/// belonged, in the checker that left the variable free -
+/// `spec/04-type-system.md` section 3.2 now makes a variable an application's
+/// instantiation minted, that met a runtime extent and that no argument bound,
+/// denote that extent. `main` reads `() -> tensor[*, f32]`, the existing
+/// manifest rule admits it unchanged, and both lanes render the output the
+/// lock named as correct.
+///
+/// The test was named `..._is_still_dropped_on_both_lanes` while it was the
+/// lock, and is renamed with the flip so the name does not contradict what it
+/// asserts. That costs one line in the phase-A
+/// manifest row (`scripts/runtime_extent_oracle_targets.json`, the `cli`
+/// target's `expected` list, which is mode `all`) and moves no digest:
+/// `FROZEN_PHASE_A_DIGEST` hashes the phase-A CORPUS ROWS, and no corpus row
+/// names this test.
 #[test]
-fn a_root_that_keeps_a_dim_variable_is_still_dropped_on_both_lanes() {
+fn a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes() {
     let source = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
         def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
         def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
-    let report = check(source);
-    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
-    assert!(errors(&report).is_empty(), "{report}");
-
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("dim_variable_root.ch");
-    fs::write(&path, source).expect("fixture");
-
-    let eval = eval_file(&path);
-    assert!(
-        eval.status.success(),
-        "{}",
-        String::from_utf8_lossy(&eval.stderr)
+    let (evaluated, compiled) = run_both_lanes(source, "dim_variable_root");
+    assert_eq!(
+        evaluated, "main = tensor(shape=[2], data=[4.0, 6.0])",
+        "chelis#1801: the dim-variable root is sized from the extent it absorbed"
     );
     assert_eq!(
-        String::from_utf8_lossy(&eval.stdout).trim_end(),
-        "",
-        "chelis#1801: the dim-variable root renders nothing"
-    );
-    assert!(
-        String::from_utf8_lossy(&eval.stderr)
-            .contains("input contains only def declarations; nothing to evaluate"),
-        "{}",
-        String::from_utf8_lossy(&eval.stderr)
-    );
-
-    let out_dir = dir.path().join("out");
-    let build = build_c(&path, &out_dir);
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let emitted_path = out_dir.join("dim_variable_root.c");
-    let emitted = fs::read_to_string(&emitted_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
-    assert!(
-        !emitted.contains("int main("),
-        "chelis#1801: the dim-variable root emits no C entry:\n{emitted}"
+        compiled, evaluated,
+        "both lanes render the absorbed extent identically"
     );
 }
 
