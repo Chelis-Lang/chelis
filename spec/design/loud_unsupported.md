@@ -423,10 +423,17 @@ REGISTRIES of what actually exists:
   scheduled §C7.5 slice is now delivered by
   `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
   check out `main`, freshly rederive the complete standing manifest, and fail
-  closed while resolving every row through the issue API. Its `always()`
-  report job opens or updates one `nightly-failure` issue for every
-  non-success result (including cancelled or skipped), then closes it on the
-  next success. This is the standing issue-authority canary only; it does not
+  closed while resolving every row through the issue API. A constant
+  workflow-level concurrency group serializes the complete validation/report
+  pair across scheduled and manual dispatches without cancelling a running
+  run. GitHub retains at most one additional pending member of that group, so
+  dispatch bursts may coalesce by replacing an older pending run with the
+  newest; the group is not a FIFO queue, and report scripts do not overlap.
+  The `always()` report job opens or updates one `nightly-failure` issue for
+  every executed non-success result (including cancelled or skipped),
+  collapses any exact-title duplicates to one issue while failing, and closes
+  every exact-title match on the next success. This is the standing
+  issue-authority canary only; it does not
   deliver the pending exclusion/census/oracle matrix or complete §C7.5.
   Membership answers the compile-time question; the change-gated and
   scheduled jobs answer the truth question at their respective executions.
@@ -455,8 +462,8 @@ REGISTRIES of what actually exists:
 **Calibrated claim:** construction proves only citation IDENTITY and
 last-verified tracker STATE - an existing atom, or a manifest member
 that was live-verified as an open ISSUE by the last successful liveness
-execution. Without the pending scheduled canary, the issue manifest means
-"open at last verification", never "open this instant".
+execution. The issue manifest means "open at last verification", never
+"open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -1629,15 +1636,22 @@ both halves:
    this full-matrix contract: it freshly runs
    `scripts/validate_rejection_issue_manifest.py` over the complete derived
    standing manifest on `main`, with issue-read permission and fail-closed
-   tracker access. Its `always()` report job uses the repository's
-   open/update-on-non-success and close-on-success `nightly-failure` pattern;
-   cancelled and skipped are non-success, never green. The loud-unsupported
-   and faithful-observation Phase 2 runners, the loud-unsupported Phase 4
-   oracle, standing `Deferred`-exclusion validation, and the capacity-census
-   liveness sweep remain pending. The changed-row regular-PR narrowing also
-   remains pending. Therefore this delivered slice is only the standing
-   rejection-authority drift canary; neither execution half nor §C7.5 as a
-   whole is complete.
+   tracker access. A constant workflow-level concurrency group prevents
+   scheduled/manual validation and report scripts from overlapping and does
+   not cancel a running member. GitHub keeps at most one further pending
+   member, so a dispatch burst may replace an older pending run with the
+   newest rather than execute every queued dispatch; ordering is not FIFO. The
+   `always()` report job uses the repository's open/update-on-non-success and
+   close-on-success `nightly-failure` pattern; cancelled and skipped are
+   non-success, never green. It also consolidates every open exact-title
+   duplicate into one canonical issue on failure and closes every exact-title
+   match on success, so a legacy or race-created duplicate cannot survive
+   recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
+   loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
+   and the capacity-census liveness sweep remain pending. The changed-row
+   regular-PR narrowing also remains pending. Therefore this delivered slice
+   is only the standing rejection-authority drift canary; neither execution
+   half nor §C7.5 as a whole is complete.
 
 Neither half alone satisfies this section: the gated job without the
 nightly leaves unfiltered drift invisible; the nightly without the

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
+import subprocess
 import unittest
 
 import yaml
@@ -19,6 +21,8 @@ CANARY_JOB = "standing-rejection-liveness"
 REPORT_JOB = "report"
 COMMAND = ".venv/bin/python scripts/validate_rejection_issue_manifest.py"
 TRACKING_TITLE = "Nightly failing: Standing Rejection Authority Liveness"
+CONCURRENCY_GROUP = "loud-unsupported-standing-liveness-main"
+SUPPRESSING_SHELL = "bash -c 'source {0} || true'"
 
 
 class UniqueLoader(yaml.SafeLoader):
@@ -65,6 +69,117 @@ def _assert_exact_command_once(test: unittest.TestCase, job: dict) -> None:
     test.assertEqual(runs.count(COMMAND), 1)
 
 
+def _assert_no_run_shell_default(
+    test: unittest.TestCase,
+    owner: dict,
+) -> None:
+    """Reject an inherited shell without forbidding other run defaults."""
+    defaults = owner.get("defaults")
+    if defaults is None:
+        return
+    test.assertIsInstance(defaults, dict)
+    run_defaults = defaults.get("run")
+    if run_defaults is None:
+        return
+    test.assertIsInstance(run_defaults, dict)
+    test.assertNotIn("shell", run_defaults)
+
+
+def execute_report_reconciliation(script: str) -> dict:
+    """Run the exact github-script body against a paginated in-memory issue API."""
+    harness = f"""
+const script = {json.dumps(script)};
+const AsyncFunction = Object.getPrototypeOf(async function() {{}}).constructor;
+const runScript = new AsyncFunction("github", "context", "core", "process", script);
+const title = {json.dumps(TRACKING_TITLE)};
+const state = [
+  {{number: 11, title, state: "open"}},
+  {{number: 12, title, state: "open"}},
+  {{number: 13, title, state: "open"}},
+  {{number: 14, title, state: "open", pull_request: {{}}}},
+  {{number: 15, title: "Unrelated", state: "open"}},
+];
+let nextNumber = 100;
+const comments = [];
+const issues = {{
+  listForRepo: async () => ({{
+    data: state.filter(issue => issue.state === "open"),
+  }}),
+  create: async args => {{
+    const issue = {{
+      number: nextNumber++,
+      title: args.title,
+      state: "open",
+      labels: args.labels,
+    }};
+    state.push(issue);
+    return {{data: issue}};
+  }},
+  createComment: async args => {{
+    comments.push({{number: args.issue_number, body: args.body}});
+    return {{data: {{}}}};
+  }},
+  update: async args => {{
+    const issue = state.find(candidate => candidate.number === args.issue_number);
+    if (!issue) throw new Error(`missing issue ${{args.issue_number}}`);
+    issue.state = args.state;
+    return {{data: issue}};
+  }},
+}};
+const github = {{
+  paginate: async (method, args) => (await method(args)).data,
+  rest: {{issues}},
+}};
+const context = {{
+  repo: {{owner: "Chelis-Lang", repo: "chelis"}},
+  serverUrl: "https://github.example",
+  runId: 900,
+}};
+const core = {{info: () => {{}}}};
+async function run(result, runId) {{
+  context.runId = runId;
+  await runScript(github, context, core, {{env: {{RESULT: result}}}});
+}}
+function openExactIssues() {{
+  return state
+    .filter(issue =>
+      issue.state === "open" &&
+      !issue.pull_request &&
+      issue.title === title
+    )
+    .map(issue => issue.number)
+    .sort((a, b) => a - b);
+}}
+(async () => {{
+  await run("failure", 901);
+  const afterFailure = openExactIssues();
+  await run("success", 902);
+  const afterSuccess = openExactIssues();
+  await run("cancelled", 903);
+  const afterReopen = openExactIssues();
+  console.log(JSON.stringify({{
+    afterFailure,
+    afterSuccess,
+    afterReopen,
+    comments,
+    state,
+  }}));
+}})().catch(error => {{
+  console.error(error.stack || String(error));
+  process.exit(1);
+}});
+"""
+    result = subprocess.run(
+        ["node", "-e", harness],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    return json.loads(result.stdout)
+
+
 def assert_standing_canary_contract(
     test: unittest.TestCase,
     workflow: dict,
@@ -80,9 +195,18 @@ def assert_standing_canary_contract(
         },
     )
     test.assertEqual(workflow.get("permissions"), {"contents": "read"})
+    _assert_no_run_shell_default(test, workflow)
+    test.assertEqual(
+        workflow.get("concurrency"),
+        {
+            "group": CONCURRENCY_GROUP,
+            "cancel-in-progress": False,
+        },
+    )
     test.assertEqual(set(workflow["jobs"]), {CANARY_JOB, REPORT_JOB})
 
     canary = workflow["jobs"][CANARY_JOB]
+    _assert_no_run_shell_default(test, canary)
     test.assertEqual(
         canary.get("name"),
         "Standing Rejection Authority Liveness (main)",
@@ -110,6 +234,7 @@ def assert_standing_canary_contract(
         {"GH_TOKEN": "${{ github.token }}"},
     )
     test.assertNotIn("if", command_step)
+    test.assertNotIn("shell", command_step)
 
     report = workflow["jobs"][REPORT_JOB]
     test.assertEqual(report.get("name"), "Surface standing liveness status")
@@ -128,20 +253,28 @@ def assert_standing_canary_contract(
         report_step.get("env"),
         {"RESULT": "${{ needs.standing-rejection-liveness.result }}"},
     )
+    test.assertNotIn("if", report_step)
     script = report_step["with"]["script"]
     for required in (
         f"const title = '{TRACKING_TITLE}';",
         "const passed = process.env.RESULT === 'success';",
+        "const matches = (await github.paginate(",
+        "github.rest.issues.listForRepo",
+        ".filter(issue => !issue.pull_request && issue.title === title);",
+        "const [canonical, ...duplicates] = matches;",
         "if (!passed) {",
-        "github.rest.search.issuesAndPullRequests",
         "github.rest.issues.create({",
         "labels: ['nightly-failure']",
-        "} else if (existing) {",
+        "for (const duplicate of duplicates) {",
+        "} else {",
+        "for (const issue of matches) {",
         "github.rest.issues.createComment({",
         "github.rest.issues.update({",
         "state: 'closed'",
     ):
         test.assertIn(required, script)
+    test.assertNotIn(".find(", script)
+    test.assertNotIn("search.issuesAndPullRequests", script)
     test.assertNotIn("process.env.RESULT === 'failure'", script)
     test.assertIn(WORKFLOW_NAME, non_gate_workflows)
 
@@ -163,6 +296,31 @@ class LoudUnsupportedNightlyWorkflowTests(unittest.TestCase):
 
     def test_current_workflow_delivers_the_standing_canary_only(self) -> None:
         self.assert_contract()
+
+    def test_workflow_concurrency_is_constant_and_never_cancels_running_work(self) -> None:
+        mutations = []
+
+        missing = copy.deepcopy(self.workflow)
+        del missing["concurrency"]
+        mutations.append(missing)
+
+        per_run = copy.deepcopy(self.workflow)
+        per_run["concurrency"]["group"] = "${{ github.run_id }}"
+        mutations.append(per_run)
+
+        per_ref = copy.deepcopy(self.workflow)
+        per_ref["concurrency"]["group"] = (
+            "loud-unsupported-${{ github.ref }}"
+        )
+        mutations.append(per_ref)
+
+        cancelling = copy.deepcopy(self.workflow)
+        cancelling["concurrency"]["cancel-in-progress"] = True
+        mutations.append(cancelling)
+
+        for index, mutated in enumerate(mutations):
+            with self.subTest(index=index), self.assertRaises(AssertionError):
+                self.assert_contract(mutated)
 
     def test_schedule_and_manual_only_trigger_policy_rejects_drift(self) -> None:
         for event in (
@@ -189,17 +347,36 @@ class LoudUnsupportedNightlyWorkflowTests(unittest.TestCase):
             self.assert_contract(mutated)
 
     def test_command_cannot_be_replaced_by_noop_or_duplicated(self) -> None:
-        for change in ("noop", "duplicate"):
+        for change in ("noop", "duplicate", "suppressing-shell"):
             with self.subTest(change=change):
                 mutated = copy.deepcopy(self.workflow)
                 steps = mutated["jobs"][CANARY_JOB]["steps"]
                 command_step = next(step for step in steps if step.get("run") == COMMAND)
                 if change == "noop":
                     command_step["run"] = f"true # {COMMAND}"
-                else:
+                elif change == "duplicate":
                     steps.append(copy.deepcopy(command_step))
+                else:
+                    command_step["shell"] = SUPPRESSING_SHELL
                 with self.assertRaises(AssertionError):
                     self.assert_contract(mutated)
+
+    def test_validator_cannot_inherit_suppressing_run_shell_defaults(self) -> None:
+        for owner in ("workflow", CANARY_JOB):
+            with self.subTest(owner=owner):
+                mutated = copy.deepcopy(self.workflow)
+                target = mutated if owner == "workflow" else mutated["jobs"][owner]
+                target["defaults"] = {"run": {"shell": SUPPRESSING_SHELL}}
+                with self.assertRaises(AssertionError):
+                    self.assert_contract(mutated)
+
+    def test_non_shell_run_defaults_remain_allowed(self) -> None:
+        mutated = copy.deepcopy(self.workflow)
+        mutated["defaults"] = {"run": {"working-directory": "."}}
+        mutated["jobs"][CANARY_JOB]["defaults"] = {
+            "run": {"working-directory": "."}
+        }
+        self.assert_contract(mutated)
 
     def test_issue_permissions_are_required_at_both_boundaries(self) -> None:
         for job, permission in (
@@ -237,15 +414,27 @@ class LoudUnsupportedNightlyWorkflowTests(unittest.TestCase):
         )
         mutations.append(failure_only)
 
+        skipped_step = copy.deepcopy(self.workflow)
+        skipped_step["jobs"][REPORT_JOB]["steps"][0]["if"] = (
+            "env.RESULT == 'success'"
+        )
+        mutations.append(skipped_step)
+
         for index, mutated in enumerate(mutations):
             with self.subTest(index=index), self.assertRaises(AssertionError):
                 self.assert_contract(mutated)
 
-    def test_tracking_issue_open_and_close_paths_are_both_required(self) -> None:
+    def test_tracking_issue_all_match_reconciliation_is_required(self) -> None:
         for fragment in (
+            "const matches = (await github.paginate(",
+            "github.rest.issues.listForRepo",
+            ".filter(issue => !issue.pull_request && issue.title === title);",
+            "const [canonical, ...duplicates] = matches;",
             "github.rest.issues.create({",
             "labels: ['nightly-failure']",
-            "} else if (existing) {",
+            "for (const duplicate of duplicates) {",
+            "} else {",
+            "for (const issue of matches) {",
             "github.rest.issues.createComment({",
             "github.rest.issues.update({",
             "state: 'closed'",
@@ -258,6 +447,24 @@ class LoudUnsupportedNightlyWorkflowTests(unittest.TestCase):
                 )
                 with self.assertRaises(AssertionError):
                     self.assert_contract(mutated)
+
+    def test_exact_report_script_collapses_duplicates_and_closes_all_on_recovery(
+        self,
+    ) -> None:
+        script = self.workflow["jobs"][REPORT_JOB]["steps"][0]["with"]["script"]
+        result = execute_report_reconciliation(script)
+        self.assertEqual(result["afterFailure"], [11])
+        self.assertEqual(result["afterSuccess"], [])
+        self.assertEqual(result["afterReopen"], [100])
+        issue_states = {
+            issue["number"]: issue["state"]
+            for issue in result["state"]
+            if issue["title"] == TRACKING_TITLE and "pull_request" not in issue
+        }
+        self.assertEqual(
+            issue_states,
+            {11: "closed", 12: "closed", 13: "closed", 100: "open"},
+        )
 
     def test_non_gate_classification_is_mandatory(self) -> None:
         missing = set(gate_contract.NON_GATE_WORKFLOWS)

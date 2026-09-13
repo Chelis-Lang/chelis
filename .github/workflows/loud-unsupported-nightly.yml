@@ -8,6 +8,12 @@ name: Loud Unsupported Standing Liveness
 # Scheduled runs execute from the default branch. Manual dispatch can be
 # launched from another ref, so checkout pins main explicitly to keep the
 # standing-state claim about the production branch.
+#
+# One constant concurrency group serializes the complete validate/report pair
+# across scheduled and manual runs. GitHub retains at most one running and one
+# pending member of a group; a burst can therefore replace an older PENDING
+# run with the newest dispatch, and the group is not a FIFO queue. Running work
+# is never cancelled, and report scripts never overlap.
 
 on:
   schedule:
@@ -16,6 +22,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: loud-unsupported-standing-liveness-main
+  cancel-in-progress: false
 
 jobs:
   standing-rejection-liveness:
@@ -65,16 +75,29 @@ jobs:
             const passed = process.env.RESULT === 'success';
             const { owner, repo } = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
-            const found = await github.rest.search.issuesAndPullRequests({ q });
-            const existing = found.data.items.find(i => i.title === title);
+            const matches = (await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 },
+            )).filter(issue => !issue.pull_request && issue.title === title);
+            matches.sort((left, right) => left.number - right.number);
+            const [canonical, ...duplicates] = matches;
             if (!passed) {
-              if (existing) {
+              if (canonical) {
                 await github.rest.issues.createComment({
-                  owner, repo, issue_number: existing.number,
+                  owner, repo, issue_number: canonical.number,
                   body: `Standing rejection-authority liveness was **${result}** again — ${runUrl}.`,
                 });
-                core.info(`Tracking issue #${existing.number} already open; recorded this run.`);
+                core.info(`Tracking issue #${canonical.number} already open; recorded this run.`);
+                for (const duplicate of duplicates) {
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number: duplicate.number,
+                    body: `Duplicate of #${canonical.number}; consolidated by ${runUrl}. Closing.`,
+                  });
+                  await github.rest.issues.update({
+                    owner, repo, issue_number: duplicate.number, state: 'closed',
+                  });
+                  core.info(`Closed duplicate tracking issue #${duplicate.number}.`);
+                }
               } else {
                 const issue = await github.rest.issues.create({
                   owner, repo, title,
@@ -83,13 +106,15 @@ jobs:
                 });
                 core.info(`Opened tracking issue #${issue.data.number}.`);
               }
-            } else if (existing) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.number,
-                body: `Standing rejection-authority liveness is green again — ${runUrl}. Closing.`,
-              });
-              await github.rest.issues.update({
-                owner, repo, issue_number: existing.number, state: 'closed',
-              });
-              core.info(`Closed tracking issue #${existing.number}.`);
+            } else {
+              for (const issue of matches) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: `Standing rejection-authority liveness is green again — ${runUrl}. Closing.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number, state: 'closed',
+                });
+                core.info(`Closed tracking issue #${issue.number}.`);
+              }
             }
