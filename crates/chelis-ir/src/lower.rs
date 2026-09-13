@@ -10055,6 +10055,18 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        if subctx
+            .callable_dependency_state
+            .output_depends_on_unresolved(&subctx.dag, output)
+        {
+            #[cfg(feature = "lowering-trace")]
+            if let Some(trace) = &subctx.trace {
+                trace.boundary(crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+            }
+            // As for ordinary grad, an incomplete live callable is unknown,
+            // not an absent adjoint of a completely lowered constant body.
+            return LoweredValue::Tuple(Vec::new());
+        }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op surfaces a structured
@@ -10075,6 +10087,15 @@ impl<'program> LowerCtx<'program> {
                 body.span_id().map(ToOwned::to_owned),
             ),
         };
+        let invalid_mapping = |message: String| -> ! {
+            raise_fatal_lowering_error(
+                format!("`vmap(grad(...))` root correspondence failed: {message}"),
+                Some(body.span()),
+                body.span_id().map(ToOwned::to_owned),
+            )
+        };
+        let root_map = Self::fused_vectorized_root_map(&grad_result.dag, &vmapped)
+            .unwrap_or_else(|message| invalid_mapping(message));
 
         let batch_source = param_types
             .iter()
@@ -10086,39 +10107,62 @@ impl<'program> LowerCtx<'program> {
                     .map(|_| arg_id)
             });
         let mut arg_map = UnordMap::new();
+        let mut materialized_args = Vec::with_capacity(canonical_args.len());
         for ((name, param_ty), arg_id) in param_names
             .iter()
             .zip(param_types.iter())
             .zip(canonical_args.iter().copied())
         {
-            arg_map.insert(
-                name.clone(),
-                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
-            );
+            let actual = self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source);
+            materialized_args.push(actual);
+            arg_map.insert(name.clone(), actual);
         }
         arg_map.merge(captured_bindings);
 
         let remap = self.splice_dag(&vmapped, &arg_map);
-        let mut flattened = wrt
+        let mapped_root = |old: NodeId| {
+            root_map
+                .get(&old)
+                .and_then(|mapped| remap.get(mapped))
+                .copied()
+                .unwrap_or_else(|| {
+                    invalid_mapping(format!("missing root or splice entry for {old:?}"))
+                })
+        };
+        let forward = mapped_root(grad_result.output_node);
+        let selected: Vec<_> = wrt
             .iter()
-            .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
-            .map(|grad_node| remap[grad_node])
-            .collect::<Vec<_>>();
-        let flattened_param_indices: Vec<_> = wrt
-            .iter()
-            .zip(wrt_param_indices)
-            .filter_map(|(node, index)| grad_result.grad_nodes.contains_key(node).then_some(index))
-            .collect();
-        let reusable_inputs = param_types
-            .iter()
-            .enumerate()
-            .filter_map(|(index, param_ty)| {
-                self.is_selected_wrt(index, param_ty, wrt_indices)
-                    .then_some(canonical_args[index])
+            .copied()
+            .zip(wrt_param_indices.iter().copied())
+            .map(|(load, index)| {
+                let actual = materialized_args.get(index).copied().unwrap_or_else(|| {
+                    invalid_mapping(format!("missing materialized argument {index}"))
+                });
+                (load, index, actual)
             })
-            .collect::<Vec<_>>();
-        for (grad_node, reusable_input) in flattened.iter().zip(reusable_inputs.iter()) {
-            self.dag.set_reusable_input(*grad_node, *reusable_input);
+            .collect();
+        let mut flattened = Vec::with_capacity(selected.len());
+        for (load, _, actual) in &selected {
+            let gradient = match grad_result.grad_nodes.get(load) {
+                Some(gradient) => mapped_root(*gradient),
+                None => {
+                    let ty = self
+                        .dag
+                        .get(*actual)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| {
+                            invalid_mapping(format!("invalid materialized argument {actual:?}"))
+                        });
+                    let zero = self.zero_tensor_node(&ty, Some(*actual));
+                    // Retain the whole reachable forward carrier: a root may
+                    // be an Expand above the actual witness. This also keeps
+                    // its numeric work/allocation/traps, not just the checks.
+                    self.dag.add_shape_dep(zero, forward);
+                    zero
+                }
+            };
+            self.dag.set_reusable_input(gradient, *actual);
+            flattened.push(gradient);
         }
         if axis > 0 {
             for result in &mut flattened {
@@ -10142,8 +10186,11 @@ impl<'program> LowerCtx<'program> {
         // The fused path has one tensor per cotangent group. As above,
         // reorder only after gradient/reuse/axis restoration is complete.
         if let Some(indices) = wrt_indices {
-            let groups: UnordMap<_, _> =
-                flattened_param_indices.into_iter().zip(flattened).collect();
+            let groups: UnordMap<_, _> = selected
+                .iter()
+                .map(|(_, index, _)| *index)
+                .zip(flattened)
+                .collect();
             flattened = indices
                 .iter()
                 .filter_map(|index| groups.get(index).copied())
@@ -10155,6 +10202,31 @@ impl<'program> LowerCtx<'program> {
             }
             _ => LoweredValue::Tuple(flattened.into_iter().map(LoweredValue::Node).collect()),
         }
+    }
+
+    /// Vectorization retains the complete input-root order but may insert
+    /// nodes. Identity correspondence is positional, never numeric-ID based.
+    fn fused_vectorized_root_map(
+        before: &Dag,
+        after: &Dag,
+    ) -> Result<UnordMap<NodeId, NodeId>, String> {
+        if before.roots().len() != after.roots().len() {
+            return Err("root count changed during vectorization".into());
+        }
+        for dag in [before, after] {
+            let mut seen = UnordSet::new();
+            for root in dag.roots() {
+                if dag.get(*root).is_none_or(|node| node.id != *root) || !seen.insert(*root) {
+                    return Err(format!("invalid or duplicate root {root:?}"));
+                }
+            }
+        }
+        Ok(before
+            .roots()
+            .iter()
+            .copied()
+            .zip(after.roots().iter().copied())
+            .collect())
     }
 
     fn materialize_vmapped_arg(
@@ -16929,13 +17001,7 @@ mod fused_zero_tests {
         let grad = grad_dag_checked(&dag, forward, &[x, y]).unwrap();
         let vectorized = vmap::vectorize_axis0(&grad.dag, DimInfo::Lit(2)).unwrap();
         assert_eq!(grad.dag.roots().len(), vectorized.roots().len());
-        let roots: UnordMap<_, _> = grad
-            .dag
-            .roots()
-            .iter()
-            .copied()
-            .zip(vectorized.roots().iter().copied())
-            .collect();
+        let roots = LowerCtx::fused_vectorized_root_map(&grad.dag, &vectorized).unwrap();
         assert!(
             grad.grad_nodes
                 .to_sorted()
@@ -16971,6 +17037,75 @@ mod fused_zero_tests {
 
     fn parsed(source: &str) -> Expr {
         chelis_deep::parser::parse_str(source).unwrap().remove(0)
+    }
+
+    #[test]
+    fn fused_zero_consumer_maps_shared_coefficient_gradients() {
+        let source = "def loss(x: tensor[rows, f32], y: tensor[rows, f32]) -> f32 = {\n n = shape(x, 0)\n m = shape(y, 0)\n a = insert(mul(sum(x, 0), scalar_to_tensor(cast(n, f32))), 0, add(n, 0i64))\n b = insert(mul(sum(y, 0), scalar_to_tensor(add(cast(m, f32), 2.0f32))), 0, add(m, 0i64))\n tensor_to_scalar(add(sum(a, 0), sum(b, 0)))\n}\n";
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let checked = chelis_types::check_typed_program(&chelis_surf::desugar::desugar_program(
+            &declarations,
+        ))
+        .unwrap();
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            collect_top_level_defs(checked.exprs()),
+            collect_top_level_sigs(checked.exprs()),
+            LinearityInfo::default(),
+        );
+        let CallableExpr::Plain(function) =
+            ctx.resolve_callable_expr(&parsed("(var {} loss)")).unwrap()
+        else {
+            panic!("named function")
+        };
+        let actuals: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                ctx.dag.add_node(
+                    RiscOp::Load { name: name.into() },
+                    vec![],
+                    tensor_type(&[2, 3], Prim::F32),
+                    None,
+                )
+            })
+            .collect();
+        // Exercise the actual fused consumer, not a second root/splice algorithm.
+        let result =
+            ctx.lower_vmap_grad_callable_with_nodes(&function, None, 0, &actuals, function.span());
+        let LoweredValue::Tuple(slots) = result else {
+            panic!("two selected groups")
+        };
+        let roots: Vec<_> = slots
+            .iter()
+            .map(|slot| slot.as_single_node().unwrap())
+            .collect();
+        let values = eval_tensor_roots_with_strict(&ctx.dag, &roots, |_| {
+            Some(value(&[2, 3], Prim::F32, &[2.0; 6]))
+        })
+        .unwrap();
+        assert_eq!(values[&roots[0]].to_f64_lossy_vec(), [9.0; 6]);
+        assert_eq!(values[&roots[1]].to_f64_lossy_vec(), [15.0; 6]);
+    }
+
+    #[test]
+    fn fused_zero_root_correspondence_rejects_missing_duplicate_and_invalid_roots() {
+        let mut original = Dag::new();
+        let input = original.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(&[], Prim::F32),
+            None,
+        );
+        original.add_root(input);
+        let mut missing = original.clone();
+        missing.set_roots(vec![]);
+        assert!(LowerCtx::fused_vectorized_root_map(&original, &missing).is_err());
+        let mut invalid = original.clone();
+        invalid.set_roots(vec![NodeId(99)]);
+        assert!(LowerCtx::fused_vectorized_root_map(&original, &invalid).is_err());
+        let mut duplicate = original.clone();
+        duplicate.set_roots(vec![input, input]);
+        assert!(LowerCtx::fused_vectorized_root_map(&duplicate, &duplicate).is_err());
     }
 
     fn context() -> LowerCtx<'static> {
@@ -17067,8 +17202,61 @@ mod fused_zero_tests {
     }
 
     #[test]
+    fn fused_zero_unbatched_actual_uses_materialized_shape_and_reuse() {
+        let mut ctx = context();
+        let a = ctx.dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            tensor_type(&[2], Prim::F32),
+            None,
+        );
+        let b = ctx.dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            tensor_type(&[], Prim::F32),
+            None,
+        );
+        ctx.bindings.insert("a".into(), LoweredValue::Node(a));
+        ctx.bindings.insert("b".into(), LoweredValue::Node(b));
+        let function = "(fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}) (unused {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
+        let result = ctx.lower_expr(&parsed(&format!(
+            "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} a) (var {{}} b))"
+        )));
+        let LoweredValue::Tuple(slots) = result else {
+            panic!("two selected groups")
+        };
+        let zero = slots[1].as_single_node().unwrap();
+        let materialized = ctx.dag.get(zero).unwrap().reusable_input.unwrap();
+        assert_ne!(materialized, b);
+        assert_eq!(
+            ctx.dag.get(materialized).unwrap().output_type,
+            tensor_type(&[2], Prim::F32)
+        );
+        assert_eq!(
+            ctx.dag.get(zero).unwrap().output_type,
+            tensor_type(&[2], Prim::F32)
+        );
+        let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero], |name| {
+            Some(if name == "a" {
+                value(&[2], Prim::F32, &[2.0, 7.0])
+            } else {
+                value(&[], Prim::F32, &[11.0])
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            values[&zero]
+                .to_f64_lossy_vec()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            [0, 0]
+        );
+    }
+
+    #[test]
     fn fused_zero_forward_carrier_dependency_survives_vectorization_and_dce() {
-        // Independent graph theorem needed by the proposed repair: a shared
+        // Independent graph regression for the repair: a shared
         // root expands after vectorization, and its input retains the witness.
         for observed in [2, 3] {
             let mut dag = Dag::new();

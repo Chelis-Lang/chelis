@@ -2,6 +2,15 @@
 # New integration targets run in the unfiltered nightly unless added here.
 version = 1
 
+# chelis#1975: fused zero slots, forward checks, and exact eval/native values.
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_1975_fused_zero_cotangents"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1975_fused_zero_cotangents_cli"
+
 # chelis#1915: caller/formal scope, exact eval/native values and rejection control.
 [[target]]
 package = "chelis-cli"
