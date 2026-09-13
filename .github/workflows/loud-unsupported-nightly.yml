@@ -1,0 +1,95 @@
+name: Loud Unsupported Standing Liveness
+
+# This is the first separable slice of loud_unsupported.md section C7.5's
+# eventual full-matrix nightly. It owns only the standing [05-UNS-5] issue
+# manifest today: the Phase 2/Phase 4 oracles, exclusion liveness, and capacity
+# census liveness remain pending and are not implied by this workflow's name.
+#
+# Scheduled runs execute from the default branch. Manual dispatch can be
+# launched from another ref, so checkout pins main explicitly to keep the
+# standing-state claim about the production branch.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  standing-rejection-liveness:
+    name: Standing Rejection Authority Liveness (main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Validate every standing rejection issue authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .venv/bin/python scripts/validate_rejection_issue_manifest.py
+
+  report:
+    name: Surface standing liveness status
+    needs: standing-rejection-liveness
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open/close nightly-failure tracking issue
+        uses: actions/github-script@v7
+        env:
+          RESULT: ${{ needs.standing-rejection-liveness.result }}
+        with:
+          script: |
+            const title = 'Nightly failing: Standing Rejection Authority Liveness';
+            const result = process.env.RESULT;
+            const passed = process.env.RESULT === 'success';
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const found = await github.rest.search.issuesAndPullRequests({ q });
+            const existing = found.data.items.find(i => i.title === title);
+            if (!passed) {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Standing rejection-authority liveness was **${result}** again — ${runUrl}.`,
+                });
+                core.info(`Tracking issue #${existing.number} already open; recorded this run.`);
+              } else {
+                const issue = await github.rest.issues.create({
+                  owner, repo, title,
+                  body: `The standing rejection-authority liveness canary was **${result}**.\n\nRun: ${runUrl}\n\nThis workflow checks the full source-derived issue manifest on \`main\`. Auto-opened on any non-success result; auto-closes when the canary next passes.`,
+                  labels: ['nightly-failure'],
+                });
+                core.info(`Opened tracking issue #${issue.data.number}.`);
+              }
+            } else if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Standing rejection-authority liveness is green again — ${runUrl}. Closing.`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed',
+              });
+              core.info(`Closed tracking issue #${existing.number}.`);
+            }

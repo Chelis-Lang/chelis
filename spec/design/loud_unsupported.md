@@ -419,12 +419,17 @@ REGISTRIES of what actually exists:
   it preserves the existing conservative liveness behavior: whenever
   triggered it verifies EVERY standing manifest row against the live tracker
   (exists, is an issue, is open), not only rows changed by the PR. The
-  proposed changed-row PR narrowing and §C7.5 scheduled
-  standing-manifest canary remain later #1870 slices; this source-derivation
-  prerequisite implements neither. Until the canary lands, standing-state
-  drift remains a named pending control rather than an implied daily
-  guarantee. Membership answers the compile-time question; the change-gated
-  job answers the truth question on each run.
+  proposed changed-row PR narrowing remains a later #1870 slice. The first
+  scheduled §C7.5 slice is now delivered by
+  `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
+  check out `main`, freshly rederive the complete standing manifest, and fail
+  closed while resolving every row through the issue API. Its `always()`
+  report job opens or updates one `nightly-failure` issue for every
+  non-success result (including cancelled or skipped), then closes it on the
+  next success. This is the standing issue-authority canary only; it does not
+  deliver the pending exclusion/census/oracle matrix or complete §C7.5.
+  Membership answers the compile-time question; the change-gated and
+  scheduled jobs answer the truth question at their respective executions.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
@@ -1617,6 +1622,22 @@ both halves:
    not anticipate, and the standing proof that the full matrix still
    completes. The workflow file is added to `NON_GATE_WORKFLOWS` in
    `scripts/test_gate.py` in the same change.
+
+   **Delivery status (2026-09-13; partial, not Phase 4 completion).** The
+   contract-named workflow and its `NON_GATE_WORKFLOWS` classification now
+   exist, but its one delivered validation job is deliberately narrower than
+   this full-matrix contract: it freshly runs
+   `scripts/validate_rejection_issue_manifest.py` over the complete derived
+   standing manifest on `main`, with issue-read permission and fail-closed
+   tracker access. Its `always()` report job uses the repository's
+   open/update-on-non-success and close-on-success `nightly-failure` pattern;
+   cancelled and skipped are non-success, never green. The loud-unsupported
+   and faithful-observation Phase 2 runners, the loud-unsupported Phase 4
+   oracle, standing `Deferred`-exclusion validation, and the capacity-census
+   liveness sweep remain pending. The changed-row regular-PR narrowing also
+   remains pending. Therefore this delivered slice is only the standing
+   rejection-authority drift canary; neither execution half nor §C7.5 as a
+   whole is complete.
 
 Neither half alone satisfies this section: the gated job without the
 nightly leaves unfiltered drift invisible; the nightly without the
