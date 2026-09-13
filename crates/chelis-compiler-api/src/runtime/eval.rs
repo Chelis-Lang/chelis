@@ -4138,6 +4138,270 @@ mod legacy_capture_order_tests {
         assert_eq!(ctx.transcript, ["initialize"]);
     }
 
+    // #1956: these are real checked library contexts, with the production
+    // session and resolver. Caller-only entries model an already-entered
+    // lexical frame; none is inserted into the declaration environment.
+    fn declaration_caller_frame(ctx: &mut EvalContext<'_>) -> Option<Expr> {
+        let ty = ctx.type_env.get("next_draw").cloned();
+        assert!(ty.is_some());
+        ctx.bindings
+            .insert("caller_value".into(), RuntimeValue::int_lit(71));
+        ctx.binding_types.insert("caller_type".into(), ty.clone());
+        ctx.precision_bindings.insert("p".into(), Prim::F64);
+        ty
+    }
+
+    fn assert_declaration_caller_frame(ctx: &EvalContext<'_>, ty: &Option<Expr>) {
+        assert_eq!(ctx.binding_types.len(), 1);
+        assert_eq!(ctx.binding_types.get("caller_type"), Some(ty));
+        assert_eq!(ctx.precision_bindings.len(), 1);
+        assert_eq!(ctx.precision_bindings.get("p"), Some(&Prim::F64));
+        assert_eq!(
+            bits(&ctx.bindings["caller_value"]),
+            bits(&RuntimeValue::int_lit(71))
+        );
+        assert_eq!(
+            ctx.bindings.len(),
+            1,
+            "declaration successes are not lexical entries"
+        );
+    }
+
+    #[test]
+    fn declaration_success_restores_all_three_caller_maps_without_losing_the_value() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        let first = ctx.resolve_top_level("weights").unwrap();
+        let second = ctx.resolve_top_level("weights").unwrap();
+        assert_eq!(bits(&first), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&second), bits(&first));
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        assert!(ctx.resolving_top_levels.is_empty());
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_declaration_caller_frame(&ctx, &ty);
+    }
+
+    #[test]
+    fn declaration_closure_does_not_capture_caller_values_or_precision_parameters() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        let callable = ctx.resolve_top_level("sample").unwrap();
+        let RuntimeValue::Closure {
+            env,
+            precision_env,
+            def_name,
+            ..
+        } = callable
+        else {
+            panic!("checked named declaration resolves to a closure")
+        };
+        assert_eq!(def_name.as_deref(), Some("sample"));
+        assert!(ctx.transcript.is_empty());
+        assert_eq!(
+            (env.is_empty(), precision_env.is_empty()),
+            (true, true),
+            "caller values and precision parameters must both be absent"
+        );
+        assert_declaration_caller_frame(&ctx, &ty);
+    }
+
+    #[test]
+    fn declaration_failure_retries_and_restores_three_maps_and_parent_stream() {
+        let initializer =
+            format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
+        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        for _ in 0..2 {
+            let error = ctx.resolve_top_level("weights").unwrap_err();
+            assert_eq!(
+                error,
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_declaration_caller_frame(&ctx, &ty);
+            assert!(ctx.resolving_top_levels.is_empty());
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        }
+        assert_eq!(ctx.transcript, ["initialize", "initialize"]);
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+    }
+
+    #[test]
+    fn declaration_inner_success_survives_outer_failure_and_retry() {
+        let source = format!(
+            "inner = {{ _ = print(\"inner\")\n 9 }}\nouter = with seed(17i64) {{ _ = print(\"outer\")\n saved = inner\n _ = {DRAW}\n add(saved, floor_div(1i32, 0i32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        );
+        let library = checked_library(&source);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        for _ in 0..2 {
+            assert_eq!(
+                ctx.resolve_top_level("outer").unwrap_err(),
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_declaration_caller_frame(&ctx, &ty);
+            assert!(ctx.resolving_top_levels.is_empty());
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        }
+        let inner = ctx.resolve_top_level("inner").unwrap();
+        assert_eq!(bits(&inner), bits(&RuntimeValue::int_lit(9)));
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_eq!(ctx.transcript, ["outer", "inner", "outer"]);
+    }
+
+    #[test]
+    fn declaration_canonical_resolution_ignores_same_named_caller_value() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        ctx.bindings.insert("weights".into(), zeros());
+        let declared = ctx.resolve_top_level("weights").unwrap();
+        assert_eq!(bits(&declared), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&ctx.bindings["weights"]), bits(&zeros()));
+        assert_eq!(ctx.transcript, ["initialize"]);
+    }
+
+    #[test]
+    fn declaration_supplied_value_does_not_replace_callable_or_its_observation() {
+        let library = checked_library(
+            "def value() -> tensor[2, f32] = to_tensor([3.0f32, 5.0f32])\nalias = value\nseen = value\ncalled = value()\naliased = alias()\n",
+        );
+        let RuntimeValue::Tensor(supplied) = zeros() else {
+            unreachable!()
+        };
+        let tensors = [("value".into(), supplied)].into_iter().collect();
+        let mut ctx = context(&library, &tensors);
+        let seen = ctx.lookup_top_level_def("seen").unwrap().1;
+        let called = ctx.lookup_top_level_def("called").unwrap().1;
+        let aliased = ctx.lookup_top_level_def("aliased").unwrap().1;
+        let expected = serde_json::json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["40400000", "40a00000"]}}});
+        for warm in [false, true] {
+            if warm {
+                let closure = ctx.resolve_top_level("value").unwrap();
+                assert!(matches!(closure, RuntimeValue::Closure { .. }));
+            }
+            let observation = ctx.eval_expr(&seen).unwrap();
+            assert_eq!(bits(&ctx.eval_expr(&called).unwrap()), expected);
+            assert_eq!(bits(&ctx.eval_expr(&aliased).unwrap()), expected);
+            assert_eq!(bits(&observation), bits(&zeros()));
+        }
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn declaration_named_kernel_route_and_draws_are_independent_of_warm_cache() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        for warm in [false, true] {
+            let mut ctx = context(&library, &tensors);
+            if warm {
+                ctx.resolve_top_level("sample").unwrap();
+            }
+            // admitted_call separately proves Planned/Legacy/NoDropout,
+            // no staged plan, and exactly one baked UniformLike in the kernel.
+            let actual = admitted_call(&mut ctx, "sample").unwrap();
+            let next = admitted_call(&mut ctx, "next_draw").unwrap();
+            assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
+            assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
+            assert_eq!(ctx.transcript, ["initialize"]);
+            assert_eq!(ctx.random_counter, 7);
+        }
+    }
+
+    #[test]
+    fn declaration_anonymous_closure_keeps_lexical_shadow_and_no_named_dispatch() {
+        let library =
+            checked_library("a = 3.0f32\nmaker = { a = 7.0f32\n fn (x: f32) -> add(x, a) }\n");
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let closure = ctx.resolve_top_level("maker").unwrap();
+        let RuntimeValue::Closure { def_name, env, .. } = &closure else {
+            panic!("checked anonymous function remains a closure")
+        };
+        assert!(
+            def_name.is_none(),
+            "anonymous application must bypass named-kernel dispatch"
+        );
+        let captured = env.get("a").map(bits);
+        let actual = ctx
+            .apply_resolved_callable(closure, vec![RuntimeValue::float_lit(1.0)])
+            .unwrap();
+        assert_eq!(
+            (bits(&actual), captured),
+            (
+                bits(&RuntimeValue::float_lit(8.0)),
+                Some(bits(&RuntimeValue::float_lit(7.0)))
+            )
+        );
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn declaration_exact_and_unique_resolution_never_populates_an_ambiguous_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
+        for (module, value) in [("Left", 3), ("Right", 5)] {
+            std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
+        }
+        let compiled = crate::compile_reef_context(directory.path(), directory.path()).unwrap();
+        let library = compiled.checked_library();
+        let tensors = UnordMap::new();
+        let mut ctx = context(library, &tensors);
+        let identities = ctx
+            .top_level_defs
+            .to_sorted()
+            .into_iter()
+            .filter(|(name, _)| terminal_name_matches(name, "value"))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities.len(),
+            2,
+            "actual linked declarations supply the collision"
+        );
+        assert!(ctx.lookup_top_level_def("value").is_none());
+        for name in identities {
+            let canonical = ctx.lookup_top_level_def(&name).unwrap().0;
+            assert_eq!(canonical, name);
+            let expected = if name.contains("Left") { 3 } else { 5 };
+            assert_eq!(
+                bits(&ctx.resolve_top_level(&name).unwrap()),
+                bits(&RuntimeValue::int_lit(expected))
+            );
+            assert!(ctx.lookup_top_level_def("value").is_none());
+            assert_eq!(
+                ctx.resolve_top_level("value").unwrap_err(),
+                "unknown runtime name `value`"
+            );
+        }
+        let canonical = ctx.lookup_top_level_def("unique_3").unwrap().0;
+        let first = ctx.resolve_top_level("unique_3").unwrap();
+        let second = ctx.resolve_top_level(&canonical).unwrap();
+        assert_eq!(bits(&first), bits(&RuntimeValue::int_lit(3)));
+        assert_eq!(bits(&second), bits(&first));
+        let mut events = ctx.transcript.clone();
+        events.sort();
+        assert_eq!(events, ["Left", "Right"]);
+        assert!(
+            !ctx.bindings.contains_key("unique_3"),
+            "canonical successes do not create lexical short aliases"
+        );
+    }
+
     #[test]
     fn legacy_capture_order_valid_lazy_handler_does_not_advance_parent() {
         let library = library(DRAW, "x: tensor[2, f32]", LIVE);
