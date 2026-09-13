@@ -758,30 +758,61 @@ fn s5_input_axis_expand_reads_witness_metadata() {
 
 #[test]
 fn s5_realize_materializes_with_kernel_not_view() {
-    let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
-    let s = dag.add_node(
-        RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
-        },
-        vec![x],
-        vec_f32(3),
-        None,
-    );
-    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
-    dag.add_root(r);
+    for (precision, dtype_macro, width) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 4),
+        (Prim::F16, "CHELIS_DTYPE_F16", 2),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 2),
+    ] {
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(6)],
+            precision,
+        };
+        let output_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let s = dag.add_node(
+            RiscOp::Stride {
+                strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            },
+            vec![x],
+            output_ty.clone(),
+            None,
+        );
+        let r = dag.add_node(RiscOp::Realize, vec![s], output_ty, None);
+        dag.add_root(r);
 
-    let result = codegen_hip(&dag, "test_realize").unwrap();
-    assert!(
-        result.c_source.contains("kernel_realize_"),
-        "Realize must materialize through a copy-style kernel launch"
-    );
-    assert!(
-        !result
-            .c_source
-            .contains("chelis_device_tensor_borrow(plan_t2, d_t1->data"),
-        "Realize must not lower to a metadata-only view"
-    );
+        let result = codegen_hip(&dag, &format!("test_realize_{}", precision.name())).unwrap();
+        let kernel = format!("kernel_realize_{dtype_macro}");
+        assert!(
+            result.c_source.contains(&format!("void {kernel}(\\n"))
+                && result.c_source.contains("const unsigned char *a"),
+            "Realize must materialize through a raw-byte kernel: {}",
+            result.c_source
+        );
+        assert!(
+            result.c_source.contains(&format!(
+                "for (chelis_device_metadata byte = 0; byte < {width}; ++byte)"
+            )),
+            "Realize must preserve the dtype's stored byte width: {}",
+            result.c_source
+        );
+        assert!(
+            result
+                .c_source
+                .contains(&format!("chelis_launch_kernel(mod_{kernel}, \"{kernel}\"")),
+            "Realize must launch the copy kernel: {}",
+            result.c_source
+        );
+        assert!(
+            !result
+                .c_source
+                .contains("chelis_device_tensor_borrow(plan_t2, d_t1->data"),
+            "Realize must not lower to a metadata-only view"
+        );
+    }
 }
 
 #[test]
