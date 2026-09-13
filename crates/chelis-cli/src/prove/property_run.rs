@@ -31,6 +31,8 @@ fn run_opts(options: &ProveOptions<'_>) -> PropertyRunOptions {
         seed: options.seed.unwrap_or(0),
         samples: options.samples.unwrap_or(100),
         smt_timeout_ms: options.smt_timeout_ms,
+        beacon_budget: options.beacon_budget,
+        beacon_deadline: options.beacon_deadline,
         tier: options.tier.to_string(),
         only: options.only.map(str::to_string),
         invariant_min_rate: options.invariant_min_rate,
@@ -258,12 +260,15 @@ fn emit(
         }
         if matches!(
             outcome.proof_tier,
-            PropertyTier::Smt | PropertyTier::Induction
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon
         ) {
             value["arith_model"] = json!("real");
         }
         if let Some(evidence) = &outcome.induction_evidence {
             value["induction"] = json!(evidence);
+        }
+        if let Some(evidence) = &outcome.engine_evidence {
+            value["engine_evidence"] = evidence.clone();
         }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
@@ -281,7 +286,13 @@ fn emit(
         match status {
             "passed" => {
                 let suffix = if outcome.injected { " (injected)" } else { "" };
-                if outcome.proof_tier == PropertyTier::Induction {
+                if outcome.proof_tier == PropertyTier::Beacon {
+                    println!(
+                        "property: {} -- {} (real arithmetic on stored weights; floating execution not covered)",
+                        outcome.name,
+                        outcome.composite_verdict.as_str()
+                    );
+                } else if outcome.proof_tier == PropertyTier::Induction {
                     println!(
                         "property: {} -- proved (induction: base + step){suffix}",
                         outcome.name
@@ -320,7 +331,10 @@ fn build_failure_summary_json(
 ) -> serde_json::Value {
     let requested_tier = options.tier;
     let actual_tier = outcome.proof_tier.as_str();
-    let degradation = if requested_tier != actual_tier && actual_tier != "none" {
+    let degradation = if requested_tier != actual_tier
+        && !(requested_tier == "beacon-only" && actual_tier == "beacon")
+        && actual_tier != "none"
+    {
         Some(json!({
             "degraded": true,
             "reason": format!("requested tier '{}' fell back to '{}'", requested_tier, actual_tier),
@@ -345,6 +359,10 @@ fn build_failure_summary_json(
     }
     summary["seed"] = json!(outcome.seed);
     summary["samples"] = json!(outcome.samples);
-    summary["timeout_ms"] = json!(options.smt_timeout_ms);
+    summary["timeout_ms"] = if outcome.proof_tier == PropertyTier::Beacon {
+        json!(options.beacon_budget.as_millis())
+    } else {
+        json!(options.smt_timeout_ms)
+    };
     summary
 }

@@ -13,13 +13,14 @@ fn prove_capabilities_emits_valid_json() {
         .unwrap();
     assert!(output.status.success(), "exit 0");
     let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
-    assert_eq!(caps["schema_version"], 2);
+    assert_eq!(caps["schema_version"], 3);
     assert_eq!(caps["prove_json_schema_version"], 1);
     let tiers = caps["supported_tiers"].as_array().unwrap();
     assert!(tiers.contains(&Value::String("type_system".into())));
     assert!(tiers.contains(&Value::String("smt".into())));
     assert!(tiers.contains(&Value::String("fuzz".into())));
     assert!(tiers.contains(&Value::String("certified_envelope".into())));
+    assert!(tiers.contains(&Value::String("beacon_scalar_real".into())));
     // Boolean fields exist
     assert!(caps["smt_available"].is_boolean());
     assert!(caps["beacon_available"].is_boolean());
@@ -31,6 +32,7 @@ fn prove_capabilities_emits_valid_json() {
     // supported_flags includes --package
     let flags = caps["supported_flags"].as_array().unwrap();
     assert!(flags.contains(&Value::String("--package".into())));
+    assert!(flags.contains(&Value::String("--beacon-budget".into())));
     // engine_registry is an array
     assert!(caps["engine_registry"].is_array());
 }
@@ -38,7 +40,7 @@ fn prove_capabilities_emits_valid_json() {
 // --- Issue #673: --capabilities must not claim beacon is dispatchable ---
 
 #[test]
-fn prove_capabilities_does_not_claim_beacon_when_binary_present_but_unwired() {
+fn prove_capabilities_distinguishes_scalar_route_from_contract_upgrade() {
     // A discoverable binary is NOT dispatchability. `with_beacon` has no caller
     // on the production dispatch path, so CHELIS_BEACON_BIN pointing at a real
     // executable must still not make the machine-readable surface say prove can
@@ -61,13 +63,23 @@ fn prove_capabilities_does_not_claim_beacon_when_binary_present_but_unwired() {
     assert!(output.status.success(), "exit 0");
     let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
 
-    // Nothing may claim beacon is usable...
-    assert_eq!(caps["beacon_available"], Value::Bool(false));
-    assert_eq!(caps["beacon_wired"], Value::Bool(false));
+    assert_eq!(
+        caps["beacon_available"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
+    assert_eq!(
+        caps["beacon_scalar_available"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
+    assert_eq!(
+        caps["beacon_wired"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
+    assert_eq!(caps["beacon_contract_prover_available"], Value::Bool(false));
     let registry = caps["engine_registry"].as_array().unwrap();
     assert!(
-        !registry.contains(&Value::String("beacon_shim".into())),
-        "engine_registry must not list beacon_shim while nothing registers it: {registry:?}"
+        registry.contains(&Value::String("beacon_shim".into())) == cfg!(feature = "chelis-prove"),
+        "scalar route availability must agree with engine registry: {registry:?}"
     );
     // ...and the env var IS observed, so none of the above passed vacuously.
     assert_eq!(caps["beacon_binary_present"], Value::Bool(true));
