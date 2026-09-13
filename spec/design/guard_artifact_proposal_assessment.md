@@ -514,8 +514,8 @@ Pull-request execution reach remains the largest immediate gap:
 | rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
-| §C7.5 standing-liveness canary | Daily/manual workflow on `main`; the regular PR job still checks the standing manifest until changed-row narrowing lands |
-| newly added or changed package integration target | Candidate required change-owned shards derive its PR execution; merged-main acceptance remains outstanding |
+| §C7.5 standing-liveness canary | Daily/manual workflow checks every standing row on `main`; the regular PR job live-validates changed authority rows |
+| newly added or changed package integration target | Required change-owned shards landed in chelis#2019 and passed merged-main acceptance; representative hosted cost trials remain under chelis#1824 |
 
 The former contrast between the two expand inventories remains historical
 evidence for execution reach. The selected insert inventory stayed

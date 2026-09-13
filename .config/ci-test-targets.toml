@@ -597,6 +597,15 @@ tracking_issue = "chelis#1824"
 
 # Rejection authority row admission and standing-canary controls.
 [[path_rule]]
+prefix = "spec/design/loud_unsupported.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the Phase 4B freeze and per-file contract acknowledgement run in the required Docs job"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
 prefix = "scripts/generate_rejection_registries.py"
 disposition = "owner"
 workflow = "ci.yml"
