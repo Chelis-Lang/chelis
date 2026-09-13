@@ -28,6 +28,15 @@ def assert_change_owned_topology(test: unittest.TestCase, workflow: dict) -> Non
         "package-expansion-summary",
     }
     test.assertLessEqual(expected, set(jobs))
+    for name in expected:
+        steps = jobs[name]["steps"]
+        invoke = next(index for index, step in enumerate(steps)
+                      if "scripts/ci_change_owned.py" in step.get("run", ""))
+        setup = next((index for index, step in enumerate(steps)
+                      if step.get("run") in {"uv venv --python 3.11", "python3 scripts/ci_setup_uv_python.py"}), None)
+        test.assertIsNotNone(setup, f"{name} requires managed Python setup")
+        test.assertLess(setup, invoke)
+        test.assertIn(".venv/bin/python scripts/ci_change_owned.py", steps[invoke]["run"])
 
     planner = jobs["integration-plan"]
     test.assertEqual(planner["needs"], ["changes"])
@@ -140,6 +149,20 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
 
     def test_required_lane_and_informational_trial_are_isolated(self) -> None:
         assert_change_owned_topology(self, self.workflow)
+
+    def test_missing_managed_python_setup_or_system_invocation_is_rejected(self) -> None:
+        for mutation in ("missing-setup", "system-python"):
+            workflow = copy.deepcopy(self.workflow)
+            planner = workflow["jobs"]["integration-plan"]
+            if mutation == "missing-setup":
+                planner["steps"] = [step for step in planner["steps"]
+                                    if step.get("run") != "uv venv --python 3.11"]
+            else:
+                for step in planner["steps"]:
+                    if "scripts/ci_change_owned.py" in step.get("run", ""):
+                        step["run"] = step["run"].replace(".venv/bin/python", "python3")
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                assert_change_owned_topology(self, workflow)
 
     def test_expansion_cannot_feed_or_run_ahead_of_the_required_verdict(self) -> None:
         for mutation in ("feeds-stable", "runs-concurrently"):

@@ -520,7 +520,7 @@ class ProfilePartitionTests(unittest.TestCase):
             cwd=REPO_ROOT, check=True, capture_output=True, text=True,
         ).stdout)
         selected = ci_test_targets.read_targets(REPO_ROOT / ".config/ci-test-targets.toml")
-        args = ci_test_targets.cargo_args(metadata, selected)
+        selections = ci_test_targets.cargo_selections(metadata, selected)
         def listing(selection):
             result = subprocess.run(
                 ["cargo", "nextest", "list", *selection, "--profile", "ci-full",
@@ -529,7 +529,7 @@ class ProfilePartitionTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=900,
             )
             return json.loads(result.stdout)
-        fast = listing(args)
+        fast = ci_test_targets.merge_listings([listing(args) for args in selections])
         ci_test_targets.validate_listing(fast, metadata, selected)
         full = listing(["--workspace"])
         def active(data):

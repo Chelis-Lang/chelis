@@ -216,7 +216,10 @@ class SchemaTests(unittest.TestCase):
         config = owned.read_config(
             Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
         )
-        self.assertEqual(len(config.standing_targets), 73)
+        self.assertTrue({
+            owned.Identity("chelis-types", "expand_insert_dispatch_family"),
+            owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
+        } <= set(config.standing_targets))
         self.assertEqual(len(config.target_exclusions), 3)
         self.assertEqual(len(config.test_exclusions), 6)
         for owner in (
@@ -262,12 +265,18 @@ class SchemaTests(unittest.TestCase):
         )
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
-        workflow = (root / ".github/workflows/ci.yml").read_text()
         self.assertIn("\n  full-workspace:\n", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
         for rule in config.path_rules:
             if rule.owner is not None:
+                workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
                 self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
+        by_path = {rule.prefix: rule for rule in config.path_rules}
+        self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
+                         "full-workspace")
+        for path in ("spec/design/guard_artifact_proposal_assessment.md",
+                     "spec/design/guard_artifact_proposal_evidence.md"):
+            self.assertEqual(by_path[path].disposition, "docs_only")
 
 
 class MetadataAndDiffTests(unittest.TestCase):

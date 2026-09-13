@@ -586,6 +586,23 @@ prefix = "docs/ci_validation.md"
 disposition = "docs_only"
 
 [[path_rule]]
+prefix = "scripts/test_nextest_profile_partition.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "workspace shard 1 runs the real standing-selection versus unfiltered-nightly listing comparison"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "spec/design/guard_artifact_proposal_assessment.md"
+disposition = "docs_only"
+
+[[path_rule]]
+prefix = "spec/design/guard_artifact_proposal_evidence.md"
+disposition = "docs_only"
+
+[[path_rule]]
 prefix = "changelog.d/1824-change-owned-ci.changed.md"
 disposition = "docs_only"
 

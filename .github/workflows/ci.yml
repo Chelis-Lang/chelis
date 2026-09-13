@@ -634,6 +634,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
       - name: Derive the change-owned and package-expansion plan
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -641,7 +648,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: >-
-          python3 scripts/ci_change_owned.py plan
+          .venv/bin/python scripts/ci_change_owned.py plan
           --event-name "$EVENT_NAME"
           --pr-head "$PR_HEAD"
           --before "$BEFORE"
@@ -736,6 +743,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
       - name: Require the planner and every change-owned shard
         run: >-
           python3 scripts/ci_require_success.py
@@ -756,7 +769,7 @@ jobs:
 
       - name: Validate required change-owned execution
         run: >-
-          python3 scripts/ci_change_owned.py report
+          .venv/bin/python scripts/ci_change_owned.py report
           --plan target/integration-change/plan.json
           --lane change-owned
           --receipts-root target/integration-change/receipts/change-owned
@@ -876,6 +889,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
       - name: Download integration change plan
         continue-on-error: true
         uses: actions/download-artifact@v7
@@ -898,7 +917,7 @@ jobs:
         run: |
           mkdir -p target/integration-change/package-expansion-summary
           if [ -f target/integration-change/plan.json ]; then
-            python3 scripts/ci_change_owned.py report \
+            .venv/bin/python scripts/ci_change_owned.py report \
               --plan target/integration-change/plan.json \
               --lane package-expansion \
               --receipts-root target/integration-change/receipts/package-expansion \
