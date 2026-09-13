@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -278,7 +279,7 @@ class BaselineTests(unittest.TestCase):
         self,
     ) -> None:
         mutated = json.loads(json.dumps(self.baseline))
-        mutated["source_inventory"]["mutations"][0]["path"] = "ignored.rs"
+        mutated["source_inventory"]["mutations"][0]["authority"] = "ignored"
         with self.assertRaisesRegex(
             oracle.OracleFailure,
             r"source_inventory\.mutations\[0\].*exact fields",
@@ -313,6 +314,16 @@ class BaselineTests(unittest.TestCase):
             ("implementation type", "implementation_sha256", 7),
             ("implementation spelling", "implementation_sha256", "not-a-sha"),
             ("witness type", "witness_id", 7),
+            ("missing path", "path", None),
+            ("path type", "path", 7),
+            ("path empty", "path", ""),
+            ("missing kind", "expected_kind", None),
+            ("kind type", "expected_kind", 7),
+            ("kind empty", "expected_kind", ""),
+            ("missing owners", "expected_owners", None),
+            ("owners type", "expected_owners", "owner"),
+            ("owners entry type", "expected_owners", [7]),
+            ("owners empty entry", "expected_owners", [""]),
             ("command type", "command", ["phase", "0"]),
             ("failure extra", "failure_extra", "ignored"),
             ("failure code type", "failure_code", 7),
@@ -341,7 +352,7 @@ class BaselineTests(unittest.TestCase):
     def test_top_level_fields_require_exact_types_before_digest_validation(self) -> None:
         cases = (
             ("missing freeze", "freeze_sha256", None),
-            ("schema string", "schema_version", "6"),
+            ("schema string", "schema_version", "7"),
             ("schema bool", "schema_version", True),
             ("freeze type", "freeze_sha256", 7),
             ("freeze spelling", "freeze_sha256", "not-a-sha"),
@@ -360,7 +371,7 @@ class BaselineTests(unittest.TestCase):
         duplicates = (
             (
                 "top-level",
-                '{"schema_version":6,"freeze_sha256":"'
+                '{"schema_version":7,"freeze_sha256":"'
                 + oracle.FREEZE_SHA256
                 + '","foundation_rows":[],"source_inventory":{"mutations":[]},'
                 '"active_debt":[],'
@@ -369,7 +380,7 @@ class BaselineTests(unittest.TestCase):
             ),
             (
                 "nested",
-                '{"schema_version":6,"freeze_sha256":"'
+                '{"schema_version":7,"freeze_sha256":"'
                 + oracle.FREEZE_SHA256
                 + '","foundation_rows":[],"source_inventory":{"mutations":[]},'
                 '"active_debt":[{"identity":"x","identity":"y","sample":""}]}',
@@ -646,6 +657,154 @@ class BaselineTests(unittest.TestCase):
                 "legacy-capacity-key-use", oracle.CAPACITY_KEY_OWNER, "legacy"
             )
         )
+
+
+class FrozenMutationContractTests(unittest.TestCase):
+    """Exercise the reviewed contract without invoking the inventory scanner."""
+
+    def setUp(self) -> None:
+        self.probes = oracle.phase0_mutation_probes()
+        self.baseline = oracle.load_baseline()
+        # All foundation rows may retire without moving the mutation freeze.
+        # This fixture checks contract validation, not current source inventory.
+        self.baseline["active_debt"] = []
+        self.probe = next(
+            probe for probe in self.probes
+            if probe.witness_id == "phase0.mutate_element_binding"
+        )
+        self.assertEqual(
+            self.probe.expected_owners,
+            ("Storage for UnregisteredElement", "private :: Sealed for UnregisteredElement"),
+        )
+
+    def test_unchanged_probes_match_the_reviewed_digest_and_contract(self) -> None:
+        oracle.validate_baseline(self.baseline, (), probes=self.probes)
+        self.assertEqual(
+            self.baseline["source_inventory"]["mutations"],
+            oracle.mutation_manifest(self.probes),
+        )
+
+    def test_rejection_obligation_drift_moves_digest_and_fails_comparison(self) -> None:
+        variants = (
+            ("path", replace(self.probe, path=Path(oracle.VOCAB_OWNER))),
+            ("kind", replace(self.probe, expected_kind="direct-data-access")),
+            ("first owner removed", replace(self.probe, expected_owners=self.probe.expected_owners[1:])),
+            ("second owner removed", replace(self.probe, expected_owners=self.probe.expected_owners[:1])),
+            ("all owners removed", replace(self.probe, expected_owners=())),
+        )
+        for name, replacement in variants:
+            probes = tuple(
+                replacement if probe is self.probe else probe for probe in self.probes
+            )
+            projected = {"mutations": oracle.frozen_mutation_rows(probes)}
+            with self.subTest(drift=name, check="digest"):
+                self.assertNotEqual(
+                    self.baseline["freeze_sha256"],
+                    oracle._freeze_digest(self.baseline["foundation_rows"], projected),
+                )
+            with self.subTest(drift=name, check="comparison"):
+                with self.assertRaisesRegex(oracle.OracleFailure, "frozen mutation contract"):
+                    oracle._validate_frozen_mutation_contract(
+                        self.baseline["source_inventory"], probes,
+                    )
+            with self.subTest(drift=name, check="validator"):
+                with self.assertRaisesRegex(oracle.OracleFailure, "frozen mutation contract"):
+                    oracle.validate_baseline(self.baseline, (), probes=probes)
+
+    def test_persisted_rejection_drift_requires_a_reviewed_digest(self) -> None:
+        for field, value in (
+            ("path", oracle.VOCAB_OWNER),
+            ("expected_kind", "direct-data-access"),
+            ("expected_owners", []),
+        ):
+            with self.subTest(field=field):
+                baseline = json.loads(json.dumps(self.baseline))
+                row = next(
+                    row for row in baseline["source_inventory"]["mutations"]
+                    if row["witness_id"] == self.probe.witness_id
+                )
+                row[field] = value
+                digest = oracle._freeze_digest(
+                    baseline["foundation_rows"], baseline["source_inventory"],
+                )
+                self.assertNotEqual(self.baseline["freeze_sha256"], digest)
+                # Rewriting the stored digest alone cannot authorize contract drift.
+                baseline["freeze_sha256"] = digest
+                with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
+                    oracle.validate_baseline(baseline, (), probes=self.probes)
+
+    def test_owner_list_spelling_matches_the_existing_live_manifest(self) -> None:
+        for owners in (
+            tuple(reversed(self.probe.expected_owners)),
+            (*self.probe.expected_owners, self.probe.expected_owners[0]),
+        ):
+            with self.subTest(owners=owners):
+                probes = tuple(
+                    replace(probe, expected_owners=owners) if probe is self.probe else probe
+                    for probe in self.probes
+                )
+                rows = oracle.frozen_mutation_rows(probes)
+                self.assertEqual(rows, oracle.mutation_manifest(probes))
+                self.assertNotEqual(rows, oracle.frozen_mutation_rows(self.probes))
+                with self.assertRaisesRegex(oracle.OracleFailure, "frozen mutation contract"):
+                    oracle._validate_frozen_mutation_contract(
+                        self.baseline["source_inventory"], probes,
+                    )
+
+    def test_live_configuration_does_not_enter_the_frozen_contract(self) -> None:
+        original = oracle.coverage_manifest(self.probes)
+        with (
+            mock.patch.object(oracle, "phase0_legs", return_value=()),
+            mock.patch.object(oracle, "hardware_probe_manifest", return_value=()),
+            mock.patch.object(oracle, "INVENTORY_SOURCES", ()),
+        ):
+            current = oracle.coverage_manifest(self.probes)
+            self.assertNotEqual(original, current)
+            self.assertEqual(
+                self.baseline["freeze_sha256"],
+                oracle._freeze_digest(
+                    self.baseline["foundation_rows"],
+                    {"mutations": oracle.frozen_mutation_rows(self.probes)},
+                ),
+            )
+            oracle.validate_baseline(self.baseline, (), probes=self.probes)
+
+    def test_schema_accepts_full_manifest_and_rejects_legacy_rows(self) -> None:
+        baseline = json.loads(json.dumps(self.baseline))
+        baseline["schema_version"] = 7
+        baseline["source_inventory"]["mutations"] = oracle.mutation_manifest(self.probes)
+        with self.subTest(schema="current"):
+            oracle._validate_baseline_schema(baseline)
+        baseline["schema_version"] = 6
+        for row in baseline["source_inventory"]["mutations"]:
+            for field in ("path", "expected_kind", "expected_owners"):
+                del row[field]
+        with self.subTest(schema="legacy"):
+            with self.assertRaisesRegex(oracle.OracleFailure, "schema_version"):
+                oracle._validate_baseline_schema(baseline)
+        baseline["schema_version"] = 7
+        with self.subTest(schema="legacy rows relabeled current"):
+            with self.assertRaisesRegex(oracle.OracleFailure, "mutations.*exact fields"):
+                oracle._validate_baseline_schema(baseline)
+
+    def test_schema_rejects_malformed_rejection_fields_before_comparison(self) -> None:
+        for field, values in (
+            ("path", (None, 7, "")),
+            ("expected_kind", (None, 7, "")),
+            ("expected_owners", (None, "owner", [7], [""], [None])),
+        ):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    baseline = json.loads(json.dumps(self.baseline))
+                    row = baseline["source_inventory"]["mutations"][0]
+                    row[field] = value
+                    with self.assertRaisesRegex(oracle.OracleFailure, field):
+                        oracle._validate_baseline_schema(baseline)
+            with self.subTest(field=field, value="missing"):
+                baseline = json.loads(json.dumps(self.baseline))
+                baseline["source_inventory"]["mutations"][0].pop(field, None)
+                with self.assertRaisesRegex(oracle.OracleFailure, "exact fields"):
+                    oracle._validate_baseline_schema(baseline)
 
 
 class MutationContractTests(unittest.TestCase):

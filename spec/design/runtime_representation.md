@@ -1328,8 +1328,9 @@ execution tests prove its sanctioned replacements work.
 
 - Phase 0 freezes the immutable `foundation_rows`, including each identity's
   owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
-  row binds its stable witness ID, exact implementation digest, expected
-  failure code and reason, and required command. Later phases may reduce raw
+  row binds its stable witness ID, exact implementation digest, target source
+  path, expected seam kind, required owners, expected failure code and reason,
+  and required command. Later phases may reduce raw
   hits but may not add an exception or weaken a witness without a reviewed
   freeze move. The separately stored active-debt list sits outside the digest
   so it can shrink, while regeneration preserves retired foundation identities
@@ -1338,8 +1339,8 @@ execution tests prove its sanctioned replacements work.
   reappearance rather than silently restoring it. A genuinely new identity
   outside the prior foundation may still be emitted with a changed digest for
   review. `coverage_manifest()` remains code-derived configuration rather than
-  a persisted baseline field: it adds source paths, seam kinds, expected
-  owners, release reproducers, hardware probes, counts, and ordinary execution
+  a persisted baseline field: beyond the frozen mutation contract, it adds the
+  source universe, release reproducers, hardware probes, counts, and ordinary execution
   configuration. At runtime the oracle verifies that live probes match the
   frozen mutation rows, verifies that the richer manifest is the exact
   projection of the current configuration, and executes every non-hardware
@@ -1375,9 +1376,23 @@ does not add or change a foundation row or frozen mutation row does not move the
 digest and does not require a B1 amendment paragraph. Its owning change still
 updates code, focused positive and negative tests, and current documentation.
 Adding, removing, renaming, reimplementing, retargeting, or changing the
-expected failure or command of a mutation does move the freeze. The runtime
+expected seam kind, required owners, failure or command of a mutation does move
+the freeze. The runtime
 manifest/configuration equality check, source closure, expected-failure checks,
 and execution of every mutation and reproducer remain mandatory.
+
+The schema 7 mutation-contract amendment freezes the existing full mutation
+manifest projection, adding `path`, `expected_kind`, and `expected_owners` to
+each reviewed row. These fields select the mutated source, the seam kind its
+rejection must identify, and every owner the rejection must name; changing
+them changes the witness's rejection obligation even when its implementation
+is unchanged. The frozen owner list retains the live manifest's exact order
+and duplicates; execution still requires the set of named owners. This
+strengthening preserves all foundation identities, deletion phases, active
+debt, mutation implementations, failure expectations, and commands. It adds
+no representation exception or negative witness and changes no numbered
+language semantics. Live reproducers, hardware probes, source-universe
+configuration, and counts remain outside the freeze.
 
 The checked-extent staged plan registers `chelis-ir/src/host/staged.rs` in
 that source universe. It composes existing tagged values and DAG carriers,
