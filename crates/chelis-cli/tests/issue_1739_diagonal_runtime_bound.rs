@@ -54,6 +54,8 @@
 //! guard fires only on disagreement.
 
 mod common;
+#[path = "common/unsupported_wording.rs"]
+mod unsupported_wording;
 
 use assert_cmd::Command;
 use common::{gcc_available, link_generated};
@@ -72,16 +74,18 @@ use tempfile::{TempDir, tempdir};
 /// softmax; `parity_annotated_concat_softmax_eval_and_c_rejection` owns the
 /// full-value positive and exact C diagnostic. No C guard artifact exists.
 /// When either build succeeds, its row fails and must join the guard census.
-const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
-    (
-        "dropout_staged_claim.ch",
-        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-    ),
-    (
-        "annotated_concat_softmax.ch",
-        "unsupported: builtin `softmax` on `chelis build` host emission (codegen:c); deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary disagree; no fallback expression is permitted",
-    ),
-];
+fn refused_by_a_capability_gate() -> [(&'static str, &'static str); 2] {
+    [
+        (
+            "dropout_staged_claim.ch",
+            "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+        ),
+        (
+            "annotated_concat_softmax.ch",
+            unsupported_wording::stderr("annotated_concat_softmax_c"),
+        ),
+    ]
+}
 
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";
@@ -1084,7 +1088,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         let name = example.file_name().expect("name").to_str().expect("UTF-8");
         let path = example.to_str().expect("UTF-8 path");
         let out = dir.path().join(stem);
-        if let Some((_, diagnostic)) = REFUSED_BY_A_CAPABILITY_GATE
+        if let Some((_, diagnostic)) = refused_by_a_capability_gate()
             .iter()
             .find(|(refused_name, _)| *refused_name == name)
         {
@@ -1119,7 +1123,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     // THE ENUMERATION WITNESS. Both sides are sorted, so this asks whether
     // every recorded refusal was reached and nothing else was; the order the
     // constant happens to be declared in is not part of the contract.
-    let mut expected_refusals: Vec<String> = REFUSED_BY_A_CAPABILITY_GATE
+    let mut expected_refusals: Vec<String> = refused_by_a_capability_gate()
         .iter()
         .map(|(name, _)| (*name).to_string())
         .collect();

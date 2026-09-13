@@ -22,6 +22,7 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("diagnostic_kind_oracle_literal"), 1)
         self.assertIn('kind: "unsupported_feature".to_owned()', mutated)
+        self.assertIn("unsupported: None", mutated)
 
     def test_kind_write_mutation_targets_the_private_field(self) -> None:
         source = (oracle.REPO_ROOT / oracle.MUTATION_SOURCE).read_text(encoding="utf-8")
@@ -36,6 +37,7 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("impl From<WireDiagnostic> for Diagnostic"), 1)
         self.assertIn("kind: wire.kind", mutated)
+        self.assertIn("unsupported: None", mutated)
 
     def test_wire_bridge_mutation_runs_the_compiler_api_doctests(self) -> None:
         self.assertEqual(

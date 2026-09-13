@@ -1610,14 +1610,6 @@ fn lower_selected_execution_plan(
         &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
     >,
 ) -> Result<Option<chelis_ir::evaluation::EvaluationPlan>> {
-    let error = |diagnostic: chelis_ir::lower::LowerDiagnostic| {
-        stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            GeneralKind::LowerError,
-            deep_span_to_diagnostic(diagnostic.span),
-        )
-    };
     #[cfg(feature = "compilation-trace")]
     if let Some(trace_out) = trace_out {
         return chelis_ir::host::lower_named_tensor_entry_execution_plan_with_trace(checked, entry)
@@ -1627,9 +1619,10 @@ fn lower_selected_execution_plan(
                     plan
                 })
             })
-            .map_err(error);
+            .map_err(lower_diagnostic_to_compiler_error);
     }
-    chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry).map_err(error)
+    chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry)
+        .map_err(lower_diagnostic_to_compiler_error)
 }
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
@@ -1970,14 +1963,6 @@ fn execution_artifact_from_compiled_observed(
     #[cfg(feature = "compilation-trace")]
     let mut entry_trace = None;
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
-    let lower_error = |diagnostic: chelis_ir::lower::LowerDiagnostic| {
-        stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            GeneralKind::LowerError,
-            deep_span_to_diagnostic(diagnostic.span),
-        )
-    };
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
     {
@@ -1987,7 +1972,7 @@ fn execution_artifact_from_compiled_observed(
         )
     } else {
         let lowered = chelis_ir::host::try_lower_manifested_program(&compiled.program)
-            .map_err(lower_error)?;
+            .map_err(lower_diagnostic_to_compiler_error)?;
         (lowered.host, None)
     };
     let host_program = execution_host
@@ -3494,12 +3479,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
         PipelineRejection::Linearity { errors } => {
             crate::compiler::check_errors_to_compiler_error("linearity", &errors)
         }
-        PipelineRejection::Lower(diagnostic) => stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            GeneralKind::LowerError,
-            deep_span_to_diagnostic(diagnostic.span),
-        ),
+        PipelineRejection::Lower(diagnostic) => lower_diagnostic_to_compiler_error(diagnostic),
         PipelineRejection::RootCount {
             context,
             expected,
@@ -3518,6 +3498,26 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             )
         }
     }
+}
+
+fn lower_diagnostic_to_compiler_error(
+    diagnostic: chelis_ir::lower::LowerDiagnostic,
+) -> CompilerError {
+    let unsupported = diagnostic.unsupported().cloned();
+    let mut error = stage_error_with_span(
+        "lower",
+        diagnostic.to_string(),
+        GeneralKind::LowerError,
+        deep_span_to_diagnostic(diagnostic.span),
+    );
+    if let Some(unsupported) = unsupported {
+        error
+            .errors
+            .first_mut()
+            .expect("a stage error contains one diagnostic")
+            .retain_unsupported(unsupported);
+    }
+    error
 }
 
 pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
