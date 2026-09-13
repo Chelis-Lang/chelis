@@ -669,6 +669,11 @@ fn parity_induction_bond_library_only() {
 }
 
 #[test]
+fn parity_beacon_scalar_range_library_only() {
+    drive_parity(&examples_root().join("beacon_scalar_range.ch"), false);
+}
+
+#[test]
 fn parity_linreg_library_only() {
     drive_parity(&examples_root().join("linreg.ch"), false);
 }
@@ -779,6 +784,7 @@ fn parity_caller_actual_scope() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "annotated_concat_softmax.ch",
+        "beacon_scalar_range.ch",
         "caller_actual_scope.ch",
         "source-file-names.ch",
         "checked_reshape.ch",
