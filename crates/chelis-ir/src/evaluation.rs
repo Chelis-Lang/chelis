@@ -640,16 +640,24 @@ impl EvaluationPlan {
         Ok(())
     }
 
-    pub(crate) fn frame<'a>(
-        &'a self,
-        context: &'a mut RandomExecutionContext,
-    ) -> Result<ExecutionFrame<'a>, String> {
+    pub(crate) fn validate_for_context(
+        &self,
+        context: &RandomExecutionContext,
+    ) -> Result<(), String> {
         self.validate()?;
         if self.metadata.scopes[0].seed != context.state.seed {
             return Err(
                 "evaluation plan inherited seed does not match its execution context".into(),
             );
         }
+        Ok(())
+    }
+
+    pub(crate) fn frame<'a>(
+        &'a self,
+        context: &'a mut RandomExecutionContext,
+    ) -> Result<ExecutionFrame<'a>, String> {
+        self.validate_for_context(context)?;
         Ok(ExecutionFrame {
             metadata: &self.metadata,
             counters: vec![0; self.metadata.scopes.len()],
@@ -875,6 +883,10 @@ impl ExecutionFrame<'_> {
         Ok(Some((key.seed, key.ordinal)))
     }
 }
+
+#[cfg(test)]
+#[path = "input_preparation_tests.rs"]
+mod input_preparation_tests;
 
 #[cfg(test)]
 mod tests {
