@@ -60,12 +60,21 @@ fn allocated_for(iterations: usize) -> usize {
 
 #[test]
 fn recursive_calls_do_not_recopy_unrelated_definition_bodies() {
-    let setup = allocated_for(0);
-    let repeated = allocated_for(64);
-    let extra = repeated.saturating_sub(setup);
-    eprintln!("setup={setup}, repeated={repeated}, extra={extra} bytes");
-    assert!(
-        extra < 32 * 1024 * 1024,
-        "recursive profile admission allocated {extra} extra bytes"
-    );
+    // This deliberately recursive fixture measures heap allocation. Give debug
+    // evaluator frames enough stack without requiring runner environment flags.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let setup = allocated_for(0);
+            let repeated = allocated_for(64);
+            let extra = repeated.saturating_sub(setup);
+            eprintln!("setup={setup}, repeated={repeated}, extra={extra} bytes");
+            assert!(
+                extra < 32 * 1024 * 1024,
+                "recursive profile admission allocated {extra} extra bytes"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
