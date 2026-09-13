@@ -190,6 +190,23 @@ but do not trigger initialization. An entered initializer's error is preserved.
 The CLI regression fixtures use separate Reef packages to exercise this lazy
 library boundary; a standalone rank-polymorphic example cannot demonstrate it.
 
+The host evaluator reuses a successfully initialized declaration by its resolved
+identity within one evaluation context, independently of the caller's local
+values and type parameters. A failed initializer is not cached; successful
+dependencies survive an outer initializer's failure. Compiling a library context
+does not execute its initializers, and an ordinary host evaluation request starts
+a fresh declaration cache. Invariant predicates retain separate contexts.
+
+Ordinary named and named-axis host calls read free values in declaration scope;
+anonymous host functions keep their lexical captures. Calls still evaluate
+arguments in caller scope (see
+`examples/caller_actual_scope.ch`, whose `out` is 25), and applying a cached
+callable runs its body each time. Supplied tensor observations and displayed
+callable results do not replace the cached callable.
+The [declaration regression tests](../../../crates/chelis-compiler-api/tests/issue_1956_declaration_values.rs)
+exercise named versus anonymous scope, initialization reuse and fresh requests;
+the example above demonstrates caller-argument scope only.
+
 ### Targeted evaluation and root manifests
 
 Function aliases remain callable entries, without display roots of their own.

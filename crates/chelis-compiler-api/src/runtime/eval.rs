@@ -440,12 +440,12 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
-        if let Some(value) = self.bindings.get(name) {
-            return Ok(value.clone());
-        }
         let Some((resolved_name, expr)) = self.lookup_top_level_def(name) else {
             return Err(format!("unknown runtime name `{name}`"));
         };
+        if let Some(value) = self.declaration_values.get(&resolved_name) {
+            return Ok(value.clone());
+        }
         if self
             .resolving_top_levels
             .iter()
@@ -454,6 +454,11 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
+        // Declaration scope is independent of its first caller. Nested
+        // successful declarations remain cached even if this one fails.
+        let saved = std::mem::take(&mut self.bindings);
+        let saved_types = std::mem::take(&mut self.binding_types);
+        let saved_precisions = std::mem::take(&mut self.precision_bindings);
         let saved_exclusion = self.execution_exclusion;
         self.admit_execution_profile(&expr, &[]);
         // A checked function alias carries the callable, including a nullary
@@ -470,12 +475,12 @@ impl<'a> EvalContext<'a> {
             self.eval_expr(&expr)
         };
         self.execution_exclusion = saved_exclusion;
+        self.bindings = saved;
+        self.binding_types = saved_types;
+        self.precision_bindings = saved_precisions;
         self.resolving_top_levels.pop();
         let value = stamp_def_closure(value?, &resolved_name, &expr);
-        self.bindings.insert(resolved_name.clone(), value.clone());
-        if resolved_name != name {
-            self.bindings.insert(name.to_string(), value.clone());
-        }
+        self.declaration_values.insert(resolved_name, value.clone());
         Ok(value)
     }
 
@@ -622,7 +627,7 @@ impl<'a> EvalContext<'a> {
             });
         let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
-        let host_bindings = &self.bindings;
+        let host_bindings = &self.declaration_values;
         if let Some(plan) = execution_plan {
             let mut context = RandomExecutionContext::new(RandomLoweringState {
                 seed: self.random_seed,
@@ -1294,13 +1299,9 @@ impl<'a> EvalContext<'a> {
                 .and_then(|meta| meta.ty())
                 .map(|ty| ty.expression().clone()),
             body,
-            env: self
-                .bindings
-                .to_sorted()
-                .into_iter()
-                .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect(),
+            // Named declarations are initialized in an empty lexical frame;
+            // an anonymous fn must retain every actual local shadow.
+            env: self.bindings.clone(),
             precision_env: self.precision_bindings.clone(),
             def_name: None,
         })
@@ -1859,7 +1860,16 @@ impl<'a> EvalContext<'a> {
                 if let Some(name) = def_name.as_deref()
                     && let Some(kernel) = self.def_kernel(name)?
                 {
-                    return self.apply_def_kernel(name, &kernel, &params, args);
+                    // Arguments already ran in the caller. Kernel/staged
+                    // capture providers now see only declaration scope.
+                    let saved = std::mem::take(&mut self.bindings);
+                    let saved_types = std::mem::take(&mut self.binding_types);
+                    let saved_precisions = std::mem::take(&mut self.precision_bindings);
+                    let result = self.apply_def_kernel(name, &kernel, &params, args);
+                    self.bindings = saved;
+                    self.binding_types = saved_types;
+                    self.precision_bindings = saved_precisions;
+                    return result;
                 }
                 if params.len() != args.len() {
                     return Err(format!(
@@ -4030,6 +4040,7 @@ mod legacy_capture_order_tests {
             bindings: UnordMap::new(),
             binding_types: UnordMap::new(),
             precision_bindings: UnordMap::new(),
+            declaration_values: UnordMap::new(),
             named_axis_route_cache: UnordMap::new(),
             named_axis_route_visiting: UnordSet::new(),
             top_level_defs: definitions,
@@ -4245,6 +4256,42 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
+    fn named_axis_caller_shadow_does_not_replace_a_declaration_capture() {
+        let library = checked_library(
+            "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total(x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = (sum(x, seq), sum(weights, 0i32))\ndef main(weights: tensor[seq, f32]) = total(weights)\n",
+        );
+        let tensors = UnordMap::new();
+        for warm in [false, true] {
+            let mut ctx = context(&library, &tensors);
+            assert!(ctx.def_kernel("total").unwrap().is_none());
+            assert!(ctx.def_kernel("main").unwrap().is_none());
+            if warm {
+                ctx.resolve_top_level("total").unwrap();
+                ctx.resolve_top_level("weights").unwrap();
+            }
+            let main = ctx.resolve_top_level("main").unwrap();
+            let input = RuntimeValue::Tensor(
+                RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![7.0, 11.0]).unwrap(),
+            );
+            let RuntimeValue::Tuple(values) =
+                ctx.apply_resolved_callable(main, vec![input]).unwrap()
+            else {
+                panic!("checked call returns two reductions")
+            };
+            assert_eq!(ctx.named_axis_route_cache.get("total"), Some(&true));
+            assert_eq!(values.len(), 2);
+            for (value, expected) in values.iter().zip(["41900000", "41000000"]) {
+                assert_eq!(
+                    bits(value),
+                    serde_json::json!({"type":"tensor", "value":{"shape":[], "data":{"dtype":"f32", "bits":[expected]}}})
+                );
+            }
+            assert_eq!(ctx.transcript, ["initialize"]);
+            assert!(ctx.bindings.is_empty());
+        }
+    }
+
+    #[test]
     fn named_axis_dead_capture_does_not_initialize() {
         named_axis_capture_case(
             "to_tensor([3.0f32, 5.0f32])",
@@ -4386,18 +4433,367 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
+    fn declaration_cold_warm_builtin_and_local_shadow_control() {
+        // Top-level builtin-name declarations are rejected by the checker;
+        // warm a legal declaration, never manufacture a cached builtin.
+        let library = checked_library(
+            "marker = 7\nplain = relu(-2.0f64)\nshadowed = { relu = fn (v: f64) -> add(v, 100.0f64)\n relu(-2.0f64) }\n",
+        );
+        let tensors = UnordMap::new();
+        for warm in [false, true] {
+            let mut ctx = context(&library, &tensors);
+            if warm {
+                ctx.resolve_top_level("marker").unwrap();
+            }
+            let plain = ctx.lookup_top_level_def("plain").unwrap().1;
+            let shadowed = ctx.lookup_top_level_def("shadowed").unwrap().1;
+            assert!(ctx.active_builtin_symbol("relu"));
+            let zero = bits(&ctx.eval_expr(&plain).unwrap());
+            let local = bits(&ctx.eval_expr(&shadowed).unwrap());
+            assert_eq!(zero, bits(&RuntimeValue::float64(0.0)));
+            assert_eq!(local, bits(&RuntimeValue::float64(98.0)));
+            assert!(ctx.active_builtin_symbol("relu"));
+            assert_eq!(bits(&ctx.eval_expr(&plain).unwrap()), zero);
+            assert!(ctx.transcript.is_empty());
+        }
+    }
+
+    #[test]
+    fn declaration_cold_warm_dropout_specialization_and_local_shadow_control() {
+        // Reuse #1764's admitted generic/static-rate and local-shadow shapes.
+        // Evaluating the checked value body directly reaches eval_app rather
+        // than lowering a whole main wrapper. Warming resolves the same keep.
+        let tensors = UnordMap::new();
+        for local in [false, true] {
+            let shadow = if local {
+                "keep = fn (v: tensor[4, f32]) -> v\n"
+            } else {
+                ""
+            };
+            let library = checked_library(&format!(
+                "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\nout = with seed(42i64) {{ {shadow}x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n first = keep(copy(x))\n next = dropout(x, 0.5f32)\n (first, next) }}\n"
+            ));
+            for warm in [false, true] {
+                let mut ctx = context(&library, &tensors);
+                let declaration = ctx.lookup_top_level_def("keep").unwrap().1;
+                assert_eq!(
+                    chelis_ir::lower::evaluation_profile(&declaration, &ctx.top_level_defs),
+                    EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate)
+                );
+                if warm {
+                    let closure = ctx.resolve_top_level("keep").unwrap();
+                    assert!(
+                        matches!(closure, RuntimeValue::Closure { def_name: Some(ref name), .. } if name == "keep")
+                    );
+                }
+                let body = ctx.lookup_top_level_def("out").unwrap().1;
+                let RuntimeValue::Tuple(values) = ctx.eval_expr(&body).unwrap() else {
+                    panic!("checked output is a pair")
+                };
+                assert_eq!(values.len(), 2);
+                // Independent fixed-stream ordinals 0=[0,2,0,0], 1=[2,0,0,0].
+                let expected = if local {
+                    [
+                        ["3f800000"; 4],
+                        ["00000000", "40000000", "00000000", "00000000"],
+                    ]
+                } else {
+                    [
+                        ["00000000", "40000000", "00000000", "00000000"],
+                        ["40000000", "00000000", "00000000", "00000000"],
+                    ]
+                };
+                for (value, expected_bits) in values.iter().zip(expected) {
+                    assert_eq!(
+                        bits(value),
+                        serde_json::json!({"type":"tensor", "value":{"shape":[4], "data":{"dtype":"f32", "bits":expected_bits}}})
+                    );
+                }
+                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+                assert!(ctx.execution_exclusion.is_none());
+                assert!(ctx.transcript.is_empty());
+            }
+        }
+    }
+
+    // #1956: these are real checked library contexts, with the production
+    // session and resolver. Caller-only entries model an already-entered
+    // lexical frame; none is inserted into the declaration environment.
+    fn declaration_caller_frame(ctx: &mut EvalContext<'_>) -> Option<Expr> {
+        let ty = ctx.type_env.get("next_draw").cloned();
+        assert!(ty.is_some());
+        ctx.bindings
+            .insert("caller_value".into(), RuntimeValue::int_lit(71));
+        ctx.binding_types.insert("caller_type".into(), ty.clone());
+        ctx.precision_bindings.insert("p".into(), Prim::F64);
+        ty
+    }
+
+    fn assert_declaration_caller_frame(ctx: &EvalContext<'_>, ty: &Option<Expr>) {
+        assert_eq!(ctx.binding_types.len(), 1);
+        assert_eq!(ctx.binding_types.get("caller_type"), Some(ty));
+        assert_eq!(ctx.precision_bindings.len(), 1);
+        assert_eq!(ctx.precision_bindings.get("p"), Some(&Prim::F64));
+        assert_eq!(
+            bits(&ctx.bindings["caller_value"]),
+            bits(&RuntimeValue::int_lit(71))
+        );
+        assert_eq!(
+            ctx.bindings.len(),
+            1,
+            "declaration successes are not lexical entries"
+        );
+    }
+
+    #[test]
+    fn declaration_success_restores_all_three_caller_maps_without_losing_the_value() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        let first = ctx.resolve_top_level("weights").unwrap();
+        let second = ctx.resolve_top_level("weights").unwrap();
+        assert_eq!(bits(&first), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&second), bits(&first));
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        assert!(ctx.resolving_top_levels.is_empty());
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_declaration_caller_frame(&ctx, &ty);
+    }
+
+    #[test]
+    fn declaration_closure_does_not_capture_caller_values_or_precision_parameters() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        let callable = ctx.resolve_top_level("sample").unwrap();
+        let RuntimeValue::Closure {
+            env,
+            precision_env,
+            def_name,
+            ..
+        } = callable
+        else {
+            panic!("checked named declaration resolves to a closure")
+        };
+        assert_eq!(def_name.as_deref(), Some("sample"));
+        assert!(ctx.transcript.is_empty());
+        assert_eq!(
+            (env.is_empty(), precision_env.is_empty()),
+            (true, true),
+            "caller values and precision parameters must both be absent"
+        );
+        assert_declaration_caller_frame(&ctx, &ty);
+    }
+
+    #[test]
+    fn declaration_failure_retries_and_restores_three_maps_and_parent_stream() {
+        let initializer =
+            format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
+        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        for _ in 0..2 {
+            let error = ctx.resolve_top_level("weights").unwrap_err();
+            assert_eq!(
+                error,
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_declaration_caller_frame(&ctx, &ty);
+            assert!(ctx.resolving_top_levels.is_empty());
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        }
+        assert_eq!(ctx.transcript, ["initialize", "initialize"]);
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+    }
+
+    #[test]
+    fn declaration_inner_success_survives_outer_failure_and_retry() {
+        let source = format!(
+            "inner = {{ _ = print(\"inner\")\n 9 }}\nouter = with seed(17i64) {{ _ = print(\"outer\")\n saved = inner\n _ = {DRAW}\n add(saved, floor_div(1i32, 0i32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+        );
+        let library = checked_library(&source);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let ty = declaration_caller_frame(&mut ctx);
+        for _ in 0..2 {
+            assert_eq!(
+                ctx.resolve_top_level("outer").unwrap_err(),
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_declaration_caller_frame(&ctx, &ty);
+            assert!(ctx.resolving_top_levels.is_empty());
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        }
+        let inner = ctx.resolve_top_level("inner").unwrap();
+        assert_eq!(bits(&inner), bits(&RuntimeValue::int_lit(9)));
+        let next = admitted_call(&mut ctx, "next_draw").unwrap();
+        assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
+        assert_eq!(ctx.random_counter, 6);
+        assert_eq!(ctx.transcript, ["outer", "inner", "outer"]);
+    }
+
+    #[test]
+    fn declaration_canonical_resolution_ignores_same_named_caller_value() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        ctx.bindings.insert("weights".into(), zeros());
+        let declared = ctx.resolve_top_level("weights").unwrap();
+        assert_eq!(bits(&declared), bits(&expected_draw(17, 0)));
+        assert_eq!(bits(&ctx.bindings["weights"]), bits(&zeros()));
+        assert_eq!(ctx.transcript, ["initialize"]);
+    }
+
+    #[test]
+    fn declaration_supplied_value_does_not_replace_callable_or_its_observation() {
+        let library = checked_library(
+            "def value() -> tensor[2, f32] = to_tensor([3.0f32, 5.0f32])\nalias = value\nseen = value\ncalled = value()\naliased = alias()\n",
+        );
+        let RuntimeValue::Tensor(supplied) = zeros() else {
+            unreachable!()
+        };
+        let tensors = [("value".into(), supplied)].into_iter().collect();
+        let mut ctx = context(&library, &tensors);
+        let seen = ctx.lookup_top_level_def("seen").unwrap().1;
+        let called = ctx.lookup_top_level_def("called").unwrap().1;
+        let aliased = ctx.lookup_top_level_def("aliased").unwrap().1;
+        let expected = serde_json::json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["40400000", "40a00000"]}}});
+        for warm in [false, true] {
+            if warm {
+                let closure = ctx.resolve_top_level("value").unwrap();
+                assert!(matches!(closure, RuntimeValue::Closure { .. }));
+            }
+            let observation = ctx.eval_expr(&seen).unwrap();
+            assert_eq!(bits(&ctx.eval_expr(&called).unwrap()), expected);
+            assert_eq!(bits(&ctx.eval_expr(&aliased).unwrap()), expected);
+            assert_eq!(bits(&observation), bits(&zeros()));
+        }
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn declaration_named_kernel_route_and_draws_are_independent_of_warm_cache() {
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        for warm in [false, true] {
+            let mut ctx = context(&library, &tensors);
+            if warm {
+                ctx.resolve_top_level("sample").unwrap();
+            }
+            // admitted_call separately proves Planned/Legacy/NoDropout,
+            // no staged plan, and exactly one baked UniformLike in the kernel.
+            let actual = admitted_call(&mut ctx, "sample").unwrap();
+            let next = admitted_call(&mut ctx, "next_draw").unwrap();
+            assert_eq!(bits(&actual), bits(&expected_draw(42, 5)));
+            assert_eq!(bits(&next), bits(&expected_draw(42, 6)));
+            assert_eq!(ctx.transcript, ["initialize"]);
+            assert_eq!(ctx.random_counter, 7);
+        }
+    }
+
+    #[test]
+    fn declaration_anonymous_closure_keeps_lexical_shadow_and_no_named_dispatch() {
+        let library =
+            checked_library("a = 3.0f32\nmaker = { a = 7.0f32\n fn (x: f32) -> add(x, a) }\n");
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let closure = ctx.resolve_top_level("maker").unwrap();
+        let RuntimeValue::Closure { def_name, env, .. } = &closure else {
+            panic!("checked anonymous function remains a closure")
+        };
+        assert!(
+            def_name.is_none(),
+            "anonymous application must bypass named-kernel dispatch"
+        );
+        let captured = env.get("a").map(bits);
+        let actual = ctx
+            .apply_resolved_callable(closure, vec![RuntimeValue::float_lit(1.0)])
+            .unwrap();
+        assert_eq!(
+            (bits(&actual), captured),
+            (
+                bits(&RuntimeValue::float_lit(8.0)),
+                Some(bits(&RuntimeValue::float_lit(7.0)))
+            )
+        );
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn declaration_exact_and_unique_resolution_never_populates_an_ambiguous_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("src")).unwrap();
+        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
+        for (module, value) in [("Left", 3), ("Right", 5)] {
+            std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
+        }
+        let compiled = crate::compile_reef_context(directory.path(), directory.path()).unwrap();
+        let library = compiled.checked_library();
+        let tensors = UnordMap::new();
+        let mut ctx = context(library, &tensors);
+        let identities = ctx
+            .top_level_defs
+            .to_sorted()
+            .into_iter()
+            .filter(|(name, _)| terminal_name_matches(name, "value"))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities.len(),
+            2,
+            "actual linked declarations supply the collision"
+        );
+        assert!(ctx.lookup_top_level_def("value").is_none());
+        for name in identities {
+            let canonical = ctx.lookup_top_level_def(&name).unwrap().0;
+            assert_eq!(canonical, name);
+            let expected = if name.contains("Left") { 3 } else { 5 };
+            assert_eq!(
+                bits(&ctx.resolve_top_level(&name).unwrap()),
+                bits(&RuntimeValue::int_lit(expected))
+            );
+            assert!(ctx.lookup_top_level_def("value").is_none());
+            assert_eq!(
+                ctx.resolve_top_level("value").unwrap_err(),
+                "unknown runtime name `value`"
+            );
+        }
+        let canonical = ctx.lookup_top_level_def("unique_3").unwrap().0;
+        let first = ctx.resolve_top_level("unique_3").unwrap();
+        let second = ctx.resolve_top_level(&canonical).unwrap();
+        assert_eq!(bits(&first), bits(&RuntimeValue::int_lit(3)));
+        assert_eq!(bits(&second), bits(&first));
+        let mut events = ctx.transcript.clone();
+        events.sort();
+        assert_eq!(events, ["Left", "Right"]);
+        assert!(
+            !ctx.bindings.contains_key("unique_3"),
+            "canonical successes do not create lexical short aliases"
+        );
+    }
+
+    #[test]
     fn legacy_capture_order_valid_lazy_handler_does_not_advance_parent() {
         let library = library(DRAW, "x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
-        assert!(!ctx.bindings.contains_key("weights"));
+        assert!(!ctx.declaration_values.contains_key("weights"));
         let actual = admitted_call(&mut ctx, "sample").unwrap();
         let after_helper = ctx.random_counter;
         let initialized = ctx
-            .bindings
+            .declaration_values
             .get("weights")
             .expect("capture initialized lazily");
         assert_eq!(bits(initialized), bits(&expected_draw(17, 0)));
+        assert!(!ctx.bindings.contains_key("weights"));
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
         assert_eq!(
             (

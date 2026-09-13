@@ -814,6 +814,7 @@ pub(crate) fn revalidate_adt_value(
         bindings: UnordMap::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs: module_constants.clone(),
@@ -867,6 +868,65 @@ pub(crate) fn revalidate_adt_value(
 mod tests {
     use super::*;
     use chelis_deep::ast::{Metadata, UnknownFormData};
+
+    fn declaration_scope_library() -> crate::pipeline::CheckedLibrary {
+        let source = "module Bounds\np = 0.25f32\nceiling = add(1.0f32, p)\n@opaque\n@invariant(p) ceiling >= p.value && p.value >= 0.0f32\ntype Bounded = | Bounded { value: f32 }\n";
+        let prepared =
+            crate::pipeline::prepare_source(crate::schema::SourceKind::Surf, source, None)
+                .expect("invariant source prepares");
+        crate::pipeline::check_prepared_library(prepared)
+            .expect("type, effect, linearity and invariant admission")
+    }
+
+    fn bounded(value: f64) -> RuntimeValue {
+        RuntimeValue::Adt {
+            ctor: "Bounded".into(),
+            fields: vec![RuntimeValue::float_lit(value)],
+            field_names: None,
+        }
+    }
+
+    #[test]
+    fn declaration_constant_initialization_does_not_capture_the_predicate_binder() {
+        let library = declaration_scope_library();
+        let exprs = library.program().exprs();
+        let invariants = collect_type_invariants(exprs);
+        let fields = collect_adt_ctor_fields(exprs);
+        let constants = collect_zero_arg_constants(exprs);
+        assert!(constants.contains_key("p") && constants.contains_key("ceiling"));
+        // ceiling reads module p=0.25; subsequent field access must still
+        // read the predicate's ADT p, not the newly initialized scalar.
+        revalidate_adt_value(&bounded(1.125), &invariants, &fields, &constants).unwrap();
+        assert!(matches!(
+            revalidate_adt_value(&bounded(1.5), &invariants, &fields, &constants),
+            Err(InvariantViolation::PredicateFalse { .. })
+        ));
+        revalidate_adt_value(&bounded(0.5), &invariants, &fields, &constants).unwrap();
+    }
+
+    #[test]
+    fn declaration_invariant_cancellation_is_not_a_predicate_failure() {
+        let library = declaration_scope_library();
+        let exprs = library.program().exprs();
+        let invariants = collect_type_invariants(exprs);
+        let fields = collect_adt_ctor_fields(exprs);
+        let constants = collect_zero_arg_constants(exprs);
+        let token = chelis_types::CancelToken::new();
+        {
+            let _guard = chelis_types::install_cancel_token(token.clone());
+            revalidate_adt_value(&bounded(1.125), &invariants, &fields, &constants).unwrap();
+            token.cancel();
+            // No evaluator/checker runs between cancellation and this call:
+            // the sentinel must come from the predicate's own EvalContext.
+            let error = revalidate_adt_value(&bounded(1.125), &invariants, &fields, &constants)
+                .unwrap_err();
+            assert!(
+                matches!(&error, InvariantViolation::Cancelled { reason } if reason == chelis_types::EVAL_CANCELLED_MSG)
+            );
+            assert_eq!(error.to_string(), chelis_types::EVAL_CANCELLED_MSG);
+        }
+        revalidate_adt_value(&bounded(1.125), &invariants, &fields, &constants).unwrap();
+    }
 
     fn sp() -> Span {
         Span::new(0, 0)

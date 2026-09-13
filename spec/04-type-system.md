@@ -2790,6 +2790,12 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > component (or of an alias of one), which consumes the component's
 > carrier binding.
 
+These binding identities also govern runtime lookup: a named declaration's
+free references are not rebound by a caller's same-named local or parameter.
+An anonymous closure retains its actual lexical captures even when a declaration
+has the same name. Reusing an initialized declaration does not introduce a new
+lexical binding, change which callable is selected, or memoize function results.
+
 > **[04-LIN-3]** Evaluating an expression of an owned linear type SHALL
 > produce exactly one logical owner. Binding another name to that value does
 > not create a second owner. A second terminal use is legal only when an
