@@ -382,6 +382,13 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
             deep::Rule::typed_helper => validate_typed_helper(child.clone())?,
             deep::Rule::bare_list => validate_bare_list(child.clone())?,
             deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
+            deep::Rule::wildcard if deep_tag == DeepTag::DName => {}
+            deep::Rule::wildcard => {
+                return Err(ValidationError::Failed(format!(
+                    "Deep wildcard `*` at byte {} is only valid as the sole child of `d-name`",
+                    child.as_span().start()
+                )));
+            }
             other => {
                 return Err(ValidationError::Failed(format!(
                     "unexpected Deep child rule {:?} under `{tag}` at byte {}",
@@ -497,6 +504,21 @@ fn validate_tag_shape(
             }
             Ok(())
         }
+        DeepTag::DName => {
+            if child_count != 1 {
+                return Err(wrong_arity("exactly 1 name or wildcard child"));
+            }
+            if matches!(
+                children[0].as_rule(),
+                deep::Rule::bare_name | deep::Rule::wildcard
+            ) {
+                Ok(())
+            } else {
+                Err(ValidationError::Failed(format!(
+                    "Deep tag `d-name` at byte {offset} expects one name or wildcard child"
+                )))
+            }
+        }
         // No additional shape constraint at this validator: these tags'
         // arity/shape rules are owned by the type checker (spec/03
         // §2.5.1/§2.6, §8.2) or by their enclosing form. Listed explicitly
@@ -539,7 +561,6 @@ fn validate_tag_shape(
         | DeepTag::TVar
         | DeepTag::TUnit
         | DeepTag::TTuple
-        | DeepTag::DName
         | DeepTag::DVar
         | DeepTag::DLit
         | DeepTag::DRank
@@ -684,6 +705,54 @@ mod tests {
         let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    #[test]
+    fn deep_accepts_the_explicit_d_name_wildcard() {
+        // spec/03-deep-syntax.md §2.6: `*` is the explicit wildcard
+        // spelling for the sole symbol child of `d-name`.
+        let source = "(defsig {} f (t-tensor {} (d-name {} *) (t-prim {} f32)))\n";
+        chelis_deep::parse_and_stamp_file(source)
+            .expect("the stamped compiler ingress accepts the wildcard dimension");
+        validate_deep(source).expect("the independent grammar must accept it too");
+    }
+
+    #[test]
+    fn deep_rejects_wildcards_outside_d_name() {
+        // The wildcard exception is a child-role rule, not an identifier
+        // spelling. In particular it must not become a variable, dimension
+        // variable, rank variable, primitive, binder, or declaration name.
+        for source in [
+            "(def {} f (var {} *))\n",
+            "(defsig {} f (t-tensor {} (d-var {} *) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-rank {} *) (t-prim {} f32)))\n",
+            "(defsig {} f (t-prim {} *))\n",
+            "(def {} * (lit {} 1))\n",
+        ] {
+            let error = validate_deep(source)
+                .expect_err("`*` outside the sole child of `d-name` must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("only valid as the sole child of `d-name`"),
+                "wrong reason for {source:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_rejects_malformed_wildcard_dimensions() {
+        for source in [
+            "(defsig {} f (t-tensor {} (d-name {}) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} * batch) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} **) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} *foo) (t-prim {} f32)))\n",
+        ] {
+            assert!(
+                validate_deep(source).is_err(),
+                "a wildcard dimension must have exactly one standalone `*` child: {source}"
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,11 @@ syntax_name = @{ (ASCII_ALPHA | "_" | "*" | "-" | "+") ~ (ASCII_ALPHANUMERIC | "
 bare_list = { "(" ~ spacing ~ (bare_list_item ~ spacing)* ~ ")" ~ spacing }
 bare_list_item = { typed_helper | node | unit_list | literal | bare_name }
 
-child = { bare_list | typed_helper | node | unit_list | literal | bare_name }
+// spec/03 §2.6 reserves `*` for the sole child of `(d-name ...)`.
+// Keep it distinct from `bare_name`: the structural validator can then
+// admit that one role without making `*` an identifier everywhere.
+child = { bare_list | typed_helper | node | unit_list | literal | wildcard | bare_name }
+wildcard = { "*" }
 bare_name = { identifier | type_name }
 tag = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
 identifier = @{ ident_segment ~ ("." ~ ident_segment)* }
