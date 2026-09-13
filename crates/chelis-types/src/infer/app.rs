@@ -187,10 +187,12 @@ fn infer_app_inner(
     // anchor)` carries four arguments, but the builtin HM scheme is arity-3
     // (`(&tensor, int32, int32) -> out`), so it would hit the generic arity
     // check before the procedural arm. Dispatch it here (the
-    // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
-    // which reaches `check_expand_signature` with the scheme intact.
+    // `infer_permute_app` pattern). The ordinary 3-arg expand keeps the generic
+    // path, which reaches `check_expand_signature` with the scheme intact.
+    // Named-axis calls and malformed arities use the procedural path so the
+    // expand-specific arity diagnostic owns obsolete shape-taking spellings.
     if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
-        && kids.len() >= 5
+        && kids.len() != 4
     {
         // `&'static str`, not the borrow, so the callee outlives `func_name`.
         let callee = if callee == "insert" {

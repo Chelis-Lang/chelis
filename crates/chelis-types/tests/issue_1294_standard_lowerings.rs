@@ -69,6 +69,15 @@ fn standard_axis_recipes_use_insert_for_rank_raising() {
 }
 
 #[test]
+fn expand_accepts_same_rank_unit_axis_recipe() {
+    check(
+        "def f(x: tensor[1,2,3,f32]) -> tensor[4,2,3,f32] = \
+         expand(x,0i32,4i64)\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn expand_rejects_rank_raising_recipe() {
     let rank_raising = "def f(x: tensor[1,2,3,f32]) -> tensor[4,1,2,3,f32] = \
          expand(x,0i32,4i64)\n";
@@ -93,9 +102,14 @@ fn expand_rejects_nonunit_axis_recipe() {
 #[test]
 fn expand_rejects_retired_shape_taking_recipe() {
     let obsolete_shape_form = "def f(x: tensor[2,3,f32]) = expand(x,[2i64,3i64,4i64])\n";
+    let error = check(obsolete_shape_form).expect_err("retired expand form must be rejected");
     assert!(
-        check(obsolete_shape_form).is_err(),
-        "the retired shape-taking expand recipe must stay rejected"
+        error.contains("kind: ArityMismatch")
+            && error.contains(
+                "expand expects (tensor, axis, size) or the named-axis form \
+                 (tensor, name, size, anchor), got 2 arguments"
+            ),
+        "the retired shape-taking form must reach expand's owning arity route, got {error}"
     );
 }
 
