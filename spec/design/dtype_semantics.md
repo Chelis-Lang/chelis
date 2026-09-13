@@ -2773,9 +2773,12 @@ that runtime has never been executed). For HIP it reaches only the cells that
 stay `Unimplemented`: the backend has real kernels and a documented hardware
 gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
 owes that gate rather than a diagnostic. And [#1291] and the device residual of
-[#1306] stay open while their cells cite them, so the rejection-authority
-liveness gate keeps reporting honestly. Neither closes on this narrowing; each
-closes when its kernels land and its own hardware gate is green.
+[#1306] both stay open, but for different executable reasons. The remaining
+`Unimplemented` [#1306] cells cite that issue, so rejection-authority liveness
+continues to cover them. The `count` device cells are already
+`Implemented { kernel_id }`; no production rejection cites [#1291], so the
+source-derived rejection manifest does not carry it. [#1291] instead closes
+only when its real-hardware numerical gates are green.
 
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with

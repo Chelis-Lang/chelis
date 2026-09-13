@@ -100,6 +100,8 @@ REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
         "scripts/ci_detect_docs_only.py",
         "scripts/generate_rejection_registries.py",
         "scripts/test_check_rejection_authority_boundary.py",
+        "scripts/test_generate_rejection_registries.py",
+        "scripts/test_validate_rejection_issue_manifest.py",
         "scripts/validate_rejection_issue_manifest.py",
         "spec/design/loud_unsupported_issue_manifest.json",
     }

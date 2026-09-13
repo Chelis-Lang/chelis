@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Live-validate [05-UNS-5] issue identities and open state.
+"""Validate source derivation, then live-check all [05-UNS-5] issue rows.
 
 Success is exit 0 with final line ``REJECTION ISSUE MANIFEST: PASS``.
 The REST issues endpoint is required because it distinguishes issues from pull
-requests. Tracker unavailability fails closed.
+requests. Every standing row is fetched; tracker unavailability fails closed.
 """
 
 from __future__ import annotations
@@ -13,7 +13,13 @@ import sys
 from pathlib import Path
 
 from capacity_census_liveness import IssueKind, IssueRecord, IssueState, fetch_issue
-from generate_rejection_registries import MANIFEST_REL, load_issue_manifest
+from generate_rejection_registries import (
+    MANIFEST_REL,
+    derive_issue_numbers,
+    discover_issue_citations,
+    load_issue_manifest,
+    manifest_derivation_problems,
+)
 
 
 def adjudicate(
@@ -42,6 +48,13 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
     manifest_path = root / MANIFEST_REL
     numbers = load_issue_manifest(manifest_path)
+    source_numbers = derive_issue_numbers(discover_issue_citations(root))
+    derivation_problems = manifest_derivation_problems(numbers, source_numbers)
+    if derivation_problems:
+        for problem in derivation_problems:
+            print(problem, file=sys.stderr)
+        print("REJECTION ISSUE MANIFEST: FAIL", file=sys.stderr)
+        return 1
     rows = json.loads(manifest_path.read_text())["issues"]
     resolved = {number: fetch_issue(number) for number in numbers}
     records = {

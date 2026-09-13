@@ -12,9 +12,10 @@ Usage (from the repository root, with the worktree's managed Python):
 
 Tiers, in dependency order
 --------------------------
-0   Python-only writers that need no build: the rejection registry
-    (`generate_rejection_registries.py --write`), the embedded conformance
-    skill assets (`regenerate_conformance_assets.py`), and the
+0   Python-only writers that need no build: the source-derived rejection issue
+    manifest and Rust registry (`generate_rejection_registries.py --write`),
+    the embedded conformance skill assets (`regenerate_conformance_assets.py`),
+    and the
     opaque-invariants corpus (`tests/corpus/opaque_invariants/generate_corpus.py`).
     The corpus generator has no `--check`; this script regenerates into a
     temporary directory and byte-compares, the same three comparisons
@@ -178,7 +179,10 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             tier=0,
             write_argv=(python, "scripts/generate_rejection_registries.py", "--write"),
             check_argv=(python, "scripts/generate_rejection_registries.py", "--check"),
-            writes=("crates/chelis-types/src/rejection_registry_generated.rs",),
+            writes=(
+                "spec/design/loud_unsupported_issue_manifest.json",
+                "crates/chelis-types/src/rejection_registry_generated.rs",
+            ),
             needs="python",
         ),
         RegenLeg(

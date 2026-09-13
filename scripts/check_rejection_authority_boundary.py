@@ -15,7 +15,6 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
 
@@ -160,15 +159,23 @@ def validate_usage_source(path: str, source: str) -> list[str]:
     return errors
 
 
-def validate_production_usage(root: Path = ROOT) -> list[str]:
-    errors: list[str] = []
-    crates = root / "crates"
-    for path in sorted(crates.rglob("*.rs")):
+def discover_authority_boundary_sources(root: Path = ROOT) -> list[Path]:
+    """Return the boundary guard's historical non-test crate Rust universe."""
+    sources: list[Path] = []
+    for path in sorted((root / "crates").rglob("*.rs")):
         relative = path.relative_to(root)
         if "tests" in relative.parts or relative.as_posix().endswith(
             "chelis-types/src/unsupported.rs"
         ):
             continue
+        sources.append(path)
+    return sources
+
+
+def validate_production_usage(root: Path = ROOT) -> list[str]:
+    errors: list[str] = []
+    for path in discover_authority_boundary_sources(root):
+        relative = path.relative_to(root)
         errors.extend(
             validate_usage_source(
                 relative.as_posix(), path.read_text(encoding="utf-8")

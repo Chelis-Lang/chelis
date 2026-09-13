@@ -416,21 +416,25 @@ two faces of one defect in how a pipe stage's argument positions survive the
 round trip, with #1241 adjacent in the migrator that consumes it. Both are
 pending decision 3.
 
-### The CI-pinned set (11, all legitimately live)
+### The CI-pinned set (19, source-derived as of 2026-09-13)
 
-`spec/design/loud_unsupported_issue_manifest.json` requires these OPEN while
-emitter `unimplemented_rejection!` sites cite them - closing one reddens the
-Rejection Authority Liveness job: **#600** (value-derived output dims),
-**#689** (HIP typed kernels beyond f32/f64), **#729** (the tracker), **#759**
-(the HIP cast half - `cast_trunc` landed on C, but HIP still emits an
-unguarded device conversion and the issue demands every-lane parity),
-**#829**, **#879** (C-host function-value ABI), **#951** (`emit_fused_reduce`
-f32-hardcoded), **#1058**, **#1059**, **#1138**, and **#1192** (compiled
-seeded-dropout kernels, added by PR #1186 when the host-helper `dropout`
-emitter panic became a branded rejection). Each closes by landing its support,
-not by cleanup. (#691 and #714 left this set via PR #1164; their one-time
-closure by #1151 and un-closure by the #1159 revert is the worked example of
-why closing a pinned issue from the roadmap top-down breaks the build.)
+`spec/design/loud_unsupported_issue_manifest.json` is generated from the exact
+literal issue identities cited by production `unimplemented_rejection!`
+invocations. Its current set is **#600, #689, #729, #759, #829, #879, #912,
+#951, #1058, #1059, #1138, #1192, #1277, #1298, #1306, #1364, #1383, #1482,
+and #1844**. Repeated citation sites collapse to one row; a missing cited row,
+an uncited stale row, or a dynamic/malformed issue argument fails the
+generator. The first regeneration removed #1291 because no production
+rejection cites it; #1291's remaining hardware work and closing condition are
+unchanged and no longer masquerade as rejection-construction authority.
+
+The Rejection Authority Liveness job still checks every standing row whenever
+its existing change gate triggers, so closing any listed issue reddens that
+run. The #1870 changed-row PR narrowing and scheduled standing-state canary
+are not part of this prerequisite slice. (#691 and #714 left the set via PR
+#1164; their one-time closure by #1151 and un-closure by the #1159 revert is
+the worked example of why closing a pinned issue from the roadmap top-down
+breaks the build.)
 
 ### Where the graph puts things
 

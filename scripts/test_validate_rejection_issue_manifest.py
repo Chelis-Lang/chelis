@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Tests for live validation of the [05-UNS-5] issue manifest."""
+"""Tests for source and live validation of the [05-UNS-5] issue manifest."""
 
 from __future__ import annotations
 
+import io
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 
 from capacity_census_liveness import IssueKind, IssueRecord, IssueState
-from validate_rejection_issue_manifest import adjudicate
+from generate_rejection_registries import MANIFEST_REL, load_issue_manifest
+from validate_rejection_issue_manifest import adjudicate, main
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class Adjudicate(unittest.TestCase):
@@ -38,6 +45,17 @@ class Adjudicate(unittest.TestCase):
         problems = adjudicate([{"number": 999_999_999}], {})
         self.assertEqual(len(problems), 1)
         self.assertIn("UNRESOLVABLE", problems[0])
+
+    @mock.patch("validate_rejection_issue_manifest.fetch_issue")
+    def test_main_fetches_every_standing_row(self, fetch_issue: mock.Mock) -> None:
+        fetch_issue.return_value = IssueRecord(IssueKind.ISSUE, IssueState.OPEN)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(), 0)
+        expected = load_issue_manifest(ROOT / MANIFEST_REL)
+        self.assertEqual(
+            [call.args[0] for call in fetch_issue.call_args_list],
+            expected,
+        )
 
 
 if __name__ == "__main__":
