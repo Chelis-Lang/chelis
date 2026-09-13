@@ -3,6 +3,11 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 2
 
+# chelis#2027: canonical release manifests and bundled locks are live inputs.
+[[standing_target]]
+package = "chelis-cli"
+name = "compiler_pin_tripwire"
+
 # chelis#2020: inherited profile admission must not copy the whole program per call.
 [[standing_target]]
 package = "chelis-compiler-api"
@@ -778,3 +783,59 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
+
+# Exact release inputs; neighboring example and corpus sources stay unclassified.
+
+[[path_rule]]
+prefix = "examples/illustrative/phase3g_text_pipeline/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/reef.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/manifest.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "test_corpus_integrity checks the manifest pin and the frozen Hull corpus gate consumes this exact manifest"
+tracking_issue = "chelis#2027"
