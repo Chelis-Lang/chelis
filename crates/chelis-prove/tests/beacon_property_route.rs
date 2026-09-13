@@ -1,8 +1,31 @@
 mod support;
 
 use chelis_prove::property_runner::{
-    PropertyRunOptions, PropertyRunResult, PropertyStatus, run_surf_source_properties,
+    PropertyRunOptions, PropertyRunResult, PropertyStatus, PropertyTier,
+    run_deep_source_properties, run_surf_source_properties,
 };
+
+#[test]
+fn deep_explicit_beacon_is_terminal_and_never_samples() {
+    crate::support::isolate();
+    let source = r#"(module {} m
+      (defsig {} always_true (t-fn {} (t-prim {} f32) (t-prim {} bool)))
+      (def {chelis_role: "property", property_preconditions: (tuple {}),
+        property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+        property_source_kind: "user"} always_true
+        (fn {} (params {} (x {type: (t-prim {} f32)}))
+          (app {} (var {} gte) (var {} x) (var {} x)))))"#;
+    let options = PropertyRunOptions {
+        tier: "beacon-only".into(),
+        ..Default::default()
+    };
+    let PropertyRunResult::Ran(outcomes) = run_deep_source_properties(source, &options).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(outcomes[0].proof_tier, PropertyTier::Beacon);
+    assert_eq!(outcomes[0].samples, 0);
+    assert!(outcomes[0].reason.as_deref().unwrap().contains("Deep"));
+}
 
 #[test]
 fn beacon_tier_rejects_missing_box_bounds_without_smt_or_fuzz_fallback() {

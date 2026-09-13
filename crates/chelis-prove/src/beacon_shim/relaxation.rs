@@ -144,7 +144,8 @@ fn map_relaxation(stdout: &str, stderr: &str, request_hash: &str) -> Discharge {
         Err(error) => {
             return untrusted_error(
                 "invalid relaxation JSON",
-                json!({"error":error.to_string(),"stderr":stderr}),
+                json!({"engine":"beacon","error":error.to_string(),"stdout":stdout,
+                    "stderr":stderr,"request_sha256":request_hash}),
             );
         }
     };
@@ -155,7 +156,7 @@ fn map_relaxation(stdout: &str, stderr: &str, request_hash: &str) -> Discharge {
     {
         return untrusted_error(
             "unsupported relaxation report",
-            json!({"engine":"beacon","report":report}),
+            json!({"engine":"beacon","report":report,"stderr":stderr,"request_sha256":request_hash}),
         );
     }
     let mut evidence = json!({"engine":"beacon","method":"linear_relaxation_back_substitution",
@@ -222,6 +223,16 @@ mod tests {
             "semantics_note":"real-valued semantics; no floating-point roundoff soundness claim",
             "verdict":"certified","reason":"all leaves excluded","tree":[{"status":"certified"}],
             "final_bound":[{"lo":-1.0,"hi":0.5},{"lo":-2.0,"hi":-0.5}]})
+    }
+    #[test]
+    fn malformed_reports_retain_the_sent_request_identity() {
+        let mut value = report();
+        value["schema_version"] = json!("future");
+        for stdout in ["not JSON".to_string(), value.to_string()] {
+            let result = map_relaxation(&stdout, "diagnostic", "exact-request");
+            assert_eq!(result.soundness(), Soundness::Untrusted);
+            assert_eq!(result.evidence()["request_sha256"], "exact-request");
+        }
     }
     #[test]
     fn certification_is_qualified_and_unknown_retains_hull_reason_and_tree() {

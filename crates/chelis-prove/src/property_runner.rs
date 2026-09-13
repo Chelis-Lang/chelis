@@ -3848,6 +3848,22 @@ fn prove_deep_property(
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
 
+    // The range-goal extractor currently owns checked Surf syntax only.
+    // An explicitly selected engine must never fall through to sampling.
+    if options.tier == "beacon-only" {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Beacon,
+            0,
+            seed,
+            None,
+            Some("beacon-only is unavailable for Deep properties; use a checked Surf scalar range goal".to_string()),
+            false,
+            Vec::new(),
+        );
+    }
+
     // chelis#978's production induction classifier consumes checked Surf AST.
     // Deep has no equivalent structural-recursion ownership record yet. An
     // explicit induction request is therefore terminal on Deep: never let the
