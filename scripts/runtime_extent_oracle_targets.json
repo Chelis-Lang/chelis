@@ -467,6 +467,7 @@
         "literal_parameter_obligations_keep_the_existing_helper_order",
         "load_and_op_output_members_share_one_guarded_class_on_eval",
         "load_load_named_class_guards_every_non_canonical_member_on_eval",
+        "malformed_parameter_ranks_keep_the_existing_helper_diagnostic",
         "no_environment_variable_disables_the_named_claim_guard",
         "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
         "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",

@@ -2062,13 +2062,14 @@ fn a_helper_owns_an_entry_obligation(function: &HostFunction) -> bool {
 /// order and agree with the one-kernel form's DAG guard byte for byte.
 ///
 /// The NULL and rank preconditions are not defensive noise. A nonexistent axis
-/// has no extent to compare, and the wrong-rank and NULL-input diagnostics
+/// has no extent to compare, and extra axes also invalidate the declared rank.
+/// The wrong-rank and NULL-input diagnostics
 /// belong to the kernel helper that already reports them; without the
 /// preconditions this guard would reach `chelis_tensor_shape` first and replace
 /// a named diagnostic with a generic one.
 fn entry_binder_guards(function: &HostFunction, indent: &str) -> Vec<String> {
-    // (binder, parameter index, axis), in declared signature order.
-    let mut occurrences: Vec<(&str, usize, usize)> = Vec::new();
+    // (binder, parameter index, axis, declared rank), in declared signature order.
+    let mut occurrences: Vec<(&str, usize, usize, usize)> = Vec::new();
     for (index, param) in function.params.iter().enumerate() {
         let HostAbiType::Tensor(ty) = &param.ty else {
             continue;
@@ -2082,16 +2083,16 @@ fn entry_binder_guards(function: &HostFunction, indent: &str) -> Vec<String> {
             if name == "*" {
                 continue;
             }
-            occurrences.push((name.as_str(), index, axis));
+            occurrences.push((name.as_str(), index, axis, ty.dims.len()));
         }
     }
-    let mut declared: Vec<(&str, usize, usize)> = Vec::new();
+    let mut declared: Vec<(&str, usize, usize, usize)> = Vec::new();
     let mut lines = Vec::new();
-    for &(name, index, axis) in &occurrences {
-        let Some(&(_, first_index, first_axis)) =
-            declared.iter().find(|(seen, _, _)| *seen == name)
+    for &(name, index, axis, rank) in &occurrences {
+        let Some(&(_, first_index, first_axis, first_rank)) =
+            declared.iter().find(|(seen, _, _, _)| *seen == name)
         else {
-            declared.push((name, index, axis));
+            declared.push((name, index, axis, rank));
             continue;
         };
         let first = c_ident(&function.params[first_index].name);
@@ -2103,7 +2104,7 @@ fn entry_binder_guards(function: &HostFunction, indent: &str) -> Vec<String> {
         let later_label =
             chelis_ir::span_sanitize::sanitize_for_format_string(&function.params[index].name);
         lines.push(format!(
-            "{indent}if ({first} != NULL && {later} != NULL && chelis_tensor_rank({first}) > {first_axis} && chelis_tensor_rank({later}) > {axis} && chelis_tensor_shape({later}, {axis}) != chelis_tensor_shape({first}, {first_axis})) {{"
+            "{indent}if ({first} != NULL && {later} != NULL && chelis_tensor_rank({first}) == {first_rank} && chelis_tensor_rank({later}) == {rank} && chelis_tensor_shape({later}, {axis}) != chelis_tensor_shape({first}, {first_axis})) {{"
         ));
         lines.push(format!(
             "{indent}    fprintf(stderr, \"extent `{label}`: {first_label} axis {first_axis} = %lld, {later_label} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape({first}, {first_axis}), (long long)chelis_tensor_shape({later}, {axis}));"

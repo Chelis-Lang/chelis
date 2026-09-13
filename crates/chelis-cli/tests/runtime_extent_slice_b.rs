@@ -8536,3 +8536,65 @@ fn literal_parameter_obligations_keep_the_existing_helper_order() {
         }
     }
 }
+
+/// Invalid ABI ranks retain the helper's rank diagnostic before comparing
+/// extents, whether the malformed tensor is the first or later witness.
+#[test]
+fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def both(x: tensor[seq, f32], y: tensor[seq, f32]) -> \
+                  (tensor[seq, f32], tensor[seq, f32]) = (neg(x), neg(y))\n\
+                  out = both(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]))\n";
+    let path = fixture(&dir, "rank-entry.ch", source);
+    let out_dir = dir.path().join("c");
+    let built = build_c(&path, &out_dir);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    for (name, xr, x0, yr, y0, expected) in [
+        ("agreeing", 1, 2, 1, 2, "completed"),
+        (
+            "extent_refuted",
+            1,
+            3,
+            1,
+            2,
+            "numeric trap: domain in load at int64",
+        ),
+        ("first_extra_equal", 2, 2, 1, 2, "expected rank 1, got 2"),
+        ("first_extra_mismatch", 2, 3, 1, 2, "expected rank 1, got 2"),
+        ("later_extra_equal", 1, 2, 2, 2, "expected rank 1, got 2"),
+        ("later_extra_mismatch", 1, 2, 2, 3, "expected rank 1, got 2"),
+    ] {
+        let harness = format!(
+            "#define main generated_main\n#include \"rank-entry.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_tensor *x = chelis_alloc({xr}, (int64_t[]){{{x0}, 1}}, CHELIS_DTYPE_F32);\n\
+             chelis_tensor *y = chelis_alloc({yr}, (int64_t[]){{{y0}, 1}}, CHELIS_DTYPE_F32);\n\
+             chelis_tuple *result = both(x, y);\n\
+             chelis_tuple_release(result);\n\
+             chelis_tensor_release(x); chelis_tensor_release(y);\n\
+             puts(\"completed\"); return 0;\n}}\n"
+        );
+        fs::write(out_dir.join("harness.c"), harness).expect("harness");
+        assert!(link_generated(&out_dir, "harness.c", name).success());
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .expect("run");
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.status.success(), name == "agreeing", "{name}: {out}");
+        assert!(out.contains(expected), "{name}: {out}");
+        if xr != 1 || yr != 1 {
+            assert!(!out.contains("extent `seq`"), "{name}: {out}");
+        }
+    }
+}
