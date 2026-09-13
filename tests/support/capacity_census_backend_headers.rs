@@ -1,15 +1,11 @@
-//! Whole backend header census obligations. The final registry and manifest
-//! activate with the device carrier cutover; this module grants no exceptions.
+//! Backend header census obligations. HIP is scanned through a closed
+//! committed-fixture universe. Metal currently exports only `static inline`
+//! definitions, so an executable enrollment tripwire replaces its vacuous
+//! census lane until an attributable ABI declaration exists.
 
 use super::*;
 
 const BACKEND_BASELINE_REL: &str = "spec/design/capacity_census_backend_headers.json";
-const HIP_HEADERS: &[&str] = &[
-    "chelis_device_descriptor.h",
-    "chelis_device_owner.h",
-    "chelis_hip_runtime.h",
-];
-const METAL_HEADERS: &[&str] = &["chelis_metal_runtime.h"];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BackendBaseline {
@@ -30,53 +26,43 @@ fn copy_published_headers(source: &Path, destination: &Path) {
     }
 }
 
+fn closed_hip_environment(sdk_roots: &[PathBuf]) -> c_preprocessor::Environment<'_> {
+    c_preprocessor::Environment {
+        compiler: "clang",
+        language: "c++",
+        target: Some("x86_64-unknown-linux-gnu"),
+        arguments: &["-std=c++17"],
+        include_dirs: sdk_roots,
+        freestanding: true,
+        no_standard_includes: true,
+        closed_include_universe: true,
+        hermetic: true,
+    }
+}
+
 fn live_backend_rows(root: &Path) -> Vec<Row> {
     let runtime = root.join(INCLUDE_DIR_REL);
     let mut rows = Vec::new();
 
+    let hip_runtime = root.join("crates/chelis-backend-hip/runtime");
+    let hip_published_headers = published_headers_on_disk(&hip_runtime);
     let hip = planted_include_dir("backend-live-hip", &[]);
     copy_published_headers(&runtime, &hip);
-    copy_published_headers(&root.join("crates/chelis-backend-hip/runtime"), &hip);
-    let hip_sdk = [root.join("crates/chelis-backend-hip/tests/fixtures/device_entry_sdk")];
-    let hip_environment = c_preprocessor::Environment {
-        compiler: "clang",
-        language: "c++",
-        include_dirs: &hip_sdk,
-        hermetic: true,
-        ..c_preprocessor::Environment::native_c()
-    };
-    rows.extend(
-        scan(
-            &hip,
-            &["chelis_hip_runtime.h", "chelis_blas.h", "chelis_math.h"],
-            &[hip_environment],
-        )
-        .into_iter()
-        .filter(|row| HIP_HEADERS.iter().any(|name| row.id.starts_with(name))),
-    );
+    copy_published_headers(&hip_runtime, &hip);
+    let phase0_sdk = root.join("crates/chelis-repr-inventory/sdk-stubs");
+    let hip_sdk = [
+        phase0_sdk.join("hipblas-present"),
+        phase0_sdk.join("blas-cblas"),
+        phase0_sdk,
+    ];
+    let hip_environment = closed_hip_environment(&hip_sdk);
+    rows.extend(scan_published_backend_rows(
+        &hip,
+        &["chelis_hip_runtime.h", "chelis_blas.h", "chelis_math.h"],
+        &[hip_environment],
+        &hip_published_headers,
+    ));
     fs::remove_dir_all(hip).unwrap();
-
-    let metal = planted_include_dir("backend-live-metal", &[]);
-    copy_published_headers(&runtime, &metal);
-    copy_published_headers(&root.join("crates/chelis-backend-metal/runtime"), &metal);
-    let metal_sdk = [root.join("tests/fixtures/capacity_backend_sdk")];
-    let metal_environment = c_preprocessor::Environment {
-        compiler: "clang",
-        language: "objective-c++",
-        include_dirs: &metal_sdk,
-        hermetic: true,
-        ..c_preprocessor::Environment::native_c()
-    };
-    rows.extend(
-        scan(
-            &metal,
-            &["chelis_metal_runtime.h", "chelis_blas.h", "chelis_math.h"],
-            &[metal_environment],
-        )
-        .into_iter()
-        .filter(|row| METAL_HEADERS.iter().any(|name| row.id.starts_with(name))),
-    );
-    fs::remove_dir_all(metal).unwrap();
 
     rows.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
     assert!(
@@ -87,10 +73,28 @@ fn live_backend_rows(root: &Path) -> Vec<Row> {
     rows
 }
 
+fn scan_published_backend_rows(
+    include_dir: &Path,
+    roots: &[&str],
+    environments: &[c_preprocessor::Environment<'_>],
+    published_headers: &BTreeSet<String>,
+) -> Vec<Row> {
+    scan_selected_headers(include_dir, roots, environments, Some(published_headers))
+}
+
 fn scan(
     include_dir: &Path,
     roots: &[&str],
     environments: &[c_preprocessor::Environment<'_>],
+) -> Vec<Row> {
+    scan_selected_headers(include_dir, roots, environments, None)
+}
+
+fn scan_selected_headers(
+    include_dir: &Path,
+    roots: &[&str],
+    environments: &[c_preprocessor::Environment<'_>],
+    published_headers: Option<&BTreeSet<String>>,
 ) -> Vec<Row> {
     assert!(
         !environments.is_empty(),
@@ -104,8 +108,22 @@ fn scan(
         for text in files.values() {
             typedefs.append(&mut collect_typedefs(text));
         }
+        if let Some(published_headers) = published_headers {
+            let attributed_headers: BTreeSet<_> = files.keys().cloned().collect();
+            let missing: Vec<_> = published_headers
+                .difference(&attributed_headers)
+                .cloned()
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "published backend headers missing from closed attributed closure: {missing:?}"
+            );
+        }
         let mut rows: Vec<Row> = files
             .iter()
+            .filter(|(name, _)| {
+                published_headers.is_none_or(|headers| headers.contains(name.as_str()))
+            })
             .flat_map(|(name, text)| header_rows(name, text, &typedefs))
             .collect();
         rows.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
@@ -230,21 +248,111 @@ fn complete_backend_closure_keeps_macro_fields_and_external_declarations() {
 #[test]
 fn backend_roots_cannot_omit_an_unreached_generated_header() {
     let dir = planted_include_dir(
-        "backend-unreached",
+        "hip-backend-unreached",
         &[
-            ("root.h", "int chelis_present(void);\n"),
-            ("generated.h", "extern double chelis_hidden;\n"),
+            (
+                "chelis_hip_runtime.h",
+                "static inline int chelis_present(void) { return 1; }\n",
+            ),
+            (
+                "detail/unreached.h",
+                "extern double chelis_hidden_unreached_scale;\n",
+            ),
         ],
     );
     let error = expect_census_panic(|| {
         scan(
             &dir,
-            &["root.h"],
+            &["chelis_hip_runtime.h"],
             &[c_preprocessor::Environment::native_c()],
         );
     });
     fs::remove_dir_all(&dir).unwrap();
     assert!(error.contains("PUBLISHED HEADER NOT REACHED"), "{error}");
+}
+
+#[test]
+fn reached_nested_hip_header_survives_backend_authority_selection() {
+    let published = planted_include_dir(
+        "hip-backend-published",
+        &[
+            (
+                "chelis_hip_runtime.h",
+                "#include \"detail/redteam_extra.h\"\n#include \"chelis_runtime.h\"\n",
+            ),
+            (
+                "detail/redteam_extra.h",
+                "extern double chelis_redteam_unregistered_scale;\n",
+            ),
+        ],
+    );
+    let staged = planted_include_dir(
+        "hip-backend-staged",
+        &[(
+            "chelis_runtime.h",
+            "extern double chelis_shared_runtime_scale;\n",
+        )],
+    );
+    copy_published_headers(&published, &staged);
+    let rows = scan_published_backend_rows(
+        &staged,
+        &["chelis_hip_runtime.h"],
+        &[c_preprocessor::Environment::native_c()],
+        &published_headers_on_disk(&published),
+    );
+    fs::remove_dir_all(published).unwrap();
+    fs::remove_dir_all(staged).unwrap();
+    assert!(
+        rows.iter().any(|row| {
+            row.id.starts_with("detail/redteam_extra.h:")
+                && row.id.contains("chelis_redteam_unregistered_scale")
+        }),
+        "a reached nested HIP declaration must survive to authority comparison: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.id.contains("chelis_shared_runtime_scale")),
+        "shared runtime rows retain their primary census owner: {rows:?}"
+    );
+}
+
+#[test]
+fn hip_sdk_stub_rows_remain_nonpublished_inputs() {
+    let published = planted_include_dir(
+        "hip-backend-sdk-published",
+        &[("chelis_hip_runtime.h", "#include <redteam_sdk_input.h>\n")],
+    );
+    let staged = planted_include_dir("hip-backend-sdk-staged", &[]);
+    copy_published_headers(&published, &staged);
+    let sdk = planted_include_dir(
+        "hip-backend-sdk-input",
+        &[(
+            "redteam_sdk_input.h",
+            "extern double chelis_redteam_sdk_scale;\n",
+        )],
+    );
+    let root = repo_root();
+    let phase0_sdk = root.join("crates/chelis-repr-inventory/sdk-stubs");
+    let sdk_roots = [
+        sdk.clone(),
+        phase0_sdk.join("hipblas-present"),
+        phase0_sdk.join("blas-cblas"),
+        phase0_sdk,
+    ];
+    let rows = scan_published_backend_rows(
+        &staged,
+        &["chelis_hip_runtime.h"],
+        &[closed_hip_environment(&sdk_roots)],
+        &published_headers_on_disk(&published),
+    );
+    fs::remove_dir_all(published).unwrap();
+    fs::remove_dir_all(staged).unwrap();
+    fs::remove_dir_all(sdk).unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| !row.id.contains("chelis_redteam_sdk_scale")),
+        "declared SDK/stub headers are preprocessing inputs, not published backend rows: {rows:?}"
+    );
 }
 
 #[test]
@@ -319,6 +427,191 @@ fn backend_scan_requires_an_actual_preprocessing_lane() {
         error.contains("missing backend preprocessing lane"),
         "{error}"
     );
+}
+
+#[test]
+fn backend_include_resolving_outside_declared_universe_fails_closed() {
+    let outside = planted_include_dir(
+        "backend-outside-universe",
+        &[("escape.h", "double escaped_value(void);\n")],
+    );
+    let source = format!(
+        "#include \"{}\"\nint owned_value(void);\n",
+        outside.join("escape.h").display()
+    );
+    let include_dir = planted_include_dir("backend-owned-universe", &[("root.h", source.as_str())]);
+    let root = repo_root();
+    let phase0_sdk = root.join("crates/chelis-repr-inventory/sdk-stubs");
+    let sdk_roots = [
+        phase0_sdk.join("hipblas-present"),
+        phase0_sdk.join("blas-cblas"),
+        phase0_sdk,
+    ];
+    let error = expect_census_panic(|| {
+        scan(
+            &include_dir,
+            &["root.h"],
+            &[closed_hip_environment(&sdk_roots)],
+        );
+    });
+    fs::remove_dir_all(include_dir).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+    assert!(
+        error.contains("outside the declared include universe") && error.contains("escape.h"),
+        "{error}"
+    );
+}
+
+fn raw_metal_published_abi_rows(runtime: &Path) -> Vec<Row> {
+    let headers = published_headers_on_disk(runtime);
+    assert!(
+        headers.contains("chelis_metal_runtime.h"),
+        "the published Metal header universe must retain chelis_metal_runtime.h"
+    );
+    let mut rows: Vec<Row> = headers
+        .into_iter()
+        .flat_map(|name| {
+            let path = runtime.join(&name);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read published Metal header {name}: {error}"));
+            header_rows_local(&name, &source)
+        })
+        .collect();
+    rows.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
+    rows
+}
+
+fn assert_metal_headers_need_no_census_enrollment(runtime: &Path) {
+    let rows = raw_metal_published_abi_rows(runtime);
+    assert!(
+        rows.is_empty(),
+        "METAL BACKEND CENSUS ENROLLMENT REQUIRED: \
+         the recursively discovered published Metal header set now contains \
+         attributable ABI rows {rows:?}. \
+         Add a hermetic Metal lane and exact final authority in the same change; \
+         do not weaken or delete this tripwire merely to admit the declaration."
+    );
+}
+
+#[test]
+fn metal_runtime_header_has_no_published_abi_before_enrollment() {
+    let root = repo_root();
+    let runtime = root.join("crates/chelis-backend-metal/runtime");
+    let source = fs::read_to_string(runtime.join("chelis_metal_runtime.h"))
+        .expect("read published Metal runtime header");
+    assert!(
+        header_rows_local("chelis_metal_runtime.h", &source).is_empty(),
+        "the current Metal root header must remain free of attributable ABI before enrollment"
+    );
+    assert_metal_headers_need_no_census_enrollment(&runtime);
+}
+
+#[test]
+fn a_metal_abi_declaration_requires_backend_census_enrollment() {
+    let runtime = planted_include_dir(
+        "metal-nested-enrollment",
+        &[
+            (
+                "chelis_metal_runtime.h",
+                "static inline float private_helper(float value) { return value; }\n",
+            ),
+            (
+                "detail/public_abi.h",
+                concat!(
+                    "static inline void chelis_metal_redteam_helper(void) {\n",
+                    "    const char *message = \"{\";\n",
+                    "    (void)message;\n",
+                    "}\n",
+                    "extern double chelis_metal_public_scale;\n",
+                ),
+            ),
+        ],
+    );
+    let error = expect_census_panic(|| {
+        assert_metal_headers_need_no_census_enrollment(&runtime);
+    });
+    fs::remove_dir_all(runtime).unwrap();
+    assert!(
+        error.contains("METAL BACKEND CENSUS ENROLLMENT REQUIRED")
+            && error.contains("detail/public_abi.h")
+            && error.contains("chelis_metal_public_scale"),
+        "{error}"
+    );
+}
+
+#[test]
+fn metal_literal_payloads_cannot_change_declaration_depth() {
+    let cases = [
+        (
+            "adjacent_close",
+            concat!(
+                "static inline void chelis_metal_adjacent_close(void) {\n",
+                "    const char *message = \"{\";}\n",
+                "extern double chelis_metal_adjacent_close_public_scale;\n",
+            ),
+        ),
+        (
+            "closing_string",
+            concat!(
+                "static inline void chelis_metal_closing_string(void) {\n",
+                "    const char *message = \"}\";\n",
+                "}\n",
+                "extern double chelis_metal_closing_string_public_scale;\n",
+            ),
+        ),
+        (
+            "comment_braces",
+            concat!(
+                "static inline void chelis_metal_comment_braces(void) {\n",
+                "    /* { unmatched */ const char *message = \"ok\"; // } unmatched\n",
+                "}\n",
+                "extern double chelis_metal_comment_braces_public_scale;\n",
+            ),
+        ),
+        (
+            "escaped_string_and_chars",
+            concat!(
+                "static inline void chelis_metal_escaped_string_and_chars(void) {\n",
+                "    const char *message = \"escaped \\\"{\\\" and }\";\n",
+                "    char open = '{'; char close = '}'; char quote = '\\'';\n",
+                "}\n",
+                "extern double chelis_metal_escaped_string_and_chars_public_scale;\n",
+            ),
+        ),
+        (
+            "raw_string",
+            concat!(
+                "static inline void chelis_metal_raw_string(void) {\n",
+                "    const char *message = R\"delim({ literal } \\\" text)delim\";\n",
+                "}\n",
+                "extern double chelis_metal_raw_string_public_scale;\n",
+            ),
+        ),
+        (
+            "actual_nested_body",
+            concat!(
+                "static inline void chelis_metal_actual_nested_body(void) {\n",
+                "    if (1) { while (0) { } }\n",
+                "}\n",
+                "extern double chelis_metal_actual_nested_body_public_scale;\n",
+            ),
+        ),
+    ];
+    for (label, source) in cases {
+        let runtime = planted_include_dir(
+            &format!("metal-lexical-{label}"),
+            &[("chelis_metal_runtime.h", source)],
+        );
+        let error = expect_census_panic(|| {
+            assert_metal_headers_need_no_census_enrollment(&runtime);
+        });
+        fs::remove_dir_all(runtime).unwrap();
+        assert!(
+            error.contains("METAL BACKEND CENSUS ENROLLMENT REQUIRED")
+                && error.contains(&format!("chelis_metal_{label}_public_scale")),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]

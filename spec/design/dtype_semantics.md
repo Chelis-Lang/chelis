@@ -955,11 +955,25 @@ Deliverables, with phase homes:
    matching remain the completion oracle.
 
    The backend-header baseline has ten final rows discovered from the complete
-   HIP and Metal support roots under committed SDK fixtures. The generated
-   `chelis_gpu_tensor` packet is one exact tagged transport; the nine opaque
-   device-owner callables are exact [05-OP-33] numeric operations. Shared
-   runtime declarations retain their primary-baseline authority and are not
-   duplicated into the backend baseline.
+   HIP support root under the committed Phase-0 SDK stubs. Clang runs against a
+   fixed target with `-ffreestanding -nostdlibinc`; canonical linemarker paths
+   may resolve only inside the staged published closure, declared stub roots,
+   or clang's own resource headers. The generated `chelis_gpu_tensor` packet is
+   one exact tagged transport; the nine opaque device-owner callables are exact
+   [05-OP-33] numeric operations. The recursively discovered HIP support-header
+   set selects attributed files before declaration extraction; there is no
+   basename authority filter, so a reached nested support header cannot disappear.
+   Shared runtime declarations retain their primary-baseline authority and
+   declared SDK/stub headers remain preprocessing inputs rather than backend
+   publications.
+   The complete recursively discovered published Metal `.h` set currently
+   exports only `static inline` definitions and therefore contributes no ABI
+   row. A separate executable enrollment gate runs every such header through
+   the shared C-family lexer, aggregates and sorts its raw rows, and fails when
+   an attributable Metal declaration first appears. Comment, string, character,
+   and raw-literal payloads therefore cannot alter structural brace depth or
+   hide a later declaration. Enrollment requires a hermetic Metal census lane
+   plus exact authority in that same change.
 
    The final C/runtime authority partition is exact:
 
