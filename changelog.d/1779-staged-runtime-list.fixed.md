@@ -1,0 +1,1 @@
+The staged host-source partition now declines a body that reaches a runtime-shaped `to_tensor`, allowing the existing host path to evaluate it. This restores the Shoals symbolic column-reshape and vmap program on eval and generated C without weakening the staged input ownership check (chelis#1779).

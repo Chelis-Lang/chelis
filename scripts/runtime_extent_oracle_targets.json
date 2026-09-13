@@ -400,6 +400,7 @@
         "a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
         "a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
+        "a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
         "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",

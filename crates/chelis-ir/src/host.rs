@@ -4076,6 +4076,20 @@ fn staged_def_kernel_product(
     {
         return Ok(StagingAttempt::NotApplicable);
     }
+    // chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate rank-0
+    // `Load { name: "to_tensor" }` placeholder (`lower::lower_builtin_app`)
+    // whose whole purpose is to be refused, so the def routes to the host
+    // lane. The partition below cannot carry that marker: the placeholder is
+    // neither a declared external input nor a staged producer, so the
+    // exactly-one check in `staged.rs` rejects the entire def and the build
+    // fails after a clean check. Read the same signal the tensor-helper
+    // extractor reads and decline, because the marker already says this is
+    // not our lane. Asked about the body rather than the def name: this
+    // signature's body can be a rewritten tree (inlined callable lets, hoisted
+    // locals), and the body is what the partition would receive.
+    if expr_reaches_dynamic_to_tensor(&signature.body_expr, program) {
+        return Ok(StagingAttempt::NotApplicable);
+    }
     let context = cached_subexpr_lowering_context(program);
     let lowered = crate::lower::try_lower_staged_host_region(
         &signature.body_expr,
@@ -14299,6 +14313,19 @@ fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
     };
     let is_to_tensor = callee_kids.first().and_then(symbol_name) == Some("to_tensor");
     is_to_tensor && !crate::lower::is_static_to_tensor_literal(expr)
+}
+
+/// Does this expression reach a runtime-shaped `to_tensor`, accounting for
+/// lexical shadowing of the name and for the program's call graph?
+///
+/// This is the extractor's `reaches_dynamic_to_tensor` fact asked about one
+/// body directly, rather than through the pointer-keyed preflight stack, so a
+/// decision taken before that stack exists can read the same signal.
+/// chelis#1779.
+fn expr_reaches_dynamic_to_tensor(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
+    let summaries = cached_dynamic_to_tensor_def_summaries(program);
+    let mut facts = UnordMap::new();
+    analyze_tensor_helper_preflight(expr, &summaries, &mut facts).reaches_dynamic_to_tensor
 }
 
 fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
