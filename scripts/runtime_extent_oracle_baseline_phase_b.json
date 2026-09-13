@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "db950ede8cf84ceea80d6e7ce9d42a761df8849e4f6982f2222db2f522d473ff",
+  "corpus_sha256": "047cc610e4d24726dee3d98f5f2fa31911f9a83ac446918a27390434ea13fb55",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -211,6 +211,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation"
+    },
+    {
+      "id": "entry.host_tuple.repeated_binder.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_c"
+    },
+    {
+      "id": "entry.host_tuple.repeated_binder.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval"
+    },
+    {
+      "id": "entry.kernel.repeated_binder.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes"
+    },
+    {
+      "id": "entry.kernel.repeated_binder.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes"
     },
     {
       "id": "entry.merged_scopes.declaration.c",

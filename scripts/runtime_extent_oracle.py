@@ -1282,6 +1282,37 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "rejects_exactly",
             "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too",
         ),
+        # chelis#1788. One signature spelling `seq` on two parameter axes. In
+        # the split-kernel tuple form each tensor leaf is lowered from its own
+        # subexpression, so no DAG on this lane ever saw the binder twice: C
+        # exited zero printing both outputs while eval refused, and eval refused
+        # with a private sentence rather than the [04-NUM-9] pair. The
+        # one-kernel twin already carried the correct rendering and is the lock
+        # that the fix reproduces it without double-guarding.
+        _row(
+            "entry.host_tuple.repeated_binder.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
+        ),
+        _row(
+            "entry.host_tuple.repeated_binder.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
+        ),
+        _row(
+            "entry.kernel.repeated_binder.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
+        ),
+        _row(
+            "entry.kernel.repeated_binder.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
+        ),
         # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
         # rank-0 placeholder whose contract is to be refused so the definition
         # routes to the host lane. chelis#1693's staged host-source partition

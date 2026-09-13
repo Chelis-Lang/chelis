@@ -8252,3 +8252,287 @@ fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
         "{c_error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1788: the entry obligation a host-bodied signature carries.
+// ---------------------------------------------------------------------------
+
+/// A tuple root whose ONE signature spells `seq` on two parameters.
+///
+/// A tuple-bodied def is host-bodied, and each tensor leaf is lowered from its
+/// own subexpression into its own kernel helper, so `both__tensor_0` receives
+/// `x` alone and `both__tensor_1` receives `y` alone. No DAG on this lane ever
+/// saw `seq` twice, which is why nothing guarded the signature's own
+/// obligation.
+fn split_kernel_tuple_root(x: &str, y: &str) -> String {
+    format!(
+        "def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> \
+         (tensor[seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
+         a = to_tensor({x})\n\
+         b = to_tensor({y})\n\
+         out = both(a, b)\n"
+    )
+}
+
+/// The same signature over ONE kernel. `add(x, sum(y, 0i32))` joins both
+/// witnesses inside a single helper, so the DAG lane's entry guards already own
+/// the obligation, and this is the rendering the split form owes.
+fn one_kernel_repeated_binder_root(x: &str, y: &str) -> String {
+    format!(
+        "def joined(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> tensor[seq, f32] = \
+         add(x, sum(y, 0i32))\n\
+         a = to_tensor({x})\n\
+         b = to_tensor({y})\n\
+         out = joined(a, b)\n"
+    )
+}
+
+/// The `[04-NUM-9]` pair an all-interface `seq` disagreement owes: section 4.7
+/// puts the `load` primitive of the LATER witness in the `<op>` slot, and the
+/// declaring witness is rendered first because the guard runs in declared
+/// signature order.
+const REPEATED_BINDER_CONTEXT: &str = "extent `seq`: x axis 0 = 3, y axis 1 = 2";
+
+const DISAGREEING_X: &str = "[1.0, 2.0, 3.0]";
+const AGREEING_X: &str = "[1.0, 2.0]";
+const TWO_BY_TWO_Y: &str = "[[1.0, 2.0], [3.0, 4.0]]";
+
+/// entry.host_tuple.repeated_binder.eval. REGRESSION TEST on the RENDERING.
+/// Measured on `0820ee28e`, eval refused with the private sentence
+/// ``dimension binder `seq` has inconsistent runtime witnesses: 3 and 2``,
+/// which conveys neither the parameters nor the axes [04-NUM-9] requires.
+#[test]
+fn a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = split_kernel_tuple_root(DISAGREEING_X, TWO_BY_TWO_Y);
+    let (ok, out) = eval_result(&dir, "entry_tuple_binder.ch", &source);
+    assert!(!ok, "eval must refuse the disagreeing binder: {out}");
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "[04-NUM-9]'s line names the `load` of the later witness: {out}"
+    );
+    assert!(
+        out.contains(REPEATED_BINDER_CONTEXT),
+        "expected {REPEATED_BINDER_CONTEXT}: {out}"
+    );
+}
+
+/// entry.host_tuple.repeated_binder.c. REGRESSION TEST. Measured on
+/// `0820ee28e` the linked binary exited ZERO and printed both outputs at
+/// `shape=[3]` and `shape=[2, 2]` under one signature that spells `seq` on
+/// both, while eval refused: a lane divergence on a four-line program.
+#[test]
+fn a_split_kernel_tuple_root_guards_its_repeated_binder_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = split_kernel_tuple_root(DISAGREEING_X, TWO_BY_TWO_Y);
+    let (ok, out) = c_run_result(&dir, "entry_tuple_binder_c", &source);
+    assert!(!ok, "the C lane must abort: {out}");
+    assert!(
+        !out.contains("out.0 = "),
+        "and must not print an output it computed under a refuted signature: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "[04-NUM-9]'s line names the `load` of the later witness: {out}"
+    );
+    assert!(
+        out.contains(REPEATED_BINDER_CONTEXT),
+        "expected {REPEATED_BINDER_CONTEXT}: {out}"
+    );
+}
+
+/// DISPOSITION LOCK, both lanes. The agreeing call executes exactly, so the
+/// entry guard is a verdict on disagreement rather than a refusal of every
+/// repeated binder. Green on `0820ee28e` and after.
+#[test]
+fn a_split_kernel_tuple_root_executes_when_its_repeated_binder_agrees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = split_kernel_tuple_root(AGREEING_X, TWO_BY_TWO_Y);
+    let (eval_ok, eval_out) = eval_result(&dir, "entry_tuple_binder_ok.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "entry_tuple_binder_ok_c", &source);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: the agreeing signature executes: {out}");
+        assert!(
+            out.contains("out.0 = tensor(shape=[2], data=[-1.0, -2.0])"),
+            "{lane}: the first leaf's exact result: {out}"
+        );
+        assert!(
+            out.contains("out.1 = tensor(shape=[2, 2], data=[-1.0, -2.0, -3.0, -4.0])"),
+            "{lane}: the second leaf's exact result: {out}"
+        );
+    }
+}
+
+/// entry.kernel.repeated_binder.{eval,c}. DISPOSITION LOCK: the one-kernel
+/// twin already trapped with this exact pair on both lanes before the change,
+/// and it is what the split form now reproduces. It also pins that the fix did
+/// not double-guard the form the DAG lane already owns: the wrapper emits no
+/// entry guard where a helper can see the binder twice, because that helper's
+/// prologue also owns the slot ORDER section 4.7 requires.
+#[test]
+fn a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = one_kernel_repeated_binder_root(DISAGREEING_X, TWO_BY_TWO_Y);
+    let (eval_ok, eval_out) = eval_result(&dir, "entry_kernel_binder.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "entry_kernel_binder_c", &source);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the disagreeing binder is refused: {out}");
+        assert!(
+            out.contains(&domain_trap_line("load")),
+            "{lane}: [04-NUM-9]'s line names the `load`: {out}"
+        );
+        assert!(
+            out.contains(REPEATED_BINDER_CONTEXT),
+            "{lane}: expected {REPEATED_BINDER_CONTEXT}: {out}"
+        );
+        assert_eq!(
+            out.matches(&domain_trap_line("load")).count(),
+            1,
+            "{lane}: and exactly one guard reports it, not two: {out}"
+        );
+    }
+}
+
+/// A type alias denotes the resolved parameter type, including its runtime
+/// binder witnesses. Rejection happens before any body effect on both lanes.
+#[test]
+fn aliased_parameter_types_keep_the_entry_binder_guard() {
+    for aliases in [
+        "type Row = tensor[seq, f32]\ntype Batch = tensor[batch, seq, f32]\n",
+        "type R = tensor[seq, f32]\ntype B = tensor[batch, seq, f32]\ntype Row = R\ntype Batch = B\n",
+    ] {
+        for (x, agrees) in [(DISAGREEING_X, false), (AGREEING_X, true)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let source = format!(
+                "{aliases}def both(x: Row, y: Batch) -> (Row, Batch) ! {{ IO }} = {{\n \
+                 _ = print(\"body\")\n (neg(x), neg(y))\n}}\n\
+                 out = both(to_tensor({x}), to_tensor({TWO_BY_TWO_Y}))\n"
+            );
+            let path = dir.path().join("entry-alias.ch");
+            fs::write(&path, &source).expect("source");
+            let checked = check(&path);
+            let checked: serde_json::Value =
+                serde_json::from_slice(&checked.stdout).expect("check JSON");
+            assert_eq!(checked["score"], 1, "{checked}");
+            let eval = eval_result(&dir, "entry-alias.ch", &source);
+            let compiled = c_run_result(&dir, "entry-alias-c", &source);
+            for (lane, (ok, out)) in [("eval", eval), ("C", compiled)] {
+                assert_eq!(ok, agrees, "{lane}: {source}\n{out}");
+                assert_eq!(out.contains("body"), agrees, "{lane}: {out}");
+                if agrees {
+                    assert!(
+                        out.contains("out.0 = tensor(shape=[2], data=[-1.0, -2.0])"),
+                        "{lane}: {out}"
+                    );
+                    assert!(
+                        out.contains("out.1 = tensor(shape=[2, 2], data=[-1.0, -2.0, -3.0, -4.0])"),
+                        "{lane}: {out}"
+                    );
+                } else {
+                    assert!(out.contains(REPEATED_BINDER_CONTEXT), "{lane}: {out}");
+                    assert!(out.contains(&domain_trap_line("load")), "{lane}: {out}");
+                }
+            }
+        }
+    }
+}
+
+/// Entry witnesses remain live through the guard even when the body does not
+/// use their tensor. Both the declaring and later parameter can be unused.
+#[test]
+fn unused_parameters_keep_their_entry_witnesses_until_after_the_guard() {
+    for used in ["x", "y"] {
+        for (x, agrees) in [(DISAGREEING_X, false), (AGREEING_X, true)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let source = format!(
+                "def both(x: tensor[seq, f32], y: tensor[seq, f32]) -> \
+                 (tensor[seq, f32], tensor[seq, f32]) ! {{ IO }} = {{\n \
+                 _ = print(\"body\")\n (neg({used}), neg({used}))\n}}\n\
+                 out = both(to_tensor({x}), to_tensor([1.0, 2.0]))\n"
+            );
+            let evaluated = eval_result(&dir, "unused-entry.ch", &source);
+            let compiled = c_run_result(&dir, "unused-entry-c", &source);
+            for (lane, (ok, out)) in [("eval", evaluated), ("C", compiled)] {
+                assert_eq!(ok, agrees, "{lane}, used={used}: {out}");
+                assert_eq!(out.contains("body"), agrees, "{lane}: {out}");
+                if agrees {
+                    for field in [0, 1] {
+                        assert!(
+                            out.contains(&format!(
+                                "out.{field} = tensor(shape=[2], data=[-1.0, -2.0])"
+                            )),
+                            "{lane}: {out}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        out.contains("extent `seq`: x axis 0 = 3, y axis 0 = 2"),
+                        "{lane}: {out}"
+                    );
+                    assert!(out.contains(&domain_trap_line("load")), "{lane}: {out}");
+                }
+            }
+        }
+    }
+}
+
+/// A wrapper guard must not preempt an earlier literal input-axis obligation
+/// that an existing tensor helper owns. Drive the exported ABI directly so
+/// compile-time checking does not reject the malformed foreign input first.
+#[test]
+fn literal_parameter_obligations_keep_the_existing_helper_order() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def both(x: tensor[2, seq, f32], y: tensor[batch, seq, f32]) -> \
+                  (tensor[2, seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
+                  out = both(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), \
+                  to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
+    let path = fixture(&dir, "literal-entry.ch", source);
+    let out_dir = dir.path().join("c");
+    let built = build_c(&path, &out_dir);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    for (name, x0, y1, agrees) in [
+        ("both_refuted", 3, 2, false),
+        ("literal_refuted", 3, 3, false),
+        ("agreeing", 2, 3, true),
+    ] {
+        let harness = format!(
+            "#define main generated_main\n#include \"literal-entry.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_tensor *x = chelis_alloc(2, (int64_t[]){{{x0}, 3}}, CHELIS_DTYPE_F32);\n\
+             chelis_tensor *y = chelis_alloc(2, (int64_t[]){{2, {y1}}}, CHELIS_DTYPE_F32);\n\
+             chelis_tuple *result = both(x, y);\n\
+             chelis_tuple_release(result);\n\
+             chelis_tensor_release(x); chelis_tensor_release(y);\n\
+             puts(\"completed\"); return 0;\n}}\n"
+        );
+        fs::write(out_dir.join("harness.c"), harness).expect("harness");
+        assert!(link_generated(&out_dir, "harness.c", name).success());
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .expect("run");
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.status.success(), agrees, "{name}: {out}");
+        assert_eq!(out.contains("completed"), agrees, "{name}: {out}");
+        if !agrees {
+            assert!(
+                out.contains("`x` axis 0 expected 2, got 3"),
+                "{name}: {out}"
+            );
+            assert!(!out.contains("extent `seq`"), "{name}: {out}");
+        }
+    }
+}
