@@ -7787,7 +7787,6 @@ fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
     assert_eq!(rendered[2], rendered[0], "and last");
 }
 
-
 // ---------------------------------------------------------------------------
 // chelis#1779: a runtime-shaped `to_tensor` routes to the host lane under
 // staging.
