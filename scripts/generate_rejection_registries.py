@@ -724,10 +724,23 @@ def derive_issue_numbers(citations: list[IssueCitation]) -> list[int]:
 def load_issue_manifest(path: Path) -> list[int]:
     """Parse the checked-in open-issue manifest with strict shape checks."""
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        source = path.read_text()
+    except OSError as error:
         raise RegistryError(f"cannot read issue manifest: {error}") from error
-    if payload.get("schema") != 1 or not isinstance(payload.get("issues"), list):
+    return parse_issue_manifest(source)
+
+
+def parse_issue_manifest(source: str) -> list[int]:
+    """Use the same strict schema for working-tree and committed manifests."""
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as error:
+        raise RegistryError(f"cannot parse issue manifest: {error}") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != 1
+        or not isinstance(payload.get("issues"), list)
+    ):
         raise RegistryError("issue manifest must have schema 1 and an issues list")
 
     numbers: list[int] = []
