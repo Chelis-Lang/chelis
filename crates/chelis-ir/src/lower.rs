@@ -17125,6 +17125,15 @@ mod fused_zero_tests {
             .iter()
             .map(|slot| slot.as_single_node().unwrap())
             .collect();
+        for node in ctx.dag.nodes() {
+            assert!(
+                node.inputs
+                    .iter()
+                    .chain(&node.shape_deps)
+                    .all(|dependency| dependency.0 < node.id.0),
+                "fused consumer introduced a non-topological dependency: {node:?}"
+            );
+        }
         let values = eval_tensor_roots_with_strict(&ctx.dag, &roots, |_| {
             Some(value(&[2, 3], Prim::F32, &[2.0; 6]))
         })
@@ -17355,9 +17364,16 @@ mod fused_zero_tests {
                 None,
             );
             dag.add_root(forward);
-            let vectorized = vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+            let (vectorized, operator_map) =
+                vmap::vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).unwrap();
             assert_eq!(vectorized.roots().len(), 1);
             let root = vectorized.roots()[0];
+            let operator = operator_map[forward.0];
+            assert_ne!(root, operator, "root expansion is not the rebuilt operator");
+            assert!(operator.0 < root.0);
+            assert_eq!(vectorized.get(operator).unwrap().output_type.dims.len(), 0);
+            assert_eq!(vectorized.get(root).unwrap().output_type.dims.len(), 1);
+            assert!(vectorized.get(root).unwrap().inputs.contains(&operator));
             assert!(matches!(
                 vectorized.get(root).unwrap().op,
                 RiscOp::Expand { .. }
