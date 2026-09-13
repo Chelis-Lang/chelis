@@ -226,9 +226,11 @@ The inventory gains `ArithmeticRepr` variant enumeration. Its six exact
 registered variants and `DTypeContract::byte_width` in the vocabulary owner
 are final forms, justified by this executed contract suite; another variant,
 path, or width-helper owner is not. Existing foundation rows remain unchanged,
-and no new transition debt is authorized. The Phase 0 coverage manifest binds
-these final forms and runs the contract suite; its freeze digest changes for
-that reviewed acceptance addition, not to bless a new debt row. The Phase 1 composite below includes this vocabulary contract.
+and no new transition debt is authorized. The code-derived Phase 0 coverage
+manifest names these final forms and the contract suite. The runner verifies
+that manifest against the configuration it executes; this acceptance addition
+does not move the foundation digest. The Phase 1 composite below includes this
+vocabulary contract.
 
 ### C1 runtime element delivery boundary
 
@@ -393,12 +395,12 @@ the C/HIP `issue_888_capacity_collision` suites continue to prove placement.
 This closeout does not complete Phase 1: #889's mandatory checked runtime
 metadata and the composite Phase 1 oracle still have to land.
 
-The Phase 0 coverage freeze moves to name the inverted shared-plan witness,
-execute finite-projection overflow controls in release, and add a mutation
-restoring `DimExpr::normalized_key`. That restored owner must be rejected as
-unclassified even though it existed in the immutable foundation. Paired
-compile-fail/compiling API probes independently prevent the retired key and
-method from returning. The foundation identities remain byte-identical;
+The code-derived Phase 0 coverage manifest names the inverted shared-plan
+witness, executes finite-projection overflow controls in release, and adds a
+mutation restoring `DimExpr::normalized_key`. That restored owner must be
+rejected as unclassified even though it existed in the immutable foundation.
+Paired compile-fail/compiling API probes independently prevent the retired key
+and method from returning. The foundation identities remain byte-identical;
 only deleted active debt is removed and current samples are refreshed.
 
 ### C2.2 Runtime metadata types
@@ -508,9 +510,10 @@ The final Phase 1 command still additionally
 requires generated-C adoption and execution-receipt/mutation integration;
 host-only green does not close #889 or #893.
 
-This delivery explicitly amends the Phase 0 coverage freeze: register the private
-`metadata.rs` source and the exact width owners `ElementCount::bytes` (the closed
-representation width) and `ElementCount::scratch_len` (physical scratch layout).
+This delivery extends the code-derived Phase 0 configuration with the private
+`metadata.rs` source and the exact width owners `ElementCount::bytes` (the
+closed representation width) and `ElementCount::scratch_len` (physical scratch
+layout).
 Neither admits another owner, pointer cast, or dtype authority. Both feed checked
 byte construction and allocation projection. Optimized executable mutations must
 reject weakened extent, count, byte, stride, target, capacity, and scratch checks;
@@ -549,10 +552,10 @@ nine representations, exact stored bits, scalar and zero-extent shapes, int64
 metadata above int32, and metadata observation during a write guard. Negative
 cases cover malformed carriers, invalid axes, unequal counts, overflow of count,
 stride or byte size, and data access during a write guard. A mutation that restores
-raw snapshot arithmetic must fail the bounded delegation control. The Phase 0
-coverage freeze is explicitly extended with these supporting tests and mutation;
-its 358-row immutable foundation inventory is unchanged. The two retired
-emitter spelling owners leave active debt (343 to 341).
+raw snapshot arithmetic must fail the bounded delegation control. The
+code-derived Phase 0 manifest includes these supporting tests and mutation; its
+358-row immutable foundation inventory is unchanged. The two retired emitter
+spelling owners leave active debt (343 to 341).
 
 #### Generated C shared indexing delivery (#889)
 
@@ -585,10 +588,11 @@ and scalar admission to fast paths. The registered `checked_reshape.ch` example
 also exercises ordinary elementwise composition and a checked cast.
 
 This is one shippable slice because the new index projections and their emitter
-consumers establish one shared iteration contract. The Phase 0 coverage digest
-changes to bind these commands and controls; its 358 immutable foundation rows
+consumers establish one shared iteration contract. The code-derived Phase 0
+manifest names these commands and controls; its 358 immutable foundation rows
 remain unchanged. Fifteen retired load/store-template owners leave active debt
-(341 to 326); reduced-float and other surviving obligations keep their rows. The Phase 1 composite below includes this supporting execution surface.
+(341 to 326); reduced-float and other surviving obligations keep their rows.
+The Phase 1 composite below includes this supporting execution surface.
 
 The two new emitter projection helpers are exact final metadata owners in the
 inventory, alongside the existing checked runtime owners. Their int64 declarations
@@ -643,12 +647,12 @@ The bounded acceptance surface is `checked_c_affine` in debug and release,
 the backend movement adoption controls, and optimized generated-C sanitizer
 execution. Controls cover all nine dtypes, scalar/empty/high ranks, exact large
 metadata, invalid bounds and target shapes, arithmetic overflow, and erased/late
-validation. The Phase 0 coverage manifest adds the runtime suite in both profiles;
-its digest changes for that command registration. The immutable 358-row foundation
-is preserved, and retiring the three raw movement templates reduces active debt
-from 324 to 321. Checked-add/multiply and bounds mutations execute against the
-private metadata owner. No new inventory identity or owner exception is admitted.
-The Phase 1 composite below includes these controls.
+validation. The code-derived Phase 0 coverage manifest adds the runtime suite in
+both profiles without moving the foundation digest. The immutable 358-row
+foundation is preserved, and retiring the three raw movement templates reduces
+active debt from 324 to 321. Checked-add/multiply and bounds mutations execute
+against the private metadata owner. No new inventory identity or owner exception
+is admitted. The Phase 1 composite below includes these controls.
 
 The consumer deliveries below feed the Phase 1 execution receipt/mutation oracle.
 Host-only results do not establish device execution or close #893. Generated host/device descriptors and
@@ -680,11 +684,12 @@ indices, and scratch capacity must agree for the same grouping. Its oracle combi
 `checked_c_reduction` and the private `checked_metadata`/`metadata_compile` controls
 in debug and release, generated native and sanitizer executions, existing fused,
 integer-promotion and exact-tree regressions, and `count_bool_axes.ch` parity.
-The Phase 0 freeze adds these commands and the grouping/index bypass mutations.
-The 358 foundation identities remain unchanged; no new owner exception is admitted.
-The retired Sum raw-index template leaves active debt (314 to 313). This supports
-the reduction slice only: sparse/BLAS/window consumers and the complete Phase 1
-execution-receipt oracle remain open. It does not close #889 or #893.
+The code-derived Phase 0 manifest adds these commands and the grouping/index
+bypass mutations. The 358 foundation identities remain unchanged; no new owner
+exception is admitted. The retired Sum raw-index template leaves active debt
+(314 to 313). This supports the reduction slice only: sparse/BLAS/window
+consumers and the complete Phase 1 execution-receipt oracle remain open. It does
+not close #889 or #893.
 
 
 #### Generated C sparse loops (#889)
@@ -711,7 +716,8 @@ executed directly from IR because it is produced by AD rather than a Surf builti
 
 The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
 consumer owners reduces active debt from 313 to 300 without a new exception. The
-coverage freeze adds these executable suites to the Phase 1 composite below.
+code-derived coverage manifest adds these executable suites to the Phase 1
+composite below.
 
 
 #### Generated C BLAS submission metadata (#889)
@@ -799,9 +805,9 @@ with an explicitly released caller. Empty and two-entry objects leave zero live
 owners/bytes. Output-preserving last-iteration return and omitted-owner-release
 mutations must leave live ownership; omitted guard exit must fail with the active
 write-guard error. The source check alone does not prove control-flow cleanup.
-These execution registrations move the frozen Phase 0 contract under B1; its
-immutable foundation and active identities stay unchanged. The Phase 1 composite
-below includes this ownership contract; Phase 2 remains separate.
+These execution registrations extend the code-derived Phase 0 manifest without
+moving its immutable foundation. The Phase 1 composite below includes this
+ownership contract; Phase 2 remains separate.
 
 #### Generated C literal ingress (#889)
 
@@ -824,8 +830,8 @@ Literal tests exercise all nine storage representations, rank zero and empty
 domains, exact int64 values above 2^53, floating bit patterns, invalid counts,
 tags/payloads and overflow. A malformed last carrier must trap with canonical
 `const`/int64 identity while every destination element remains unchanged. These
-commands extend the frozen Phase 0 manifest; removing or reordering ingress calls
-is rejected by the bounded source controls.
+commands extend the code-derived Phase 0 manifest; removing or reordering
+ingress calls is rejected by the bounded source controls.
 
 The immutable 358-row foundation is unchanged. Removing the literal emitter's raw
 storage/element-spelling templates reduces active debt from 294 to 292 without a
@@ -858,9 +864,9 @@ maps, `movement_expansion_kind`, the runtime movement CLI suite, and
 `parity_checked_reshape`. The CLI positive/negative pair uses an extent read from a
 locally shortened tensor and checks exact `expand`/`insert` trap identities. Bare
 scalar expansion extents remain outside the admitted CLI surface under #469.
-The frozen Phase 0 manifest requires these executions; its foundation stays fixed,
-with no new owner exception. This B1 contract amendment adds the explicit movement
-receipt registrations and their negative controls in the Phase 1 composite below.
+The code-derived Phase 0 manifest requires these executions; its foundation
+stays fixed, with no new owner exception. The explicit movement receipt
+registrations and their negative controls also enter the Phase 1 composite below.
 Phase 2 descriptors and bindings remain separate. This is one geometry slice because the shared plan, all
 five consumers, semantic authority and executable controls must ship together.
 
@@ -885,9 +891,10 @@ does not claim that the current planner reuses a last-use input. Source controls
 reject restored metadata VLAs, raw stride construction and byte multiplication.
 The vmap CLI control preserves the mapped axis shift. Existing cast, movement,
 elementwise and physical-slot lifetime regressions remain required supporting
-coverage. The B1 manifest adds these named executions and negative controls while
-preserving the immutable foundation and admitting no new inventory owner.
-The Phase 1 composite below includes this shape observation contract.
+coverage. The code-derived Phase 0 manifest adds these named executions and
+negative controls while preserving the immutable foundation and admitting no
+new inventory owner. The Phase 1 composite below includes this shape observation
+contract.
 
 ## C3. One generated host/device descriptor schema
 
@@ -1019,13 +1026,13 @@ in the same cutover; neither the generated packet nor this plan grants numeric
 authority. Any further public callable or field requires its owning [05-OP-N]
 rule and exact registration before implementation.
 
-This delivery moves the Phase 0 coverage freeze without changing its immutable
-358-row foundation. The source universe grows from 74 to 80 files: the generated
-device packet, opaque owner header and C++ companion, Python DLPack and native
-owner modules, and the standalone generated host-view header. The C/C++ scanner
-uses one fixed C++17 lane with the committed HIP/hipBLAS and standard-library
-fixtures; adding a `.cpp` under a backend runtime root is covered by the existing
-unregistered-source mutation.
+This delivery extends the code-derived Phase 0 source universe without changing
+its immutable 358-row foundation. The universe grows from 74 to 80 files: the
+generated device packet, opaque owner header and C++ companion, Python DLPack
+and native owner modules, and the standalone generated host-view header. The
+C/C++ scanner uses one fixed C++17 lane with the committed HIP/hipBLAS and
+standard-library fixtures; adding a `.cpp` under a backend runtime root is
+covered by the existing unregistered-source mutation.
 
 Exactly 35 new scanner rows are final forms rather than transition debt: the 13
 field/carrier observations of the generated packet, nine private opaque-owner
@@ -1193,14 +1200,14 @@ source and classifies every hit into one of these final forms:
 - a foreign-boundary validator that yields only branded indexed foreign access
   before the first operation.
 
-Until Phase 5, a hit may instead match one exact Phase-0 transition-debt
-identity with one owning deletion phase. That frozen manifest is generated
-from the reviewed Phase-0 tree, integrity-digested, and shrink-only: the oracle
-may delete rows, but regeneration cannot bless an addition, rename, signature
-change, relocation, or reclassification. Such a change removes the old
-identity and introduces a new unclassified hit, which fails. At Phase 5 the
-debt set must be empty. This is an explicit migration ledger, not an allow-list
-or a final authority class.
+Until Phase 5, a hit may instead match one exact identity in the
+integrity-digested Phase 0 foundation, with one owning deletion phase, and
+remain in the separately generated active-debt list. The foundation is
+append-only while the active list is shrink-only: regeneration preserves
+retired foundation identities, and an addition, rename, signature change,
+relocation, or reclassification changes the foundation digest and requires
+review. At Phase 5 the debt set must be empty. This is an explicit migration
+ledger, not an allow-list or a final authority class.
 
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
@@ -1319,16 +1326,25 @@ execution tests prove its sanctioned replacements work.
 
 ## B1. Freeze points
 
-- Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
-  behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception. The digest binds one canonical object holding
-  both the immutable foundation rows and the executable coverage manifest
-  (enumerator, universe, identity rule, command, success condition, and mutation
-  set); the separately stored active-debt list sits outside that digest so it
-  can only shrink. Each mutation binds a stable witness ID, source path, exact
-  implementation digest, expected failure code and reason, and required command,
-  so a witness cannot be weakened while its manifest entry still claims the old
-  semantics.
+- Phase 0 freezes the immutable `foundation_rows`, including each identity's
+  owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
+  row binds its stable witness ID, exact implementation digest, expected
+  failure code and reason, and required command. Later phases may reduce raw
+  hits but may not add an exception or weaken a witness without a reviewed
+  freeze move. The separately stored active-debt list sits outside the digest
+  so it can shrink, while regeneration preserves retired foundation identities
+  and the reviewed mutation rows. An identity in the frozen foundation but
+  absent from the prior active-debt list is retired; regeneration rejects its
+  reappearance rather than silently restoring it. A genuinely new identity
+  outside the prior foundation may still be emitted with a changed digest for
+  review. `coverage_manifest()` remains code-derived configuration rather than
+  a persisted baseline field: it adds source paths, seam kinds, expected
+  owners, release reproducers, hardware probes, counts, and ordinary execution
+  configuration. At runtime the oracle verifies that live probes match the
+  frozen mutation rows, verifies that the richer manifest is the exact
+  projection of the current configuration, and executes every non-hardware
+  mutation and reproducer. Changes only to live-derived reproducers, hardware
+  probes, counts, or ordinary configuration do not move the freeze.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   checked finite-count types, and a required test-identity floor. Later phases
   consume the contracts without parallel tables. Tests newly selected by an
@@ -1346,54 +1362,34 @@ execution tests prove its sanctioned replacements work.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
   child test substitutes for it.
 
-Moving an architectural freeze or removing, renaming, or intentionally replacing
-a required test identity requires changing this document, the owning numbered
-spec when semantics move, the oracle's integrity digest, and a mutation that
-would have accepted the forbidden behavior. Adding a test already selected by a
-frozen command does not move the required floor.
+Moving an architectural freeze, adding or changing a Phase 0 foundation row or
+frozen mutation row, or removing, renaming, or intentionally replacing a
+required test identity requires changing this document, the owning numbered
+spec when semantics move, and the oracle's integrity digest. A foundation
+change also requires a mutation that would have accepted the forbidden
+behavior. Adding a test already selected by a frozen command does not move the
+required floor.
 
-The chelis#1286 private ownership-IR boundary extends the Phase 0 source
-universe by eight `chelis-ir/src/ownership/` files without adding or
-reclassifying a representation-seam row. That source-list-only freeze move is
-covered by the existing `unregistered-inventory-source` mutation; no numbered
-representation rule changes with it.
-
-The opt-in lowering trace likewise registers `chelis-ir/src/lowering_trace.rs`
-in that source universe. It clones existing DAG carriers without introducing a
-representation-seam row. Only the source count and corresponding integrity
-digest change; foundation rows, active debt, and mutation implementations stay
-unchanged. The existing `unregistered-inventory-source` mutation covers this
-source-list-only move. No numbered representation semantics change.
-
-The Python result adapters register `chelis-python/src/source_json.rs` and
-`chelis-python/src/compiler_json.rs`
-in the same source universe. Its typed JSON conversion adds no representation
-seam: foundation rows, active debt, and mutation implementations remain unchanged.
-The source count and integrity digest include these files, with the existing
-`unregistered-inventory-source` mutation covering the source-list-only move.
+A Phase 0 source-universe, final-form, reproducer, or hardware registration that
+does not add or change a foundation row or frozen mutation row does not move the
+digest and does not require a B1 amendment paragraph. Its owning change still
+updates code, focused positive and negative tests, and current documentation.
+Adding, removing, renaming, reimplementing, retargeting, or changing the
+expected failure or command of a mutation does move the freeze. The runtime
+manifest/configuration equality check, source closure, expected-failure checks,
+and execution of every mutation and reproducer remain mandatory.
 
 The checked-extent staged plan registers `chelis-ir/src/host/staged.rs` in
 that source universe. It composes existing tagged values and DAG carriers,
 without adding a representation seam. Borrowing its checked program changes
 seven existing scanner-qualified owners from `LowerCtx::method` to
 `LowerCtx < 'program >::method`. This is an exact one-to-one owner rename:
-each row retains its kind, source path and deletion phase. The integrity digest
-includes those seven names and the additional source. The existing
+each row retains its kind, source path and deletion phase. The foundation digest
+includes those seven successor names; the additional source is code-derived
+configuration. The existing
 unregistered-source, unregistered-subdirectory, direct-data-access and
 normalized-key-arithmetic mutations continue to reject new debt; the rename
 adds no exception or detector admission rule.
-
-The fixed-control dropout plan additionally registers `chelis-ir/src/evaluation.rs`
-in the Phase 0 source universe. Numeric dropout preparation and sampling belong
-to the existing typed semantics owner, while the plan carries only source order,
-raw keys and replay provenance. The shared legacy evaluator retains its actual
-`eval_tensor_internal` arithmetic owner; planned UniformLike keys use that same
-legacy seed fold. Combining the staged and dropout sources gives 75 registered
-sources. This source-list-only freeze move retains the checked-extent baseline's
-358 foundation rows, 290 active-debt rows (including its exact owner renames),
-classifier rules and mutation implementations. The existing
-`unregistered-inventory-source` mutation covers the additional source; no
-numbered representation semantics change.
 
 The fixed-control host transport extends that same Phase 0 freeze with three
 closed, scanner-visible owners: the single shared C dropout sampler prelude,
@@ -1406,16 +1402,6 @@ existing backend-element-spelling and load-store-template controlled mutations
 remain the closed-world negative witnesses: an additional spelling or state
 template still fails as an unclassified identity. This amendment changes no
 public C descriptor, dtype tag, width, or numbered representation semantics.
-
-The typed static-rate profile registers `chelis-ir/src/lower/static_controls.rs`
-in the Phase 0 source universe (70 Rust sources and seven headers). It consumes
-checked dtype facts and existing typed scalar carriers without inspecting
-tensor payloads or adding a representation seam. This source-list-only freeze
-move changes the source count and integrity digest; all 358 foundation rows,
-290 active-debt rows, classifier rules and mutation implementations remain
-unchanged. The existing `unregistered-inventory-source` and subdirectory
-closure witnesses cover the added source. No numbered representation semantics
-change.
 
 The staged fixed-control evaluator composes those existing owners without a
 new numeric carrier. Its opaque companion retains exact partition mappings
@@ -1430,11 +1416,12 @@ and C state-observation prelude add two scanner-visible Phase 4 owners:
 `backend-element-spelling` at `host_emit.rs::emit_function`, and
 `load-store-template` at `random_observer.rs::SUPPORT`. The foundation therefore
 extends from 361 to 363 rows and active debt from 247 to 249; every prior row,
-classifier rule and mutation implementation remains unchanged. The integrity
-digest binds those exact additional owners and source count, with no exemption
-for the opt-in feature. Existing backend-element-spelling, load-store-template,
-unregistered-source and subdirectory closure mutations remain the negative
-witnesses. This amendment changes no public descriptor, dtype, width or numbered
+classifier rule and mutation implementation remains unchanged. The foundation
+digest binds those exact additional owners; the source count remains
+code-derived configuration, with no exemption for the opt-in feature. Existing
+backend-element-spelling, load-store-template, unregistered-source and
+subdirectory closure mutations remain the negative witnesses. This amendment
+changes no public descriptor, dtype, width or numbered
 representation semantics.
 
 ## B2. Invariants at every phase boundary

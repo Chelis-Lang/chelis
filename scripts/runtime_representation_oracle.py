@@ -62,8 +62,10 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
-# design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "ba54e4c3f15a6524039c77aed2663665432dca270ce2ea1529428f3b82269abf"
+# design amendment when the finished foundation or a mutation binding changes.
+# Release reproducers, hardware probes, counts, and ordinary configuration are
+# deliberately outside this digest.
+FREEZE_SHA256 = "905e0c46e65d95d9111dec2d66c40e703dbd3c8c6323ee0e92fa49f853ddaddc"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -578,9 +580,15 @@ def _deletion_phase(kind: str, path: str) -> int:
     return 3
 
 
-def _freeze_digest(rows: Sequence[dict[str, object]], manifest: dict[str, object]) -> str:
+def _freeze_digest(
+    rows: Sequence[dict[str, object]],
+    source_inventory: dict[str, object],
+) -> str:
     payload = json.dumps(
-        {"coverage_manifest": manifest, "foundation_rows": rows},
+        {
+            "foundation_rows": rows,
+            "source_inventory": source_inventory,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -639,8 +647,43 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
     ]
 
 
-def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str, object]:
-    probes = phase0_mutation_probes() if probes is None else probes
+def frozen_mutation_rows(
+    probes: Sequence[MutationProbe],
+) -> list[dict[str, object]]:
+    """Project the review-bearing part of each Phase 0 mutation contract."""
+
+    return [
+        {
+            "witness_id": probe.witness_id,
+            "implementation_sha256": _mutation_implementation_sha256(probe.mutate),
+            "expected_failure": {
+                "code": probe.expected_failure.code,
+                "reason_prefix": probe.expected_failure.reason_prefix,
+            },
+            "command": PHASE0_COMMAND,
+        }
+        for probe in probes
+    ]
+
+
+def _validate_frozen_mutation_contract(
+    source_inventory: dict[str, object],
+    probes: Sequence[MutationProbe],
+) -> None:
+    expected = {"mutations": frozen_mutation_rows(probes)}
+    if source_inventory != expected:
+        raise OracleFailure(
+            "current Phase 0 probes do not match the frozen mutation contract"
+        )
+
+
+def _coverage_manifest_from_configuration(
+    probes: Sequence[MutationProbe],
+    legs: Sequence[OracleLeg],
+    hardware_probes: Sequence[dict[str, str]],
+) -> dict[str, object]:
+    """Project the exact executable Phase 0 configuration for review."""
+
     return {
         "source_inventory": {
             "artifact": "the frozen INVENTORY_SOURCES file list",
@@ -697,9 +740,9 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "mutations": mutation_manifest(probes),
         },
         "release_reproducers": [
-            {"name": leg.name, "command": " ".join(leg.argv)} for leg in phase0_legs()
+            {"name": leg.name, "command": " ".join(leg.argv)} for leg in legs
         ],
-        "hardware_probes": list(hardware_probe_manifest()),
+        "hardware_probes": list(hardware_probes),
         "hardware_disposition": (
             "manual-required rows are harness registrations, not executed receipts"
         ),
@@ -707,21 +750,125 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
     }
 
 
-def build_foundation_baseline(rows: Sequence[InventoryRow]) -> dict[str, object]:
-    foundation = [row.to_baseline_dict() for row in rows]
-    manifest = coverage_manifest()
-    return {
-        "schema_version": 4,
-        "freeze_sha256": _freeze_digest(foundation, manifest),
-        "foundation_rows": foundation,
-        "active_debt": [row.to_active_dict() for row in rows],
-        "coverage_manifest": manifest,
+def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str, object]:
+    """Return the current code-derived coverage configuration.
+
+    This object is review content, not a frozen artifact. Runtime validation
+    compares it with the exact mutations, reproducers, and hardware
+    registrations captured for the current run.
+    """
+
+    return _coverage_manifest_from_configuration(
+        phase0_mutation_probes() if probes is None else probes,
+        phase0_legs(),
+        hardware_probe_manifest(),
+    )
+
+
+def _validate_coverage_manifest(
+    manifest: dict[str, object],
+    *,
+    probes: Sequence[MutationProbe],
+    legs: Sequence[OracleLeg],
+    hardware_probes: Sequence[dict[str, str]],
+) -> None:
+    expected = _coverage_manifest_from_configuration(probes, legs, hardware_probes)
+    if manifest != expected:
+        raise OracleFailure(
+            "Phase 0 coverage manifest drifted from the code-derived configuration"
+        )
+
+
+def build_foundation_baseline(
+    rows: Sequence[InventoryRow],
+    *,
+    foundation_rows: Sequence[dict[str, object]] | None = None,
+    source_inventory: dict[str, object],
+    active_debt_rows: Sequence[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Build the shrink-only ledger without forgetting reviewed contracts.
+
+    Existing foundation rows remain review-bearing even after their live debt
+    disappears. A new identity or changed deletion phase enters the foundation
+    and therefore changes the manual digest. The supplied source inventory is
+    copied exactly; regeneration must never derive reviewed mutation rows from
+    whatever implementation happens to be current.
+    """
+
+    foundation = [
+        dict(row) for row in (() if foundation_rows is None else foundation_rows)
+    ]
+    stored_active = [
+        dict(row) for row in (() if active_debt_rows is None else active_debt_rows)
+    ]
+    preexisting_foundation_ids = {
+        str(row["identity"]) for row in foundation
     }
+    preexisting_active_ids = {
+        str(row["identity"]) for row in stored_active
+    }
+    observed_ids = {row.identity for row in rows}
+    reactivated = sorted(
+        observed_ids & (preexisting_foundation_ids - preexisting_active_ids)
+    )
+    if reactivated:
+        raise OracleFailure(
+            "retired Phase 0 identity reappeared and cannot be restored by regeneration: "
+            + ", ".join(reactivated[:5])
+        )
+
+    foundation_index = {
+        str(row["identity"]): index for index, row in enumerate(foundation)
+    }
+    for row in rows:
+        current = row.to_baseline_dict()
+        index = foundation_index.get(row.identity)
+        if index is None:
+            foundation_index[row.identity] = len(foundation)
+            foundation.append(current)
+        else:
+            foundation[index] = current
+
+    current_by_id = {row.identity: row for row in rows}
+    active: list[dict[str, object]] = []
+    active_ids: set[str] = set()
+    for stored in stored_active:
+        identity = str(stored["identity"])
+        current = current_by_id.get(identity)
+        if current is not None:
+            active.append(current.to_active_dict())
+            active_ids.add(identity)
+    for row in rows:
+        if row.identity not in active_ids:
+            active.append(row.to_active_dict())
+            active_ids.add(row.identity)
+
+    return {
+        "schema_version": 6,
+        "freeze_sha256": _freeze_digest(foundation, source_inventory),
+        "source_inventory": json.loads(json.dumps(source_inventory)),
+        "foundation_rows": foundation,
+        "active_debt": active,
+    }
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON keys instead of silently keeping the last value."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OracleFailure(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
 
 
 def load_baseline() -> dict[str, object]:
     try:
-        loaded = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        loaded = json.loads(
+            BASELINE_PATH.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_json_object,
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise OracleFailure(f"cannot read Phase 0 inventory baseline: {error}") from error
     if not isinstance(loaded, dict):
@@ -729,43 +876,198 @@ def load_baseline() -> dict[str, object]:
     return loaded
 
 
-def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow]) -> None:
+def _validate_exact_fields(
+    row: object,
+    *,
+    expected: set[str],
+    location: str,
+) -> dict[str, object]:
+    if not isinstance(row, dict):
+        raise OracleFailure(f"{location} must be an object")
+    actual = set(row)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        raise OracleFailure(
+            f"{location} must have exact fields {', '.join(sorted(expected))}; "
+            + "; ".join(details)
+        )
+    return row
+
+
+def _validate_baseline_schema(baseline: object) -> None:
+    """Validate every persisted field before digest or inventory semantics."""
+
+    expected_fields = {
+        "schema_version",
+        "freeze_sha256",
+        "foundation_rows",
+        "source_inventory",
+        "active_debt",
+    }
+    if not isinstance(baseline, dict):
+        raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
+    if set(baseline) != expected_fields:
+        raise OracleFailure(
+            "Phase 0 inventory has unsupported top-level fields: "
+            + ", ".join(sorted(set(baseline) ^ expected_fields))
+        )
+
+    schema_version = baseline["schema_version"]
+    if type(schema_version) is not int or schema_version != 6:
+        raise OracleFailure("schema_version must be the integer 6")
+    freeze_sha256 = baseline["freeze_sha256"]
+    if (
+        not isinstance(freeze_sha256, str)
+        or len(freeze_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in freeze_sha256)
+    ):
+        raise OracleFailure("freeze_sha256 must be a lowercase 64-digit SHA-256")
+
+    foundation = baseline["foundation_rows"]
+    source_inventory = baseline["source_inventory"]
+    active = baseline["active_debt"]
+    if not isinstance(foundation, list):
+        raise OracleFailure("foundation_rows must be a list")
+    source_inventory = _validate_exact_fields(
+        source_inventory,
+        expected={"mutations"},
+        location="source_inventory",
+    )
+    mutations = source_inventory["mutations"]
+    if not isinstance(mutations, list):
+        raise OracleFailure("source_inventory.mutations must be a list")
+    if not isinstance(active, list):
+        raise OracleFailure("active_debt must be a list")
+
+    foundation_ids: list[str] = []
+    for index, untyped_row in enumerate(foundation):
+        location = f"foundation_rows[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "deletion_phase"},
+            location=location,
+        )
+        identity = row["identity"]
+        deletion_phase = row["deletion_phase"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if type(deletion_phase) is not int or deletion_phase not in (1, 2, 3, 4):
+            raise OracleFailure(f"{location}.deletion_phase must be one of 1, 2, 3, 4")
+        foundation_ids.append(identity)
+
+    witness_ids: list[str] = []
+    for index, untyped_row in enumerate(mutations):
+        location = f"source_inventory.mutations[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={
+                "witness_id",
+                "implementation_sha256",
+                "expected_failure",
+                "command",
+            },
+            location=location,
+        )
+        witness_id = row["witness_id"]
+        implementation_sha256 = row["implementation_sha256"]
+        expected_failure = _validate_exact_fields(
+            row["expected_failure"],
+            expected={"code", "reason_prefix"},
+            location=f"{location}.expected_failure",
+        )
+        command = row["command"]
+        if not isinstance(witness_id, str) or not witness_id:
+            raise OracleFailure(f"{location}.witness_id must be a nonempty string")
+        if (
+            not isinstance(implementation_sha256, str)
+            or len(implementation_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in implementation_sha256
+            )
+        ):
+            raise OracleFailure(
+                f"{location}.implementation_sha256 must be a lowercase 64-digit SHA-256"
+            )
+        if (
+            not isinstance(expected_failure["code"], str)
+            or not expected_failure["code"]
+        ):
+            raise OracleFailure(
+                f"{location}.expected_failure.code must be a nonempty string"
+            )
+        if (
+            not isinstance(expected_failure["reason_prefix"], str)
+            or not expected_failure["reason_prefix"]
+        ):
+            raise OracleFailure(
+                f"{location}.expected_failure.reason_prefix must be a nonempty string"
+            )
+        if not isinstance(command, str) or not command:
+            raise OracleFailure(f"{location}.command must be a nonempty string")
+        witness_ids.append(witness_id)
+
+    active_ids: list[str] = []
+    for index, untyped_row in enumerate(active):
+        location = f"active_debt[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "sample"},
+            location=location,
+        )
+        identity = row["identity"]
+        sample = row["sample"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if not isinstance(sample, str):
+            raise OracleFailure(f"{location}.sample must be a string")
+        active_ids.append(identity)
+
+    if len(foundation_ids) != len(set(foundation_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 foundation_rows")
+    if len(witness_ids) != len(set(witness_ids)):
+        raise OracleFailure(
+            "duplicate witness_id in Phase 0 source_inventory.mutations"
+        )
+    if len(active_ids) != len(set(active_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 active_debt")
+
+
+def validate_baseline(
+    baseline: dict[str, object],
+    rows: Sequence[InventoryRow],
+    *,
+    probes: Sequence[MutationProbe] | None = None,
+) -> None:
     """Check the derived inventory against the shrink-only frozen ledger.
 
-    The digest binds the immutable foundation and the executable coverage
-    manifest together. The active-debt list is deliberately outside it so it can
-    shrink; what stops it growing is that every active identity must already be
-    in the reviewed foundation.
+    The digest binds the immutable foundation and exact mutation contracts.
+    The active-debt list is deliberately outside it so it can shrink; what
+    stops it growing is that every active identity must already be in the
+    reviewed foundation.
     """
 
-    if baseline.get("schema_version") != 4:
-        raise OracleFailure("unsupported Phase 0 inventory schema")
-    manifest = baseline.get("coverage_manifest")
-    if not isinstance(manifest, dict):
-        raise OracleFailure("coverage_manifest must be an object")
-    if manifest != coverage_manifest():
-        raise OracleFailure("Phase 0 coverage manifest drifted")
-    foundation = baseline.get("foundation_rows")
-    active = baseline.get("active_debt")
-    if not isinstance(foundation, list) or not all(isinstance(row, dict) for row in foundation):
-        raise OracleFailure("foundation_rows must be a list of objects")
-    if not isinstance(active, list) or not all(isinstance(row, dict) for row in active):
-        raise OracleFailure("active_debt must be a list of objects")
+    _validate_baseline_schema(baseline)
+    foundation = baseline["foundation_rows"]
+    source_inventory = baseline["source_inventory"]
+    active = baseline["active_debt"]
 
-    computed_digest = _freeze_digest(foundation, manifest)
+    computed_digest = _freeze_digest(foundation, source_inventory)
     if baseline.get("freeze_sha256") != computed_digest or computed_digest != FREEZE_SHA256:
         raise OracleFailure("Phase 0 freeze digest does not match the reviewed contract")
+    _validate_frozen_mutation_contract(
+        source_inventory,
+        phase0_mutation_probes() if probes is None else probes,
+    )
 
     foundation_ids = [row.get("identity") for row in foundation]
     active_ids = [row.get("identity") for row in active]
-    if not all(isinstance(value, str) for value in foundation_ids):
-        raise OracleFailure("every foundation row must have an identity")
-    if not all(isinstance(value, str) for value in active_ids):
-        raise OracleFailure("every active-debt row must have an identity")
-    if len(foundation_ids) != len(set(foundation_ids)):
-        raise OracleFailure("duplicate identity in Phase 0 foundation")
-    if len(active_ids) != len(set(active_ids)):
-        raise OracleFailure("duplicate identity in active transition debt")
 
     foundation_set = set(foundation_ids)
     active_set = set(active_ids)
@@ -1710,8 +2012,10 @@ def _expect_mutation_rejected(probe: MutationProbe) -> None:
             raise OracleFailure(f"{probe.witness_id} mutation was silently accepted")
 
 
-def run_phase0_mutations() -> None:
-    probes = phase0_mutation_probes()
+def run_phase0_mutations(
+    probes: Sequence[MutationProbe] | None = None,
+) -> None:
+    probes = phase0_mutation_probes() if probes is None else probes
     print(f"+ controlled mutations: {len(probes)}", flush=True)
     for probe in probes:
         _expect_mutation_rejected(probe)
@@ -2027,10 +2331,19 @@ def _run_leg(leg: OracleLeg) -> None:
 
 
 def run_phase0(*, run_mutations: bool = True) -> None:
+    probes = phase0_mutation_probes()
+    legs = phase0_legs()
+    hardware_probes = hardware_probe_manifest()
+    _validate_coverage_manifest(
+        coverage_manifest(),
+        probes=probes,
+        legs=legs,
+        hardware_probes=hardware_probes,
+    )
     validate_phase0_inventory()
     if run_mutations:
-        run_phase0_mutations()
-    for leg in phase0_legs():
+        run_phase0_mutations(probes)
+    for leg in legs:
         _run_leg(leg)
     print("RUNTIME REPRESENTATION PHASE 0: PASS")
 
@@ -2040,12 +2353,33 @@ def regenerate() -> None:
 
     Regeneration cannot bless growth: it rewrites the artifact, and the reviewed
     `FREEZE_SHA256` in this file still has to be moved by hand, which is the
-    design's B1 freeze move rather than a regeneration step.
+    design's B1 freeze move rather than a regeneration step. It also preserves
+    the reviewed mutation rows and refuses to run when current probe code has
+    drifted from them.
     """
 
-    baseline = build_foundation_baseline(inventory_rows(REPO_ROOT))
+    existing = load_baseline()
+    _validate_baseline_schema(existing)
+    foundation = existing["foundation_rows"]
+    source_inventory = existing["source_inventory"]
+    active_debt = existing["active_debt"]
+    _validate_frozen_mutation_contract(
+        source_inventory,
+        phase0_mutation_probes(),
+    )
+    baseline = build_foundation_baseline(
+        inventory_rows(REPO_ROOT),
+        foundation_rows=foundation,
+        source_inventory=source_inventory,
+        active_debt_rows=active_debt,
+    )
     BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {len(baseline['foundation_rows'])} rows to {BASELINE_PATH}")
+    print(
+        f"wrote {len(baseline['active_debt'])} active rows with "
+        f"{len(baseline['foundation_rows'])} foundation rows and "
+        f"{len(baseline['source_inventory']['mutations'])} frozen mutations "
+        f"to {BASELINE_PATH}"
+    )
     print(f"freeze_sha256 = {baseline['freeze_sha256']}")
 
 
