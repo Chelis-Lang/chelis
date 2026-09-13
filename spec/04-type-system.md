@@ -153,17 +153,17 @@ admits every active dtype. This sub-section is the authoritative per-backend
 matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
 the spec or in user-facing docs must resolve to a cell in this table.
 
-| dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
-|--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
-| f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
-| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
-| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
-| int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int32  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int64  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| bool   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| dtype  | C backend                                                                                                         | HIP backend                                                                                                                                                                                              | Metal backend                                | Evaluator |
+|--------|-------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|-----------|
+| f32    | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| f64    | admitted                                                                                                          | admitted                                                                                                                                                                                                 | **rejected (hardware)**                      | admitted  |
+| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to that operation's own restrictions | admitted on Apple7+ (M3 or later)            | admitted  |
+| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to that operation's own restrictions | admitted                                     | admitted  |
+| int8   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| int16  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| int32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| int64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
@@ -186,6 +186,12 @@ Cell semantics:
   (e.g. matmul accumulator dispatch per §5.7.1, transcendental ops are
   float-only per §5.4) apply uniformly across backends and are not encoded
   in this matrix.
+- **operation-limited** — the backend accepts the dtype only on the operation
+  identities named in that cell, subject to each named operation's own
+  restrictions. Every unlisted operation that is otherwise valid for the dtype
+  rejects before emission. The backend SHALL NOT route an unlisted operation
+  through another dtype, operation identity, fallback kernel, or software
+  substitution.
 - **rejected (hardware)** — the backend rejects the dtype at codegen with a
   diagnostic naming the hardware constraint and does not substitute a dtype
   or software emulation (see the f64-on-Metal entry below).

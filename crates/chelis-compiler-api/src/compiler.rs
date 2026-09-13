@@ -5416,6 +5416,12 @@ mod metal_runtime_dim_reject_tests {
     }
 }
 
+const HIP_NARROW_FLOAT_KERNEL_HINT: &str =
+    "this operation has no typed HIP narrow-float kernel; see spec/04-type-system.md §1.1.3";
+
+const HIP_UNSUPPORTED_DTYPE_HINT: &str =
+    "this tensor dtype is not admitted by the HIP target; see spec/04-type-system.md §1.1.3";
+
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
         let fused_direct_ops = match &node.op {
@@ -5793,8 +5799,8 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
-    // storage, planned Realize copies and hipBLAS matmul are implemented, and
-    // [05-OP-43]'s dedicated ReLU identities have exact raw-bit kernels. Other compute nodes would
+    // storage, exact-bit Realize copies, hipBLAS matmul, and [05-OP-43]'s
+    // dedicated ReLU identities have shipped kernels. Other compute nodes
     // still reach an unsupported narrow-float path.
     let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
@@ -5827,18 +5833,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int64 => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
-                    let authority = if node.output_type.precision == chelis_types::types::Prim::F16
-                    {
-                        chelis_types::unimplemented_rejection!(
-                            729,
-                            "`f16` is implemented only for HIP tensor load/store, planned `Realize`, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
-                        )
-                    } else {
-                        chelis_types::unimplemented_rejection!(
-                            729,
-                            "`bf16` is implemented only for HIP tensor load/store, planned `Realize`, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
-                        )
-                    };
                     return Err(unsupported_gate_error(
                         format!(
                             "narrow-float compute at lowered node {} (`{:?}` with `{}`)",
@@ -5847,7 +5841,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.output_type.precision.name(),
                         ),
                         "hip",
-                        authority,
+                        chelis_types::unimplemented_rejection!(729, HIP_NARROW_FLOAT_KERNEL_HINT),
                     ));
                 }
             }
@@ -5855,18 +5849,12 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` DAG path does not support tensor precision \
-                         `{}` (node {}). Supported: f32/f64/bool plus the integer family \
-                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul, \
-                         load/store, planned Realize, and dedicated ReLU nodes. See \
-                         spec/04-type-system.md §5.7.1.",
+                         `{}` at lowered node {}",
                         other.name(),
                         node.id.0,
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
-                        729,
-                        "the HIP target dtype capability cell is not implemented"
-                    ),
+                    chelis_types::unimplemented_rejection!(729, HIP_UNSUPPORTED_DTYPE_HINT),
                 ));
             }
         }

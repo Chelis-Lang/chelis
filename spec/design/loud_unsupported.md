@@ -254,9 +254,10 @@ literal prefix `unsupported:` so tests and shells can match it. The three
 existing exemplary messages are the calibration set and must remain
 conformant when migrated:
 
-- HIP: `` `chelis build --target hip` admits `f16` only on tensor
-  load/store nodes ... See spec/04-type-system.md §5.7.1`` (names the
-  construct, the boundary, and the spec);
+- HIP: ``unsupported: narrow-float compute ...; unimplemented chelis#729:
+  this operation has no typed HIP narrow-float kernel; see
+  spec/04-type-system.md §1.1.3`` (names the construct, the boundary, and the
+  controlling matrix without repeating its capability list);
 - Metal: `` `chelis build --target metal` rejects f64 ... `` ;
 - runtime: `unsupported: destination dtype ... on to_tensor host-lane
   literal storage (runtime); ...` (migrated to the branded shape at
