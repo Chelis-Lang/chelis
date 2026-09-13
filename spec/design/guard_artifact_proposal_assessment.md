@@ -1,9 +1,10 @@
 # Guard-Artifact Proposal Assessment
 
-**Status:** PROPOSED review guidance for chelis#1868, chelis#1869, and
-chelis#1870. This document does not amend the agent contract, a numbered
-specification, or an executable oracle. Each proposal remains open until its
-own implementation and acceptance evidence land.
+**Status:** ACTIVE implementation guidance for chelis#1868, chelis#1869,
+chelis#1870, and chelis#1824. This document does not amend the agent contract,
+a numbered specification, or an executable oracle. It records which assessed
+slices have landed and the selected delivery contract for the remaining
+pull-request execution work.
 
 **Related decisions:** chelis#1824 decides where pull-request validation runs.
 Chelis#1882 reports that the wire and bindings capacity censuses run in no
@@ -12,9 +13,9 @@ manual heavy-E2E dtype job owns both censuses.
 
 **Evidence snapshot:** the original review was written on 2026-09-12 from
 `main` at `0e858f184` and later evidence through `72a1fb497`. This repository
-copy was refreshed on 2026-09-13 against `main` at `23729c638`, including every
-first-parent merge after the local report's final timestamp
-(2026-09-12 11:07 EDT). The companion
+copy was first refreshed on 2026-09-13 against `23729c638`, then refreshed
+again against `main` at `8d1293f31` after the implementation sequence through
+chelis#2008. The companion
 [`guard_artifact_proposal_evidence.md`](guard_artifact_proposal_evidence.md)
 records coverage, measurements, and known limits.
 
@@ -28,10 +29,10 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 
 | Proposal | Recommendation | Required correction or condition |
 |---|---|---|
-| chelis#1868, frozen digests | Adopt with changes, per artifact | Preserve the Phase 0 mutation implementation binding; replace growing-artifact hashes only with derived reports that retain the same review obligations and mutations. |
-| chelis#1869, inventories | Adopt with one change | Keep positive `required` vocabulary evidence at crate granularity; do not replace reviewed classifications with regeneration. |
-| chelis#1870, diagnostic pins | Adopt with changes | Use structured rejection identity for `unsupported` diagnostics, not a second prose parser; deliver the scheduled liveness canary before narrowing the pull-request check. |
-| chelis#1824, pull-request execution reach | Decide first or in parallel | A correct guard outside the pull-request selection has a delayed failure mode. Do not retire an existing guard before its replacement has an executable owner at the required cadence. |
+| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports remain. |
+| chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
+| chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
+| chelis#1824, pull-request execution reach | Adopt the change-owned lane and package expansion below | Keep local `--fast` unchanged. Add the two small replacement expand controls to the standing `ci-fast` selection, require every added or directly modified integration target to execute, and trial broader package-qualified expansion informationally until exact-head cost receipts justify requiring it. |
 | chelis#1882, scheduled census reach | Refresh or close its stale premise | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's broader demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. |
 
 The governing distinction is:
@@ -46,32 +47,171 @@ The frozen-digest corollary is:
 > not semantic evidence, and may be replaced only by a derived trigger that
 > preserves the same obligations.
 
+## chelis#1824: change-owned and changed-package pull-request execution
+
+The selected policy is neither a longer hand-maintained target list nor a full
+workspace run on every pull request. It adds a precise change-owned target
+guarantee and a broader cost-bounded changed-package trial beside the current
+standing lane.
+
+### Cadence and ownership
+
+| Surface | Result after implementation |
+|---|---|
+| Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
+| Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The manifest is currently 68 package/target identities; the first implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the planned standing set to 70. |
+| New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
+| New hosted package expansion | Informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
+| Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
+| macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
+
+The standing lane remains useful even when no package maps from a documentation
+or workflow-only change. The change-owned lane closes the structural omission
+where a pull request adds or directly changes an integration target root but no
+reviewed row names it. Package expansion may catch same-package helper and
+implementation effects without pretending to compute a reverse-dependency or
+semantic impact closure. Nightly remains the completeness net for packages the
+pull request did not directly change and for exclusions too expensive or
+prerequisite-bound for the regular lane.
+
+The two planned standing additions resolve the concrete post-chelis#1968 case
+recorded on chelis#1824. The retired spelling inventories no longer belong in
+CI, but their small behavioral replacements did not inherit a regular
+pull-request owner. `chelis-types::expand_insert_dispatch_family` protects the
+two AST dispatch positions, while
+`chelis-types::issue_1294_standard_lowerings` protects the behavioral
+expand/insert distinction. The latter also runs in the broader dtype builtin
+atom closure, but that is not ordinary per-pull-request selection. On
+`da11a6fa3`, the two targets ran 12 tests in 0.060 seconds of measured nextest
+execution. Their standing admission is an explicit ownership decision, not a
+request to restore copied counts or a precedent that every same-package test
+must enter the standing layer.
+
+### Planner contract
+
+The planner must fail closed and emit one final disposition for every changed
+path:
+
+- an exact added/directly-modified integration target;
+- one or more selected workspace packages;
+- a named standing CI or nightly owner for a reviewed shared/non-package path;
+  or
+- the existing docs-only disposition.
+
+Unknown paths, malformed configuration, stale package names, duplicate rules,
+ambiguous mappings, and paths with no disposition are planning failures. The
+first implementation should use a versioned configuration with four explicit
+row kinds:
+
+- `standing_target`: the current 68 package-qualified reviewed identities plus
+  the two explicit replacement-expand additions above;
+- `target_exclusion`: one exact package/target excluded from the change-owned
+  or package-expansion lane;
+- `test_exclusion`: one exact package/target/test excluded from an otherwise
+  selected target; and
+- `path_rule`: a shared path mapped either to exact packages or to a named
+  existing owner.
+
+Each exclusion must name its workflow, job, cadence, reason, and tracking issue.
+The three whole-target and six exact-test heavy exclusions currently expressed
+by the default nextest profile need such rows before package expansion runs
+with `--ignore-default-filter`. A newly added or modified excluded target still
+must resolve to that exact alternative owner. Cost alone is not an admission
+rule and no slow test is promoted to nightly merely because it crosses a
+timing threshold.
+
+For pull requests, the checked-out synthetic merge commit is the execution
+candidate. The planner must require exactly two parents, use `HEAD^1` as the
+base, require `HEAD^2` to equal the event pull-request head, and derive the
+NUL-delimited rename-aware change set with
+`git diff --name-status -z --find-renames BASE CANDIDATE`. A main push uses the
+event's before/after commits and the same path-classification logic.
+
+Base and candidate Cargo metadata define exact `package::target` identities and
+their `src_path`. A candidate identity absent from the base is added; an
+identity whose candidate `src_path` is in the changed-path set is directly
+modified. A renamed target is a deletion plus an addition. Changes to shared
+test helpers, package implementation, examples, scripts, specifications, or
+workspace files are not mislabelled as direct target changes; they enter
+package expansion or an explicit shared-path disposition.
+
+A target whose `required-features` are all enabled by that package's
+default-feature closure is eligible; a target requiring a non-default feature
+is not. Package qualification is mandatory: current `main` has 768
+default-eligible integration targets in a 34-package workspace; 24 packages
+currently own at least one. Thirty-six target names, covering 78 identities,
+are shared by more than one package, so the present global target-name
+uniqueness check cannot be reused.
+
+### Execution and receipts
+
+The planner writes one machine-readable plan containing the candidate and base
+SHAs, raw changed-path records, path dispositions, selected packages, eligible
+targets, the exact change-owned subset, the package-expansion subset,
+target/test exclusions, exclusion owners, and a plan digest. Exact
+`package::target` identities are assigned to four deterministic shards by
+`sha256(package + "::" + target) mod 4`. Runners execute package-scoped Cargo
+selectors so equal target names in different packages cannot create a cross
+product or ambiguity.
+
+Each shard has a 20-minute hard timeout. A 15-minute soft budget is telemetry,
+not a test failure. Every shard uploads its command, selected and executed test
+lists, timings, JUnit, and plan digest. The report job fails on a missing shard,
+digest mismatch, duplicate execution, uncovered selected target, executed
+exclusion, or non-success result. The stable `Integration Tests (Linux)`
+context eventually depends on both the standing `ci-fast` worker and this
+change-owned/package-expansion report. The report distinguishes failure of the
+precise change-owned contract from failure or budget overflow in the
+informational package expansion.
+
+### Delivery sequence
+
+1. Land this design amendment.
+2. Add the planner, versioned configuration, structural/mutation tests,
+   four-shard workflow, aggregate report, and telemetry. Add the two exact
+   replacement-expand standing rows named above. Enforce plan correctness and
+   execution of the exact change-owned subset; keep broader package expansion
+   informational. Do not alter local `--fast`, any other standing-target
+   ownership, or nightly ownership in that slice.
+3. Collect exact-head receipts from representative small, multi-package,
+   shared-path, new-target, duplicate-name, and heavy-exclusion pull requests.
+4. Make package expansion required only after those receipts show that the
+   four shards finish within budget and that every changed path receives one
+   reviewable disposition. If the package-wide heuristic does not fit, retain
+   the required change-owned guarantee and narrow or repartition the heuristic
+   rather than weakening that guarantee.
+5. Remove `PROVISIONAL pending chelis#1824` comments and close the issue only
+   after required hosted execution proves the selected contract on merged
+   `main`.
+
 ## chelis#1868: frozen digests and freeze constants
 
 The proposal covers eight artifact groups. They do not have one answer.
 
-### Phase 0 runtime-representation freeze: split, but retain mutations
+### Phase 0 runtime-representation freeze: implemented with retained mutations
 
-Keep `foundation_rows` and `source_inventory.mutations` inside the frozen
-object. Each mutation row binds a witness identity, exact implementation
-digest, expected failure, and command. The executed expected-failure contract
-cannot detect a witness rewritten to fail trivially for the expected reason.
+Chelis#1969 implemented this split. `foundation_rows` and the mutation
+projection remain inside the frozen object. Each mutation row binds a witness
+identity, exact implementation digest, expected failure, and command. The
+executed expected-failure contract alone cannot detect a witness rewritten to
+fail trivially for the expected reason.
 
-Drop `release_reproducers`, hardware probes, registered-source counts, and
-other ordinary oracle configuration from the digest. Those entries are
-reviewable directly as code and account for most routine freeze movement.
+Release reproducers, hardware registrations, registered-source counts, and
+other ordinary oracle configuration are code-derived outside the digest.
+Schema closure rejects extra stored authority, and regeneration rejects a
+retired foundation identity that reappears without a reviewed freeze move.
 
 This is not theoretical. chelis#1828 changed the implementation digest of 16
 of 44 existing mutation witnesses without adding or removing a witness. Every
 mutation still ran and passed. Only the implementation binding could reveal
 that what the witnesses checked had changed.
 
-### Phase 1 and Phase 2 selection manifests: use superset semantics
+### Phase 1 and Phase 2 selection manifests: superset semantics implemented
 
 Reject chelis#1868's original regenerate-on-failure replacement. It would
 remove the blocking check on deletion of a frozen test.
 
-Adopt chelis#1869's superset form:
+Chelis#1959 implemented chelis#1869's superset form:
 
 - every frozen identity remains listed;
 - every listed identity is non-ignored, selected, executed, and passing;
@@ -164,7 +304,7 @@ its owning explanation while preserving the classifier, baseline, inventory,
 comparison, and denominator. That is the right repair shape for a
 judgement-bearing guard.
 
-### Replace the two expand inventories
+### Expand inventories: replacement and retirement implemented
 
 The compiler checker owns the semantic property: rank-raising use must not
 survive under the `expand` spelling. The inventory scanners count textual
@@ -187,26 +327,30 @@ is the semantic classification written beside the count. The repair therefore
 strengthens the replacement case rather than showing that the list owns the
 language property.
 
-Do not delete the inventories first. Land the checker-backed or derived
-replacement beside them, demonstrate the existing added/missing mutations,
-then remove the hand copy.
+Chelis#1968 completed that sequencing and removed both
+`expand_call_site_inventory` and
+`expand_insert_source_literal_inventory` after the checker-backed semantic
+contract and its tests owned the property. Chelis#1998 then removed the stale
+`ci-fast` row that still named the retired insert inventory. The assessment's
+replacement recommendation is therefore implemented; neither inventory should
+be restored as a copied count.
 
-### Keep crate-granular positive vocabulary evidence
+### Crate-granular positive vocabulary evidence: implemented
 
-Do not drop `required` markers from
-`closed_vocabulary_architecture.rs`. Make them crate-granular so an owner may
-move within the consumer crate without failing a file-path pin.
+Chelis#1960 retained the `required` markers in
+`closed_vocabulary_architecture.rs` and made their evidence crate-granular, so
+an owner may move within the consumer crate without failing a file-path pin.
 
 The `forbidden` list names only spellings already imagined. It cannot prove
 that some typed path is used at all. Positive crate-level evidence directly
 addresses the risk that an orthogonal implementation bypasses the tagged
 carrier or typed vocabulary.
 
-### Header censuses need hermetic closure
+### Header census discovery closure: implemented
 
-Adopt the Phase 0 scanner's closure contract for backend header lanes:
-freestanding preprocessing, committed SDK fixtures, complete attributed
-include closure, and a planted include-outside-universe mutation.
+Chelis#1963 adopted the Phase 0 scanner's closure contract for backend header
+lanes: committed SDK fixtures, complete attributed include closure, and
+planted include-outside-universe controls.
 
 Do not add a Metal SDK stub merely to satisfy the current lane. A header made
 only of `static inline` functions produces no exported ABI row; the lane must
@@ -222,19 +366,25 @@ target-manifest repair was required.
 This is the successful comparator for the expand inventories: derived
 selection plus a current tripwire, rather than a count copied beside the tree.
 
-### `.config/ci-test-targets.toml` remains chelis#1824's decision
+### `.config/ci-test-targets.toml` becomes the standing layer
 
-The file grew from 53 to 61 targets after the original assessment:
+The file grew from 53 to 68 targets after the original assessment:
 
 - three targets in chelis#1894;
 - three targets in chelis#1918; and
-- two targets in chelis#1926.
+- two targets in chelis#1926;
+- four targets for caller/formal and gradient-result scope;
+- one wildcard-absorption target;
+- two pipe-fold placement/surface targets; and
+- one symbolic-reshape regression target, offset by retirement of the insert
+  inventory row.
 
-All eight were added by the pull request introducing or depending on those
-tests. That is useful immediate protection, but still reactive growth without
-an admission rule. chelis#1824 must decide default inclusion, exclusions,
-change detection, and cost ownership. This assessment does not prescribe a
-longer hand-maintained list.
+Those rows are useful immediate protection, but still reactive growth without
+an admission rule. The chelis#1824 decision above therefore freezes their role
+as the standing baseline rather than prescribing a longer hand-maintained
+list. New or changed package integration targets enter regular hosted coverage
+through the derived dynamic lane; durable additions to the standing layer
+remain an explicit review decision.
 
 ## chelis#1870: diagnostic pins and rejection identity
 
@@ -295,19 +445,25 @@ Either way, chelis#1870's migration inventory must include both sites.
 - Use one source for narrow-float capability prose, then point users to the
   normative dtype matrix rather than restating its contents.
 
-### Deliver the canary before narrowing liveness
+### Standing canary delivered; changed-row narrowing remains
 
-The §C7.5 scheduled workflow still does not exist on `main`. The pull-request
-job still validates the standing issue manifest. Therefore the current job is
-still the only automated monitor for a cited issue that closes.
+Chelis#1961 made standing issue membership source-derived, and chelis#1971
+landed `.github/workflows/loud-unsupported-nightly.yml` with daily/manual
+execution, serialized reporting, duplicate recovery, and close-on-recovery.
+The pull-request job still validates the standing issue manifest. The first
+manual default-branch receipt, workflow run `34765689930`, passed on
+`da11a6fa388e7f52465cc28728513a331a85cac5` in 10 minutes 45 seconds. Its
+status job completed successfully without opening a failure issue.
 
-Land and validate both of these before narrowing the pull-request job:
+The sequencing preconditions are now satisfied:
 
-1. a source-derived manifest that cannot retain an uncited row; and
-2. the scheduled standing-liveness canary, including its workflow-registry and
+1. the source-derived manifest cannot retain an uncited row; and
+2. the scheduled standing-liveness canary has workflow-registry and
    trigger-loop controls.
 
-Then restrict the pull-request check to rows the change adds or modifies.
+Restricting the pull-request check to rows the change adds or modifies remains
+a separate implementation slice. The standing nightly continues to own every
+source-derived row after that narrowing.
 
 ## Deterrence and execution reach
 
@@ -330,23 +486,26 @@ Pull-request execution reach remains the largest immediate gap:
 
 | Guard | Pull-request reach and delayed owner |
 |---|---|
-| `expand_call_site_inventory` | Not selected by `ci-fast`; reached by the daily/manual full-workspace and generalization jobs |
-| `expand_insert_source_literal_inventory` | Selected by `ci-fast` and reached by the daily/manual broad jobs |
+| retired `expand` spelling inventories | Correctly absent after chelis#1968/chelis#1998; they must not be restored |
+| `chelis-types::expand_insert_dispatch_family` | Small AST-position replacement is currently absent from regular PR selection; add it to the standing manifest |
+| `chelis-types::issue_1294_standard_lowerings` | Behavioral replacement runs in broader dtype closure but not ordinary PR selection; add it to the standing manifest |
 | rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
-| §C7.5 standing-liveness canary | Workflow absent |
+| §C7.5 standing-liveness canary | Daily/manual workflow on `main`; the regular PR job still checks the standing manifest until changed-row narrowing lands |
+| newly added or changed package integration target | Nightly is automatic; regular PR execution is still omitted unless the target is in the 68-row standing manifest, pending the change-owned lane selected above |
 
-The contrast between the two expand inventories is useful but not a complete
-mechanism verdict. The selected insert inventory remained synchronized through
-chelis#1910 and chelis#1926; the unselected call-site inventory drifted and
-needed chelis#1936. Distribution determines whether a defect is loud. It does
-not turn a copied count into semantic authority.
+The former contrast between the two expand inventories remains historical
+evidence for execution reach. The selected insert inventory stayed
+synchronized longer than the unselected call-site inventory, but both were
+still copied counts and are now retired. Distribution determines whether a
+defect is loud. It does not turn a copied count into semantic authority.
 
 ## Post-review merge audit
 
 Every first-parent merge after the local assessment's final timestamp was
-classified:
+classified. The table lists the merges that changed an assessed guard
+mechanism or supplied an implementation receipt:
 
 | Pull request | Relevant effect |
 |---|---|
@@ -362,10 +521,21 @@ classified:
 | chelis#1911 | Updated the runtime-extent derived target manifest in the owning feature change. |
 | chelis#1936 | Repaired the post-chelis#1914 expand count from 32 to 34 and proved the scanner's added/missing sensitivity. |
 | chelis#1943 | Updated the runtime-extent derived target manifest in the owning feature change; added an exact lowering diagnostic contract outside chelis#1870's unsupported scope. |
+| chelis#1959 | Implemented Phase 1/2 selection-superset semantics. |
+| chelis#1960 | Kept positive vocabulary evidence and moved it to crate-granular ownership. |
+| chelis#1961 | Derived the rejection-issue manifest from source. |
+| chelis#1963 | Closed backend-header census discovery over its attributed universe. |
+| chelis#1968 | Retired both redundant expand spelling inventories after checker-backed replacement. |
+| chelis#1969 | Implemented the Phase 0 foundation/mutation freeze split and shrink-only regeneration contract. |
+| chelis#1971 | Added the daily/manual standing rejection-liveness canary. |
+| chelis#1972 | Unified narrow-float capability diagnostic identity. |
+| chelis#1973 | Landed the structured unsupported-identity trial while preserving adapter rendering compatibility and reviewed exact-text contracts. |
+| chelis#1998 | Removed the stale `ci-fast` row for the retired insert inventory. |
 
-None implements or closes chelis#1868, chelis#1869, or chelis#1870.
+These merges implement the listed slices but do not close the broader
+chelis#1868, chelis#1869, or chelis#1870 trackers.
 
-## Current-main extended validation
+## Historical extended validation at `23729c638`
 
 Workflow-dispatched Linux Extended Validation run `34728303804` completed on
 the exact assessed head, `23729c638098f40e72b9a9834c6338318c41a5ba`.
@@ -421,27 +591,24 @@ The remaining failures reconfirm already-open work, including chelis#1746,
 chelis#1776, chelis#1779, chelis#1784, chelis#1842, chelis#1861 through
 chelis#1864, chelis#1866, chelis#1881, and chelis#1917. They do not change the
 mechanism conclusions here. In particular, the rejected-cells corpus passed
-in the dtype union, while the §C7.5 standing-liveness canary remains absent;
-chelis#1870's structured-identity and sequencing recommendation is unchanged.
+in the dtype union. The §C7.5 standing-liveness canary was absent on that
+historical assessed head; chelis#1971 has since delivered it. The
+structured-identity recommendation has since landed as the bounded
+chelis#1973 trial.
 
-## Review and delivery order
+## Remaining delivery order
 
-1. Adopt chelis#1869's disposition-versus-regeneration rule as the governing
-   design sentence; treat the digest rule as its corollary.
-2. Give the retained guards executable owners at their required cadence. Treat
-   chelis#1882's scheduled-owner premise as satisfied by the dtype Phase 0-3
-   job, and decide chelis#1824 for pull-request selection rather than adding
-   targets indefinitely.
-3. Trial replacements beside existing guards:
-   - derive Phase 4B changed atoms and regions while retaining the digest;
-   - derive the Phase 3 changed-test set while retaining definition hashes;
-   - add structured unsupported identity checks while retaining snapshots; and
-   - measure Phase 1 superset behavior without changing acceptance.
-4. Require every replacement to fail on the planted mutation that justified
-   the old guard.
-5. Deliver the §C7.5 canary, then narrow liveness.
-6. Retire old artifacts only after the parallel trial records equivalent
-   detection and review output.
+1. Land the chelis#1824 design and change-owned execution guarantee with
+   informational package expansion, collect exact-head cost/completeness
+   receipts, then decide whether to require the broader expansion.
+2. Narrow rejection-issue validation on pull requests to changed rows while
+   retaining the delivered standing nightly over the complete source-derived
+   manifest.
+3. Trial Phase 3 changed-test and Phase 4B changed-atom/region reports beside
+   their existing digests. Require every replacement to fail on the planted
+   mutation that justified the old guard.
+4. Retire a remaining old artifact only after parallel evidence records
+   equivalent detection, review prompts, and executable ownership.
 
 Record the three proposal implementations as one coordinated decision even if
 delivery is split into separate pull requests. The interactions are semantic:
@@ -456,9 +623,14 @@ This assessment does not establish:
 - whether reviewers re-read every changed atom when a digest moves;
 - whether required-literal anchors would continue to grow without the current
   digest round trip;
-- whether the primary backend-header census shares the host-SDK exposure found
-  in the device lanes; or
-- the final cost and pull-request scheduling policy chelis#1824 must place.
+- steady-state standing-liveness cost beyond the first successful
+  10-minute-45-second default-branch receipt;
+- whether the chelis#1824 package-expansion heuristic fits its four 20-minute
+  shard budgets on representative exact-head pull requests;
+- whether shared-path rules need additional package mappings after the
+  informational trial; or
+- the evidence threshold for adding a target permanently to the standing
+  68-row layer instead of leaving it dynamically selected.
 
-Those unknowns are reasons to run parallel trials, not reasons to silently
-remove or indefinitely retain the current artifacts.
+Those unknowns are reasons for the informational trial and its receipts, not
+reasons to silently remove coverage or resume indefinite target-list growth.

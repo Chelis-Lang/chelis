@@ -6,9 +6,9 @@ It records what was inspected, the measurements that changed a verdict, the
 post-review refresh, and what remains inferred. It is not normative authority
 and does not by itself authorize an oracle change.
 
-**Tracking:** chelis#1868, chelis#1869, chelis#1870. Related execution-reach
-decision: chelis#1824. Chelis#1882's local-only premise is contradicted by the
-current heavy-E2E dtype owner and should be refreshed separately.
+**Tracking:** chelis#1868, chelis#1869, chelis#1870, and chelis#1824.
+Chelis#1882's local-only premise is contradicted by the current heavy-E2E dtype
+owner and should be refreshed separately.
 
 ## Review method
 
@@ -26,31 +26,33 @@ A second pass read the originating rationale for the Phase 0 freeze, Phase 3
 definition digests, and Phase 4B atom and region digests, then ran recurrence
 searches for the census and substitution-count ratchets.
 
-The 2026-09-13 refresh classified every first-parent merge after the local
-report's final timestamp and inspected the changed artifacts, owning pull
-request threads, and current CI reach through `main` at `23729c638`.
+The first 2026-09-13 refresh classified every first-parent merge after the
+local report's final timestamp and inspected the changed artifacts, owning
+pull-request threads, and CI reach through `main` at `23729c638`. A second
+refresh through `main` at `8d1293f31` classified the implementation sequence
+through chelis#2008 and re-measured the current PR integration surface.
 
 ## Per-artifact rationale coverage
 
 | Artifact | Owning rationale inspected | Assessment basis | Current conclusion |
 |---|---|---|---|
-| Phase 0 `FREEZE_SHA256` | `runtime_representation.md` §B1 and `coverage_manifest()` | Parsed freeze movement and mutation identity changes | Freeze `foundation_rows` plus `source_inventory.mutations`; drop ordinary oracle configuration. |
-| Phase 1/2 `MANIFEST_SHA256` | Selection code and proposal history | Equality behavior, chelis#1817 drift, interaction with removal | Use superset semantics; additions report, removals fail. |
+| Phase 0 `FREEZE_SHA256` | `runtime_representation.md` §B1 and `coverage_manifest()` | Parsed freeze movement and mutation identity changes | Implemented by chelis#1969: frozen foundation plus mutation implementation binding; ordinary oracle configuration is code-derived. |
+| Phase 1/2 `MANIFEST_SHA256` | Selection code and proposal history | Equality behavior, chelis#1817 drift, interaction with removal | Implemented by chelis#1959: additions report and execute; removals fail. |
 | Phase 3 required-test digests | `faithful_observation.md` Phase 3 rationale and oracle mutations | Originating failure classes, chelis#1724, chelis#1818, chelis#1918 | Replace only with a derived changed-test report preserving comparator and mutation obligations. |
 | Phase 4B atom/region digests | Oracle doctrine, dtype amendment ledger, post-chelis#1495 moves | Per-move anchor and region classification | Replace only with atom-granular derived reporting, acknowledgements, anchors, and doctrine. |
 | Phase A digest | Runtime-extent design and move receipts | Closed corpus, measured moves | Keep while Phase A remains closed. |
 | Nix workflow digest | Test docstring and issue history | Temporary event policy, no movement | Keep with an explicit retirement condition. |
 | Loud-unsupported count baseline | Loud-unsupported rationale and chelis#1348 | Shrink-only census and true catches | Keep. |
-| Expand call/insert inventories | Headers, checker owner, history, chelis#1936 mutations | Scanner sensitivity versus semantic classification | Replace after checker-backed or derived coverage runs beside them. |
-| Closed-vocabulary markers | Complete test header/tables and known evasions | Positive use versus finite forbidden spellings | Keep `required` at crate granularity; keep and widen structural forbidden detection. |
+| Expand call/insert inventories | Headers, checker owner, history, chelis#1936 mutations | Scanner sensitivity versus semantic classification | Retired by chelis#1968 after checker-backed replacement; stale PR selection removed by chelis#1998. |
+| Closed-vocabulary markers | Complete test header/tables and known evasions | Positive use versus finite forbidden spellings | Crate-granular positive evidence implemented by chelis#1960. |
 | Capacity census baselines and registries | Agent contract, census implementation, representative review history | Rows carry authority a machine cannot invent | Keep; improve executable reach and hermetic closure. |
-| Backend header lanes | Phase 0 closure precedent and device-lane preprocessing probes | Host SDK leakage and zero-row Metal lane | Adopt hermetic attributed closure before relying on the lane. |
+| Backend header lanes | Phase 0 closure precedent and device-lane preprocessing probes | Host SDK leakage and zero-row Metal lane | Complete attributed discovery and SDK fixtures implemented by chelis#1963. |
 | Runtime-extent target manifest | Manifest code, tripwire, post-review changes | Five synchronized feature changes, no repair-only drift | Keep. |
-| `.config/ci-test-targets.toml` | chelis#1824 and current history | 53 to 61 post-review growth | Do not decide here; require an admission and omission-detection rule. |
+| `.config/ci-test-targets.toml` | chelis#1824 and current history | 53 to 68 growth; 768 default-eligible integration targets and 36 duplicate names across packages | Keep the 68 rows as a standing layer; require every added/directly-modified target to execute and trial broader package-qualified expansion rather than growing the list by default. |
 | Rejected-cells corpus | File contract, unsupported structure, collect-all and mutation probe | Byte drift versus stable identity, cross-lane skew | Structured identity blocking; wording snapshot reviewed. |
 | Dropout gate rows | Gate implementation and entry-path findings | Real behavior changes and policy-fork detection | Keep, with per-target and per-entry claims. |
-| Rejection-authority liveness | Design §C2.1/§C7.5, workflow, validator | Useful audits, bystander failures, missing scheduled half | Keep membership; deliver scheduled standing check before narrowing PR liveness. |
-| Narrow-float messages | Dtype matrix, compiler copies, chelis#1871 | Triplicated prose disagrees with normative source | Share identity and point to the matrix instead of restating it. |
+| Rejection-authority liveness | Design §C2.1/§C7.5, workflow, validator | Useful audits, bystander failures, scheduled-owner sequencing | Source-derived membership landed in chelis#1961 and the standing scheduled check in chelis#1971; changed-row PR narrowing remains. |
+| Narrow-float messages | Dtype matrix, compiler copies, chelis#1871 | Triplicated prose disagrees with normative source | Shared capability identity implemented by chelis#1972. |
 
 ## Measurements that changed or constrained verdicts
 
@@ -166,33 +168,64 @@ superset semantics, while leaving deletion and rename blocking.
 ### CI target-list growth
 
 At the local report cutoff, `.config/ci-test-targets.toml` contained 53 target
-entries. At `23729c638` it contained 61.
+entries. At `23729c638` it contained 61. At `8d1293f31` it contains 68.
 
 | Merge | Added targets |
 |---|---:|
 | chelis#1894 | 3 |
 | chelis#1918 | 3 |
 | chelis#1926 | 2 |
+| Later caller/formal and gradient-result scope | 4 |
+| Wildcard-absorption coverage | 1 |
+| Pipe-fold placement and surface coverage | 2 |
+| Symbolic-reshape regression | 1 |
+| Retired insert inventory row | -1 |
 
 The additions are legitimate, but each came from the pull request currently
 needing the test. No rule derives omissions or states which future test target
-must be selected. The measurement strengthens chelis#1824's decision request;
-it does not determine which of that issue's execution policies is best.
+must be selected.
+
+Current Cargo metadata contains 768 default-eligible integration targets in a
+34-package workspace; 24 packages currently own at least one. Thirty-six
+target names, covering 78 identities, occur in more than one package. The
+standing file covers 68 exact package/target identities in 11 packages. Those
+measurements rule out reusing its current global target-name uniqueness check
+for a dynamic lane. They support package-qualified exact changed-target
+execution and justify treating broader package expansion as a measured
+heuristic rather than an impacted-test completeness claim.
+
+Jeff Smith's incoming-main audit on chelis#1824 identified a concrete ownership
+case after chelis#1968/chelis#1998. The retired
+`expand_call_site_inventory` and `expand_insert_inventory` rows are correctly
+gone, but neither `chelis-types::expand_insert_dispatch_family` nor
+`chelis-types::issue_1294_standard_lowerings` is in the standing manifest. The
+first protects the replacement AST dispatch positions. The second protects the
+behavioral expand/insert distinction and participates in the broader dtype
+builtin atom closure, which is not an ordinary per-pull-request owner.
+
+An exact local run on `da11a6fa3` executed both replacement targets together:
+12 tests passed in 0.060 seconds of nextest execution. The selected policy adds
+both exact package/target identities to the standing manifest, taking it from
+68 to 70 rows when implemented. This is a bounded correction for controls that
+replace a previously selected guard class; it does not restore the copied
+inventories or claim that every test in `chelis-types` belongs in standing CI.
 
 ## Current executable reach
 
-Checked on `main` at `23729c638`:
+Checked on `main` at `8d1293f31`:
 
 | Artifact or test | Reach |
 |---|---|
-| `expand_call_site_inventory` | Absent from `.config/ci-test-targets.toml`; reached by daily/manual broad jobs |
-| `expand_insert_source_literal_inventory` | Present in `.config/ci-test-targets.toml` and reached by daily/manual broad jobs |
+| checker-backed `expand` contract | Both copied inventories are retired; semantic coverage remains in ordinary package tests and daily/manual broad jobs |
+| `chelis-types::expand_insert_dispatch_family` | Absent from current `ci-fast`; selected to enter the standing manifest as a small replacement AST-position control |
+| `chelis-types::issue_1294_standard_lowerings` | Absent from current `ci-fast`; reached by the broader dtype builtin atom closure and selected to enter the standing manifest for ordinary PR ownership |
 | `issue_687_rejected_cells_corpus` | Present in `.config/ci-test-targets.toml` and reached by daily/manual broad jobs |
 | `phase3_gate_contract` | Present in `.config/ci-test-targets.toml` and reached by daily/manual broad jobs |
 | `capacity_census_wire` | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 oracle |
 | `capacity_census_bindings` | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 oracle |
-| §C7.5 `loud-unsupported-nightly.yml` | File absent |
+| §C7.5 `loud-unsupported-nightly.yml` | Daily/manual standing-liveness owner on `main`; first default-branch run `34765689930` passed on `da11a6fa3` in 10m45s without opening a failure issue |
 | current rejection-issue validator | Runs in `ci.yml` against the standing manifest |
+| new/changed integration target outside the current standing manifest | Automatically reached by full Linux nightly; omitted from regular PR execution until the exact change-owned lane lands |
 
 The generic heavy-E2E workspace and generalization commands exclude both
 capacity binaries, but `.config/nextest.toml` delegates them to the dtype
@@ -206,7 +239,7 @@ it is not the same condition as a local-only guard. Chelis#1882's stated
 requirement that the census be reachable from some citable automated job is
 therefore met on this head; chelis#1824 still owns the per-pull-request policy.
 
-## Current-main extended-run evidence
+## Historical extended-run evidence at `23729c638`
 
 Linux Extended Validation run `34728303804` was manually dispatched on
 2026-09-13 and completed against
@@ -332,16 +365,19 @@ Post-review merges added exact diagnostic checks for different reasons:
 - chelis#1926 requires exact public fatal diagnostic transport after helper
   probe cleanup; and
 - chelis#1918 added exact unsupported-softmax stderr in both a shipped-example
-  census and parity test.
+  census and parity test; while
+- chelis#1973 added typed unsupported identity through the compiler/API adapter
+  boundary while retaining compatible rendered text and the reviewed exact
+  snapshots.
 
 The first two classes have explicit owning claims about exact observable
 rendering. They are not evidence that all prose should become identity-only.
 
 The chelis#1918 unsupported copies do fall within chelis#1870's design question
-because the numbered unsupported contract identifies structured fields. The
-implementation review must decide whether the executable example intentionally
-adds a stronger exact-text contract. Until that decision, the sites belong in
-the migration inventory and must not be silently weakened.
+because the numbered unsupported contract identifies structured fields.
+Chelis#1973 deliberately retained them as reviewed exact-text contracts while
+adding typed identity beside the rendering. Later migrations may revisit those
+sites, but the bounded trial did not silently weaken them.
 
 ## Evidence still missing
 
@@ -351,9 +387,11 @@ The review did not establish:
   green result;
 - complete review-thread behavior for every historical digest move;
 - whether atom anchors continue to grow without the current oracle-file edit;
-- primary backend-header exposure under a hermetic SDK closure;
-- the runtime and cost of a scheduled standing-liveness canary; or
-- the best target-selection policy under chelis#1824.
+- steady-state standing-liveness cost beyond the first successful
+  10-minute-45-second default-branch receipt;
+- the exact cost distribution of changed-package expansion on representative
+  pull requests; or
+- whether reviewed shared-path rules need broader package mappings.
 
 Each implementation slice should close only the unknowns it needs. None of
 these gaps justifies a broad “remove all ratchets” or “retain all ratchets”
