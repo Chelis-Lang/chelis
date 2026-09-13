@@ -523,6 +523,134 @@ fn both_lanes_execute(dir: &TempDir, stem: &str, source: &str, printed: &str) {
     }
 }
 
+#[test]
+fn vmap_ordinary_shape_value_executes_on_both_lanes() {
+    let dir = TempDir::new().unwrap();
+    for (name, result_type, body, printed) in [
+        (
+            "read",
+            "int64",
+            "shape(x, 0)",
+            "tensor(shape=[2], data=[3, 3])",
+        ),
+        (
+            "cast",
+            "f32",
+            "x |> shape(0) |> cast(f32)",
+            "tensor(shape=[2], data=[3.0, 3.0])",
+        ),
+    ] {
+        for (axis, data) in [
+            (0, "[[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]"),
+            (1, "[[1.0f32, 4.0f32], [2.0f32, 5.0f32], [3.0f32, 6.0f32]]"),
+        ] {
+            let axis_argument = if axis == 0 { "" } else { ", axis=1" };
+            let source = format!(
+                "def width(x: tensor[3, f32]) -> {result_type} = {body}\nout = vmap(width{axis_argument})(to_tensor({data}))\n"
+            );
+            both_lanes_execute(
+                &dir,
+                &format!("shape_value_{name}_{axis}"),
+                &source,
+                printed,
+            );
+        }
+    }
+}
+
+#[test]
+fn vmap_ordinary_shape_root_transport_preserves_repeated_result_leaves() {
+    let dir = TempDir::new().unwrap();
+    let source = "def pair(x: tensor[3, f32]) -> (tensor[3, f32], tensor[3, f32], tensor[3, f32]) = {\n  y = x\n  z = neg(y)\n  (y, z, y)\n}\nout = vmap(pair)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let path = fixture(&dir, "repeated_vmap_roots.ch", source);
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let roots = result["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 3);
+    for (index, bits) in [
+        [
+            "3f800000", "40000000", "40400000", "40800000", "40a00000", "40c00000",
+        ],
+        [
+            "bf800000", "c0000000", "c0400000", "c0800000", "c0a00000", "c0c00000",
+        ],
+        [
+            "3f800000", "40000000", "40400000", "40800000", "40a00000", "40c00000",
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(roots[index]["name"], format!("out.{index}"));
+        assert_eq!(
+            roots[index]["value"]["value"],
+            serde_json::json!({
+                "shape": [2, 3], "data": {"dtype": "f32", "bits": bits}
+            })
+        );
+    }
+}
+
+#[test]
+fn vmap_ordinary_shape_preserves_the_nested_gradient_claim() {
+    let dir = TempDir::new().unwrap();
+    for extent in [2, 3] {
+        let row = if extent == 2 {
+            "[2.0f32, 7.0f32]"
+        } else {
+            "[2.0f32, 7.0f32, 11.0f32]"
+        };
+        let source = format!(
+            "def claim(x: tensor[n, f32]) -> tensor[2, f32] = shrink(x, [[0i64, shape(x, 0)]])\ndef loss(x: tensor[{extent}, f32]) -> f32 = cast(shape(claim(x), 0), f32)\nout = vmap(grad(loss))(to_tensor([{row}, {row}]))\n"
+        );
+        let path = fixture(&dir, &format!("nested_shape_{extent}.ch"), &source);
+        let output = Command::cargo_bin("chelis")
+            .unwrap()
+            .env_remove("CHELIS_STYLE_GATE_DISABLE")
+            .args([
+                "eval",
+                "--file",
+                path.to_str().unwrap(),
+                "--json",
+                "--timeout",
+                "20",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if extent == 2 {
+            assert!(output.status.success(), "{stderr}");
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["roots"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                result["roots"][0]["value"]["value"],
+                serde_json::json!({
+                    "shape": [2, 2],
+                    "data": {"dtype": "f32", "bits": ["00000000", "00000000", "00000000", "00000000"]}
+                })
+            );
+        } else {
+            assert!(!output.status.success());
+            assert!(stderr.contains("claimed = 2"), "{stderr}");
+            assert!(stderr.contains("shrink axis 1 = 3"), "{stderr}");
+            assert!(
+                stderr.contains("numeric trap: domain in shrink at int64"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("extent source(s)"), "{stderr}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Guard-order controls.
 // ---------------------------------------------------------------------------

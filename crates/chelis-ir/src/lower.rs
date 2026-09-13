@@ -6042,6 +6042,28 @@ fn extract_fn_return_type(expr: &Expr) -> Option<&Expr> {
     fn_kids.last()
 }
 
+/// Vectorization preserves root order, but shared scalars gain final broadcast
+/// roots distinct from their raw operator IDs. DAG roots are unique; result
+/// leaves may repeat and must be looked up individually in this correspondence.
+fn vectorized_root_map(before: &Dag, after: &Dag) -> Result<UnordMap<NodeId, NodeId>, String> {
+    if before.roots().len() != after.roots().len() {
+        return Err("vectorized root cardinality changed".into());
+    }
+    let mut mapped = UnordMap::new();
+    let mut destinations = UnordSet::new();
+    for (&old, &new) in before.roots().iter().zip(after.roots()) {
+        if !before.get(old).is_some_and(|node| node.id == old)
+            || !after.get(new).is_some_and(|node| node.id == new)
+        {
+            return Err("vectorized root correspondence contains an invalid node ID".into());
+        }
+        if mapped.insert(old, new).is_some() || !destinations.insert(new) {
+            return Err("vectorized root correspondence contains a duplicate root".into());
+        }
+    }
+    Ok(mapped)
+}
+
 fn axis_to_front_perm(rank: usize, axis: usize) -> Vec<usize> {
     let mut perm = Vec::with_capacity(rank);
     perm.push(axis);
@@ -9919,11 +9941,31 @@ impl<'program> LowerCtx<'program> {
             &vmapped_param_types,
             &canonical_actual_types,
         );
+        let roots =
+            vectorized_root_map(&subctx.dag, &specialized_vmapped).unwrap_or_else(|message| {
+                raise_fatal_lowering_error(
+                    format!("internal `vmap` root correspondence failed: {message}"),
+                    Some(body.span()),
+                    body.span_id().map(ToOwned::to_owned),
+                )
+            });
         let remap = self.splice_dag(&specialized_vmapped, &arg_map);
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
-            .map(|node| remap[&node])
+            .map(|node| {
+                roots
+                    .get(&node)
+                    .and_then(|root| remap.get(root))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "internal `vmap` result leaf has no spliced final root",
+                            Some(body.span()),
+                            body.span_id().map(ToOwned::to_owned),
+                        )
+                    })
+            })
             .collect::<Vec<_>>();
         if axis > 0 {
             for result in &mut flattened {
@@ -17411,6 +17453,62 @@ mod fused_zero_tests {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[test]
+    fn vectorized_root_map_checks_the_complete_correspondence() {
+        let mut before = Dag::new();
+        let x = before.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let y = before.add_node(
+            RiscOp::Neg,
+            vec![x],
+            before.get(x).unwrap().output_type.clone(),
+            None,
+        );
+        before.set_roots(vec![y, x]);
+        let mut after = before.clone();
+        after.set_roots(vec![x, y]);
+        let mapping = vectorized_root_map(&before, &after).unwrap();
+        assert_eq!([mapping[&y], mapping[&x], mapping[&y]], [x, y, x]);
+        after.set_roots(vec![x]);
+        assert!(
+            vectorized_root_map(&before, &after)
+                .unwrap_err()
+                .contains("cardinality")
+        );
+        after.set_roots(vec![x, x]);
+        assert!(
+            vectorized_root_map(&before, &after)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        after.set_roots(vec![x, NodeId(99)]);
+        assert!(
+            vectorized_root_map(&before, &after)
+                .unwrap_err()
+                .contains("invalid")
+        );
+        after.set_roots(vec![x, y]);
+        before.set_roots(vec![y, y]);
+        assert!(
+            vectorized_root_map(&before, &after)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        before.set_roots(vec![NodeId(99), y]);
+        assert!(
+            vectorized_root_map(&before, &after)
+                .unwrap_err()
+                .contains("invalid")
+        );
+    }
 
     #[test]
     fn evaluation_normalization_drops_only_inert_scope_witnesses() {

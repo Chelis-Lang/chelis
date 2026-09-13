@@ -141,6 +141,11 @@ name = "unresolved_operand_matrix"
 package = "chelis-cli"
 name = "issue_1801_wildcard_absorption"
 
+# chelis#2003: scalar Shape identity, batching, and malformed-read refusal.
+[[target]]
+package = "chelis-ir"
+name = "vmap"
+
 [[target]]
 package = "chelis-compiler-api"
 name = "pipeline_contract"

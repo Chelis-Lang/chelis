@@ -5,6 +5,113 @@ use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
+/// #2003: a metadata read is scalar even without a movement-bound consumer.
+#[test]
+fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
+    for batch in [
+        DimInfo::Lit(2),
+        DimInfo::Lit(0),
+        DimInfo::Named("batch".into(), None),
+    ] {
+        let count = if batch == DimInfo::Lit(0) { 0 } else { 2 };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+        let shape = dag.add_node(
+            RiscOp::Shape { axis: 0 },
+            vec![x],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let cast = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![shape],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let sum = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![x],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let mixed = dag.add_node(
+            RiscOp::Add,
+            vec![sum, cast],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        for root in [shape, cast, mixed] {
+            dag.add_root(root);
+        }
+        let mapped = vectorize_axis0(&dag, batch).unwrap();
+        let reads: Vec<_> = mapped
+            .nodes()
+            .iter()
+            .filter(|n| matches!(n.op, RiscOp::Shape { .. }))
+            .collect();
+        assert_eq!(reads.len(), 1);
+        assert!(reads[0].output_type.dims.is_empty());
+        assert!(matches!(reads[0].op, RiscOp::Shape { axis: 1 }));
+        assert!(chelis_ir::verify::verify(&mapped).is_empty());
+        chelis_ir::axis_sources::check_axis_sources(
+            &mapped,
+            chelis_types::unsupported::Stage::Runtime,
+        )
+        .unwrap();
+        let values = eval_tensor_roots_with_strict(&mapped, mapped.roots(), |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![count, 3], vec![2.0; count * 3]))
+        })
+        .unwrap();
+        for (root, precision, expected) in [
+            (mapped.roots()[0], Prim::Int64, 3.0),
+            (mapped.roots()[1], Prim::F32, 3.0),
+            (mapped.roots()[2], Prim::F32, 9.0),
+        ] {
+            assert_eq!(values[&root].shape, vec![count]);
+            assert_eq!(values[&root].prim(), precision);
+            assert_eq!(values[&root].to_f64_lossy_vec(), vec![expected; count]);
+        }
+    }
+}
+
+#[test]
+fn vmap_ordinary_shape_rejects_a_malformed_ranked_read() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let bad = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_root(bad);
+    let error = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap_err();
+    assert!(
+        error.contains("produces rank 1 rather than one shared scalar"),
+        "{error}"
+    );
+}
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
