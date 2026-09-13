@@ -383,6 +383,7 @@
         "a_non_unit_stride_op_computed_extent_remains_unadmitted",
         "a_non_zero_pad_extent_is_guarded_on_both_lanes",
         "a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs",
+        "a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         "a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
         "a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
         "a_piped_shape_read_of_a_non_tensor_is_still_sourceless",
@@ -410,6 +411,9 @@
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         "a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval",
         "a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli",
+        "a_split_kernel_tuple_root_executes_when_its_repeated_binder_agrees",
+        "a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
+        "a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
         "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
         "a_synthesized_kernel_parameter_collision_emits_no_guard",
         "a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c",
@@ -419,6 +423,7 @@
         "a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
         "a_zero_positional_replacement_declares_an_empty_axis_on_c",
         "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
+        "aliased_parameter_types_keep_the_entry_binder_guard",
         "an_abi_promised_entailing_extent_keeps_its_literal_guard",
         "an_earlier_trap_preempts_the_extent_guard_on_eval",
         "an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c",
@@ -459,8 +464,10 @@
         "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_eval",
         "issue_597_positional_same_rank_replacement_executes_on_c",
         "issue_665_expand_over_stride_builds_and_runs",
+        "literal_parameter_obligations_keep_the_existing_helper_order",
         "load_and_op_output_members_share_one_guarded_class_on_eval",
         "load_load_named_class_guards_every_non_canonical_member_on_eval",
+        "malformed_parameter_ranks_keep_the_existing_helper_diagnostic",
         "no_environment_variable_disables_the_named_claim_guard",
         "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
         "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
@@ -482,7 +489,8 @@
         "two_expands_over_one_operand_axis_share_one_guard",
         "two_op_output_members_guard_against_the_canonical_member_on_c",
         "two_op_output_members_guard_against_the_canonical_member_on_eval",
-        "two_record_paths_that_join_to_one_string_get_two_locals"
+        "two_record_paths_that_join_to_one_string_get_two_locals",
+        "unused_parameters_keep_their_entry_witnesses_until_after_the_guard"
       ]
     },
     {
@@ -625,6 +633,20 @@
         "the_unannotated_deep_still_carries_the_pipe"
       ],
       "note": "Pipe application semantics include lexical binding and eager input evaluation. Direct-call twins and trapping/agreeing inputs cover those obligations alongside the three printed surfaces."
+    },
+    {
+      "phase": "b",
+      "id": "cli_entry_boundary",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "the_census_reader_finds_an_entry_guard_that_is_there"
+      ],
+      "note": "The entry-guard census positive control runs beside the split-kernel tuple and one-kernel runtime receipts. The existing example census covers the shipped corpus."
     }
   ]
 }

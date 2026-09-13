@@ -1876,22 +1876,55 @@ impl<'a> EvalContext<'a> {
                     // extent as compiled lowering instead of looking up an
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
-                    for (declared, arg) in param_types.iter().zip(args.iter()) {
-                        let (Some(declared), RuntimeValue::Tensor(tensor)) = (declared, arg) else {
+                    // chelis#1788: the binder's DECLARING witness, as
+                    // `(parameter, axis, extent)`. Section 4.7 evaluates an
+                    // all-interface guard at function entry in declared
+                    // signature order, so the first witness of a binder is the
+                    // one every later occurrence is compared against, and it is
+                    // the half rendered first.
+                    let mut binder_witnesses: UnordMap<String, (String, usize, usize)> =
+                        UnordMap::new();
+                    // A directly declared tensor retains its source binders
+                    // for diagnostics and the callee frame. An alias needs
+                    // the checked signature to expose that tensor structure.
+                    let checked_params = checked_signature
+                        .as_ref()
+                        .and_then(checked_function_children)
+                        .and_then(|children| children.split_last())
+                        .map(|(_, params)| params);
+                    for (index, arg) in args.iter().enumerate() {
+                        let RuntimeValue::Tensor(tensor) = arg else {
                             continue;
                         };
-                        let Ok(actualized) = declared_tensor_type_for_shape(
-                            declared,
-                            &tensor.value.shape,
-                            tensor.precision,
-                            true,
-                        ) else {
+                        let actualize = |declared: &Expr| {
+                            declared_tensor_type_for_shape(
+                                declared,
+                                &tensor.value.shape,
+                                tensor.precision,
+                                true,
+                            )
+                            .ok()
+                        };
+                        let actualized = param_types
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .and_then(actualize)
+                            .or_else(|| {
+                                checked_params
+                                    .and_then(|params| params.get(index))
+                                    .and_then(actualize)
+                            });
+                        let Some(actualized) = actualized else {
                             // Rank-polymorphic declarations are handled by
                             // their existing routed path; they do not expose
                             // an unambiguous fixed-axis witness here.
                             continue;
                         };
-                        for dim in actualized.dims {
+                        let parameter = params
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("argument {index}"));
+                        for (axis, dim) in actualized.dims.into_iter().enumerate() {
                             let DimInfo::Named(name, Some(size)) = dim else {
                                 continue;
                             };
@@ -1902,12 +1935,26 @@ impl<'a> EvalContext<'a> {
                             }
                             match dimension_bindings.insert(name.clone(), size) {
                                 Some(previous) if previous != size => {
+                                    // [04-NUM-9]: a runtime extent guard IS the
+                                    // trap-producing primitive, and an
+                                    // all-interface guard names the `load` of
+                                    // the later witness. The private message
+                                    // this replaced conveyed neither the
+                                    // parameters nor the axes.
+                                    let (first_param, first_axis, first_size) = binder_witnesses
+                                        .get(&name)
+                                        .cloned()
+                                        .unwrap_or_else(|| (parameter.clone(), axis, previous));
                                     return Err(format!(
-                                        "dimension binder `{name}` has inconsistent runtime witnesses: {previous} and {size}"
+                                        "extent `{name}`: {first_param} axis {first_axis} = {first_size}, {parameter} axis {axis} = {size}\n\
+                                         numeric trap: domain in load at int64"
                                     ));
                                 }
                                 _ => {}
                             }
+                            binder_witnesses
+                                .entry(name)
+                                .or_insert((parameter.clone(), axis, size));
                         }
                     }
                     let caller_precisions = saved_precisions.clone();

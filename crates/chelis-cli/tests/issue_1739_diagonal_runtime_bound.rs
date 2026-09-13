@@ -844,6 +844,88 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
     found
 }
 
+/// Every emitted chelis#1788 ENTRY-OBLIGATION guard in one C source, as
+/// `(enclosing function, the rendered claim)`.
+///
+/// A different guard model from the one above and therefore a different
+/// reader: this one compares two runtime shapes rather than a shape against a
+/// literal, it opens with its null and rank preconditions, and it names the
+/// `load` primitive rather than the producing operation. The census needs both,
+/// because chelis#1788 adds emitted lines to every authored host-bodied def
+/// whose signature repeats a binder, and "no example gained a declared-result
+/// guard" says nothing about that set.
+fn emitted_entry_guards(c_source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut enclosing: Option<String> = None;
+    let mut pending: Option<String> = None;
+    for line in c_source.lines() {
+        if let Some(head) = line.split("__chelis_owned_body(").next()
+            && line.contains("__chelis_owned_body(")
+            && line.trim_end().ends_with('{')
+        {
+            enclosing = Some(
+                head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("<none>")
+                    .to_string(),
+            );
+            continue;
+        }
+        if line == "}" {
+            enclosing = None;
+            pending = None;
+            continue;
+        }
+        let Some(function) = enclosing.as_ref() else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.starts_with("if (") && trimmed.contains("chelis_tensor_rank(") {
+            pending = Some(function.clone());
+            continue;
+        }
+        // The claim is on the `fprintf` the guard body opens with, which is
+        // what a reader has to capture: the condition alone does not say WHICH
+        // binder disagreed, and a census that recorded only the condition would
+        // stay green through a wrong label.
+        if let Some(owner) = pending.take()
+            && let Some(rest) = trimmed.strip_prefix("fprintf(stderr, \"extent `")
+            && let Some((claim, _)) = rest.split_once('`')
+        {
+            found.push((owner, claim.to_string()));
+        }
+    }
+    found
+}
+
+/// POSITIVE CONTROL for the entry-guard reader. Without it, "no example gains
+/// an entry guard" could equally mean the reader never finds one.
+#[test]
+fn the_census_reader_finds_an_entry_guard_that_is_there() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("entry_witness.ch");
+    let source = "def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> \
+                  (tensor[seq, f32], tensor[batch, seq, f32]) = (neg(x), neg(y))\n\
+                  a = to_tensor([1.0, 2.0])\n\
+                  b = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n\
+                  out = both(a, b)\n";
+    fs::write(&path, source).expect("write fixture");
+    let emitted = emit_c(
+        path.to_str().expect("UTF-8 path"),
+        &dir.path().join("entry-witness-out"),
+    );
+    assert_eq!(
+        emitted_entry_guards(&emitted),
+        vec![("both".to_string(), "seq".to_string())],
+        "the witness emits exactly one entry guard, in `both`, on the binder `seq`"
+    );
+    assert!(
+        emitted_guards(&emitted).is_empty(),
+        "and the declared-result reader must not also claim it: the two guard \
+         models are counted separately"
+    );
+}
+
 /// Every executable Phase 0 example, sorted: the `.ch` files directly under
 /// `examples/`, which the repository's example-corpus policy defines as the
 /// executable set. `examples/illustrative/` is a subdirectory and is therefore
@@ -1020,6 +1102,16 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         for (function, target, axis, required) in emitted_guards(&source) {
             census.push(format!(
                 "{stem}: {function} guards {target} axis {axis} claiming {required}"
+            ));
+        }
+        // chelis#1788's entry guard is the OTHER thing this change can add to
+        // a shipped example, and it is counted here rather than in a second
+        // enumeration of the same directory: a roster compared against the
+        // directory it was read from measures nothing, so both readers run
+        // over the one traversal that the refusal witness below validates.
+        for (function, claim) in emitted_entry_guards(&source) {
+            census.push(format!(
+                "{stem}: {function} checks the binder {claim} at entry"
             ));
         }
     }

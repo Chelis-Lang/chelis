@@ -149,9 +149,12 @@ fn host_admission_preserves_shared_runtime_row_guard() {
     .expect_err("a Host decision must retain the input relationship");
     assert_eq!(error.stage, "eval");
     assert_eq!(error.errors.len(), 1);
+    // chelis#1788 re-rendered this verdict as the frozen [04-NUM-9] pair. What
+    // this row pins is unchanged: a Host decision still retains the input
+    // relationship and refuses the disagreeing call.
     assert_eq!(
         error.errors[0].message,
-        "dimension binder `extent` has inconsistent runtime witnesses: 2 and 1"
+        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at int64"
     );
 }
 

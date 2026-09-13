@@ -902,22 +902,10 @@ fn a_nested_application_divergence_is_older_than_this_change() {
     );
 }
 
-/// DISPOSITION LOCK. Two runtime extents that DISAGREE reach one absorbed
-/// class through two function-typed arguments. This change makes the program
-/// executable, and both lanes then refuse it, which is the right verdict, with
-/// different renderings, which is not.
-///
-/// Eval refuses at the checker's binder-equality rule with
-/// ``dimension binder `p` has inconsistent runtime witnesses: 2 and 1``; C
-/// refuses at the [04-NUM-9] guard with ``extent `k`: claimed = 2, shrink axis
-/// 0 = 1`` and `numeric trap: domain in shrink at int64`, aborting rather than
-/// exiting non-zero cleanly. Both are refusals and no wrong value is produced,
-/// so this is a rendering divergence rather than a soundness one.
-///
-/// The eval rendering is chelis#1788's subject and PR #1938's M7e re-renders
-/// exactly that message, so that work owns the convergence. The lock asserts
-/// both renderings as measured on this head so the divergence cannot be
-/// recorded as agreement, and it is the test to update when M7e lands.
+/// Two disagreeing runtime extents reach one absorbed class through two
+/// function-typed arguments. Eval rejects at host entry, naming the authored
+/// binder and the first/later witnesses under section 4.7. C still rejects at
+/// the earlier shrink result guard; #1788 owns the remaining lane divergence.
 #[test]
 fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() {
     let source = format!(
@@ -946,8 +934,15 @@ fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() 
     );
     let eval_stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
     assert!(
-        eval_stderr.contains("dimension binder `p` has inconsistent runtime witnesses: 2 and 1"),
-        "chelis#1788 / PR #1938's M7e owns this rendering: {eval_stderr}"
+        eval_stderr.contains("extent `p`: v axis 0 = 2, w axis 0 = 1"),
+        "the entry guard retains the authored binder and witness order: {eval_stderr}"
+    );
+
+    assert!(
+        eval_stderr
+            .lines()
+            .any(|line| line == "numeric trap: domain in load at int64"),
+        "the canonical entry trap is a separate line: {eval_stderr}"
     );
 
     let out_dir = dir.path().join("two-extents-out");

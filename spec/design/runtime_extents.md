@@ -397,6 +397,22 @@ and a lowered tensor helper, whose DAG carries the literal-result claim
 already. A NAMED declared result is unguarded on this lane in every form,
 because the guard reads a literal declared extent only; that is #1900.
 
+##### Host entry guards (#1788)
+
+The ENTRY-OBLIGATION guard compares the witnesses a signature's repeated
+dimension binder names on two or more declared parameter axes. It exists
+because a tuple-bodied def is host-bodied and each tensor leaf is lowered from
+its own subexpression into its own kernel helper, so no DAG on that lane ever
+receives two witnesses of the binder. The interpreter reads the resolved checked parameter types, so aliases carry
+the same witnesses as the C ABI. The guard is emitted in the owned body,
+before body operations and entry ownership drops, comparing each later occurrence
+against the first in declared signature order, and it is suppressed entirely
+for a function where a helper owns a literal input-axis obligation or already
+receives two witnesses of one binder. That suppression is not an optimization: such a helper's prologue owns
+the slot ORDER section 4.7 requires across the whole signature, and a wrapper
+guard would preempt an earlier slot's claim. A function that mixes the two
+shapes is left to the DAG lane's ordering and is residual.
+
 #### C2.6 Atomic integration and wire ordering
 
 B2b-1 first implements literal call claims through an explicit IR witness.
@@ -870,12 +886,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 128 rows and none of them is an unexplained
+The recorded phase-B corpus has 132 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 28 non-`executes_exactly` values
-against 100 `executes_exactly`, and every one of the twenty-eight is accounted
+against 104 `executes_exactly`, and every one of the twenty-eight is accounted
 for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:

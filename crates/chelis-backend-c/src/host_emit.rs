@@ -2006,6 +2006,117 @@ impl HostResultClaim {
     }
 }
 
+/// Whether a tensor helper owns a literal input-axis obligation or can
+/// already see a repeated dimension binder among its own inputs.
+///
+/// The helper's existing input checks establish an order among obligations.
+/// A wrapper guard runs before the helper call, so it could preempt an earlier
+/// literal-axis check or assigned-slot claim. The helper keeps that ordering;
+/// mixed helper and wrapper obligations remain residual.
+///
+/// The wrapper guard fills the gap only where no helper owns any of it, which
+/// is exactly the split-kernel shape chelis#1788 reports: every tensor leaf of
+/// a tuple-bodied def is lowered from its own subexpression, so no helper
+/// receives two witnesses of one binder and nothing on this lane owned the
+/// signature's obligation. A function that mixes the two is left to the DAG
+/// lane's ordering and is residual.
+fn a_helper_owns_an_entry_obligation(function: &HostFunction) -> bool {
+    for helper in &function.tensor_helpers {
+        let mut seen: Vec<&str> = Vec::new();
+        for input in &helper.inputs {
+            for dim in &input.ty.dims {
+                if matches!(dim, DimInfo::Lit(_)) {
+                    return true;
+                }
+                let DimInfo::Named(name, _) = dim else {
+                    continue;
+                };
+                if name == "*" {
+                    continue;
+                }
+                if seen.contains(&name.as_str()) {
+                    return true;
+                }
+                seen.push(name.as_str());
+            }
+        }
+    }
+    false
+}
+
+/// chelis#1788. The entry obligation a host-bodied def's SIGNATURE carries when
+/// one dimension binder names two or more declared parameter axes.
+///
+/// A tuple-bodied def is host-bodied, and each tensor leaf becomes its own
+/// kernel helper lowered from its own subexpression, so
+/// `def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> (...)` reaches
+/// no DAG that can see `seq` twice and nothing on C owned the signature's
+/// obligation. `spec/04-type-system.md` section 4.7 puts that guard here: a
+/// guard whose operands are all interface values is evaluated at function
+/// entry, in declared signature order, before any other operation of the
+/// function runs, and its `[04-NUM-9]` `<op>` slot is the `load` primitive of
+/// the later witness.
+///
+/// Each later occurrence is compared against the FIRST, which is the one the
+/// declaration establishes, so the two rendered halves come out in signature
+/// order and agree with the one-kernel form's DAG guard byte for byte.
+///
+/// The NULL and rank preconditions are not defensive noise. A nonexistent axis
+/// has no extent to compare, and extra axes also invalidate the declared rank.
+/// The wrong-rank and NULL-input diagnostics
+/// belong to the kernel helper that already reports them; without the
+/// preconditions this guard would reach `chelis_tensor_shape` first and replace
+/// a named diagnostic with a generic one.
+fn entry_binder_guards(function: &HostFunction, indent: &str) -> Vec<String> {
+    // (binder, parameter index, axis, declared rank), in declared signature order.
+    let mut occurrences: Vec<(&str, usize, usize, usize)> = Vec::new();
+    for (index, param) in function.params.iter().enumerate() {
+        let HostAbiType::Tensor(ty) = &param.ty else {
+            continue;
+        };
+        for (axis, dim) in ty.dims.iter().enumerate() {
+            let DimInfo::Named(name, _) = dim else {
+                continue;
+            };
+            // Section 4.5: `*` describes an unknown extent, not a binder shared
+            // by independent axes or arguments (chelis#1898).
+            if name == "*" {
+                continue;
+            }
+            occurrences.push((name.as_str(), index, axis, ty.dims.len()));
+        }
+    }
+    let mut declared: Vec<(&str, usize, usize, usize)> = Vec::new();
+    let mut lines = Vec::new();
+    for &(name, index, axis, rank) in &occurrences {
+        let Some(&(_, first_index, first_axis, first_rank)) =
+            declared.iter().find(|(seen, _, _, _)| *seen == name)
+        else {
+            declared.push((name, index, axis, rank));
+            continue;
+        };
+        let first = c_ident(&function.params[first_index].name);
+        let later = c_ident(&function.params[index].name);
+        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        let first_label = chelis_ir::span_sanitize::sanitize_for_format_string(
+            &function.params[first_index].name,
+        );
+        let later_label =
+            chelis_ir::span_sanitize::sanitize_for_format_string(&function.params[index].name);
+        lines.push(format!(
+            "{indent}if ({first} != NULL && {later} != NULL && chelis_tensor_rank({first}) == {first_rank} && chelis_tensor_rank({later}) == {rank} && chelis_tensor_shape({later}, {axis}) != chelis_tensor_shape({first}, {first_axis})) {{"
+        ));
+        lines.push(format!(
+            "{indent}    fprintf(stderr, \"extent `{label}`: {first_label} axis {first_axis} = %lld, {later_label} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape({first}, {first_axis}), (long long)chelis_tensor_shape({later}, {axis}));"
+        ));
+        lines.push(format!(
+            "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at int64\");"
+        ));
+        lines.push(format!("{indent}}}"));
+    }
+    lines
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
@@ -2105,6 +2216,12 @@ fn emit_function(
                 "verified C host ownership emission",
             )
         })?;
+    if authored && !a_helper_owns_an_entry_obligation(function) {
+        let guards = entry_binder_guards(function, &emitter.indent);
+        emitter.lines.extend(guards);
+    }
+    // Entry guards still read parameters the body does not use. Their
+    // verified entry drops run only after those witness reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
     // chelis#1771: the declared-result guard travels with the expression that
     // produces the returned value. `emit_expr_to_var` hands the flag to

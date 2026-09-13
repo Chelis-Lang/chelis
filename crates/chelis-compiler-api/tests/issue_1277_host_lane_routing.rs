@@ -222,9 +222,15 @@ fn wildcard_arguments_do_not_hide_real_shared_host_binders() {
     .expect_err("the real extent binder must still agree");
     assert_eq!(error.stage, "eval");
     assert_eq!(error.errors.len(), 1);
+    // chelis#1788 re-rendered this verdict. The wildcard exclusion chelis#1898
+    // added is unchanged and is what this row actually pins: `*` axes stay
+    // independent while the real binder `extent` is still caught. What moved is
+    // the message, from a private sentence to the frozen [04-NUM-9] pair with
+    // the declaring witness first, which is byte-identical to what the C lane
+    // prints for the same program.
     assert_eq!(
         error.errors[0].message,
-        "dimension binder `extent` has inconsistent runtime witnesses: 2 and 1"
+        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at int64"
     );
 }
 
