@@ -887,6 +887,161 @@ impl ExecutionFrame<'_> {
 #[cfg(test)]
 mod input_preparation_tests {
     //! Test-first contract for additive load preparation.
+    // #1956: role-aware preparation remains an additive compiler boundary.
+    use crate::eval::{
+        TensorInputDemand, prepare_tensor_plan_inputs_with_demand,
+        prepare_tensor_roots_inputs_with_demand,
+    };
+    use chelis_unord::UnordSet;
+
+    #[test]
+    fn binding_obligation_keeps_blas_strict_beside_op_declared_shape() {
+        use crate::dag::{DimExpr, bind_symbolic_dims};
+        let (mut dag, _) = computed_shape_fixture();
+        // The fixture includes both a type use and Reshape(Sym n). Both may
+        // defer n because Stride declares it; this is not true for BLAS.
+        assert!(bind_symbolic_dims(&dag, &UnordMap::new(), &UnordSet::new()).is_ok());
+        assert!(!crate::dag::required_prebinding_symbols(&dag).contains("n"));
+        let matrix = |rows, cols| TensorType {
+            dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+            precision: Prim::F32,
+        };
+        let lhs = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 1.0]),
+            vec![],
+            matrix(1, 2),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 1.0]),
+            vec![],
+            matrix(2, 1),
+            None,
+        );
+        dag.add_node(
+            RiscOp::BlasMatmul {
+                batch_dims: vec![],
+                m: DimExpr::Sym("n".into()),
+                n: DimExpr::Concrete(1),
+                k: DimExpr::Concrete(2),
+                accumulator: Prim::F32,
+            },
+            vec![lhs, rhs],
+            matrix(1, 1),
+            None,
+        );
+        assert_eq!(
+            bind_symbolic_dims(&dag, &UnordMap::new(), &UnordSet::new()).unwrap_err(),
+            "missing symbolic dimension binding `n`"
+        );
+        assert!(crate::dag::required_prebinding_symbols(&dag).contains("n"));
+        assert!(
+            bind_symbolic_dims(
+                &dag,
+                &UnordMap::from([("n".to_owned(), 1)]),
+                &UnordSet::new()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn demand_distinguishes_required_shape_from_available_declarer() {
+        use TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        for ((dag, root), expected) in [
+            (
+                shape_only_fixture(&["shape"]),
+                vec![("shape", RequiredShape)],
+            ),
+            (
+                internal_shape_fixture(),
+                vec![("shape", RequiredShape), ("x", Selected)],
+            ),
+            (
+                computed_shape_fixture(),
+                vec![("shape", AvailableShape), ("x", Selected)],
+            ),
+        ] {
+            let mut calls = Vec::new();
+            let prepared =
+                prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, demand| {
+                    calls.push((name.to_owned(), demand));
+                    Ok((demand != AvailableShape).then(value))
+                })
+                .unwrap();
+            assert_eq!(
+                calls,
+                expected
+                    .into_iter()
+                    .map(|(name, role)| (name.to_owned(), role))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn demand_required_shape_none_stays_deferred() {
+        let (dag, root) = shape_only_fixture(&["shape"]);
+        let mut calls = Vec::new();
+        let prepared = prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, role| {
+            calls.push((name.to_owned(), role));
+            Ok(None)
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![("shape".to_owned(), TensorInputDemand::RequiredShape)]
+        );
+        assert_eq!(
+            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                .unwrap_err(),
+            "missing required input `shape` for symbolic dimension `n`"
+        );
+    }
+
+    #[test]
+    fn demand_does_not_select_between_ambiguous_dead_initializers() {
+        let (dag, root) = shape_only_fixture(&["a", "b"]);
+        let mut calls = Vec::new();
+        let prepared = prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, role| {
+            calls.push(name.to_owned());
+            assert_eq!(role, TensorInputDemand::AvailableShape);
+            Ok(None)
+        })
+        .unwrap();
+        assert_eq!(calls, ["a", "b"]);
+        assert_eq!(
+            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
+                .unwrap_err(),
+            "ambiguous dead-load sources [\"a\", \"b\"] for live symbolic dimension `n`"
+        );
+    }
+
+    #[test]
+    fn demand_empty_roots_and_selected_plan_include_every_load() {
+        let dag = loads(&["x", "retained"]);
+        let mut root_calls = Vec::new();
+        prepare_tensor_roots_inputs_with_demand(&dag, &[], |name, role| {
+            assert_eq!(role, TensorInputDemand::Selected);
+            root_calls.push(name.to_owned());
+            Ok(Some(value()))
+        })
+        .unwrap();
+        let mut plan_calls = Vec::new();
+        prepare_tensor_plan_inputs_with_demand(&plan(dag), &context(42), |name, role| {
+            assert_eq!(role, TensorInputDemand::Selected);
+            plan_calls.push(name.to_owned());
+            Ok(Some(value()))
+        })
+        .unwrap();
+        assert_eq!(root_calls, ["x", "retained"]);
+        assert_eq!(plan_calls, root_calls);
+    }
+
     use super::*;
     use crate::dag::{DimInfo, TensorType};
     use crate::eval::{
@@ -1013,6 +1168,17 @@ mod input_preparation_tests {
             old
         );
         assert_eq!(old, "missing required input `shape`");
+        let mut roles = Vec::new();
+        let missing = prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, role| {
+            roles.push((name.to_owned(), role));
+            Ok(None)
+        })
+        .unwrap_err();
+        assert_eq!(
+            roles,
+            vec![("shape".to_owned(), TensorInputDemand::Selected)]
+        );
+        assert_eq!(missing, old);
     }
 
     #[test]
@@ -1353,6 +1519,20 @@ mod input_preparation_tests {
             eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
                 .unwrap();
         assert_eq!(actual[&root], value());
+        let mut roles = Vec::new();
+        let role_prepared = prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, role| {
+            roles.push((name.to_owned(), role));
+            Ok((role == TensorInputDemand::Selected).then(value))
+        })
+        .unwrap();
+        assert_eq!(
+            roles,
+            vec![
+                ("x".to_owned(), TensorInputDemand::AvailableShape),
+                ("x".to_owned(), TensorInputDemand::Selected)
+            ]
+        );
+        assert_eq!(role_prepared, prepared);
     }
 
     #[test]

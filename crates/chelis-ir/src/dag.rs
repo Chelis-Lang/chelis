@@ -235,20 +235,31 @@ impl DimExpr {
     }
 
     pub fn bind(&self, bindings: &UnordMap<String, usize>) -> Result<Self, String> {
+        self.map_symbols(&mut |name| {
+            bindings
+                .get(name)
+                .copied()
+                .map(Some)
+                .ok_or_else(|| format!("missing symbolic dimension binding `{name}`"))
+        })
+    }
+
+    fn map_symbols<E>(
+        &self,
+        resolve: &mut impl FnMut(&str) -> Result<Option<usize>, E>,
+    ) -> Result<Self, E> {
         match self {
             Self::Concrete(value) => Ok(Self::Concrete(*value)),
-            Self::Sym(name) => {
-                Ok(Self::Concrete(bindings.get(name).copied().ok_or_else(
-                    || format!("missing symbolic dimension binding `{name}`"),
-                )?))
-            }
+            Self::Sym(name) => Ok(resolve(name)?
+                .map(Self::Concrete)
+                .unwrap_or_else(|| self.clone())),
             Self::Mul(lhs, rhs) => Ok(Self::Mul(
-                Box::new(lhs.bind(bindings)?),
-                Box::new(rhs.bind(bindings)?),
+                Box::new(lhs.map_symbols(resolve)?),
+                Box::new(rhs.map_symbols(resolve)?),
             )),
             Self::Div(lhs, rhs) => Ok(Self::Div(
-                Box::new(lhs.bind(bindings)?),
-                Box::new(rhs.bind(bindings)?),
+                Box::new(lhs.map_symbols(resolve)?),
+                Box::new(rhs.map_symbols(resolve)?),
             )),
         }
     }
@@ -2297,173 +2308,27 @@ pub fn bind_symbolic_dims(
     bindings: &UnordMap<String, usize>,
     unbound: &UnordSet<String>,
 ) -> Result<Dag, String> {
-    // chelis#616: an op-declared dim (a node-valued movement output extent)
-    // has no pre-eval value — the evaluator computes it from actual bound
-    // scalars. Leave it unbound instead of raising the loud missing-binding
-    // error; the eval movement arms never read the output type for it. The
-    // same applies to a raw ANONYMOUS (wildcard) dim: it is not a
-    // referenceable symbol, and the evaluator computes the real extent from
-    // values.
     let op_declared = op_declared_dim_names(dag);
-    // chelis#1566: a name whose two scopes resolve to DIFFERENT extents has no
-    // single pre-eval extent, because the binding map is keyed by name and
-    // cannot hold both. The inference leaves such a name out and names it in
-    // `unbound`; every axis carrying it is then computed from actual values.
-    // The tolerance is exactly that set and no wider - an agreeing multi-scope
-    // name a caller merely omits is an omitted binding like any other - and it
-    // stops at the TYPE: a live node that reads the name BY VALUE (a `Reshape`
-    // target's `RtDim::Sym`) still refuses below, because there is no value to
-    // give it. A per-scope rename is the structural fix and belongs to the
-    // claim transport.
-    let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
-        match dim {
-            DimInfo::Lit(size) => Ok(DimInfo::Lit(*size)),
-            DimInfo::Named(name, Some(size)) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-            DimInfo::Named(name, None) => match bindings.get(name) {
-                Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-                None if op_declared.contains(name)
-                    || unbound.contains(name)
-                    || name.is_empty()
-                    || name == "*" =>
-                {
-                    Ok(dim.clone())
-                }
-                None => Err(format!("missing symbolic dimension binding `{name}`")),
-            },
+    let mut resolve = |name: &str, usage: SymbolBindingUse| {
+        if let Some(size) = bindings.get(name) {
+            Ok(Some(*size))
+        } else if usage.allows_unbound(name, &op_declared, unbound) {
+            Ok(None)
+        } else {
+            Err(usage.missing(name))
         }
     };
-
     let mut rebound = Dag::new();
     for node in dag.nodes() {
-        let output_type = TensorType {
-            dims: node
-                .output_type
-                .dims
-                .iter()
-                .map(&bind_dim)
-                .collect::<Result<_, _>>()?,
-            precision: node.output_type.precision,
-        };
-        let op = match &node.op {
-            RiscOp::Expand { axis, size } => RiscOp::Expand {
-                axis: *axis,
-                size: size.clone(),
-            },
-            RiscOp::Reshape { new_shape } => RiscOp::Reshape {
-                new_shape: new_shape
-                    .iter()
-                    .map(|dim| match dim {
-                        RtDim::Sym(name) => match bindings.get(name) {
-                            Some(size) => Ok(RtDim::Lit(*size)),
-                            // chelis#616: an op-declared symbol (and an
-                            // anonymous wildcard) resolves during evaluation,
-                            // not here.
-                            None if op_declared.contains(name)
-                                || name.is_empty()
-                                || name == "*" =>
-                            {
-                                Ok(dim.clone())
-                            }
-                            None => Err(format!("missing symbolic dimension binding `{name}`")),
-                        },
-                        // `Lit` passes through; `Node` (runtime) targets are
-                        // resolved by the evaluator from `inputs`, not here.
-                        RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
-                        RtDim::Node(i) => Ok(RtDim::Node(*i)),
-                        RtDim::InputAxis { tensor, axis } => Ok(RtDim::InputAxis {
-                            tensor: *tensor,
-                            axis: *axis,
-                        }),
-                        RtDim::ToEnd => {
-                            Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
-                        }
-                    })
-                    .collect::<Result<_, _>>()?,
-            },
-            // chelis#368: resolve the `SHRINK_TO_END` full-axis sentinel to the
-            // axis's now-bound extent (from this node's bound output type). The
-            // sentinel is emitted only for a full-axis slice of a symbolic
-            // bystander axis (the Pad adjoint's no-pad axes, and since
-            // chelis#513 the Stride adjoint's trim and the ProdReduce
-            // adjoint's per-element slices), so the resolved `end` is exactly
-            // `start` plus the output dim's size.
-            RiscOp::Shrink { bounds }
-                if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)) =>
-            {
-                let resolved = bounds
-                    .iter()
-                    .zip(output_type.dims.iter())
-                    .map(|((start, end), dim)| {
-                        if matches!(end, RtDim::ToEnd) {
-                            // chelis#1480, `spec/05` section 2.4.1: the
-                            // sentinel is well formed only beside a `Lit(0)`
-                            // start. This used to accept any literal and
-                            // resolve `(Lit(1), ToEnd)` to `(Lit(1), Lit(1 +
-                            // size))`, which is a slice the spec says is a
-                            // malformed bound rather than a slice at all.
-                            let start_lit = match start.as_lit() {
-                                Some(0) => 0usize,
-                                _ => {
-                                    return Err(
-                                        "shrink-to-end sentinel requires a literal zero start"
-                                            .to_string(),
-                                    );
-                                }
-                            };
-                            match dim {
-                                DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
-                                    Ok((RtDim::Lit(start_lit), RtDim::Lit(start_lit + *size)))
-                                }
-                                // chelis#616: an op-declared (or wildcard)
-                                // axis has no pre-eval binding; keep the
-                                // sentinel — the evaluator resolves `ToEnd`
-                                // to the INPUT's runtime extent, which for
-                                // the full-axis identity slice (start 0) is
-                                // exactly the sentinel's meaning.
-                                DimInfo::Named(name, None)
-                                    if start_lit == 0
-                                        && (op_declared.contains(name)
-                                            || name.is_empty()
-                                            || name == "*") =>
-                                {
-                                    Ok((start.clone(), end.clone()))
-                                }
-                                DimInfo::Named(name, None) => Err(format!(
-                                    "shrink-to-end sentinel left unbound for symbolic \
-                                     dimension `{name}`"
-                                )),
-                            }
-                        } else {
-                            // `Lit` passes through; `Node` (runtime) bounds are
-                            // resolved by the evaluator from `inputs`, not here.
-                            Ok((start.clone(), end.clone()))
-                        }
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                RiscOp::Shrink { bounds: resolved }
-            }
-            RiscOp::BlasMatmul {
-                batch_dims,
-                m,
-                n,
-                k,
-                accumulator,
-            } => RiscOp::BlasMatmul {
-                batch_dims: batch_dims
-                    .iter()
-                    .map(|dim| dim.bind(bindings))
-                    .collect::<Result<_, _>>()?,
-                m: m.bind(bindings)?,
-                n: n.bind(bindings)?,
-                k: k.bind(bindings)?,
-                accumulator: *accumulator,
-            },
-            other => other.clone(),
-        };
-        let new_id = rebound.add_node(op, node.inputs.clone(), output_type, None);
-        // chelis#616: binding is a 1:1 id-preserving rebuild; shape-only
-        // deps (runtime-dim declarers, `lower_if` placeholder shape sources)
-        // must survive it — the evaluator reads them.
+        let (output_type, op) =
+            map_node_symbolic_bindings(node, &mut resolve, &mut |message| Err(message.to_owned()))?;
+        let new_id = rebound.add_node(
+            op.unwrap_or_else(|| node.op.clone()),
+            node.inputs.clone(),
+            output_type,
+            None,
+        );
+        // Binding is a 1:1 rebuild: retain shape-only dependencies and roots.
         if let Some(new_node) = rebound.node_mut(new_id) {
             new_node.shape_deps = node.shape_deps.clone();
         }
@@ -2472,6 +2337,161 @@ pub fn bind_symbolic_dims(
         }
     }
     Ok(rebound)
+}
+
+// The use, not just the symbol, decides whether evaluation can defer its value.
+// ToEnd shares the runtime-extent policy but retains its existing diagnostic.
+#[derive(Clone, Copy)]
+enum SymbolBindingUse {
+    Type,
+    RuntimeExtent,
+    ToEnd,
+    Strict,
+}
+
+impl SymbolBindingUse {
+    fn allows_unbound(
+        self,
+        name: &str,
+        op_declared: &UnordSet<String>,
+        unbound: &UnordSet<String>,
+    ) -> bool {
+        match self {
+            Self::Type => {
+                op_declared.contains(name)
+                    || unbound.contains(name)
+                    || name.is_empty()
+                    || name == "*"
+            }
+            Self::RuntimeExtent | Self::ToEnd => {
+                op_declared.contains(name) || name.is_empty() || name == "*"
+            }
+            Self::Strict => false,
+        }
+    }
+
+    fn missing(self, name: &str) -> String {
+        match self {
+            Self::ToEnd => {
+                format!("shrink-to-end sentinel left unbound for symbolic dimension `{name}`")
+            }
+            _ => format!("missing symbolic dimension binding `{name}`"),
+        }
+    }
+}
+
+/// One traversal owns both actual rewriting and observation of binding uses.
+/// Unchanged ops remain borrowed (None), so observation never clones constants.
+/// The observer's infallible refusal callback defers structural diagnostics to
+/// the real binder; it does not validate or execute a trial graph.
+fn map_node_symbolic_bindings<E>(
+    node: &DagNode,
+    resolve: &mut impl FnMut(&str, SymbolBindingUse) -> Result<Option<usize>, E>,
+    refuse: &mut impl FnMut(&str) -> Result<(), E>,
+) -> Result<(TensorType, Option<RiscOp>), E> {
+    let output_type = TensorType {
+        dims: node
+            .output_type
+            .dims
+            .iter()
+            .map(|dim| match dim {
+                DimInfo::Named(name, None) => Ok(DimInfo::Named(
+                    name.clone(),
+                    resolve(name, SymbolBindingUse::Type)?,
+                )),
+                other => Ok(other.clone()),
+            })
+            .collect::<Result<_, E>>()?,
+        precision: node.output_type.precision,
+    };
+    let op = match &node.op {
+        RiscOp::Reshape { new_shape } => Some(RiscOp::Reshape {
+            new_shape: new_shape
+                .iter()
+                .map(|dim| match dim {
+                    RtDim::Sym(name) => Ok(resolve(name, SymbolBindingUse::RuntimeExtent)?
+                        .map(RtDim::Lit)
+                        .unwrap_or_else(|| dim.clone())),
+                    RtDim::ToEnd => {
+                        refuse("reshape target dim cannot be a shrink-to-end sentinel")?;
+                        Ok(dim.clone())
+                    }
+                    other => Ok(other.clone()),
+                })
+                .collect::<Result<_, E>>()?,
+        }),
+        RiscOp::Shrink { bounds } if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)) => {
+            let resolved = bounds
+                .iter()
+                .zip(&output_type.dims)
+                .map(|((start, end), dim)| {
+                    if !matches!(end, RtDim::ToEnd) {
+                        return Ok((start.clone(), end.clone()));
+                    }
+                    if start.as_lit() != Some(0) {
+                        refuse("shrink-to-end sentinel requires a literal zero start")?;
+                        return Ok((start.clone(), end.clone()));
+                    }
+                    let size = match dim {
+                        DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+                        DimInfo::Named(name, None) => resolve(name, SymbolBindingUse::ToEnd)?,
+                    };
+                    Ok(match size {
+                        Some(size) => (RtDim::Lit(0), RtDim::Lit(size)),
+                        None => (start.clone(), end.clone()),
+                    })
+                })
+                .collect::<Result<_, E>>()?;
+            Some(RiscOp::Shrink { bounds: resolved })
+        }
+        RiscOp::BlasMatmul {
+            batch_dims,
+            m,
+            n,
+            k,
+            accumulator,
+        } => {
+            let mut strict = |name: &str| resolve(name, SymbolBindingUse::Strict);
+            Some(RiscOp::BlasMatmul {
+                batch_dims: batch_dims
+                    .iter()
+                    .map(|dim| dim.map_symbols(&mut strict))
+                    .collect::<Result<_, E>>()?,
+                m: m.map_symbols(&mut strict)?,
+                n: n.map_symbols(&mut strict)?,
+                k: k.map_symbols(&mut strict)?,
+                accumulator: *accumulator,
+            })
+        }
+        _ => None,
+    };
+    Ok((output_type, op))
+}
+
+/// Whole-DAG prebinding obligations for names no witness class answered.
+/// A dynamic-unbound exemption cannot be guessed here: only inference knows
+/// whether supplied values disagree, and such names are already class-claimed.
+pub(crate) fn required_prebinding_symbols(dag: &Dag) -> UnordSet<String> {
+    let op_declared = op_declared_dim_names(dag);
+    let unbound = UnordSet::new();
+    let mut required = UnordSet::new();
+    for node in dag.nodes() {
+        let observed = map_node_symbolic_bindings(
+            node,
+            &mut |name, usage| {
+                if !usage.allows_unbound(name, &op_declared, &unbound) {
+                    required.insert(name.to_owned());
+                }
+                Ok::<_, std::convert::Infallible>(None)
+            },
+            &mut |_| Ok(()),
+        );
+        match observed {
+            Ok(_) => {}
+            Err(never) => match never {},
+        }
+    }
+    required
 }
 
 #[cfg(test)]
