@@ -59,8 +59,18 @@ fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 fn normalize_single(expr: &deep::Expr) -> deep::Expr {
     match expr {
         deep::Expr::Node(node, span) => {
-            let list = node.to_list(*span);
-            let elements = list.elements.iter().map(normalize_single).collect();
+            // `to_list` clones all descendants. Normalizing that clone again
+            // at every child made a nested let chain quadratic. Construct the
+            // same transition representation while visiting each child once.
+            let mut elements = Vec::with_capacity(node.child_count() + 2);
+            elements.push(deep::Expr::Atom(deep::Atom::Tag(node.tag()), *span));
+            elements.push(deep::Expr::Map(
+                node.meta()
+                    .map_expressions(&mut |v, _| normalize_single(v))
+                    .expect("normalization preserves annotations"),
+                *span,
+            ));
+            elements.extend(node.children_slice().iter().map(normalize_single));
             deep::Expr::List(deep::List { elements }, *span)
         }
         deep::Expr::List(list, span) => {

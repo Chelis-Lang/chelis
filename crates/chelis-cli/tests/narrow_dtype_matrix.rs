@@ -21,7 +21,7 @@
 //!   originally proven here by decoding the misprinted bytes; since
 //!   chelis#732 Phase 2 the faithful print renders them directly
 //!   (`c_print_of_f16_tensor_prints_f16_values`, un-ignored);
-//! * **HIP rejects** f16/bf16 compute ops with a clean diagnostic and
+//! * **HIP rejects unsupported f16/bf16 elementwise `Add`** with a clean diagnostic and
 //!   **Metal emits properly typed** `half`/`bfloat` kernels - the two
 //!   backends that get it right;
 //! * **f8e4m3 is rejected** by the checker in both lanes (spec §1.1.1).
@@ -343,24 +343,39 @@ fn eval_scalar_f16_comparison_rounds_before_compare() {
     );
 }
 
-/// **HIP rejects f16/bf16 compute ops with a clean diagnostic** - the correct
-/// row-three behavior from chelis#703's response table, and the control that
-/// bounds chelis#689 (whose int64 siblings DO slip through to F32 kernels).
+/// **HIP rejects unsupported f16/bf16 elementwise `Add` with a clean
+/// diagnostic** - the correct row-three behavior from chelis#703's response
+/// table, and the control that bounds chelis#689 (whose int64 siblings DO slip
+/// through to F32 kernels).
 /// Emission-only: no hipcc needed.
 #[test]
-fn hip_rejects_f16_bf16_compute_ops_cleanly() {
+fn hip_rejects_unsupported_f16_bf16_elementwise_add_cleanly() {
     for ty in ["f16", "bf16"] {
         let program = format!(
             "def f(a: tensor[4, {ty}], b: tensor[4, {ty}]) -> tensor[4, {ty}] = add(a, b)\n"
         );
         let (ok, stderr, _) = build_target(&program, &format!("hip_{ty}_add"), "hip");
-        assert!(!ok, "HIP must reject {ty} compute ops today");
+        assert!(!ok, "HIP must reject unsupported {ty} elementwise Add");
         assert!(
             stderr.contains("narrow-float compute")
                 && stderr.contains(&format!("`{ty}`"))
-                && stderr.contains("unimplemented chelis#729"),
+                && stderr.contains("unimplemented chelis#729")
+                && stderr.contains("this operation has no typed HIP narrow-float kernel")
+                && stderr.contains("spec/04-type-system.md §1.1.3"),
             "the rejection must be the specific narrow-float diagnostic, got: {stderr}"
         );
+        for stale in [
+            "planned",
+            "HIP tensor load/store",
+            "`BlasMatmul`",
+            "[05-OP-43] ReLU identities",
+            "spec/04-type-system.md §5.7.1",
+        ] {
+            assert!(
+                !stderr.contains(stale),
+                "the rejection must not repeat the capability matrix (`{stale}`): {stderr}"
+            );
+        }
     }
 }
 

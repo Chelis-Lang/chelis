@@ -425,11 +425,10 @@ def fine(x: f32) -> f32 = {
 }
 
 #[test]
-fn check_reef_macro_from_defining_module_expanded_outside_rejected() {
-    // Macro call-site attribution (survey section 3): `forge_prob` is
-    // defined (unexported) in Demo.Types; the same-package expansion
-    // lands the record construction inside Demo.Macuser's def and is
-    // checked under the CALLER's module.
+fn check_and_build_reef_reject_unexported_macro_import() {
+    // spec/02 P2: a private macro cannot cross the module's explicit export
+    // boundary. This fixture must reject before expansion; call-site opacity
+    // after expansion is covered in chelis-types/tests/opaque_types.rs.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_TYPES_CH),
         (
@@ -443,15 +442,7 @@ def sneak(x: f32) -> f32 = {
 ",
         ),
     ]);
-    let output = chelis()
-        .current_dir(&pkg)
-        .args(["check", pkg.join("src/macuser.ch").to_str().unwrap()])
-        .assert()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    assert_reef_violation(&check_json(&output));
+    assert_private_reef_import_rejection(&pkg, "src/macuser.ch", "forge_prob");
 }
 
 // ── Private-producer scope on the reef package surface ───────────
@@ -499,33 +490,43 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
 ",
         ),
     ]);
-    let entry = pkg.join("src/attack.ch");
+    assert_private_reef_import_rejection(&pkg, "src/attack.ch", "raw_make");
+}
+
+fn assert_private_reef_import_rejection(pkg: &Path, source: &str, binding: &str) {
+    let entry = pkg.join(source);
     let out_dir = pkg.join("out");
+    let expected = format!("module `Demo.Types` does not export `{binding}`");
     for command in ["check", "build"] {
         let mut invocation = chelis();
-        invocation.current_dir(&pkg).arg(command).arg(&entry);
+        invocation.current_dir(pkg).arg(command).arg(&entry);
         if command == "build" {
             invocation.arg("-o").arg(&out_dir);
         }
         let result = invocation.assert().failure();
         if command == "check" {
+            assert_eq!(result.get_output().status.code(), Some(2));
             let json = check_json(&result.get_output().stdout);
             let errors = errors_of(&json);
             assert_eq!(errors.len(), 1, "one private import error: {json}");
             assert_eq!(errors[0]["kind"], "Other");
+            let message = errors[0]["message"]
+                .as_str()
+                .expect("private import message");
             assert!(
-                errors[0]["message"]
-                    .as_str()
-                    .is_some_and(|message| message
-                        .contains("module `Demo.Types` does not export `raw_make`")),
+                message.contains(&expected),
                 "check must reject the private import: {json}"
+            );
+            assert!(
+                !message.contains("pkg__") && !message.contains("Pkg__"),
+                "check must report source-facing names: {message}"
             );
             assert_eq!(json["score"], 0);
             continue;
         }
         let stderr = String::from_utf8_lossy(&result.get_output().stderr);
         assert!(
-            stderr.contains("module `Demo.Types` does not export `raw_make`"),
+            stderr.contains(&expected),
             "{command} must reject the private import, stderr: {stderr}"
         );
         assert!(

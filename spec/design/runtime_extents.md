@@ -305,8 +305,8 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | DCE | unread signature witnesses and potentially trapping extent checks survive; deleting either must make a mismatch test fail |
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
 | specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
-| grad | remap all bound slots and preserve primal obligations; bounds keep spec/05's zero-cotangent boundary |
-| vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires |
+| grad | remap all bound slots and preserve primal obligations; the gradient splice roots only the per-wrt cotangents, so the forward activation is retained as their shape dependency (chelis#1821, a TENSOR-typed single `wrt`; the axis is every `wrt` kind spec/04 991-995 admits, and the other five cells are residual: a multi-target `wrt` forms only one of the callee's interface witnesses on the interpreter, chelis#1920, an aggregate-typed `wrt` forms the claim but loses it on the differentiated route, chelis#1924, and a float prim `wrt` is silent on eval and refused on C, chelis#1934); the edge is unconditional, chelis#1935; bounds keep spec/05's zero-cotangent boundary |
+| vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, the same edge the grad row records and under the same tensor-typed single-`wrt` bound (chelis#1821) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
 
 This table is an implementation acceptance obligation. The preparation
@@ -886,12 +886,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 132 rows and none of them is an unexplained
+The recorded phase-B corpus has 146 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 28 non-`executes_exactly` values
-against 104 `executes_exactly`, and every one of the twenty-eight is accounted
+count of the JSON's `phase_b` column reaches 35 non-`executes_exactly` values
+against 111 `executes_exactly`, and every one of the thirty-five is accounted
 for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:
@@ -922,6 +922,44 @@ dtype policy first ran. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
 
+Seven rows are deferred, and `PHASE_B_DEFERRED` names the owning issue for each.
+They are the unrepaired halves of the `wrt`-kind axis below.
+
+The `wrt` ARGUMENT KIND is an axis of this corpus, enumerated from the SPEC's
+category rather than from what a review round happened to find. Three
+consecutive rounds of chelis#1821 each found an unrecorded execution mode by
+varying that kind, which is what a witness-by-witness list cannot stop:
+`spec/04-type-system.md` lines 991-995 defines the category as a
+"differentiable target" and admits a float tensor of any rank, a float PRIM
+scalar, and an aggregate of those; only a non-differentiable `wrt` is a type
+error. The axis is therefore **every `wrt` kind the spec admits, three of them,
+crossed with single and multi target: six cells, fourteen rows, seven measured
+at an exit state and seven deferred.**
+
+None of the three kinds folds into another, and that is measured rather than
+asserted. A rank-0 `tensor[f32]` target traps on both lanes where a float prim
+target does not, so rank is not the variable and the prim scalar is its own
+value. Every aggregate spelling behaves identically, tuple, record, one-field
+record, nested record and a record with a non-differentiable leaf, so one value
+covers all five.
+
+Only tensor/single is repaired, by chelis#1821. The other five cells are
+recorded at the state they were MEASURED in, and their mechanisms are distinct:
+under a multi target the interpreter emits only one of the callee's two
+interface witnesses, so the claim is never formed (chelis#1920); under an
+aggregate target the claim IS formed, since its undifferentiated control traps
+on both lanes, and only the differentiated route loses it (chelis#1924); and
+under a float prim target eval computes a derivative for a program the
+undifferentiated call rejects while the C lane reaches no exit state at all,
+because its build is REFUSED with the host-lane transform-position diagnostic
+that the rank-0 tensor and tensor variants of the same inline `grad` do not hit
+(chelis#1934, which owns both halves, and whose silence is pre-existing).
+
+chelis#1821's forward-activation dependency is recorded unconditionally, so a
+gradient whose forward carries no obligation retains and emits it anyway: 891
+to 931 emitted C lines for an obligation-free `grad`, measured against a
+revert. chelis#1935 owns conditioning the edge.
+
 The `dtype.late_precision` receipts cover direct tensor literals, calls with
 concrete declared result precision, parameter and value bindings resolved in
 lexical order, and tuple projections from concretely typed parameters, when
@@ -939,18 +977,14 @@ matrix contains disposition locks for these known gaps. An unresolved
 precision entry still discharges silently at the declaration boundary; this
 change does not adopt #1942's proposed declaration-time rejection.
 
-Phase B has NO deferred rows. `PHASE_B_DEFERRED` is an empty mapping, and B2c
-is what emptied it: `concat.literal_claim.inlined_root.{c,eval}` were the only
-entries, and a claim the lowered graph proves wrong is now rejected before any
-execution rather than recorded at a start state pending #526. The machinery
-itself stays, and what a deferred row means is worth stating exactly because
-it is easy to overstate: the row is recorded at its MEASURED start state with
-its reason; `exit_shortfall` skips it in every phase, `final` included, so no
-phase reports it and no phase fails for it; and `rows_at_exit` still enforces
-its receipt, so the test that pins the disposition has to keep passing. What
-`--phase final` refuses is `--allow-shortfall`, which a deferred row never
-needed. An empty mapping therefore means every phase-B row is at an exit state
-or is an unexplained shortfall, with nothing in between.
+Phase B retains seven grad deferrals. B2c removed the old
+`concat.literal_claim.inlined_root.{c,eval}` deferrals: a claim the lowered
+graph proves wrong is rejected before execution. A deferred row stays at its
+measured start state with its reason; `exit_shortfall` skips it in every
+phase, `final` included, so no phase reports it as a shortfall or fails for it.
+`rows_at_exit` still enforces its receipt, so the test that pins the disposition
+has to keep passing. `--phase final` refuses `--allow-shortfall`, which a
+named deferral never needed.
 
 The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
@@ -1003,6 +1037,14 @@ own remaining obligations are the list at the end of this section and the open
 sub-issues of [#1277]. The HIP and Metal hardware halves are separate receipts
 run by hand at the same head and digest; the oracle prints the HIP command it
 expects rather than executing it.
+
+Each deferred row carries its measured state in both columns, because
+`validate_transition` permits only a move from a start state to an exit class:
+the lattice is one-way, so a start-to-start move is refused by design and is
+not expressible. `validate_deferral_keys` refuses a deferral key that names no
+row, so a typo cannot silently defer nothing. Both lanes of every deferred
+cell are pinned by a lock, and each issue's fix flips its lock, moves its rows
+and removes its deferral.
 
 `--phase a` reaches its row report and PASSes. Its `symbolic_window` target runs
 `issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`

@@ -366,6 +366,7 @@
         "a_local_unit_extent_claim_traps_at_its_operation_on_c",
         "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
         "a_multi_input_record_forward_sizes_its_broadcast_from_a_sibling_field",
+        "a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
         "a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too",
         "a_named_bystander_axis_keeps_its_size_extent_on_c",
         "a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
@@ -390,6 +391,7 @@
         "a_polymorphic_argument_claim_sizes_a_root_on_c",
         "a_polymorphic_argument_claim_sizes_a_root_on_eval",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
+        "a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         "a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
         "a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size",
         "a_record_projection_becomes_the_tensor_helper_s_own_input",
@@ -425,6 +427,7 @@
         "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
         "aliased_parameter_types_keep_the_entry_binder_guard",
         "an_abi_promised_entailing_extent_keeps_its_literal_guard",
+        "an_aggregate_typed_wrt_is_still_lane_divergent",
         "an_earlier_trap_preempts_the_extent_guard_on_eval",
         "an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c",
         "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
@@ -455,6 +458,14 @@
         "checked_arithmetic_operators_reach_the_same_guard_on_c",
         "every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval",
         "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
+        "grad_keeps_an_op_computed_local_guard_on_c",
+        "grad_keeps_an_op_computed_local_guard_on_eval",
+        "grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c",
+        "grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval",
+        "grad_over_a_disagreeing_named_claim_traps_on_c",
+        "grad_over_a_disagreeing_named_claim_traps_on_eval",
+        "grad_over_an_agreeing_named_claim_executes_on_c",
+        "grad_over_an_agreeing_named_claim_executes_on_eval",
         "issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         "issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         "issue_1556_uniform_over_an_inlined_parameter_builds_and_runs",
@@ -490,7 +501,8 @@
         "two_op_output_members_guard_against_the_canonical_member_on_c",
         "two_op_output_members_guard_against_the_canonical_member_on_eval",
         "two_record_paths_that_join_to_one_string_get_two_locals",
-        "unused_parameters_keep_their_entry_witnesses_until_after_the_guard"
+        "unused_parameters_keep_their_entry_witnesses_until_after_the_guard",
+        "vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval"
       ]
     },
     {

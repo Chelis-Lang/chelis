@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
+from generate_rejection_registries import (
+    ProductionSource,
+    discover_production_sources,
+)
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location(
@@ -81,7 +88,48 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         self.assertTrue(any("macro edge" in error for error in errors), errors)
 
     def test_production_authorities_do_not_use_response_only_atoms(self):
-        self.assertEqual(MODULE.validate_production_usage(), [])
+        self.assertEqual(
+            MODULE.validate_production_usage(
+                sources=[
+                    ProductionSource(
+                        path=Path("crates/example/src/lib.rs"),
+                        source=(
+                            'deliberate_rejection!("[04-TOT-2]", "semantic");\n'
+                            'unimplemented_rejection!(879, "implementation");\n'
+                        ),
+                    )
+                ]
+            ),
+            [],
+        )
+
+    def test_main_uses_a_fresh_shared_production_graph(self):
+        with mock.patch.object(
+            MODULE, "discover_production_sources", return_value=[]
+        ) as discover, redirect_stdout(io.StringIO()):
+            self.assertEqual(MODULE.main(), 0)
+        discover.assert_called_once_with(MODULE.ROOT)
+
+    def test_boundary_consumes_the_shared_production_source_owner(self):
+        self.assertIs(MODULE.discover_production_sources, discover_production_sources)
+        self.assertFalse(hasattr(MODULE, "discover_authority_boundary_sources"))
+
+    def test_path_reached_source_outside_target_directory_is_checked(self):
+        errors = MODULE.validate_production_usage(
+            sources=[
+                ProductionSource(
+                    path=Path("tests/support/outside.rs"),
+                    source=(
+                        "fn outside(issue: u32) { "
+                        "chelis_types::unsupported::__build_unimplemented_rejection("
+                        'issue, "dynamic"); }'
+                    ),
+                )
+            ]
+        )
+        self.assertTrue(
+            any("direct authority builder" in error for error in errors), errors
+        )
 
     def test_response_atom_mutation_is_rejected(self):
         errors = MODULE.validate_usage_source(

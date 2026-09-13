@@ -955,11 +955,25 @@ Deliverables, with phase homes:
    matching remain the completion oracle.
 
    The backend-header baseline has ten final rows discovered from the complete
-   HIP and Metal support roots under committed SDK fixtures. The generated
-   `chelis_gpu_tensor` packet is one exact tagged transport; the nine opaque
-   device-owner callables are exact [05-OP-33] numeric operations. Shared
-   runtime declarations retain their primary-baseline authority and are not
-   duplicated into the backend baseline.
+   HIP support root under the committed Phase-0 SDK stubs. Clang runs against a
+   fixed target with `-ffreestanding -nostdlibinc`; canonical linemarker paths
+   may resolve only inside the staged published closure, declared stub roots,
+   or clang's own resource headers. The generated `chelis_gpu_tensor` packet is
+   one exact tagged transport; the nine opaque device-owner callables are exact
+   [05-OP-33] numeric operations. The recursively discovered HIP support-header
+   set selects attributed files before declaration extraction; there is no
+   basename authority filter, so a reached nested support header cannot disappear.
+   Shared runtime declarations retain their primary-baseline authority and
+   declared SDK/stub headers remain preprocessing inputs rather than backend
+   publications.
+   The complete recursively discovered published Metal `.h` set currently
+   exports only `static inline` definitions and therefore contributes no ABI
+   row. A separate executable enrollment gate runs every such header through
+   the shared C-family lexer, aggregates and sorts its raw rows, and fails when
+   an attributable Metal declaration first appears. Comment, string, character,
+   and raw-literal payloads therefore cannot alter structural brace depth or
+   hide a later declaration. Enrollment requires a hermetic Metal census lane
+   plus exact authority in that same change.
 
    The final C/runtime authority partition is exact:
 
@@ -2776,9 +2790,12 @@ that runtime has never been executed). For HIP it reaches only the cells that
 stay `Unimplemented`: the backend has real kernels and a documented hardware
 gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
 owes that gate rather than a diagnostic. And [#1291] and the device residual of
-[#1306] stay open while their cells cite them, so the rejection-authority
-liveness gate keeps reporting honestly. Neither closes on this narrowing; each
-closes when its kernels land and its own hardware gate is green.
+[#1306] both stay open, but for different executable reasons. The remaining
+`Unimplemented` [#1306] cells cite that issue, so rejection-authority liveness
+continues to cover them. The `count` device cells are already
+`Implemented { kernel_id }`; no production rejection cites [#1291], so the
+source-derived rejection manifest does not carry it. [#1291] instead closes
+only when its real-hardware numerical gates are green.
 
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with

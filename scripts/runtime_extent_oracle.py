@@ -1313,6 +1313,155 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         ),
+        # chelis#1821: the gradient splice imported the forward activation and
+        # rooted it nowhere, so the entry-point DCE removed it together with the
+        # carrier holding its witness claims. The `live_forward` pair separates
+        # the case where the whole forward chain is dead from the case where the
+        # forward VALUES live and only the claim's carrier is unrooted; a repair
+        # that kept reachability alone would close the first and leave the
+        # second.
+        #
+        # The `wrt` ARGUMENT KIND is an axis of this corpus, enumerated from
+        # the SPEC's category rather than from what a round happened to find.
+        # Three rounds each found an unrecorded execution mode by varying that
+        # kind, so a list grown witness by witness is the wrong
+        # representation: `spec/04-type-system.md` lines 991-995 defines the
+        # category as a "differentiable target", and the kinds it admits are a
+        # float tensor of any rank, a float PRIM scalar, and an aggregate of
+        # those (tuple, record, nested record, and a record with a
+        # non-differentiable leaf). Each is crossed with single and multi
+        # target.
+        #
+        # The three kinds are measured to behave differently and none folds
+        # into another. A rank-0 `tensor[f32]` target traps on both lanes
+        # while a float prim target does not, so rank is not the variable and
+        # the prim scalar is its own value. Every aggregate spelling behaves
+        # identically, so one value covers all five of them.
+        #
+        # Only tensor/single is repaired here. Every other cell is recorded at
+        # the state it was MEASURED in and deferred to the issue that owns its
+        # mechanism, so the next spec-admitted kind cannot be unlisted.
+        _row(
+            "grad.wrt_tensor.single.dead_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_eval",
+        ),
+        _row(
+            "grad.wrt_tensor.single.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_c",
+        ),
+        _row(
+            "grad.wrt_tensor.single.live_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval",
+        ),
+        _row(
+            "grad.wrt_tensor.single.live_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c",
+        ),
+        # The other three cells of the axis. Each C lane reaches the exit
+        # state and each eval lane does not, so each `.eval` row records the
+        # `lane_divergent` it was measured in and is named in
+        # PHASE_B_DEFERRED against the issue that owns its mechanism.
+        # Declaring `executes_exactly` for one of them would assert an exit its
+        # own receipt denies, and `exit_shortfall` reads that field rather than
+        # measured behaviour, so the oracle could not see the contradiction.
+        # Deferring keeps `--phase b` green without `--allow-shortfall` AND
+        # leaves the oracle a complete view of the divergence.
+        #
+        # Each deferred row carries `lane_divergent` in BOTH columns, the way
+        # phase A's deferred Metal row does, because `validate_transition`
+        # permits only a move from a start state to an exit class: the lattice
+        # is one-way, so a start-to-start move like `silent_unguarded` to
+        # `lane_divergent` is refused by design and is not expressible. These
+        # programs were silent on both lanes before this change, which C5's
+        # prose and each lock's comment state; the row records where the cell
+        # now sits and that it has not moved.
+        #
+        # The two mechanisms are distinct. Under a multi-target `wrt` the
+        # interpreter emits only one of the callee's two interface witnesses,
+        # so the claim is never FORMED (chelis#1920). Under an aggregate `wrt`
+        # it IS formed, measured: the undifferentiated call traps on both lanes
+        # at base and at head, and only the differentiated interpreter route
+        # loses it (chelis#1924).
+        _row(
+            "grad.wrt_tensor.multi.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_tensor.multi.dead_forward.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.single.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.single.dead_forward.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.multi.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.multi.dead_forward.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        # The float PRIM scalar, the kind round 3 found unlisted. Its eval
+        # lane computes a derivative for a program the undifferentiated call
+        # rejects, and its C lane does not reach a lane at all: the build is
+        # REFUSED with the host-lane transform-position diagnostic, which the
+        # rank-0 tensor and tensor variants of the same inline `grad` in the
+        # same def-body position do not hit. So there is no `.c` row at an
+        # exit state to write; the refusal is recorded and deferred with the
+        # eval half against chelis#1934, which owns both.
+        _row(
+            "grad.wrt_prim_scalar.single.dead_forward.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        _row(
+            "grad.wrt_prim_scalar.single.dead_forward.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        # The prim scalar crossed with a multi target, measured rather than
+        # assumed from the single cell: eval computes both cotangents
+        # (`main.0 = 21.0` beside the tensor cotangent's zeros) and C refuses
+        # the same way. Same owner.
+        _row(
+            "grad.wrt_prim_scalar.multi.dead_forward.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        _row(
+            "grad.wrt_prim_scalar.multi.dead_forward.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
         # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
         # rank-0 placeholder whose contract is to be refused so the definition
         # routes to the host lane. chelis#1693's staged host-source partition
@@ -1551,13 +1700,47 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (self_test_target(python), *manifest_targets("b"))
 
 
-# chelis#1837 and chelis#1930 closed the only deferred rows this phase had:
-# `concat.literal_claim.inlined_root.{c,eval}` now REJECT at lowering rather
-# than returning an undeclared shape, so they are ordinary exit rows and this
-# mapping is empty. The machinery stays because a later row may need it; an
-# empty mapping means every phase-b row is at an exit state or an unexplained
-# shortfall, with nothing in between.
-PHASE_B_DEFERRED: Mapping[str, str] = {}
+_AGGREGATE_WRT_DEFERRAL = (
+    "runtime_extents.md C5: an aggregate-typed `wrt` forms the callee's "
+    "interface witness claim, measured by its undifferentiated control "
+    "trapping on both lanes, and only the interpreter's differentiated route "
+    "loses it; chelis#1924 owns that route"
+)
+
+
+PHASE_B_DEFERRED: Mapping[str, str] = {
+    # Seven measured grad obligations remain with their named owners.
+    "grad.wrt_tensor.multi.dead_forward.eval": (
+        "runtime_extents.md C5: the interpreter's lowering of a multi-target "
+        "`grad` emits only one of the callee's two interface witnesses, so the "
+        "claim is never formed and no retained activation can carry it; "
+        "chelis#1920 owns forming it"
+    ),
+    "grad.wrt_aggregate.single.dead_forward.eval": _AGGREGATE_WRT_DEFERRAL,
+    "grad.wrt_aggregate.multi.dead_forward.eval": _AGGREGATE_WRT_DEFERRAL,
+    "grad.wrt_prim_scalar.single.dead_forward.eval": (
+        "runtime_extents.md C5: `spec/04-type-system.md` 991-995 admits a "
+        "float prim parameter as a differentiable single target, and this "
+        "kind computes a derivative for a program the undifferentiated call "
+        "rejects; chelis#1934 owns it. Pre-existing, not introduced by "
+        "chelis#1821"
+    ),
+    "grad.wrt_prim_scalar.multi.dead_forward.eval": (
+        "runtime_extents.md C5: the prim-scalar kind crossed with a multi "
+        "target, measured to behave as its single cell does; chelis#1934"
+    ),
+    "grad.wrt_prim_scalar.multi.dead_forward.c": (
+        "runtime_extents.md C5: the same build refusal as the single cell; "
+        "chelis#1934"
+    ),
+    "grad.wrt_prim_scalar.single.dead_forward.c": (
+        "runtime_extents.md C5: the C lane reaches no exit state for this "
+        "kind because the build is refused with the host-lane "
+        "transform-position diagnostic, which the rank-0 tensor and tensor "
+        "variants of the same inline `grad` do not hit; chelis#1934 owns both "
+        "halves"
+    ),
+}
 
 
 PHASE_A_DEFERRED: Mapping[str, str] = {
@@ -1767,6 +1950,23 @@ def validate_target_receipt(target: TestTarget, completed: subprocess.CompletedP
         )
 
 
+def validate_deferral_keys(spec: PhaseSpec) -> None:
+    """Every `deferred` key names a row of the phase it defers.
+
+    A key with no row defers nothing and reads as though it did, so a typo
+    would hide a real shortfall rather than record it. Round 2 of chelis#1912
+    found this unchecked for both phases; it costs one set difference.
+    """
+
+    ids = {row.id for row in spec.corpus}
+    orphans = sorted(set(spec.deferred) - ids)
+    if orphans:
+        raise SystemExit(
+            f"phase {spec.phase!r} defers row ids that its corpus does not "
+            f"contain, so they defer nothing: {', '.join(orphans)}"
+        )
+
+
 def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestTarget]) -> None:
     available = {
         f"{target.id}.{test}"
@@ -1887,6 +2087,7 @@ def validate(
 
     selected = selected_specs(phase, registry)
     for spec in selected:
+        validate_deferral_keys(spec)
         load_and_validate_baseline(spec)
 
     if targets is None:

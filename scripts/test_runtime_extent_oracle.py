@@ -869,5 +869,31 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         self.assertEqual(rendered["corpus_sha256"], FROZEN_PHASE_A_DIGEST)
 
 
+
+class DeferralKeyTests(unittest.TestCase):
+    """chelis#1912 round 2: a deferral key that names no row defers nothing.
+
+    `exit_shortfall` skips every id in `deferred`, so a typo'd key removes no
+    row from the shortfall and reads as though it had. The check costs one set
+    difference and both registered phases now use the mechanism.
+    """
+
+    ROW = ("a.row", "silent_unguarded", "lane_divergent", "t.r")
+
+    def test_a_key_naming_a_real_row_is_accepted(self) -> None:
+        spec = _spec("t", (ORACLE._row(*self.ROW),), deferred={"a.row": "because"})
+        ORACLE.validate_deferral_keys(spec)
+
+    def test_a_key_naming_no_row_is_refused(self) -> None:
+        spec = _spec("t", (ORACLE._row(*self.ROW),), deferred={"a.rwo": "typo"})
+        with self.assertRaises(SystemExit) as caught:
+            ORACLE.validate_deferral_keys(spec)
+        self.assertIn("a.rwo", str(caught.exception))
+
+    def test_every_registered_phase_defers_only_real_rows(self) -> None:
+        for phase, spec in ORACLE.PHASE_REGISTRY.items():
+            with self.subTest(phase=phase):
+                ORACLE.validate_deferral_keys(spec)
+
 if __name__ == "__main__":
     unittest.main()

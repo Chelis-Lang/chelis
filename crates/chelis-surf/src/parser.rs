@@ -63,7 +63,9 @@ pub enum ParseError {
 }
 
 struct Parser {
-    tokens: Vec<Token>,
+    // Lookahead owns a cursor, but shares the immutable stream. Cloning every
+    // token for each BlockBinding made generated scalar modules quadratic.
+    tokens: std::sync::Arc<[Token]>,
     pos: usize,
     module_allowed: bool,
     mode: ParseMode,
@@ -91,7 +93,7 @@ pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
 
 fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
-        tokens: tokens.to_vec(),
+        tokens: tokens.into(),
         pos: 0,
         module_allowed: true,
         mode,
@@ -738,7 +740,7 @@ impl Parser {
             span: Span::new(self.current_offset(), 0),
         });
         let mut nested = Parser {
-            tokens: expr_tokens,
+            tokens: expr_tokens.into(),
             pos: 0,
             module_allowed: false,
             mode: self.mode,

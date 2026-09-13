@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "047cc610e4d24726dee3d98f5f2fa31911f9a83ac446918a27390434ea13fb55",
+  "corpus_sha256": "d55833711a2e9f5070fcb9aa6f9bf6d407ff1862bb654c3d9106690787562a78",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -433,6 +433,90 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "rejects_exactly",
       "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
+    },
+    {
+      "id": "grad.wrt_aggregate.multi.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.multi.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "lane_divergent",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.single.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "lane_divergent",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.multi.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.multi.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.single.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.multi.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_tensor.multi.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "lane_divergent",
+      "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_tensor.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.single.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_eval"
+    },
+    {
+      "id": "grad.wrt_tensor.single.live_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.single.live_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval"
     },
     {
       "id": "guard.local.declaration_order.eval_c",
