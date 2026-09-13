@@ -821,12 +821,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 99 rows and none of them is an unexplained
+The recorded phase-B corpus has 107 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 23 non-`executes_exactly` values
-against 76 `executes_exactly`, and every one of the twenty-three is accounted
+against 84 `executes_exactly`, and every one of the twenty-three is accounted
 for. Twenty-two rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-two predate B2c:
