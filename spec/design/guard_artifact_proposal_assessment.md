@@ -5,9 +5,10 @@ chelis#1870. This document does not amend the agent contract, a numbered
 specification, or an executable oracle. Each proposal remains open until its
 own implementation and acceptance evidence land.
 
-**Related decisions:** chelis#1824 decides where pull-request validation runs;
-chelis#1882 records that the wire and bindings capacity censuses run in no
-automated job.
+**Related decisions:** chelis#1824 decides where pull-request validation runs.
+Chelis#1882 reports that the wire and bindings capacity censuses run in no
+automated job, but that premise is stale on the assessed head: the daily and
+manual heavy-E2E dtype job owns both censuses.
 
 **Evidence snapshot:** the original review was written on 2026-09-12 from
 `main` at `0e858f184` and later evidence through `72a1fb497`. This repository
@@ -17,6 +18,12 @@ first-parent merge after the local report's final timestamp
 [`guard_artifact_proposal_evidence.md`](guard_artifact_proposal_evidence.md)
 records coverage, measurements, and known limits.
 
+The refresh also corrects an execution-reach error in the local report and the
+first repository draft. The heavy-E2E workspace shards exclude
+`capacity_census_wire` and `capacity_census_bindings` because the dedicated
+dtype Phase 0-3 oracle executes them. They remain absent from pull-request
+`ci-fast`, but they are not local-only.
+
 ## Decision summary
 
 | Proposal | Recommendation | Required correction or condition |
@@ -24,7 +31,8 @@ records coverage, measurements, and known limits.
 | chelis#1868, frozen digests | Adopt with changes, per artifact | Preserve the Phase 0 mutation implementation binding; replace growing-artifact hashes only with derived reports that retain the same review obligations and mutations. |
 | chelis#1869, inventories | Adopt with one change | Keep positive `required` vocabulary evidence at crate granularity; do not replace reviewed classifications with regeneration. |
 | chelis#1870, diagnostic pins | Adopt with changes | Use structured rejection identity for `unsupported` diagnostics, not a second prose parser; deliver the scheduled liveness canary before narrowing the pull-request check. |
-| chelis#1824 and chelis#1882, execution reach | Decide first or in parallel | A correct guard that does not run has a silent failure mode. Do not retire an existing guard before its replacement has an executable owner. |
+| chelis#1824, pull-request execution reach | Decide first or in parallel | A correct guard outside the pull-request selection has a delayed failure mode. Do not retire an existing guard before its replacement has an executable owner at the required cadence. |
+| chelis#1882, scheduled census reach | Refresh or close its stale premise | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's broader demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. |
 
 The governing distinction is:
 
@@ -73,6 +81,15 @@ Adopt chelis#1869's superset form:
 Under this rule, the frozen selection is stable in the sense that matters:
 ordinary additions do not require a digest move, while loss of reviewed
 coverage still fails.
+
+The current-main extended run supplies an exact witness. Runtime
+Representation Phase 2 expected 237 tests in its broad shared-indexing leg and
+failed selection equality after
+`chelis-backend-c::host_abi_tests::fixed_control_host_helper_uses_the_active_invocation_rng`
+entered that command. An exact `nextest list` comparison found that one
+additional passing test and no removed frozen identity. The test arrived in
+chelis#1826 before the local assessment, so this was a missed live instance,
+not a hypothetical replacement benefit.
 
 ### Phase 3 required-test definition digests: replace, preserving the review cue
 
@@ -298,15 +315,15 @@ The corrected claim for recompute-style guards is narrower:
   files as routine bookkeeping, which can obscure the guards that require
   judgement.
 
-Execution reach remains the largest immediate gap:
+Pull-request execution reach remains the largest immediate gap:
 
-| Guard | Current pull-request reach |
+| Guard | Pull-request reach and delayed owner |
 |---|---|
-| `expand_call_site_inventory` | Not selected by `ci-fast` |
-| `expand_insert_source_literal_inventory` | Selected by `ci-fast` |
-| rejected-cells corpus | Selected by `ci-fast` |
-| Phase 3 gate contract | Selected by `ci-fast` |
-| wire and bindings capacity censuses | Explicitly excluded from heavy E2E and absent from `ci-fast` |
+| `expand_call_site_inventory` | Not selected by `ci-fast`; reached by the daily/manual full-workspace and generalization jobs |
+| `expand_insert_source_literal_inventory` | Selected by `ci-fast` and reached by the daily/manual broad jobs |
+| rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
+| Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
+| wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
 | §C7.5 standing-liveness canary | Workflow absent |
 
 The contrast between the two expand inventories is useful but not a complete
@@ -337,12 +354,69 @@ classified:
 
 None implements or closes chelis#1868, chelis#1869, or chelis#1870.
 
+## Current-main extended validation
+
+Workflow-dispatched Linux Extended Validation run `34728303804` completed on
+the exact assessed head, `23729c638098f40e72b9a9834c6338318c41a5ba`.
+Across 20 jobs, six succeeded, 13 failed, and one telemetry job was skipped
+because its prerequisites were red. The red run does not overturn the three
+artifact recommendations, but it adds four material findings.
+
+First, the Runtime Representation Phase 2 selection failure is the live
+positive-addition witness described above. Equality rejected one new passing
+unit test without losing a frozen identity. That directly strengthens
+chelis#1868's superset replacement.
+
+Second, the dtype Phase 0-3 job selected and executed both capacity census
+binaries. Its flattened union ran 772 tests: 769 passed and three failed. The
+wire census's full current-baseline test passed after 968 seconds. The bindings
+census reached its full 1,246-second test and failed because the current native
+execution worker triggers GCC's `-Wmisleading-indentation` error tracked by
+chelis#1864. Thus chelis#1882's local-only premise is false even though the
+current automated verdict is red.
+
+Third, the dtype job's other two failures were the missing Metal SDK fixture
+tracked by chelis#1866. That is fresh executable support for chelis#1869's
+hermetic attributed-closure recommendation, not a reason to weaken or bypass
+the census.
+
+Fourth, chelis#1918 added `annotated_concat_softmax.ch` to the audited frozen
+parity definition, but this run found that the same example fails both strict
+Deep validation and `--desugar` corpus acceptance. The digest movement
+successfully prompted a filename audit; it did not prove the example's broader
+executable obligations. The replacement report must therefore join changed
+names to their owning executable checks, not reproduce only the name review.
+
+Compared with scheduled run `34670561943` on `6abca2406`, ten distinct tests
+that previously passed are now failing:
+
+- four chained-expand evaluation or C-agreement rows fail on a conflicting
+  synthetic dimension;
+- the chelis#345 gradient row rejects backward-DAG construction;
+- three proof or opaque-type fixtures now encounter module-export rejection
+  before their expected contract; and
+- the two `annotated_concat_softmax.ch` corpus checks fail.
+
+No exact open issue match was found for those ten rows as of 2026-09-13. This
+document records them as current-main residual findings rather than assigning
+an unproved root cause or expanding this documentation pull request into their
+repair.
+
+The remaining failures reconfirm already-open work, including chelis#1746,
+chelis#1776, chelis#1779, chelis#1784, chelis#1842, chelis#1861 through
+chelis#1864, chelis#1866, chelis#1881, and chelis#1917. They do not change the
+mechanism conclusions here. In particular, the rejected-cells corpus passed
+in the dtype union, while the §C7.5 standing-liveness canary remains absent;
+chelis#1870's structured-identity and sequencing recommendation is unchanged.
+
 ## Review and delivery order
 
 1. Adopt chelis#1869's disposition-versus-regeneration rule as the governing
    design sentence; treat the digest rule as its corollary.
-2. Give the retained guards executable owners. In particular, resolve
-   chelis#1882 and decide chelis#1824 rather than adding targets indefinitely.
+2. Give the retained guards executable owners at their required cadence. Treat
+   chelis#1882's scheduled-owner premise as satisfied by the dtype Phase 0-3
+   job, and decide chelis#1824 for pull-request selection rather than adding
+   targets indefinitely.
 3. Trial replacements beside existing guards:
    - derive Phase 4B changed atoms and regions while retaining the digest;
    - derive the Phase 3 changed-test set while retaining definition hashes;
@@ -369,8 +443,7 @@ This assessment does not establish:
   digest round trip;
 - whether the primary backend-header census shares the host-SDK exposure found
   in the device lanes; or
-- the final cost and scheduling policy for the guards chelis#1824 and
-  chelis#1882 must place.
+- the final cost and pull-request scheduling policy chelis#1824 must place.
 
 Those unknowns are reasons to run parallel trials, not reasons to silently
 remove or indefinitely retain the current artifacts.
