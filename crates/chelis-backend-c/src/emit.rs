@@ -1161,7 +1161,7 @@ impl CEmitter {
             return dag;
         }
 
-        let mut out = dag;
+        let mut out = dag.clone();
         let ids: Vec<NodeId> = out.nodes().iter().map(|node| node.id).collect();
         for id in ids {
             let Some(Some(scope)) = scopes.get(id.0).copied() else {
@@ -1194,7 +1194,7 @@ impl CEmitter {
                 if chelis_ir::dag::op_references_symbol(&op, from) {
                     // A payload this pass does not rewrite still names the old
                     // identity. Abandon rather than emit a half-renamed graph.
-                    return out;
+                    return dag;
                 }
             }
             if changed {
