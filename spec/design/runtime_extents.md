@@ -111,7 +111,16 @@ independent declaration, value and failure assertions. Remaining failure boundar
   checker's provenance walk stopped letting a sourceless operand poison an
   expression that already carried a real shape source, and its operator set now
   agrees with the shared static folder's. A size with no admissible operand at
-  all is still sourceless with its unchanged diagnostic. With #1266/#569
+  all is still sourceless with its unchanged diagnostic. Since chelis#1791 the
+rule also runs in pipe position, and no rule moved to achieve it: the operand
+of a pipe stage used to reach `check_expand_signature` as an unresolved type
+variable, whose arm returns before the size rule, and after the fold the
+operand is the real expression. Hoisting the provenance rule above the
+operand-type match would also have closed the hole, and was measured to
+replace the direct-position rendering for `insert(b, m, cast(k, int64), n)`
+with the sourceless one: a silent change to an established diagnostic that
+nothing asked for. Stating the pipe's meaning once cannot have that effect.
+With #1266/#569
   admitted beside it, no provenance restriction remains and removing the walk
   itself is all that is left of B2b-2's acceptance half.
 - #1482 needs an actual shape source for a synthesized constant. The
@@ -861,22 +870,26 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 120 rows and none of them is an unexplained
+The recorded phase-B corpus has 128 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 27 non-`executes_exactly` values
-against 93 `executes_exactly`, and every one of the twenty-seven is accounted
-for. Twenty-six rows are `rejects_exactly`, an exit state, since those programs
+count of the JSON's `phase_b` column reaches 28 non-`executes_exactly` values
+against 100 `executes_exactly`, and every one of the twenty-eight is accounted
+for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
-defect. Nine of the twenty-six predate B2c:
+defect. Nine of the twenty-seven predate B2c:
 `expand.positional.replacement.non_unit_source_static`,
 `shrink.to_end.nonzero_start`, and the seven `route.untied` rows
 (`gather.gate`, `matmul.match`, `scatter_replace.gate`, `sum.copy`,
 `sum.match`, `sum.record` and `trace.gate`), whose operand is still unresolved
 where the shape-computed route runs, so the route returns a result nothing ties
-to the shape it computes and any declared shape is admitted. Thirteen are
-B2c's: the two `concat.literal_claim.inlined_root` rows, which B2c moved off
+to the shape it computes and any declared shape is admitted. Fourteen are
+B2c's. One is `expand.sourceless_size.pipe_position`, chelis#1791's half B: a
+size with no tensor source was accepted in pipe position and rejected written
+directly, because the size rule matched the operand's type first and a pipe
+stage's operand was unresolved. The other thirteen are
+the two `concat.literal_claim.inlined_root` rows, which B2c moved off
 `silent_unguarded`, plus five more lane pairs of the same class
 (`pad.identity_axis.literal_claim.inlined_root`, `claim.literal.identity_root`,
 `pad.literal_claim.inlined_root`, `claim.named.resolved.inlined_root` and
@@ -929,6 +942,33 @@ The op-computed local guards moved seven rows
 `class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
 #1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`, which were
 the last two.
+
+The pipe fold reduces only direct first-argument forwarding stages into a
+named call or its dedicated cast/copy/realize form. The fold consumes the
+call-stage origin marker when a lambda becomes an ordinary callee. Other
+lambda stages remain ordinary applications, preserving
+lexical bindings and evaluation of the input before the body. The CLI oracle
+receipts cover capture, sequential shadowing, conditional and deferred uses,
+and trap order, with direct-call and agreeing-input controls.
+
+Eight rows arrived with the pipe fold (chelis#1923 and chelis#1791).
+`spec/02-surf-syntax.md` section 0.1 says `x |> f(y)` MEANS `f(x, y)`; every
+consumer that met a `pipe` node reconstructed that application for itself, and
+they did not all reconstruct it the same way. The checker typed a bare-name
+stage from the callee's function type instead of as the application, which
+lost every rule keyed on an application's arguments
+(`pipe.bare_name_stage.to_tensor.{expand,sum}.{eval,c}`, rejected at check on a
+program the direct spelling accepts) and dropped the section 4.7.2 size rule
+on an operand that stayed unresolved
+(`expand.sourceless_size.pipe_position`, which accepted a sourceless size
+before chelis#1909 and rejected it with the wrong diagnostic after).
+The lowerer bound the accumulator to a synthesized variable, so a callee's own
+shape source stopped resolving and the lanes disagreed
+(`pipe.bare_name_stage.expand_source.{eval,c}`, and
+`pipe.bare_name_stage.lint_fix.c` for the same program as `chelis lint --fix`
+writes it). `chelis_deep::pipe::fold_pipes` states the sentence once, over
+every checker entry's input, and each of those passes lost its own pipe arm
+rather than gaining a rule.
 
 The two `staged.dynamic_to_tensor.vmap_column` rows are chelis#1779 and are
 adjacent rather than the same defect. A runtime-shaped `to_tensor` lowers to a

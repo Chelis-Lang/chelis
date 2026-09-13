@@ -318,6 +318,18 @@ name = "issue_1489_deferred_tensor_operand_gates"
 package = "chelis-cli"
 name = "issue_1489_deferred_result_generalization"
 
+# chelis#1923: the two locks on WHERE the pipe fold runs. The first says the
+# fold returns a new tree and that every public checker entry calls it, so a
+# tenth entry added later cannot quietly skip it; the second says which printed
+# surfaces move and which do not. Six tests, well under a second warm.
+[[target]]
+package = "chelis-types"
+name = "issue_1923_pipe_fold_placement"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1923_pipe_fold_surface"
+
 # chelis#1779: one nine-line `chelis build --target c` of the Shoals column
 # reshape. It went red on `main` when chelis#1693 put the staged partition
 # ahead of the decision that reads the runtime-shaped `to_tensor` marker, and

@@ -1217,6 +1217,71 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_return_boundary.eval_traps_on_a_call_bodied_return",
         ),
+        # chelis#1923 and chelis#1791: pipe application semantics.
+        # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument
+        # insertion, and every consumer that met a `pipe` node reconstructed
+        # that application for itself, not all the same way. The checker typed
+        # a bare-name stage from the callee's FUNCTION type instead, so every
+        # rule keyed on an application's arguments was lost downstream of it;
+        # the lowerer bound the accumulator to a synthesized variable, so a
+        # callee's own shape source stopped resolving. The two `to_tensor`
+        # rows are the checker face, `expand_source` and `lint_fix` the
+        # lowerer face. Both lanes carry a row wherever the pair diverged.
+        _row(
+            "pipe.bare_name_stage.to_tensor.expand.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.expand.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.sum.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.sum.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.expand_source.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
+        ),
+        _row(
+            "pipe.bare_name_stage.expand_source.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
+        ),
+        _row(
+            "pipe.bare_name_stage.lint_fix.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds",
+        ),
+        # chelis#1791 half B: `check_expand_signature` matches the operand's
+        # type before applying the size rule and its unresolved-operand arm
+        # returns early, so in pipe position the rule was dropped and a
+        # sourceless size reached the lowerer. The fold above repairs it
+        # without touching that rule, because after the fold the operand is
+        # resolved. One row, not a lane pair: this is a checker verdict, and
+        # no lane varies once check rejects.
+        _row(
+            "expand.sourceless_size.pipe_position",
+            "nonconforming_rejection",
+            "rejects_exactly",
+            "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+        ),
         # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
         # rank-0 placeholder whose contract is to be refused so the definition
         # routes to the host lane. chelis#1693's staged host-source partition

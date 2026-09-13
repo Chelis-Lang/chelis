@@ -127,6 +127,12 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         "`insert whitespace`, the English verb, in a literal-suffix diagnostic",
     ),
     (
+        "crates/chelis-deep/src/pipe.rs",
+        2,
+        0,
+        "chelis#1923: the fold names `expand`'s size twice as the worked example of a rule keyed on an application's argument, which a pipe stage lost. `insert` has the same exposure and its own receipt in `issue_530_expand_inline_size_gate.rs`; naming a second builtin in the same sentence would document the class no better and the example is deliberately one",
+    ),
+    (
         "crates/chelis-deep/src/tag.rs",
         1,
         0,

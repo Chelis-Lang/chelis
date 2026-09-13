@@ -202,7 +202,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 Some(DeepTag::Let) => infer_let(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::If) => infer_if(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Match) => infer_match(list, env, vg, subst, adt_reg, errors, product),
-                Some(DeepTag::Pipe) => infer_pipe(list, env, vg, subst, adt_reg, errors, product),
+                Some(DeepTag::Pipe) => pipe_reached_inference_unfolded(list, errors),
                 Some(DeepTag::Tuple) => infer_tuple(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::TupleGet) => {
                     infer_tuple_get(list, env, vg, subst, adt_reg, errors, product)
@@ -474,7 +474,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Match => infer_match(&list, env, vg, subst, adt_reg, errors, product),
-                DeepTag::Pipe => infer_pipe(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Pipe => pipe_reached_inference_unfolded(&list, errors),
                 DeepTag::Tuple => infer_tuple(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::TupleGet => {
                     infer_tuple_get(&list, env, vg, subst, adt_reg, errors, product)

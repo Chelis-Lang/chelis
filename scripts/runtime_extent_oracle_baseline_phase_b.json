@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "407d3a26b22fa94cd7ef47b544a4e01f0eec4353e698d4667f5071094f4763af",
+  "corpus_sha256": "db950ede8cf84ceea80d6e7ce9d42a761df8849e4f6982f2222db2f522d473ff",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -405,6 +405,12 @@
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
     },
     {
+      "id": "expand.sourceless_size.pipe_position",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
+    },
+    {
       "id": "guard.local.declaration_order.eval_c",
       "baseline": "lane_divergent",
       "phase_b": "executes_exactly",
@@ -541,6 +547,48 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens"
+    },
+    {
+      "id": "pipe.bare_name_stage.expand_source.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source"
+    },
+    {
+      "id": "pipe.bare_name_stage.expand_source.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source"
+    },
+    {
+      "id": "pipe.bare_name_stage.lint_fix.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.expand.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.expand.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.sum.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.sum.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
     },
     {
       "id": "rebuild.classes_after_each_pass",

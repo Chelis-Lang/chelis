@@ -921,7 +921,18 @@ impl<'a> EvalContext<'a> {
             Some(DeepTag::TupleGet) => self.eval_tuple_get(list),
             Some(DeepTag::Match) => self.eval_match(list),
             Some(DeepTag::Fn) => self.eval_fn(list),
-            Some(DeepTag::Pipe) => self.eval_pipe(list),
+            // chelis#1923: a pipe cannot reach the evaluator. Every checker
+            // entry folds it into the application it denotes
+            // (`chelis_deep::pipe::fold_pipe`), and this evaluator reads the
+            // checked program. The arm that used to sit here re-derived a
+            // static type per stage to recover named axes the stage lambda's
+            // unresolved parameter had lost; the folded application carries
+            // the operand's own annotation, so there is nothing left to
+            // re-derive. Fail closed so a new unfolded ingress is loud.
+            Some(DeepTag::Pipe) => Err("a pipe reached evaluation unfolded: every checker \
+                 entry folds a pipe into the application it denotes \
+                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
+                .to_string()),
             Some(DeepTag::Cast) => self.eval_cast(list),
             Some(DeepTag::Realize) => {
                 // Bucket 1: `realize` is identity in the host runtime,
@@ -1779,108 +1790,6 @@ impl<'a> EvalContext<'a> {
             self.binding_types = saved_types;
         }
         Err("non-exhaustive runtime match".to_string())
-    }
-
-    fn eval_pipe(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
-        let head = kids
-            .first()
-            .ok_or_else(|| "pipe missing head".to_string())?;
-        // Thread the piped value's static type into each stage's
-        // synthesized `__chelis_pipe` param (which carries no annotation
-        // of its own; the annotated AST leaves pipe lambdas as
-        // unresolved type vars) so a named-axis reduction in any stage
-        // can recover the operand's named dims (chelis#338). The type
-        // starts from the head expression and propagates through
-        // shape-preserving (Identity) builtin stages and def stages
-        // with concrete declared return types; any other stage drops it.
-        let mut value_ty = self.static_type_expr_of(head);
-        let mut value = self.eval_expr(head)?;
-        for stage in kids.iter().skip(1) {
-            let next_ty = self.pipe_stage_output_type(stage, value_ty.as_ref());
-            value = self.apply_callable(stage, vec![value], &[value_ty], next_ty.as_ref())?;
-            value_ty = next_ty;
-        }
-        Ok(value)
-    }
-
-    /// Static output type of a pipe stage, for threading the piped
-    /// value's type across stages (chelis#338): the stage body's own
-    /// concrete checker annotation when present, else the incoming
-    /// type when the stage applies a shape-preserving (Identity-class)
-    /// builtin, else a called def's declared return type. Anything
-    /// else is unknown and drops the thread.
-    fn pipe_stage_output_type(&self, stage: &Expr, input_ty: Option<&Expr>) -> Option<Expr> {
-        // A no-extra-arg stage stays a bare `(var f)`; a stage with
-        // bound args is synthesized as
-        // `(fn {..} (params {} __chelis_pipe) (app {..} (var f) args...))`.
-        if let Some(callee) = var_name(stage) {
-            return self.callee_output_type(callee, input_ty);
-        }
-        let Expr::List(stage_list, _) = stage else {
-            return None;
-        };
-        if tag(stage_list) != Some(DeepTag::Fn) {
-            return None;
-        }
-        let body = children(stage_list).get(1)?;
-        // The body's own checker annotation wins when it is concrete
-        // (pipe lambdas are typically left as unresolved `t-var`s).
-        if let Some(ty) = self.static_type_expr_of(body)
-            && !matches!(&ty, Expr::List(ty_list, _) if tag(ty_list) == Some(DeepTag::TVar))
-        {
-            return Some(ty);
-        }
-        let Expr::List(body_list, _) = body else {
-            return None;
-        };
-        if tag(body_list) != Some(DeepTag::App) {
-            return None;
-        }
-        let callee = children(body_list).first().and_then(var_name)?;
-        self.callee_output_type(callee, input_ty)
-    }
-
-    /// Output type of applying `callee` to a value of type `input_ty`:
-    /// the input type for shape-preserving (Identity-class) builtins,
-    /// or a top-level def's declared return type.
-    fn callee_output_type(&self, callee: &str, input_ty: Option<&Expr>) -> Option<Expr> {
-        if self.active_builtin_symbol(callee)
-            && chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity
-        {
-            return input_ty.cloned();
-        }
-        let (resolved, _) = self.lookup_top_level_def(callee)?;
-        let sig = self.type_env.get(&resolved)?;
-        let Expr::List(sig_list, _) = sig else {
-            return None;
-        };
-        if tag(sig_list) != Some(DeepTag::TFn) {
-            return None;
-        }
-        children(sig_list).last().cloned()
-    }
-
-    fn apply_callable(
-        &mut self,
-        stage: &Expr,
-        args: Vec<RuntimeValue>,
-        arg_type_exprs: &[Option<Expr>],
-        result_type_expr: Option<&Expr>,
-    ) -> Result<RuntimeValue, String> {
-        if let Some(name) = self.active_builtin_name(stage) {
-            return self.eval_builtin(name, &args, arg_type_exprs, result_type_expr);
-        }
-        match self.eval_expr(stage)? {
-            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => self
-                .apply_resolved_callable_with_arg_types(
-                    value,
-                    args,
-                    arg_type_exprs,
-                    result_type_expr,
-                ),
-            other => Err(format!("pipe stage is not callable: {other:?}")),
-        }
     }
 
     pub(super) fn apply_resolved_callable(

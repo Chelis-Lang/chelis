@@ -220,7 +220,7 @@ pub(crate) fn infer_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    let normalized = normalize_nodes_to_lists(exprs);
+    let normalized = normalize_program_input(exprs);
     infer_program_with_product_in_session(&normalized, errors).stats()
 }
 
@@ -489,7 +489,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
     // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(library_exprs);
+    let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
@@ -656,6 +656,15 @@ pub(crate) fn build_compiled_library_context_in_session(
     // annotation pass) so a deep-input stack bail on the library-compile path
     // always fails the check rather than returning a silent green / partial
     // CheckedProgram. Mirrors `check_ir_with_signature_context`.
+    // chelis#1923: fold every pipe into the application it denotes before
+    // anything reads this program. This entry annotates `library_exprs`
+    // directly rather than through a checked-program call, so without the
+    // fold here a library's pipe would reach `annotated_exprs` unfolded and
+    // the lowerer would refuse it. The carrier is deliberately NOT normalized
+    // here: chelis#1023 pins that a stamped program stays stamped, and this
+    // entry never normalized it.
+    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
@@ -809,6 +818,15 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // library-compile path always fails the check rather than returning a
     // silent green / partial CheckedProgram. Mirrors
     // `check_ir_with_signature_context`.
+    // chelis#1923: fold every pipe into the application it denotes before
+    // anything reads this program. This entry annotates `library_exprs`
+    // directly rather than through a checked-program call, so without the
+    // fold here a library's pipe would reach `annotated_exprs` unfolded and
+    // the lowerer would refuse it. The carrier is deliberately NOT normalized
+    // here: chelis#1023 pins that a stamped program stays stamped, and this
+    // entry never normalized it.
+    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.resume_for_new_check();
@@ -989,7 +1007,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
     // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(new_exprs);
+    let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
@@ -1117,6 +1135,11 @@ pub(crate) fn check_typed_program_in_session(
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
+    // One tree for inference and annotation: the pipe fold ONLY, not the
+    // carrier normalization. chelis#1023 pins that a stamped program stays
+    // stamped through the checker's output, and this entry deliberately
+    // passes its input through untouched otherwise.
+    let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, errors);
     // [04-INF-4] makes eager value cycles an ingress-independent checker
     // error. Reuse the canonical graph that scheduled inference rather than
@@ -1169,7 +1192,7 @@ pub(crate) fn infer_ir_program_in_session(
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
     // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(exprs);
+    let normalized = normalize_program_input(exprs);
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
@@ -2142,6 +2165,20 @@ fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     exprs.iter().map(normalize_node_to_list).collect()
 }
 
+/// The checker's input normalization: carriers to lists, then pipes folded
+/// into the applications they denote.
+///
+/// chelis#1923: `spec/02-surf-syntax.md` §0.1 makes a pipe notation for
+/// first-argument insertion, and every consumer that reconstructed the
+/// application for itself was re-deriving that sentence. The checker folds
+/// once, here, so inference and the annotation pass that follows it see one
+/// tree. Folding only inside inference would leave the ANNOTATED tree, which
+/// is the checker's output and what the lowerer, linearity, the effect pass
+/// and the caches all read, still carrying the `Pipe` node.
+fn normalize_program_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    chelis_deep::pipe::fold_program_pipes(&normalize_nodes_to_lists(exprs))
+}
+
 fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
     enum Action<'a> {
         Visit(&'a deep::Expr),
@@ -2323,7 +2360,7 @@ pub(crate) fn builtin_selection_probe(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<crate::builtin_discovery::BuiltinCaseSelection> {
-    let normalized = normalize_nodes_to_lists(exprs);
+    let normalized = normalize_program_input(exprs);
     infer_program_with_product_in_session(&normalized, errors).builtin_selections
 }
 

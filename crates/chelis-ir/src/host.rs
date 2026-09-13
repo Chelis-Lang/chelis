@@ -7271,177 +7271,6 @@ fn malformed_host_authority(
     )
 }
 
-/// Bucket 4e helper: rewrite a pipe stage `f` applied to an accumulator
-/// `x` into a Deep expression that downstream host lowering can handle
-/// without falling back to `Builtin { name: "call" }`. Three cases:
-///
-/// - `(var f) x` becomes `(app {} (var f) x)`.
-/// - `(fn (params p) body) x` beta-reduces to `body[p := x]`.
-/// - Other / nested apps become `(app {} stage x)` and let
-///   `lower_app_host_expr` work them out.
-///
-/// The beta-reduction case matters because `xs |> mul(b)` desugars to
-/// `(fn (params __chelis_pipe) (app mul __chelis_pipe b))`. Wrapping it
-/// in an outer `(app (fn ...) x)` would produce a fallback `Builtin {
-/// name: "call" }` because `lower_app_host_expr` reads the function
-/// name from the first child as a `(var ...)` -- a lambda head doesn't
-/// match. Beta-reduction skips the outer app entirely and the existing
-/// `(app mul x b)` form lowers cleanly.
-fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
-    use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, List, Metadata};
-    let span = Span::new(0, 0);
-    if let Expr::List(stage_list, _) = stage
-        && tag(stage_list) == Some(DeepTag::Fn)
-    {
-        let kids = children(stage_list);
-        if let Some(params_expr) = kids.first()
-            && let Some(params_list) = as_list(params_expr)
-            && tag(params_list) == Some(DeepTag::Params)
-        {
-            let param_names: Vec<String> = children(params_list)
-                .iter()
-                .filter_map(param_name)
-                .collect();
-            // Single-param lambdas are the only shape the desugarer
-            // produces for pipe stages (`__chelis_pipe`). Multi-param
-            // lambdas in pipe position would be a user error and we
-            // bail to the wrap-in-app path; the resulting fallback
-            // call diagnostic surfaces a clean error from the CLI.
-            if param_names.len() == 1
-                && let Some(body) = kids.get(1)
-            {
-                return substitute_var(body, &param_names[0], &acc);
-            }
-        }
-    }
-    let elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), span),
-        Expr::Map(Metadata::default(), span),
-        stage.clone(),
-        acc,
-    ];
-    Expr::List(List { elements }, span)
-}
-
-/// Substitute every `(var {} name)` reference in `expr` with
-/// `replacement`. Only walks nodes that the host pipe rewrite produces
-/// from desugaring (vars, apps, lits, fn-bodies); other Deep tags pass
-/// through unchanged on the assumption they don't bind or shadow the
-/// pipe parameter (which the surf desugarer guarantees by using a
-/// fresh `__chelis_pipe` name).
-fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
-    match expr {
-        Expr::List(list, span) => {
-            if tag(list) == Some(DeepTag::Var)
-                && children(list).first().and_then(symbol_name) == Some(name)
-            {
-                return replacement.clone();
-            }
-            // `(fn (params x) body)` shadows `name` only if `x == name`.
-            // The desugarer's pipe-param name (`__chelis_pipe`) is
-            // unique per stage so shadowing inside a stage's body is
-            // not expected, but defend against it for correctness.
-            if tag(list) == Some(DeepTag::Fn)
-                && let Some(params_expr) = list.elements.get(2)
-                && let Some(params_list) = as_list(params_expr)
-                && tag(params_list) == Some(DeepTag::Params)
-                && children(params_list)
-                    .iter()
-                    .filter_map(param_name)
-                    .any(|p| p == name)
-            {
-                return expr.clone();
-            }
-            let mut elements = Vec::with_capacity(list.elements.len());
-            for el in &list.elements {
-                elements.push(substitute_var(el, name, replacement));
-            }
-            Expr::List(chelis_deep::ast::List { elements }, *span)
-        }
-        Expr::MetaExpr(meta, span) => {
-            let inner = substitute_var(&meta.expr, name, replacement);
-            let metadata = meta
-                .metadata
-                .map_expressions(&mut |value, _| substitute_var(value, name, replacement))
-                .expect("substitution preserves annotation roles");
-            Expr::MetaExpr(
-                chelis_deep::ast::MetaExpr {
-                    expr: Box::new(inner),
-                    metadata,
-                },
-                *span,
-            )
-        }
-        Expr::Atom(_, _) => expr.clone(),
-        Expr::Map(metadata, span) => Expr::Map(
-            metadata
-                .map_expressions(&mut |value, _| substitute_var(value, name, replacement))
-                .expect("substitution preserves annotation roles"),
-            *span,
-        ),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            substitute_var(&bridged, name, replacement)
-        }
-        // chelis#1087 documented pass-through: the pipe rewrite substitutes
-        // a name the surf desugarer minted fresh per stage (`__chelis_pipe`,
-        // the contract in this function's doc comment), so that name cannot
-        // occur inside a transitional variant's subtree. The assertion keeps
-        // the freshness contract checked rather than assumed; a firing here
-        // means a caller substituted a non-fresh name.
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            debug_assert!(
-                !expr_mentions_name(expr, name),
-                "substitute_var pass-through violated its freshness contract: \
-                 `{name}` occurs inside a transitional Expr variant (chelis#1087)"
-            );
-            expr.clone()
-        }
-    }
-}
-
-/// Whether `name` occurs as an `Atom::Name` anywhere in `expr`. Supports the
-/// `substitute_var` pass-through assertion above (chelis#1087): under the
-/// freshness contract the substituted pipe-parameter name occurs nowhere in
-/// a skipped subtree, so any occurrence at all is a contract violation.
-fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
-    match expr {
-        Expr::Atom(Atom::Name(n), _) => n == name,
-        Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map.any_expression(|value| expr_mentions_name(value, name)),
-        Expr::MetaExpr(meta, _) => {
-            meta.metadata
-                .any_expression(|value| expr_mentions_name(value, name))
-                || expr_mentions_name(&meta.expr, name)
-        }
-        Expr::List(list, _) => list
-            .elements
-            .iter()
-            .any(|element| expr_mentions_name(element, name)),
-        Expr::Node(node, _) => {
-            node.meta()
-                .any_expression(|value| expr_mentions_name(value, name))
-                || node
-                    .children_slice()
-                    .iter()
-                    .any(|child| expr_mentions_name(child, name))
-        }
-        Expr::BareList(elements, _) => elements
-            .iter()
-            .any(|element| expr_mentions_name(element, name)),
-        Expr::UnknownForm(data) => {
-            data.meta
-                .any_expression(|value| expr_mentions_name(value, name))
-                || data
-                    .children
-                    .iter()
-                    .any(|child| expr_mentions_name(child, name))
-        }
-    }
-}
-
 fn lower_host_expr_kind(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
@@ -7802,30 +7631,18 @@ fn lower_host_expr_kind(
             lower_app_host_expr(expr, list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Pipe) => {
-            // Bucket 4e: a pipe expression that survives to host
-            // lowering (top-level value bindings, or pipes whose seed
-            // can't be type-resolved) is rewritten into the equivalent
-            // nested-app form so downstream lowering sees the same
-            // shape used for explicit nested calls. Without this arm
-            // the whole form fell through to
-            // `HostExpr::new(HostExprKind::Unit)`, so a top-level
-            // pipe binding to a user-defined fn materialised as `()`
-            // in generated C even though `chelis check` accepted the
-            // tensor-typed shape. The IR-side `lower_pipe` fix at
-            // `chelis_ir::lower::lower_pipe` already handles the DAG
-            // path; this is the host-lane sibling.
-            let kids = children(list);
-            let Some((seed, stages)) = kids.split_first() else {
-                return Err(host_expr_lowering_error(
-                    expr,
-                    "an empty `pipe` has no value",
-                ));
-            };
-            let mut current = (*seed).clone();
-            for stage in stages {
-                current = beta_reduce_pipe_stage(stage, current);
-            }
-            lower_host_expr(&current, program, scope, tensor_helpers)?
+            // A pipe must never reach the host lowerer either. The checker's
+            // input fold (`chelis_deep::pipe::fold_pipe`) replaced it with the
+            // application spec/02-surf-syntax.md §0.1 says it denotes, so the
+            // host emitter sees that application like every other consumer.
+            // This arm existed to beta-reduce the stage itself, which is the
+            // second derivation of one sentence that chelis#1923 and
+            // chelis#1791 came from; it fails closed instead.
+            let _ = list;
+            return Err(host_expr_lowering_error(
+                expr,
+                "a pipe reached lowering unfolded",
+            ));
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::HandleEffect) => {
             // `with seed(...) { body }` and similar effect handlers are
@@ -17915,39 +17732,14 @@ mod tests {
         );
     }
 
-    // ── chelis#1087: substitute_var transitional-variant pass-through ──
-
-    /// The documented pass-through leaves a transitional variant unchanged
-    /// when the freshness contract holds (the substituted name occurs
-    /// nowhere inside it).
-    #[test]
-    fn substitute_var_transitional_passthrough_is_unchanged() {
-        let sp = chelis_deep::Span::new(0, 0);
-        let bare = Expr::BareList(
-            vec![Expr::Atom(Atom::Name("other_name".to_string()), sp)],
-            sp,
-        );
-        let replacement = Expr::Atom(Atom::Int(1), sp);
-        let out = substitute_var(&bare, "__chelis_pipe_0", &replacement);
-        assert_eq!(out, bare, "pass-through must be byte-identical");
-    }
-
-    /// Negative: the pass-through's debug assertion fires when the
-    /// substituted name DOES occur inside a transitional variant — the
-    /// freshness contract (`__chelis_pipe` minted fresh per stage) is
-    /// checked, not assumed.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "freshness contract")]
-    fn substitute_var_documented_passthrough_negative() {
-        let sp = chelis_deep::Span::new(0, 0);
-        let bare = Expr::BareList(
-            vec![Expr::Atom(Atom::Name("__chelis_pipe_0".to_string()), sp)],
-            sp,
-        );
-        let replacement = Expr::Atom(Atom::Int(1), sp);
-        let _ = substitute_var(&bare, "__chelis_pipe_0", &replacement);
-    }
+    // chelis#1087's two `substitute_var` pass-through locks went with the
+    // function, which chelis#1923 deleted along with this lane's own pipe
+    // beta-reduction: the checker now folds a pipe into the application
+    // spec/02-surf-syntax.md §0.1 says it denotes, so no lane substitutes a
+    // stage parameter any more. The property they pinned, that a
+    // transitional variant is passed through unchanged rather than rebuilt,
+    // is a property of the surviving substitution and is pinned there by
+    // `chelis_deep::pipe::tests::a_transitional_variant_is_passed_through`.
 
     // ── harden-bounded-monomorphization D1/D2/D4 unit locks ──
 

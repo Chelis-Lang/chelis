@@ -893,208 +893,35 @@ fn report_literal_pattern_error(
     errors.push(error);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn infer_pipe(
-    list: &deep::List,
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-    product: &mut InferenceProduct,
-) -> Type {
-    let kids = children(list);
-    if kids.is_empty() {
-        return malformed_form(list, "pipe", "at least one stage", errors);
-    }
-
-    let mut current_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-
-    for stage in &kids[1..] {
-        // If the stage is the canonical bare-keyword / `cast(type)` pipe-stage
-        // shape `(fn (params <single unannotated param>) body)` produced by
-        // `crates/chelis-surf/src/parser.rs::parse_pipe_stage` and
-        // `desugar_pipe_stage`, infer the lambda with its parameter bound to
-        // the upstream pipe value's type. Without this pre-binding, per-builtin
-        // inference gates inside the body (e.g. `infer_copy`, `infer_cast`)
-        // see a fresh type variable for the parameter and reject before the
-        // pipe loop's unification can bind it to `current_ty`. See
-        // `docs/investigations/pipe_copy_typecheck_diagnosis.md` for the trace.
-        let stage_ty = if let Some(param_name) = synthesized_unary_lambda_param(stage, adt_reg, vg)
-        {
-            infer_pipe_stage_lambda(
-                stage,
-                &param_name,
-                current_ty.clone(),
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
-        } else {
-            infer_expr(stage, env, vg, subst, adt_reg, errors, product)
-        };
-        // A bare pipe stage (`x |> recip`) has no `app` node, so the normal
-        // post-application policy check cannot see it. Consult the identical
-        // chelis#860 operand policy at this application boundary.
-        if let Some(fname) = bare_var_stage_name(stage) {
-            let resolved = type_for_readonly_check(&current_ty, subst);
-            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
-                let mut error = CheckError::new(kind, message, hints);
-                if let Some(id) = stage.span_id() {
-                    error.span_offset = parse_span_offset(id);
-                    error.span_id = Some(id.to_string());
-                } else if stage.span().offset > 0 {
-                    error.span_offset = Some(stage.span().offset);
-                }
-                return report(errors, error);
-            }
-        }
-        let ret_tv = vg.fresh_type();
-        let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
-        let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
-
-        match unify(&stage_ty, &expected, subst) {
-            Ok(()) => {
-                current_ty = subst.apply(&ret_tv);
-            }
-            Err(te) => {
-                let mut e: CheckError = te.into();
-                if let Some(id) = stage.span_id() {
-                    e.span_offset = parse_span_offset(id);
-                    e.span_id = Some(id.to_string());
-                } else {
-                    let off = stage.span().offset;
-                    if off > 0 {
-                        e.span_offset = Some(off);
-                    }
-                }
-                return report(errors, e);
-            }
-        }
-    }
-
-    current_ty
-}
-
-/// Return the builtin name of a bare-reference pipe stage. Lambda-shaped
-/// stages contain ordinary application nodes and are handled by the normal
-/// post-application chokepoint.
-pub(super) fn bare_var_stage_name(stage: &deep::Expr) -> Option<&str> {
-    // chelis#1107 amendment: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(stage)?;
-    if tag != DeepTag::Var {
-        return None;
-    }
-    kids.first().and_then(symbol_name)
-}
-
-/// If `stage` is a `(fn (params x) body)` Deep node with exactly one
-/// unannotated parameter -- the canonical shape produced by the Surf
-/// parser's `parse_pipe_stage` and `desugar_pipe_stage` for bare
-/// unary-builtin keyword stages (`x |> copy`, `x |> realize`) and the
-/// one-arg `cast(type)` form (`x |> cast(f32)`) -- return the
-/// parameter's name. Otherwise return `None`.
+/// A `pipe` node reached inference.
 ///
-/// Multi-arg lambdas, lambdas with annotated parameters, and any other
-/// pipe-stage form (named reference, partial application, etc.) fall
-/// through unchanged.
-pub(super) fn synthesized_unary_lambda_param(
-    stage: &deep::Expr,
-    _adt_reg: &AdtRegistry,
-    _vg: &mut VarGen,
-) -> Option<String> {
-    // chelis#1107 amendment: carrier-preserving read (both levels).
-    let (tag, _, kids) = stamped_parts(stage)?;
-    if tag != DeepTag::Fn {
-        return None;
-    }
-    let params_expr = kids.first()?;
-    let (params_tag, _, param_kids) = stamped_parts(params_expr)?;
-    if params_tag != DeepTag::Params {
-        return None;
-    }
-    if param_kids.len() != 1 {
-        return None;
-    }
-    // Single param must be a bare symbol; an annotated form would
-    // surface as `MetaExpr` or a nested `List`, and the user-written
-    // annotation takes precedence over the upstream pipe value's type.
-    match &param_kids[0] {
-        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.to_string()),
-        _ => None,
-    }
-}
-
-/// Infer a synthesized unary pipe-stage lambda with its parameter
-/// pre-bound to `param_ty`. Mirrors `infer_fn` but seeds the
-/// parameter's scheme from `param_ty` instead of allocating a fresh
-/// type variable, so per-builtin inference gates inside the body see
-/// the upstream pipe value's type.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn infer_pipe_stage_lambda(
-    stage: &deep::Expr,
-    param_name: &str,
-    param_ty: Type,
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &AdtRegistry,
+/// It cannot, from any checker entry: `chelis_deep::pipe::fold_pipe` states
+/// `spec/02-surf-syntax.md` section 0.1's sentence -- `x |> f(y)` MEANS
+/// `f(x, y)` -- once, over every entry's input, so inference only ever sees
+/// the application. The rule that used to live here typed a stage from the
+/// callee's FUNCTION type instead of as that application, which lost every
+/// rule keyed on an application's arguments: `to_tensor`'s literal shape,
+/// `sum`'s axis, `expand`'s size (chelis#1923, chelis#1791).
+///
+/// So this arm exists to make the class impossible to reintroduce quietly
+/// rather than to handle a case. A pipe arriving here means an entry was
+/// added that does not fold, and saying so is worth more than typing it a
+/// second way.
+pub(super) fn pipe_reached_inference_unfolded(
+    list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
-    product: &mut InferenceProduct,
 ) -> Type {
-    // chelis#1107 amendment: carrier-preserving read -- a stamped pipe-stage
-    // `fn` node used to fall straight into the malformed-form rejection.
-    let Some((_, _, kids)) = stamped_parts(stage) else {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                "malformed pipe stage: expected a list-form stage node \
-                 (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
-                    .to_string(),
-                vec![],
+    let stages = children(list).len().saturating_sub(1);
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "a pipe reached inference unfolded ({stages} stage(s)): every checker entry \
+                 folds a pipe into the application it denotes before inference \
+                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
             ),
-        );
-    };
-    let body = match kids.get(1) {
-        Some(body) => body,
-        None => {
-            // A stamped `fn` node satisfies its `Fixed(2)` arity contract at
-            // construction, so only a legacy `List` carrier can be short here.
-            // chelis#1107 amendment (justified-safe, not routed): see the
-            // arity-contract argument in the comment directly above.
-            let deep::Expr::List(list, _) = stage else {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::MalformedForm,
-                        "malformed pipe stage: expected a body \
-                         (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
-                            .to_string(),
-                        vec![],
-                    ),
-                );
-            };
-            return malformed_form(list, "pipe stage", "a body", errors);
-        }
-    };
-
-    let mut fn_env = env.clone();
-    fn_env.bind_lexical(param_name.to_string(), Scheme::mono(param_ty.clone()));
-    // chelis#397/#469: a fresh parameter has no size provenance; clear any
-    // entry inherited from an outer name it shadows (BLOCKER C).
-    fn_env.clear_size_provenance(param_name);
-    // chelis#631: same for a shadowed list-literal length.
-    fn_env.clear_list_literal_len(param_name);
-
-    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
-
-    let resolved_param = subst.apply(&param_ty);
-    let resolved_body = subst.apply(&body_ty);
-    let stage_ty = Type::Fn(vec![resolved_param], Box::new(resolved_body));
-    product.record_bypass(stage, stage_ty.clone(), "synthesized pipe-stage inference");
-    stage_ty
+            vec![],
+        ),
+    )
 }

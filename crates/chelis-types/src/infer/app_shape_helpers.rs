@@ -350,13 +350,15 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
         },
         // Integer arithmetic: combine the operands' classes.
         DeepTag::App => classify_arith_app(kids, ctx),
-        // chelis#569: `v |> s1 |> s2` is `s2(s1(v))`. `chelis lint --fix`
-        // rewrites a nested first-argument chain into exactly this shape, so
-        // the canonical spelling of a shape read — `x |> shape(cast(0,
-        // int32)) |> cast(int64)` — reaches the size slot as a `pipe` node.
-        // Classifying it as the application it denotes is what keeps `lint
-        // --fix` from turning a building program into a rejected one.
-        DeepTag::Pipe => classify_pipe(kids, ctx),
+        // chelis#569's `pipe` arm is gone: `chelis_deep::pipe::fold_pipe`
+        // rewrites `v |> s1 |> s2` into `s2(s1(v))` over the checker's input,
+        // so the canonical spelling of a shape read reaches this slot as the
+        // `app` node above and takes the same route the direct spelling does.
+        // The arm that used to sit here read only the pipe's input for a
+        // type, so a `shape(...)` read in a LATER stage classified
+        // `Sourceless` where the direct spelling classified `ShapeSourced`:
+        // an under-approximation the fold makes unnecessary rather than
+        // safer.
         // chelis#530: any other List-shaped size — a tuple
         // projection (`t.0`), an inline `match`/`if`, a record
         // `access`, etc. — has NO backend-materializable shape
@@ -451,88 +453,6 @@ fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass 
         return SizeClass::Unknown;
     }
     SizeClass::Static
-}
-
-/// Classify `(pipe {} value stage...)` as the staged application it denotes
-/// (chelis#569).
-///
-/// The stage shapes are the two `infer_pipe` itself distinguishes, read
-/// through the same helpers: `synthesized_unary_lambda_param` for the
-/// `(fn {} (params {} p) body)` node the parser builds for a call stage, and
-/// `bare_var_stage_name` for `x |> f`. A stage this walk does not recognize
-/// ends the fold at `Sourceless`, the same fail-closed answer a call to an
-/// opaque function already gets.
-///
-/// Only the pipe's input expression carries a readable type, so a
-/// `shape(...)` read in the FIRST stage resolves its operand while a read in
-/// a later stage does not. That is a deliberate under-approximation: it can
-/// only reject a materializable extent, never admit a sourceless one.
-fn classify_pipe(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
-    let Some(value) = kids.first() else {
-        return SizeClass::Sourceless;
-    };
-    let mut class = classify_size_in(value, ctx);
-    let mut ty = shape_operand_type(value, ctx);
-    for stage in &kids[1..] {
-        if let Some(name) = synthesized_unary_lambda_param_name(stage) {
-            let Some((_, _, stage_kids)) = stamped_parts(stage) else {
-                return SizeClass::Sourceless;
-            };
-            let Some(body) = stage_kids.get(1) else {
-                return SizeClass::Sourceless;
-            };
-            let mut piped: Vec<PipedParam> = Vec::with_capacity(ctx.piped.len() + 1);
-            piped.extend(ctx.piped.iter().map(|param| PipedParam {
-                name: param.name.clone(),
-                class: param.class,
-                ty: param.ty.clone(),
-            }));
-            piped.push(PipedParam { name, class, ty });
-            class = classify_size_in(
-                body,
-                &SizeCtx {
-                    env: ctx.env,
-                    adt_reg: ctx.adt_reg,
-                    subst: ctx.subst,
-                    piped: &piped,
-                },
-            );
-        } else if let Some(name) = bare_var_stage_name(stage) {
-            // `x |> neg` is the pipe spelling of the unary arithmetic the
-            // application arm already follows; every other bare stage is a
-            // call whose result has no readable shape source.
-            class = if INT_ARITH.contains(&name) {
-                combine_arith_classes(std::iter::once(class))
-            } else {
-                SizeClass::Sourceless
-            };
-        } else {
-            return SizeClass::Sourceless;
-        }
-        ty = None;
-    }
-    class
-}
-
-/// The single parameter name of a synthesized unary pipe-stage lambda.
-///
-/// `synthesized_unary_lambda_param` asks the same question but takes the
-/// inference state (`&AdtRegistry`, `&mut VarGen`) that this read-only walk
-/// does not hold; both read the `(fn {} (params {} p) ..)` shape the Surf
-/// parser's `parse_pipe_stage`/`desugar_pipe_stage` produce.
-fn synthesized_unary_lambda_param_name(stage: &deep::Expr) -> Option<String> {
-    let (tag, _, kids) = stamped_parts(stage)?;
-    if tag != DeepTag::Fn {
-        return None;
-    }
-    let (params_tag, _, param_kids) = stamped_parts(kids.first()?)?;
-    if params_tag != DeepTag::Params || param_kids.len() != 1 {
-        return None;
-    }
-    match &param_kids[0] {
-        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.to_string()),
-        _ => None,
-    }
 }
 
 /// Recognize a `shape(operand, axis)` application — possibly wrapped in one
