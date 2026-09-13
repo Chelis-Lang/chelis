@@ -5651,7 +5651,8 @@ fn compute_reduce_window_out_dims(
 
 #[derive(Clone)]
 struct ResolvedFunction {
-    expression: Expr,
+    // Immutable bodies are shared across lexical scope snapshots.
+    expression: std::sync::Arc<Expr>,
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
     signature: Option<Expr>,
@@ -8358,7 +8359,7 @@ impl<'program> LowerCtx<'program> {
         let (tag, _, kids) = stamped_parts(expr)?;
         match tag {
             DeepTag::Fn => Some(CallableExpr::Plain(ResolvedFunction {
-                expression: expr.clone(),
+                expression: std::sync::Arc::new(expr.clone()),
                 signature: None,
             })),
             DeepTag::Var => {
