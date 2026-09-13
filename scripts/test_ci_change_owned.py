@@ -274,9 +274,14 @@ class SchemaTests(unittest.TestCase):
         by_path = {rule.prefix: rule for rule in config.path_rules}
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
-        for path in ("spec/design/guard_artifact_proposal_assessment.md",
-                     "spec/design/guard_artifact_proposal_evidence.md"):
-            self.assertEqual(by_path[path].disposition, "docs_only")
+
+    def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
+        for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
+            text = config_text() + (
+                f'\n[[path_rule]]\nprefix = "{path}"\ndisposition = "docs_only"\n'
+            )
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "disposition"):
+                load_config(text)
 
 
 class MetadataAndDiffTests(unittest.TestCase):
@@ -366,6 +371,22 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p"])
         owned.verify_plan_digest(plan)
 
+    def test_mixed_code_and_new_prose_use_the_existing_docs_only_disposition(self) -> None:
+        for path in ("changelog.d/new-fix.fixed.md", "docs/new-page.md",
+                     "spec/design/new-assessment.md", "openspec/changes/new/.openspec.yaml"):
+            with self.subTest(path=path):
+                plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                                  owned.ChangeRecord("A", path)])
+                self.assertEqual(plan["change_owned"], ["p::smoke"])
+                self.assertEqual(plan["path_dispositions"][1],
+                                 {"path": path, "status": "A", "kind": "docs_only"})
+
+    def test_executable_docs_and_unknown_code_still_require_a_reviewed_mapping(self) -> None:
+        for path in ("spec/05-risc-primitives.md", "docs/investigations/remediation_status_2026_08_04.md",
+                     "openspec/config.yaml", "new-tools/check.py"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "unclassified changed path"):
+                self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                           owned.ChangeRecord("A", path)])
     def test_added_target_is_owned_and_renamed_target_is_delete_plus_add(self) -> None:
         base = metadata(
             package("p", [("old", "crates/p/tests/old.rs", []), ("heavy", "crates/p/tests/heavy.rs", [])]),

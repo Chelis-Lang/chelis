@@ -493,10 +493,6 @@ prefix = "packages/chelis-std/"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-compiler-api", "chelis-reef", "chelis-std-bundle"]
 
-[[path_rule]]
-prefix = "openspec/changes/"
-disposition = "docs_only"
-
 # Exact implementation paths for the initial chelis#1824 mechanism. These
 # avoid granting authority to unrelated future files under scripts/, .github/
 # or .config/.
@@ -582,10 +578,6 @@ reason = "gate-owned workflow and cache invariants run in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
-prefix = "docs/ci_validation.md"
-disposition = "docs_only"
-
-[[path_rule]]
 prefix = "scripts/test_nextest_profile_partition.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -593,18 +585,6 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "workspace shard 1 runs the real standing-selection versus unfiltered-nightly listing comparison"
 tracking_issue = "chelis#1824"
-
-[[path_rule]]
-prefix = "spec/design/guard_artifact_proposal_assessment.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "spec/design/guard_artifact_proposal_evidence.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "changelog.d/1824-change-owned-ci.changed.md"
-disposition = "docs_only"
 
 # Stable root controls with direct standing owners.
 [[path_rule]]
@@ -660,35 +640,3 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
-
-[[path_rule]]
-prefix = ".gitignore"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "AGENTS.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "ARCHITECTURE.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "CHANGELOG.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "CLAUDE.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "CONTRIBUTING.md"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "LICENSE"
-disposition = "docs_only"
-
-[[path_rule]]
-prefix = "README.md"
-disposition = "docs_only"

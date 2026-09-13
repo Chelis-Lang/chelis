@@ -34,6 +34,11 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
+if __package__:
+    from .ci_detect_docs_only import is_docs_only
+else:
+    from ci_detect_docs_only import is_docs_only
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 2
@@ -309,16 +314,9 @@ def read_config(path: Path) -> Config:
                 )
             packages = ()
             owner = _owner(row)
-        elif disposition == "docs_only":
-            if set(row) != {"prefix", "disposition"}:
-                raise ValueError(
-                    "docs_only path_rule requires exactly prefix and disposition"
-                )
-            packages = ()
-            owner = None
         else:
             raise ValueError(
-                "path_rule disposition must be packages, owner, or docs_only"
+                "path_rule disposition must be packages or owner"
             )
         prefix = _nonempty_string(row, "prefix")
         if not _valid_prefix(prefix):
@@ -751,6 +749,9 @@ def make_plan(
             continue
 
         matching_rules = [rule for rule in config.path_rules if rule.matches(path)]
+        if not matching_rules and is_docs_only([path]):
+            dispositions.append({"path": path, "status": status, "kind": "docs_only"})
+            continue
         if len(matching_rules) != 1:
             qualifier = "ambiguous" if matching_rules else "unclassified"
             raise ValueError(f"{qualifier} changed path: {path}")
