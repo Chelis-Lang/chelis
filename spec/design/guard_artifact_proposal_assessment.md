@@ -15,7 +15,7 @@ manual heavy-E2E dtype job owns both censuses.
 `main` at `0e858f184` and later evidence through `72a1fb497`. This repository
 copy was first refreshed on 2026-09-13 against `23729c638`, then refreshed
 again against `main` at `8d1293f31` after the implementation sequence through
-chelis#2008. The CI implementation refresh uses `main` at `910f2b22d`
+chelis#2008. The CI implementation refresh uses `main` at `b38efcfbe`
 for the current integration inventory. The companion
 [`guard_artifact_proposal_evidence.md`](guard_artifact_proposal_evidence.md)
 records coverage, measurements, and known limits.
@@ -60,7 +60,7 @@ standing lane.
 | Surface | Result after implementation |
 |---|---|
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
-| Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 71 package/target identities at `910f2b22d`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 73. |
+| Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
 | New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
 | New hosted package expansion | In separate non-required workers, informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
@@ -104,7 +104,7 @@ ambiguous mappings, and paths with no disposition are planning failures. The
 first implementation should use a versioned configuration with four explicit
 row kinds:
 
-- `standing_target`: the base 71 package-qualified reviewed identities plus
+- `standing_target`: the base 73 package-qualified reviewed identities plus
   the two explicit replacement-expand additions above;
 - `target_exclusion`: one exact package/target excluded from the change-owned
   or package-expansion lane;
@@ -138,7 +138,7 @@ package expansion or an explicit shared-path disposition.
 
 A target whose `required-features` are all enabled by that package's
 default-feature closure is eligible; a target requiring a non-default feature
-is not. Package qualification is mandatory: `main` at `910f2b22d` has 777
+is not. Package qualification is mandatory: `main` at `b38efcfbe` has 779
 default-eligible integration targets in a 34-package workspace; 24 packages
 currently own at least one. Thirty-six target names, covering 78 identities,
 are shared by more than one package, so execution must preserve package

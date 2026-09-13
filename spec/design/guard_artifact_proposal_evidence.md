@@ -31,7 +31,7 @@ local report's final timestamp and inspected the changed artifacts, owning
 pull-request threads, and CI reach through `main` at `23729c638`. A second
 refresh through `main` at `8d1293f31` classified the implementation sequence
 through chelis#2008 and re-measured the current PR integration surface.
-The CI implementation refresh re-measures that surface against `910f2b22d`.
+The CI implementation refresh re-measures that surface against `b38efcfbe`.
 
 ## Per-artifact rationale coverage
 
@@ -49,7 +49,7 @@ The CI implementation refresh re-measures that surface against `910f2b22d`.
 | Capacity census baselines and registries | Agent contract, census implementation, representative review history | Rows carry authority a machine cannot invent | Keep; improve executable reach and hermetic closure. |
 | Backend header lanes | Phase 0 closure precedent and device-lane preprocessing probes | Host SDK leakage and zero-row Metal lane | Complete attributed discovery and SDK fixtures implemented by chelis#1963. |
 | Runtime-extent target manifest | Manifest code, tripwire, post-review changes | Five synchronized feature changes, no repair-only drift | Keep. |
-| `.config/ci-test-targets.toml` | chelis#1824 and current history | Historical 53 to 68 growth; current base has 71 standing rows, 777 eligible targets, and 36 duplicate names across packages | Candidate preserves 71 rows and adds the two replacement controls; require every added/directly-modified target to execute and trial broader package-qualified expansion rather than growing the list by default. |
+| `.config/ci-test-targets.toml` | chelis#1824 and current history | Historical 53 to 68 growth; current base has 73 standing rows, 779 eligible targets, and 36 duplicate names across packages | Candidate preserves 73 rows and adds the two replacement controls; require every added/directly-modified target to execute and trial broader package-qualified expansion rather than growing the list by default. |
 | Rejected-cells corpus | File contract, unsupported structure, collect-all and mutation probe | Byte drift versus stable identity, cross-lane skew | Structured identity blocking; wording snapshot reviewed. |
 | Dropout gate rows | Gate implementation and entry-path findings | Real behavior changes and policy-fork detection | Keep, with per-target and per-entry claims. |
 | Rejection-authority liveness | Design §C2.1/§C7.5, workflow, validator | Useful audits, bystander failures, scheduled-owner sequencing | Source-derived membership landed in chelis#1961 and the standing scheduled check in chelis#1971; changed-row PR narrowing remains. |
@@ -170,8 +170,8 @@ superset semantics, while leaving deletion and rename blocking.
 
 At the local report cutoff, `.config/ci-test-targets.toml` contained 53 target
 entries. At `23729c638` it contained 61. At `8d1293f31` it contained 68.
-At `910f2b22d` it contains 71; the candidate adds the two replacement controls
-for 73 standing identities.
+At `b38efcfbe` it contains 73; the candidate adds the two replacement controls
+for 75 standing identities.
 
 | Merge | Added targets |
 |---|---:|
@@ -188,10 +188,10 @@ The additions are legitimate, but each came from the pull request currently
 needing the test. No rule derives omissions or states which future test target
 must be selected.
 
-Cargo metadata at `910f2b22d` contains 777 default-eligible integration targets in a
+Cargo metadata at `b38efcfbe` contains 779 default-eligible integration targets in a
 34-package workspace; 24 packages currently own at least one. Thirty-six
 target names, covering 78 identities, occur in more than one package. The
-base standing file covers 71 exact package/target identities. Those
+base standing file covers 73 exact package/target identities. Those
 measurements rule out global target-name uniqueness as an execution
 requirement. The candidate uses package-qualified execution in both lanes.
 The measurements also justify treating broader package expansion as a measured
@@ -209,7 +209,7 @@ builtin atom closure, which is not an ordinary per-pull-request owner.
 An exact local run on `da11a6fa3` executed both replacement targets together:
 12 tests passed in 0.060 seconds of nextest execution. The selected policy adds
 both exact package/target identities to the standing manifest. The candidate
-contains both, taking the current base from 71 to 73 rows. This is a bounded
+contains both, taking the current base from 73 to 75 rows. This is a bounded
 correction for controls that replace a previously selected guard class; it does not restore the copied
 inventories or claim that every test in `chelis-types` belongs in standing CI.
 
