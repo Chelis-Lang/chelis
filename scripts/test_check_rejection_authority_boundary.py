@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from generate_rejection_registries import (
     ProductionSource,
@@ -85,7 +88,27 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         self.assertTrue(any("macro edge" in error for error in errors), errors)
 
     def test_production_authorities_do_not_use_response_only_atoms(self):
-        self.assertEqual(MODULE.validate_production_usage(), [])
+        self.assertEqual(
+            MODULE.validate_production_usage(
+                sources=[
+                    ProductionSource(
+                        path=Path("crates/example/src/lib.rs"),
+                        source=(
+                            'deliberate_rejection!("[04-TOT-2]", "semantic");\n'
+                            'unimplemented_rejection!(879, "implementation");\n'
+                        ),
+                    )
+                ]
+            ),
+            [],
+        )
+
+    def test_main_uses_a_fresh_shared_production_graph(self):
+        with mock.patch.object(
+            MODULE, "discover_production_sources", return_value=[]
+        ) as discover, redirect_stdout(io.StringIO()):
+            self.assertEqual(MODULE.main(), 0)
+        discover.assert_called_once_with(MODULE.ROOT)
 
     def test_boundary_consumes_the_shared_production_source_owner(self):
         self.assertIs(MODULE.discover_production_sources, discover_production_sources)

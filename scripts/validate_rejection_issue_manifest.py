@@ -25,6 +25,14 @@ from generate_rejection_registries import (
 )
 
 
+class SourceManifestError(ValueError):
+    """The checked-in manifest disagrees with fresh production sources."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
 def adjudicate(
     rows: list[dict], records: dict[int, IssueRecord]
 ) -> list[str]:
@@ -47,8 +55,8 @@ def adjudicate(
     return problems
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parent.parent
+def validate_source_manifest(root: Path) -> tuple[list[int], list[dict]]:
+    """Freshly validate source derivation and compiler closure."""
     manifest_path = root / MANIFEST_REL
     numbers = load_issue_manifest(manifest_path)
     workspace = discover_production_workspace(root)
@@ -57,11 +65,20 @@ def main() -> int:
     source_numbers = derive_issue_numbers(parse_production_issue_citations(sources))
     derivation_problems = manifest_derivation_problems(numbers, source_numbers)
     if derivation_problems:
-        for problem in derivation_problems:
+        raise SourceManifestError(derivation_problems)
+    rows = json.loads(manifest_path.read_text())["issues"]
+    return numbers, rows
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    try:
+        numbers, rows = validate_source_manifest(root)
+    except SourceManifestError as error:
+        for problem in error.problems:
             print(problem, file=sys.stderr)
         print("REJECTION ISSUE MANIFEST: FAIL", file=sys.stderr)
         return 1
-    rows = json.loads(manifest_path.read_text())["issues"]
     resolved = {number: fetch_issue(number) for number in numbers}
     records = {
         number: record for number, record in resolved.items() if record is not None

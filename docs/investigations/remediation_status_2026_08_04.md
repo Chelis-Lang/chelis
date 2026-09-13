@@ -448,6 +448,12 @@ standing-state canary are not part of this prerequisite slice. (#691 and #714 le
 the worked example of why closing a pinned issue from the roadmap top-down
 breaks the build.)
 
+The dedicated liveness job is the hosted owner of fresh production-graph,
+compiler-closure, boundary, and tracker execution. Script-unit tests consume
+fixtures or injected source evidence for those paths, avoiding four redundant
+Cargo inventory/closure runs while preserving the dedicated job's fail-closed
+checks.
+
 ### Where the graph puts things
 
 The graph is the assignment record, and it agrees with these two documents.

@@ -686,6 +686,16 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
 
+    def test_fresh_source_and_liveness_execution_is_dedicated_job_owned(self):
+        liveness = _ci_job_block("rejection-authority-liveness")
+        script_unit = _ci_job_block("script-unit")
+        for command in (
+            ".venv/bin/python scripts/check_rejection_authority_boundary.py",
+            ".venv/bin/python scripts/validate_rejection_issue_manifest.py",
+        ):
+            _assert_executable_run_once(liveness, command)
+            self.assertNotIn("run: " + command, script_unit)
+
 
 class DiagnosticKindOracleJobTests(unittest.TestCase):
     def test_job_is_change_gated_and_executes_the_mutation_oracle(self):

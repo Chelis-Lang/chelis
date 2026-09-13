@@ -428,6 +428,12 @@ REGISTRIES of what actually exists:
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
   runs the boundary checker before the network-backed manifest validation.
+  That dedicated liveness job owns fresh production-graph and rustc dep-info
+  execution. Ordinary Python unit discovery tests the parsers, mutations, and
+  orchestration with supplied source evidence; it does not rerun the full
+  Cargo inventory or compiler closure. This keeps the source and tracker checks
+  fresh and fail-closed without executing the same expensive derivation several
+  times in one CI run.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's

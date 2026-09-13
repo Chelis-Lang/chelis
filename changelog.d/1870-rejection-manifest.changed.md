@@ -4,4 +4,6 @@ before generated Rust membership is accepted. Production source discovery now
 uses every repository-local Cargo workspace package, one cfg(test=false)
 parser view shared with the direct-construction boundary, and an independent
 rustc dep-info closure. Every Rust or Cargo manifest edit retriggers live issue
-validation.
+validation. The dedicated liveness job owns fresh source and compiler evidence;
+ordinary script-unit tests use injected evidence instead of repeating the full
+Cargo derivation four times.

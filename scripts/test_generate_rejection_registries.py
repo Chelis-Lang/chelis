@@ -11,16 +11,17 @@ from pathlib import Path
 from generate_rejection_registries import (
     MANIFEST_REL,
     OUTPUT_REL,
+    ProductionSource,
     ProductionWorkspace,
     RegistryError,
     compiler_source_closure_problems,
     derive_issue_numbers,
     discover_atoms,
-    discover_issue_citations,
-    discover_production_sources,
+    discover_production_workspace,
     load_issue_manifest,
     manifest_derivation_problems,
     parse_issue_citations,
+    parse_production_issue_citations,
     production_dep_info_files,
     production_target_roots_from_metadata,
     production_workspace_from_metadata,
@@ -164,13 +165,14 @@ class ProductionSources(unittest.TestCase):
                 {selected_dep_info},
             )
 
-    def test_real_production_graph_includes_path_reached_source_outside_src(
+    def test_real_workspace_includes_tree_sitter_outside_crates(
         self,
     ) -> None:
-        paths = {source.path for source in discover_production_sources(ROOT)}
-        self.assertIn(Path("tests/support/c_lexical.rs"), paths)
-        self.assertIn(Path("tree-sitter-chelis/bindings/rust/lib.rs"), paths)
-        self.assertNotIn(Path("crates/chelis-types/src/unsupported.rs"), paths)
+        workspace = discover_production_workspace(ROOT)
+        self.assertIn(
+            "tree-sitter-chelis/bindings/rust/lib.rs",
+            workspace.target_roots,
+        )
 
     def test_compiler_source_missing_from_parser_graph_fails_closure(self) -> None:
         self.assertEqual(
@@ -284,14 +286,16 @@ class IssueCitations(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(RegistryError):
                 parse_issue_citations(Path("crates/example/src/lib.rs"), source)
 
-    def test_source_discovery_rejects_a_dynamic_production_citation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            source = root / "crates/example/src/lib.rs"
-            source.parent.mkdir(parents=True)
-            source.write_text('unimplemented_rejection!(issue, "dynamic");\n')
-            with self.assertRaises(RegistryError):
-                discover_issue_citations(root)
+    def test_production_source_parsing_rejects_a_dynamic_citation(self) -> None:
+        with self.assertRaises(RegistryError):
+            parse_production_issue_citations(
+                [
+                    ProductionSource(
+                        path=Path("crates/example/src/lib.rs"),
+                        source='unimplemented_rejection!(issue, "dynamic");\n',
+                    )
+                ]
+            )
 
 
 class IssueManifest(unittest.TestCase):
@@ -368,10 +372,9 @@ class RenderRegistry(unittest.TestCase):
         self.assertIn("879", rendered)
         self.assertEqual(rendered, render_registry(["[04-NUM-1]", "[05-UNS-1]"], [705, 879]))
 
-    def test_checked_in_registry_is_byte_identical_to_its_sources(self) -> None:
-        issues = derive_issue_numbers(discover_issue_citations(ROOT))
+    def test_checked_in_artifacts_match_the_manifest_and_normative_atoms(self) -> None:
         manifest = ROOT / MANIFEST_REL
-        self.assertEqual(load_issue_manifest(manifest), issues)
+        issues = load_issue_manifest(manifest)
         self.assertEqual(manifest.read_text(), render_issue_manifest(issues))
         expected = render_registry(
             discover_atoms(ROOT / "spec"),
