@@ -4557,7 +4557,21 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
         return false;
     };
 
-    let result_ty = LowerCtx::type_from_meta_static(meta);
+    // chelis#1541: an unresolved precision binder means this `if` cannot
+    // be *established* as a float DAG join, so the predicate answers
+    // `false` and `expr_requires_host_runtime_with_ctx` routes the item to
+    // the general host lane. Reading the precision with the panicking
+    // static reader aborted the process instead.
+    //
+    // The other caller, `assert_ir_lowerable`, cannot turn this answer
+    // into a user-facing rejection: `def_is_lowered` gates on the same
+    // predicate, so a `false` answer removes the def from `lowered_names`
+    // before that check runs. That is the intended order -- per §5.8.1 an
+    // unresolved precision is "a monomorphization bug, not user error",
+    // so it must never surface as `unsupported lowering`.
+    let Some(result_ty) = LowerCtx::try_type_from_meta_static(meta) else {
+        return false;
+    };
     if !result_ty.precision.is_float() {
         return false;
     }
@@ -4565,7 +4579,9 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
     let Some(cond_ty_expr) = kids.first().and_then(expr_type_metadata) else {
         return false;
     };
-    let cond_ty = LowerCtx::type_from_type_expr(cond_ty_expr);
+    let Some(cond_ty) = LowerCtx::try_type_from_type_expr_static(cond_ty_expr) else {
+        return false;
+    };
     cond_ty.precision == Prim::Bool && (cond_ty.dims.is_empty() || cond_ty.dims == result_ty.dims)
 }
 
@@ -6471,15 +6487,52 @@ impl<'program> LowerCtx<'program> {
             .unwrap_or_else(Self::default_type)
     }
 
-    /// Static (no-substitution) variant of [`Self::type_from_meta`].
-    /// Reserved for callers that operate before lowering begins (e.g.
-    /// the if-lowerable shape pre-check at top-level analysis time).
-    /// A `(t-var)` precision slot reaching this entry will trip the
-    /// F2 backend tripwire panic per spec/04-type-system.md §5.8.1.
-    fn type_from_meta_static(meta: &Metadata) -> TensorType {
-        meta.ty()
-            .map(|ty| Self::type_from_type_expr(ty.expression()))
-            .unwrap_or_else(Self::default_type)
+    /// chelis#1541: the static (no-substitution) reader for callers that
+    /// operate before lowering begins and are *asking a question* rather
+    /// than emitting -- the if-lowerable shape pre-check at top-level
+    /// analysis time. Returns `None` when the precision slot is an
+    /// unresolved `(t-var {} p)`, so a routing predicate answers "not
+    /// established" instead of aborting the process.
+    ///
+    /// This replaced a total `type_from_meta_static` that read the
+    /// precision through the panicking extractor. spec/04-type-system.md
+    /// §5.8.1 scopes that assertion to "after monomorphization", "at
+    /// lowering time", and "reaching a backend"; a predicate deciding
+    /// *whether* to use the DAG backend satisfies none of the three, so
+    /// the assertion never applied at this entry. There is deliberately
+    /// no panicking static reader left to call.
+    ///
+    /// This does NOT weaken that tripwire, for the same reason
+    /// [`Self::formal_param_type_for_call`] (issue #289) does not: the
+    /// emission paths still route through
+    /// [`Self::type_from_type_expr_with_subst`], which panics when
+    /// `prec_subst` lacks the var. Only the pre-lowering decision moves.
+    fn try_type_from_meta_static(meta: &Metadata) -> Option<TensorType> {
+        match meta.ty() {
+            // Absent type metadata is not an unresolved precision: keep
+            // the existing default so this reader differs from the
+            // panicking one on exactly one input class.
+            None => Some(Self::default_type()),
+            Some(ty) => Self::try_type_from_type_expr_static(ty.expression()),
+        }
+    }
+
+    /// chelis#1541: see [`Self::try_type_from_meta_static`]. `None`
+    /// exactly when [`Self::try_extract_tensor_type_with_subst`] would
+    /// panic under an empty substitution: an unresolved precision binder
+    /// in a `t-tensor` slot, which is the only shape that reaches that
+    /// `panic!`.
+    ///
+    /// A *bare* scalar binder (`(t-var {} p)` as the whole type) is
+    /// deliberately NOT covered. It never enters the `TTensor` branch, so
+    /// it does not panic -- it falls through to `default_type()`. Widening
+    /// this guard to reject it would change the predicate's answer for
+    /// programs that lower correctly today, without fixing anything.
+    fn try_type_from_type_expr_static(expr: &Expr) -> Option<TensorType> {
+        if extract_precision_var_name(expr).is_some() {
+            return None;
+        }
+        Some(Self::type_from_type_expr(expr))
     }
 
     fn remap_callable_dim_symbols(
