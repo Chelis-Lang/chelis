@@ -14,6 +14,7 @@ use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
 use super::*;
 
+#[derive(Clone)]
 enum ArgRepack {
     Tensor,
     Scalar(Prim),
@@ -135,14 +136,14 @@ impl<'a> EvalContext<'a> {
         // Per-differentiated-target repack plan. After
         // evaluation the gradient roots come back as one FLAT tuple (the
         // pytree of every wrt-selected target's fields, concatenated in
-        // parameter order); each plan slot says how many of those flat
+        // selected order); each plan slot says how many of those flat
         // roots the target owns and what structure to fold them back into
         // (a scalar, a tensor, or a recursive List/tuple/ADT value). This is the
         // eval-lane twin of the IR lowering's `GradResultPlan` list. Only
         // wrt-selected differentiable targets get a slot; a non-selected
         // or non-differentiable argument still marshals its placeholders
         // (the body may read it) but owns no gradient root.
-        let mut arg_repacks: Vec<ArgRepack> = Vec::with_capacity(args.len());
+        let mut arg_repacks: Vec<(usize, ArgRepack)> = Vec::with_capacity(args.len());
         // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
         // as the checker's `grad_result_type` and the IR lowering's
@@ -257,7 +258,7 @@ impl<'a> EvalContext<'a> {
                         .as_ref()
                         .is_none_or(|indices| indices.contains(&index));
                 if selected {
-                    arg_repacks.push(ArgRepack::Structured { shape });
+                    arg_repacks.push((index, ArgRepack::Structured { shape }));
                 }
                 continue;
             }
@@ -287,13 +288,32 @@ impl<'a> EvalContext<'a> {
                         .as_ref()
                         .is_none_or(|indices| indices.contains(&index));
                 if selected {
-                    arg_repacks.push(match value {
-                        RuntimeValue::Scalar(payload) => ArgRepack::Scalar(payload.dtype()),
-                        _ => ArgRepack::Tensor,
-                    });
+                    arg_repacks.push((
+                        index,
+                        match value {
+                            RuntimeValue::Scalar(payload) => ArgRepack::Scalar(payload.dtype()),
+                            _ => ArgRepack::Tensor,
+                        },
+                    ));
                 }
             }
         }
+
+        // IR emits complete cotangent groups in written `wrt` order.
+        // Restore carriers in that same order; argument staging above must
+        // stay in primal order, including non-selected argument values.
+        let arg_repacks: Vec<ArgRepack> = match grad_wrt.as_ref() {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|index| {
+                    arg_repacks
+                        .iter()
+                        .find(|(parameter, _)| parameter == index)
+                        .map(|(_, plan)| plan.clone())
+                })
+                .collect(),
+            None => arg_repacks.into_iter().map(|(_, plan)| plan).collect(),
+        };
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + arg_exprs.len());

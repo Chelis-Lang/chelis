@@ -429,6 +429,11 @@ fn parity_generic_value_roots() {
 }
 
 #[test]
+fn parity_grad_wrt_order() {
+    drive_parity(&examples_root().join("grad_wrt_order.ch"), true);
+}
+
+#[test]
 fn parity_source_file_names() {
     drive_parity(&examples_root().join("source-file-names.ch"), true);
 }
@@ -772,6 +777,7 @@ fn parity_corpus_is_complete() {
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
         "generic_value_roots.ch",
+        "grad_wrt_order.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",

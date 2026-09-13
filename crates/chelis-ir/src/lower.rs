@@ -8740,6 +8740,7 @@ impl<'program> LowerCtx<'program> {
             },
         }
         let mut result_plans: Vec<GradResultPlan> = Vec::new();
+        let mut result_param_indices = Vec::new();
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
@@ -8787,6 +8788,7 @@ impl<'program> LowerCtx<'program> {
                         leaf_values.push(LoweredValue::Node(load));
                     }
                     if selected {
+                        result_param_indices.push(index);
                         result_plans.push(GradResultPlan::Structured {
                             template: template.clone(),
                             differentiable_leaves,
@@ -8819,6 +8821,7 @@ impl<'program> LowerCtx<'program> {
                     if self.is_selected_wrt(index, &param_ty, wrt_indices) {
                         wrt.push(load);
                         wrt_actuals.push(*actual);
+                        result_param_indices.push(index);
                         result_plans.push(GradResultPlan::Tensor);
                     }
                     remap_formal_types.push(param_ty.clone());
@@ -9133,6 +9136,16 @@ impl<'program> LowerCtx<'program> {
                     packed.push(rebuild_recursive_list_like(template, &mut leaves));
                 }
             }
+        }
+        // spec/06 §2.2: permute completed cotangent groups, never their
+        // leaves or primal arguments. AD and zero/reuse associations above
+        // retain their original parameter-order identity correspondence.
+        if let Some(indices) = wrt_indices {
+            let groups: UnordMap<_, _> = result_param_indices.into_iter().zip(packed).collect();
+            packed = indices
+                .iter()
+                .filter_map(|index| groups.get(index).cloned())
+                .collect();
         }
         let result = match packed.as_slice() {
             [LoweredValue::Node(single)] => {
@@ -10016,6 +10029,7 @@ impl<'program> LowerCtx<'program> {
         subctx.current_span_id = self.current_span_id.clone();
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let mut wrt = Vec::new();
+        let mut wrt_param_indices = Vec::new();
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
@@ -10031,6 +10045,7 @@ impl<'program> LowerCtx<'program> {
             );
             if self.is_selected_wrt(index, &param_ty, wrt_indices) {
                 wrt.push(load);
+                wrt_param_indices.push(index);
             }
             subctx
                 .bindings
@@ -10089,6 +10104,11 @@ impl<'program> LowerCtx<'program> {
             .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
             .map(|grad_node| remap[grad_node])
             .collect::<Vec<_>>();
+        let flattened_param_indices: Vec<_> = wrt
+            .iter()
+            .zip(wrt_param_indices)
+            .filter_map(|(node, index)| grad_result.grad_nodes.contains_key(node).then_some(index))
+            .collect();
         let reusable_inputs = param_types
             .iter()
             .enumerate()
@@ -10118,6 +10138,16 @@ impl<'program> LowerCtx<'program> {
                     );
                 }
             }
+        }
+        // The fused path has one tensor per cotangent group. As above,
+        // reorder only after gradient/reuse/axis restoration is complete.
+        if let Some(indices) = wrt_indices {
+            let groups: UnordMap<_, _> =
+                flattened_param_indices.into_iter().zip(flattened).collect();
+            flattened = indices
+                .iter()
+                .filter_map(|index| groups.get(index).copied())
+                .collect();
         }
         match flattened.as_slice() {
             [single] => {
