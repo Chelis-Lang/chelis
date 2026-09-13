@@ -923,10 +923,18 @@ private to their owning modules; ordinary consumers receive opaque handles or
 typed views. The exact public OP31 read/write transport views retain their
 existing public Rust fields; a view is not a validated owner and cannot mint
 descriptor authority. The checked-in C fragments are generated artifacts with
-byte-for-byte freshness tests. Every published host runtime header remains reachable from
-`chelis_runtime.h`; backend headers remain reachable from their declared HIP or
-Metal support root. The public-header census sees the same canonical declarations
-in every preprocessing context.
+byte-for-byte freshness tests. Every published host runtime header remains
+reachable from `chelis_runtime.h`. The HIP support root is staged as a complete
+published closure and preprocessed only under the committed Phase-0 SDK stubs.
+Its recursively discovered source-header set selects attributed files before
+row extraction, so nested reached support declarations cannot be removed by a
+basename filter and SDK declarations remain non-published inputs.
+The recursively discovered published Metal header set currently has no
+attributable ABI row and is guarded by an explicit enrollment tripwire instead
+of a vacuous census lane. That tripwire uses the shared C-family lexer, so braces
+inside comments, strings, characters, and raw literals cannot swallow a later
+public declaration. The public-header census sees the same canonical declarations
+in every declared preprocessing context.
 
 `cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
 fragments; without `--write` it checks freshness. The host-view fragment lives
@@ -939,8 +947,11 @@ The HIP support root requires the official `hipblas/hipblas.h` from the same
 supported SDK as the linked hipBLAS library. It does not redeclare SDK types or
 functions when that header is missing. Generated helpers use that SDK's actual
 API: a library symbol's spelling does not establish its argument types. The
-header census preprocesses the complete support root with explicit committed
-SDK fixtures, while hardware acceptance separately records the installed header,
+header census preprocesses the complete support root with clang on the fixed
+`x86_64-unknown-linux-gnu` target, `-ffreestanding -nostdlibinc`, and the
+committed Phase-0 SDK stubs. Every linemarker path is canonicalized and must
+remain inside the staged published closure, a declared stub root, or clang's
+resource headers. Hardware acceptance separately records the installed header,
 library, and executed numeric behavior. The environment contract and its
 outstanding evidence live in `docs/local_hip_environment.md`.
 
@@ -1268,12 +1279,13 @@ or dtype variant that carries a seam does. That is the granularity Phases 3 and
 4 delete at, since those phases remove declarations and call sites rather than
 individual bytes.
 
-The two backend runtime headers are inventoried here rather than through the
-capacity census. Their device carrier is a bare `float *data` with fixed-rank
-`int` metadata, which [#1288]'s ratchet gives no citation or override path:
-registering them as a census surface today would produce blocking rows that
-only Phase 2's migration onto the tagged carrier can clear. Phase 2 therefore
-owns adding that census leg, and its exit is not complete until it does.
+Phase 0 inventories both backend runtime headers as structural seam sources.
+Phase 2 separately inventories the HIP support root's public ABI after its
+device packet moves onto the tagged carrier. The recursively discovered
+published Metal header set remains in this structural inventory but not in the
+capacity baseline while it exports only `static inline` definitions; its Phase
+2 enrollment tripwire fails on the first attributable public declaration in any
+published `.h`.
 
 The oracle self-validates with temporary mutations that are restored before it
 returns:
@@ -1633,15 +1645,20 @@ device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
 preserve `int64` values above `i32::MAX`, reject out-of-domain values before
 copy, and have no fixed array or narrow mirror left.
 
-**Also delivers:** the backend runtime headers' capacity-census leg. Phase 0
-inventories `chelis_hip_runtime.h` and `chelis_metal_runtime.h` as seams rather
-than as a census surface, because their bare `float *` device carrier has no
-citation or override path under [#1288]'s ratchet and would only produce
-blocking rows. Once this phase moves those headers onto the tagged carrier the
-leg becomes both possible and required, so add it here, with its own baseline
-and `coverage_manifest()` entry, reusing the census's existing `preprocess_root`
-enumerator. Phase 2 is not complete while a generated device header carries
-numeric surface no census enumerates.
+**Also delivers:** the backend runtime-header capacity-census leg. The HIP
+support root uses the tagged device packet and is inventoried under a fixed,
+freestanding clang target with the committed Phase-0 SDK stubs and closed
+canonical include attribution. Its recursively discovered support-header set is
+the structural owner selection before row extraction, so every reached nested
+declaration reaches final-authority comparison while SDK rows remain inputs.
+Its ten final rows have their own baseline and `coverage_manifest()` entry. The
+recursively discovered published Metal `.h` set exports only `static inline`
+definitions, so it has no capacity-census row and no fake SDK lane. Instead an
+executable enrollment gate parses every published header with the shared
+C-family lexer, aggregates and sorts raw attributable rows, and fails as soon
+as one gains a public declaration, requiring a hermetic Metal lane and exact
+authority in that change. Phase 2 is not complete while any generated device
+header carries numeric surface no census enumerates.
 
 **Oracle:**
 
@@ -1654,10 +1671,10 @@ Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 The implementation is `scripts/runtime_representation_phase2.py`.
 `runtime_representation_phase2_tests.json` stores seven required Python contract
-identities and 237 explicit required Rust identities: 33 shared-ABI tests, six
+identities and 243 explicit required Rust identities: 33 shared-ABI tests, six
 metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
-Python binding tests, and ten backend-header census tests. Counts and digests are
-derived summaries, not membership authority. The Python leg names its
+Python binding tests, and sixteen backend-header census/enrollment tests. Counts
+and digests are derived summaries, not membership authority. The Python leg names its
 integration binaries and relevant internal ownership tests explicitly rather
 than freezing platform-only package tests. The command first obtains a complete
 fresh Phase 1 receipt, then lists and executes each complete current Phase 2

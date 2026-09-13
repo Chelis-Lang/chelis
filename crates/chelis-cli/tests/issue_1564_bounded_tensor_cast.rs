@@ -136,6 +136,11 @@ fn result_constraints_actualize_bounded_tensor_targets() {
     for (family, dtype, input, expected) in [
         ("Float", "f32", 16777217, 16777216.0),
         ("Float", "f64", 16777217, 16777217.0),
+        ("Float", "f16", 123, 123.0),
+        ("Float", "bf16", 123, 123.0),
+        ("Int", "int8", 123, 123.0),
+        ("Int", "int16", 123, 123.0),
+        ("Int", "int32", 123, 123.0),
         ("Int", "int64", 123, 123.0),
         ("Numeric", "f64", 16777217, 16777217.0),
     ] {

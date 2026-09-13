@@ -213,7 +213,7 @@ def probability(x: f32) -> Probability = Probability { value: x }
 macro forge_prob(x) = Probability { value: x }
 ";
 
-/// Defining module for the sixth-rejection reef surface (RT-1 F1):
+/// Defining module for the private-producer reef import boundary:
 /// exported producer/reader plus an UNEXPORTED `raw_make` whose
 /// signature mentions the opaque type.
 const REEF_SIXTH_TYPES_CH: &str = "module Demo.Types
@@ -225,28 +225,6 @@ def probability(x: f32) -> Probability = Probability { value: x }
 def prob_value(p: Probability) -> f32 = p.value
 def raw_make(x: f32) -> Probability = Probability { value: x }
 ";
-
-fn assert_reef_sixth_rejection(json: &Value) {
-    let errors = errors_of(json);
-    let violations = opaque_violations(&errors);
-    assert_eq!(
-        violations.len(),
-        1,
-        "expected exactly one OpaqueTypeViolation, got: {errors:?}"
-    );
-    let msg = violations[0]
-        .get("message")
-        .and_then(Value::as_str)
-        .expect("violation message");
-    assert_eq!(
-        msg, EXPECTED_REEF_SIXTH_MSG,
-        "reef sixth-rejection message must be de-mangled and byte-exact"
-    );
-    assert!(
-        !msg.contains("pkg__") && !msg.contains("Pkg__"),
-        "message must not leak any mangled reef name: {msg}"
-    );
-}
 
 fn assert_unimported_value_rejection(json: &Value, identifier: &str) {
     let errors = errors_of(json);
@@ -337,13 +315,6 @@ fn check_dp_passes_inside_defining_module() {
 const EXPECTED_REEF_CONSTRUCTION_MSG: &str = "in def `sneak`: record construction of opaque type \
      `Probability` outside its defining module `Demo.Types`; exported producers of \
      `Demo.Types`: probability: (f32) -> Probability";
-
-/// RT-1 F1 + F3: de-mangled sixth-rejection message for `raw_make`.
-/// `prob_value` is exported but returns f32 (its RESULT does not
-/// mention the opaque type), so it is not a producer.
-const EXPECTED_REEF_SIXTH_MSG: &str = "in def `attack`: reference to unexported binding \
-     `raw_make` of module `Demo.Types` whose signature mentions opaque type `Probability`; \
-     exported producers of `Demo.Types`: probability: (f32) -> Probability";
 
 fn assert_reef_violation(json: &Value) {
     let errors = errors_of(json);
@@ -454,11 +425,10 @@ def fine(x: f32) -> f32 = {
 }
 
 #[test]
-fn check_reef_macro_from_defining_module_expanded_outside_rejected() {
-    // Macro call-site attribution (survey section 3): `forge_prob` is
-    // defined (unexported) in Demo.Types; the same-package expansion
-    // lands the record construction inside Demo.Macuser's def and is
-    // checked under the CALLER's module.
+fn check_and_build_reef_reject_unexported_macro_import() {
+    // spec/02 P2: a private macro cannot cross the module's explicit export
+    // boundary. This fixture must reject before expansion; call-site opacity
+    // after expansion is covered in chelis-types/tests/opaque_types.rs.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_TYPES_CH),
         (
@@ -472,25 +442,18 @@ def sneak(x: f32) -> f32 = {
 ",
         ),
     ]);
-    let output = chelis()
-        .current_dir(&pkg)
-        .args(["check", pkg.join("src/macuser.ch").to_str().unwrap()])
-        .assert()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    assert_reef_violation(&check_json(&output));
+    assert_private_reef_import_rejection(&pkg, "src/macuser.ch", "forge_prob");
 }
 
-// ── Sixth rejection on the reef package surface (RT-1 F1) ────────
+// ── Private-producer scope on the reef package surface ───────────
 
 #[test]
 fn check_reef_rejects_unimported_producer_reference_as_unbound() {
     // PP4 / RT-1 F1 boundary: `attack.ch` imports only the exported reader and
     // calls the unexported `raw_make` by its bare name. Exact module scope now
     // rejects that unimported reference before the opacity-specific sixth
-    // rejection. The explicit-import variant below still pins that later gate.
+    // rejection. The explicit-import variant below pins the export boundary;
+    // chelis-types/tests/opaque_types.rs retains direct Deep sixth-rejection coverage.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (
@@ -514,11 +477,9 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
 
 #[test]
 fn check_reef_rejects_unexported_producer_reference_imported() {
-    // RT-1 F1 import-shape variant: same-package imports admit
-    // non-exported names, so `attack.ch` can `import` the unexported
-    // `raw_make`. The reference is then rewritten to the internal
-    // name; the sixth rejection must still fire (attribution must be
-    // independent of import shape).
+    // spec/02 P2: an explicit export list also seals same-package imports.
+    // Both check and build must reject the private producer before opacity
+    // checking; a nonzero exit alone must not hide a different failure.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (
@@ -529,23 +490,61 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
 ",
         ),
     ]);
-    let output = chelis()
-        .current_dir(&pkg)
-        .args(["check", pkg.join("src/attack.ch").to_str().unwrap()])
-        .assert()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    assert_reef_sixth_rejection(&check_json(&output));
+    assert_private_reef_import_rejection(&pkg, "src/attack.ch", "raw_make");
+}
+
+fn assert_private_reef_import_rejection(pkg: &Path, source: &str, binding: &str) {
+    let entry = pkg.join(source);
+    let out_dir = pkg.join("out");
+    let expected = format!("module `Demo.Types` does not export `{binding}`");
+    for command in ["check", "build"] {
+        let mut invocation = chelis();
+        invocation.current_dir(pkg).arg(command).arg(&entry);
+        if command == "build" {
+            invocation.arg("-o").arg(&out_dir);
+        }
+        let result = invocation.assert().failure();
+        if command == "check" {
+            assert_eq!(result.get_output().status.code(), Some(2));
+            let json = check_json(&result.get_output().stdout);
+            let errors = errors_of(&json);
+            assert_eq!(errors.len(), 1, "one private import error: {json}");
+            assert_eq!(errors[0]["kind"], "Other");
+            let message = errors[0]["message"]
+                .as_str()
+                .expect("private import message");
+            assert!(
+                message.contains(&expected),
+                "check must reject the private import: {json}"
+            );
+            assert!(
+                !message.contains("pkg__") && !message.contains("Pkg__"),
+                "check must report source-facing names: {message}"
+            );
+            assert_eq!(json["score"], 0);
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+        assert!(
+            stderr.contains(&expected),
+            "{command} must reject the private import, stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("pkg__") && !stderr.contains("Pkg__"),
+            "{command} must report source-facing names: {stderr}"
+        );
+    }
+    assert!(
+        !out_dir.exists(),
+        "rejected import must not create build output"
+    );
 }
 
 #[test]
 fn build_reef_rejects_unimported_producer_reference_as_unbound() {
     // PP4 parity: build rejects the same bare, unimported reference at exact
-    // name resolution. `check_reef_rejects_unexported_producer_reference_imported`
-    // separately keeps the opacity-specific rejection executable once the
-    // ordinary import rule has actually brought `raw_make` into scope.
+    // name resolution. The explicit-import variant separately pins export
+    // rejection for check and build, before the opacity-specific gate.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (

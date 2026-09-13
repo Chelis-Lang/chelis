@@ -72,11 +72,12 @@ jobs:
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
-  # [05-UNS-5] issue authority is admitted through a checked-in membership
+  # [05-UNS-5] issue authority is admitted through a source-derived checked-in
   # manifest, so edits to that admission path require a live exists/kind/state
   # check before merge. The offline generator and Rust constructors establish
-  # shape and membership; this job prevents a same-PR manifest edit from
-  # blessing a closed issue, pull request, or missing object (chelis#730 §C2.1).
+  # source agreement, shape, and membership; this job still validates every
+  # standing row and prevents a same-PR source citation from blessing a closed
+  # issue, pull request, or missing object (chelis#730 §C2.1).
   rejection-authority-liveness:
     name: Rejection Authority Liveness
     runs-on: ubuntu-latest

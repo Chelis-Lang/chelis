@@ -100,6 +100,8 @@ REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
         "scripts/ci_detect_docs_only.py",
         "scripts/generate_rejection_registries.py",
         "scripts/test_check_rejection_authority_boundary.py",
+        "scripts/test_generate_rejection_registries.py",
+        "scripts/test_validate_rejection_issue_manifest.py",
         "scripts/validate_rejection_issue_manifest.py",
         "spec/design/loud_unsupported_issue_manifest.json",
     }
@@ -162,7 +164,12 @@ def rejection_authority_changed(paths: list[str]) -> bool:
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
     if not cleaned:
         return True
-    return any(path in REJECTION_AUTHORITY_PATHS for path in cleaned)
+    return any(
+        path in REJECTION_AUTHORITY_PATHS
+        or path.endswith(".rs")
+        or PurePosixPath(path).name == "Cargo.toml"
+        for path in cleaned
+    )
 
 
 def diagnostic_kind_changed(paths: list[str]) -> bool:

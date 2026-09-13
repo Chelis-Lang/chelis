@@ -86,6 +86,22 @@ fn compile_time_helpers_accept_only_registered_authorities() {
 }
 
 #[test]
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn unimplemented_macro_accepts_every_valid_decimal_token_shape() {
+    let authorities = [
+        chelis_types::unimplemented_rejection!(000879, "leading zeroes"),
+        chelis_types::unimplemented_rejection!(8__79, "repeated underscores"),
+        chelis_types::unimplemented_rejection!(879_, "trailing underscore"),
+        chelis_types::unimplemented_rejection!(0_879, "zero-prefixed digits"),
+    ];
+    assert!(
+        authorities
+            .iter()
+            .all(|authority| authority.citation() == "chelis#879")
+    );
+}
+
+#[test]
 fn diagnostic_surface_exposes_deliberate_host_only_authority() {
     let error = Unsupported::new(
         UnsupportedKind::Builtin("tensor_scan".to_string()),

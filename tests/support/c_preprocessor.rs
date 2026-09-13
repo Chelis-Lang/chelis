@@ -2,6 +2,9 @@
 //!
 //! This primitive preserves attribution. Callers still check source closure,
 //! line-directive prohibition, configuration invariance and final authority.
+//! Backend callers additionally select a closed universe: a fixed target,
+//! freestanding compilation, no standard-library include search, declared SDK
+//! roots, and a fail-closed check on every canonical linemarker path.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,8 +12,12 @@ use std::path::{Path, PathBuf};
 pub struct Environment<'a> {
     pub compiler: &'a str,
     pub language: &'a str,
+    pub target: Option<&'a str>,
     pub arguments: &'a [&'a str],
     pub include_dirs: &'a [PathBuf],
+    pub freestanding: bool,
+    pub no_standard_includes: bool,
+    pub closed_include_universe: bool,
     pub hermetic: bool,
 }
 
@@ -19,8 +26,12 @@ impl Environment<'_> {
         Self {
             compiler: "cc",
             language: "c",
+            target: None,
             arguments: &[],
             include_dirs: &[],
+            freestanding: false,
+            no_standard_includes: false,
+            closed_include_universe: false,
             hermetic: false,
         }
     }
@@ -43,14 +54,56 @@ pub fn preprocess_root(
             "published root {root} escapes its include directory"
         ));
     }
+    if environment.closed_include_universe
+        && (!environment.hermetic
+            || environment.target.is_none()
+            || !environment.freestanding
+            || !environment.no_standard_includes)
+    {
+        return Err(
+            "a closed include universe requires a hermetic fixed-target freestanding \
+             invocation with standard-library include search disabled"
+                .into(),
+        );
+    }
+    let include_dirs: Vec<PathBuf> = environment
+        .include_dirs
+        .iter()
+        .map(|directory| {
+            directory.canonicalize().map_err(|error| {
+                format!(
+                    "declared preprocessor include directory {}: {error}",
+                    directory.display()
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let resource_include = environment
+        .closed_include_universe
+        .then(|| compiler_resource_include(environment))
+        .transpose()?;
+    let mut declared_universe = vec![include_dir.clone()];
+    declared_universe.extend(include_dirs.iter().cloned());
+    if let Some(resource) = &resource_include {
+        declared_universe.push(resource.clone());
+    }
     let mut command = std::process::Command::new(environment.compiler);
     if environment.hermetic {
         let path = std::env::var_os("PATH").ok_or("preprocessor requires PATH")?;
         command.env_clear().env("PATH", path);
     }
     command.args(["-E", "-x", environment.language]);
+    if let Some(target) = environment.target {
+        command.args(["-target", target]);
+    }
+    if environment.freestanding {
+        command.arg("-ffreestanding");
+    }
+    if environment.no_standard_includes {
+        command.arg("-nostdlibinc");
+    }
     command.args(environment.arguments);
-    for directory in environment.include_dirs {
+    for directory in &include_dirs {
         command.arg("-I").arg(directory);
     }
     let output = command
@@ -86,6 +139,19 @@ pub fn preprocess_root(
             let path = Path::new(&file)
                 .canonicalize()
                 .map_err(|error| format!("unresolved preprocessor attribution {file}: {error}"))?;
+            if environment.closed_include_universe
+                && !declared_universe.iter().any(|root| path.starts_with(root))
+            {
+                return Err(format!(
+                    "preprocessor include `{}` resolved outside the declared include universe [{}]",
+                    path.display(),
+                    declared_universe
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             root_seen |= path == input;
             current = match path.strip_prefix(&include_dir) {
                 Ok(relative) => Some(
@@ -108,6 +174,36 @@ pub fn preprocess_root(
         return Err(format!("preprocessor omitted attribution for root {root}"));
     }
     Ok(per_file)
+}
+
+fn compiler_resource_include(environment: &Environment<'_>) -> Result<PathBuf, String> {
+    let mut command = std::process::Command::new(environment.compiler);
+    if environment.hermetic {
+        let path = std::env::var_os("PATH").ok_or("preprocessor requires PATH")?;
+        command.env_clear().env("PATH", path);
+    }
+    let output = command
+        .arg("-print-resource-dir")
+        .output()
+        .map_err(|error| {
+            format!(
+                "preprocessor compiler {} did not report its resource directory: {error}",
+                environment.compiler
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed to report its resource directory: {}",
+            environment.compiler,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let resource = String::from_utf8(output.stdout)
+        .map_err(|error| format!("non-UTF-8 compiler resource directory: {error}"))?;
+    Path::new(resource.trim())
+        .join("include")
+        .canonicalize()
+        .map_err(|error| format!("compiler resource include directory: {error}"))
 }
 
 /// Decode the compiler's quoted filename, never match an arbitrary suffix.
@@ -259,6 +355,62 @@ mod tests {
             preprocess_root(&fixture.0, "root.h", &Environment::native_c())
                 .unwrap_err()
                 .contains("rejected owned header")
+        );
+    }
+
+    #[test]
+    fn closed_universe_accepts_a_declared_sdk_fixture() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "owned/root.h",
+            "#include <sdk_value.h>\nint owned_value(void);\n",
+        );
+        fixture.write("sdk/sdk_value.h", "typedef int sdk_value;\n");
+        let includes = [fixture.0.join("sdk")];
+        let environment = Environment {
+            compiler: "clang",
+            language: "c",
+            target: Some("x86_64-unknown-linux-gnu"),
+            freestanding: true,
+            no_standard_includes: true,
+            include_dirs: &includes,
+            closed_include_universe: true,
+            hermetic: true,
+            ..Environment::native_c()
+        };
+        let rows = preprocess_root(&fixture.0.join("owned"), "root.h", &environment).unwrap();
+        assert!(rows["root.h"].contains("int owned_value(void)"));
+        assert!(
+            !rows.contains_key("sdk_value.h"),
+            "declared SDK fixtures are allowed inputs, not published output"
+        );
+    }
+
+    #[test]
+    fn closed_universe_rejects_include_outside_declared_roots() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "owned/root.h",
+            &format!(
+                "#include \"{}\"\nint owned_value(void);\n",
+                fixture.0.join("outside/escape.h").display()
+            ),
+        );
+        fixture.write("outside/escape.h", "double escaped_value(void);\n");
+        let environment = Environment {
+            compiler: "clang",
+            language: "c",
+            target: Some("x86_64-unknown-linux-gnu"),
+            freestanding: true,
+            no_standard_includes: true,
+            closed_include_universe: true,
+            hermetic: true,
+            ..Environment::native_c()
+        };
+        let error = preprocess_root(&fixture.0.join("owned"), "root.h", &environment).unwrap_err();
+        assert!(
+            error.contains("outside the declared include universe") && error.contains("escape.h"),
+            "{error}"
         );
     }
 }
