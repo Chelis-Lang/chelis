@@ -10,6 +10,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "../../../tests/support/c_lexical.rs"]
+mod c_lexical;
+
 struct CrateEvidence {
     crate_name: &'static str,
     role: &'static str,
@@ -25,18 +28,99 @@ struct ForbiddenRule {
 
 struct ScannedSource {
     path: PathBuf,
-    code: String,
-    evidence: String,
+    language: SourceLanguage,
+    evidence_tokens: Vec<String>,
+    active_tokens: Vec<String>,
 }
 
 impl ScannedSource {
     fn new(path: PathBuf, contents: &str) -> Self {
-        let code = source_without_comments(contents);
-        let evidence = source_tokens_for_evidence(&code);
+        let language = SourceLanguage::from_path(&path)
+            .unwrap_or_else(|| panic!("unsupported scanned source extension: {}", path.display()));
+        let tokens = language
+            .lex(contents)
+            .unwrap_or_else(|error| panic!("cannot lex {}: {error}", path.display()));
+        let evidence_tokens = project_evidence(language, &tokens);
+        let active_tokens = project_active(&tokens);
         Self {
             path,
-            code,
-            evidence,
+            language,
+            evidence_tokens,
+            active_tokens,
+        }
+    }
+
+    fn contains_evidence_pattern(&self, pattern: &str) -> bool {
+        let tokens = self
+            .language
+            .lex(pattern)
+            .unwrap_or_else(|error| panic!("invalid evidence pattern `{pattern}`: {error}"));
+        contains_token_pattern(
+            &self.evidence_tokens,
+            &project_evidence(self.language, &tokens),
+        )
+    }
+
+    fn contains_active_pattern(&self, pattern: &str) -> bool {
+        let tokens = self
+            .language
+            .lex(pattern)
+            .unwrap_or_else(|error| panic!("invalid forbidden pattern `{pattern}`: {error}"));
+        contains_token_pattern(&self.active_tokens, &project_active(&tokens))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceLanguage {
+    Rust,
+    CFamily,
+}
+
+impl SourceLanguage {
+    fn from_path(path: &Path) -> Option<Self> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => Some(Self::Rust),
+            Some("h" | "hh" | "hpp" | "hxx" | "cuh" | "c" | "cc" | "cpp" | "cu" | "m" | "mm") => {
+                Some(Self::CFamily)
+            }
+            _ => None,
+        }
+    }
+
+    fn lex(self, source: &str) -> Result<Vec<SourceToken>, String> {
+        match self {
+            Self::Rust => lex_rust_tokens(source),
+            Self::CFamily => Ok(lex_c_family_tokens(source)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceTokenKind {
+    Syntax,
+    StringLiteral,
+    CharacterLiteral,
+    RawStringLiteral,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceToken {
+    kind: SourceTokenKind,
+    spelling: String,
+}
+
+impl SourceToken {
+    fn syntax(spelling: impl Into<String>) -> Self {
+        Self {
+            kind: SourceTokenKind::Syntax,
+            spelling: spelling.into(),
+        }
+    }
+
+    fn literal(kind: SourceTokenKind, spelling: impl Into<String>) -> Self {
+        Self {
+            kind,
+            spelling: spelling.into(),
         }
     }
 }
@@ -196,8 +280,8 @@ const EFFECT_KIND_FORBIDDEN_RULES: &[ForbiddenRule] = &[
         forbidden: &[
             "meta_with_entries(vec![(\"effect\".to_string(), sym(\"random\"))])",
             "meta_with_entries(vec![(\"effect\".to_string(), sym(\"resource\"))])",
-            "Some(\"random\") => format!(\"with seed",
-            "Some(\"resource\") => format!(\"with device",
+            "Some(\"random\") => format!",
+            "Some(\"resource\") => format!",
         ],
     },
 ];
@@ -250,21 +334,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn is_scanned_source(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("rs")
-            | Some("h")
-            | Some("hh")
-            | Some("hpp")
-            | Some("hxx")
-            | Some("cuh")
-            | Some("c")
-            | Some("cc")
-            | Some("cpp")
-            | Some("cu")
-            | Some("m")
-            | Some("mm")
-    )
+    SourceLanguage::from_path(path).is_some()
 }
 
 fn collect_source_path(
@@ -315,225 +385,248 @@ fn scan_source_roots(root: &Path, roots: &[&str]) -> Result<Vec<ScannedSource>, 
     Ok(sources)
 }
 
-fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let first = *bytes.get(start + 1)?;
-    if first == b'\\' {
-        let mut index = start + 3;
-        while index < bytes.len() && bytes[index] != b'\'' && bytes[index] != b'\n' {
-            index += 1;
-        }
-        return (bytes.get(index) == Some(&b'\'')).then_some(index + 1);
-    }
-
-    let width = match first {
-        0x00..=0x7f => 1,
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf7 => 4,
-        _ => return None,
-    };
-    (bytes.get(start + 1 + width) == Some(&b'\'')).then_some(start + 2 + width)
+fn is_cxx_raw_literal(spelling: &str) -> bool {
+    ["R\"", "u8R\"", "uR\"", "UR\"", "LR\"", "@R\""]
+        .iter()
+        .any(|prefix| spelling.starts_with(prefix))
 }
 
-fn rust_raw_string_span(bytes: &[u8], start: usize) -> Option<(usize, usize, usize)> {
-    let mut marker = start;
-    if matches!(bytes.get(marker), Some(b'b' | b'c')) {
-        marker += 1;
-    }
-    if bytes.get(marker) != Some(&b'r') {
+fn lex_c_family_tokens(source: &str) -> Vec<SourceToken> {
+    c_lexical::lex_c_tokens(source)
+        .into_iter()
+        .map(|spelling| {
+            if is_cxx_raw_literal(&spelling) {
+                SourceToken::literal(SourceTokenKind::RawStringLiteral, spelling)
+            } else if spelling.starts_with('"') {
+                SourceToken::literal(SourceTokenKind::StringLiteral, spelling)
+            } else if spelling.starts_with('\'') {
+                SourceToken::literal(SourceTokenKind::CharacterLiteral, spelling)
+            } else {
+                SourceToken::syntax(spelling)
+            }
+        })
+        .collect()
+}
+
+fn rust_raw_string_end(chars: &[char], start: usize) -> Option<Result<usize, String>> {
+    let marker = if chars.get(start) == Some(&'r') {
+        start
+    } else if matches!(chars.get(start), Some('b' | 'c')) && chars.get(start + 1) == Some(&'r') {
+        start + 1
+    } else {
         return None;
-    }
+    };
 
     let mut quote = marker + 1;
-    while bytes.get(quote) == Some(&b'#') {
+    while chars.get(quote) == Some(&'#') {
         quote += 1;
     }
-    if bytes.get(quote) != Some(&b'"') {
+    if chars.get(quote) != Some(&'"') {
         return None;
     }
 
     let hashes = quote - marker - 1;
-    let content_start = quote + 1;
-    let mut closing_quote = content_start;
-    while closing_quote < bytes.len() {
-        if bytes[closing_quote] == b'"'
-            && bytes
-                .get(closing_quote + 1..closing_quote + 1 + hashes)
-                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+    let mut cursor = quote + 1;
+    while cursor < chars.len() {
+        if chars[cursor] == '"'
+            && chars
+                .get(cursor + 1..cursor + 1 + hashes)
+                .is_some_and(|suffix| suffix.iter().all(|character| *character == '#'))
         {
-            return Some((content_start, closing_quote, closing_quote + 1 + hashes));
+            return Some(Ok(cursor + 1 + hashes));
         }
-        closing_quote += 1;
+        cursor += 1;
     }
-
-    Some((content_start, bytes.len(), bytes.len()))
+    Some(Err("unterminated Rust raw string".to_owned()))
 }
 
-fn source_without_comments(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut code = Vec::with_capacity(bytes.len());
+fn rust_quoted_literal_end(chars: &[char], quote: usize, delimiter: char) -> Result<usize, String> {
+    let mut cursor = quote + 1;
+    while cursor < chars.len() {
+        if chars[cursor] == '\\' {
+            cursor += 2;
+        } else if chars[cursor] == delimiter {
+            return Ok(cursor + 1);
+        } else {
+            cursor += 1;
+        }
+    }
+    Err(format!("unterminated Rust `{delimiter}` literal"))
+}
+
+fn rust_character_literal_end(chars: &[char], quote: usize) -> Option<Result<usize, String>> {
+    let first = *chars.get(quote + 1)?;
+    if first == '\\' {
+        return Some(rust_quoted_literal_end(chars, quote, '\''));
+    }
+    if chars.get(quote + 2) == Some(&'\'') {
+        return Some(Ok(quote + 3));
+    }
+    None
+}
+
+fn lex_rust_tokens(source: &str) -> Result<Vec<SourceToken>, String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut tokens = Vec::new();
     let mut index = 0;
 
-    while index < bytes.len() {
-        if let Some((_, _, end)) = rust_raw_string_span(bytes, index) {
-            code.extend_from_slice(&bytes[index..end]);
-            index = end;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            index += 1;
             continue;
         }
 
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            code.extend_from_slice(b"  ");
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
             index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                code.push(if bytes[index] == b'\r' { b'\r' } else { b' ' });
+            while index < chars.len() && chars[index] != '\n' {
                 index += 1;
             }
             continue;
         }
 
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            code.extend_from_slice(b"  ");
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
             index += 2;
             let mut depth = 1usize;
-            while index < bytes.len() && depth > 0 {
-                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-                    code.extend_from_slice(b"  ");
-                    index += 2;
+            while index < chars.len() && depth > 0 {
+                if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
                     depth += 1;
-                } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    code.extend_from_slice(b"  ");
                     index += 2;
+                } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
                     depth -= 1;
+                    index += 2;
                 } else {
-                    code.push(match bytes[index] {
-                        b'\n' => b'\n',
-                        b'\r' => b'\r',
-                        _ => b' ',
-                    });
                     index += 1;
                 }
+            }
+            if depth != 0 {
+                return Err("unterminated Rust block comment".to_owned());
             }
             continue;
         }
 
-        if bytes[index] == b'"' {
-            let quote = bytes[index];
-            code.push(quote);
+        if let Some(raw_end) = rust_raw_string_end(&chars, index) {
+            let end = raw_end?;
+            tokens.push(SourceToken::literal(
+                SourceTokenKind::RawStringLiteral,
+                chars[index..end].iter().collect::<String>(),
+            ));
+            index = end;
+            continue;
+        }
+
+        let string_quote =
+            if matches!(chars[index], 'b' | 'c') && chars.get(index + 1) == Some(&'"') {
+                Some(index + 1)
+            } else if chars[index] == '"' {
+                Some(index)
+            } else {
+                None
+            };
+        if let Some(quote) = string_quote {
+            let end = rust_quoted_literal_end(&chars, quote, '"')?;
+            tokens.push(SourceToken::literal(
+                SourceTokenKind::StringLiteral,
+                chars[index..end].iter().collect::<String>(),
+            ));
+            index = end;
+            continue;
+        }
+
+        let character_quote = if chars[index] == 'b' && chars.get(index + 1) == Some(&'\'') {
+            Some(index + 1)
+        } else if chars[index] == '\'' {
+            Some(index)
+        } else {
+            None
+        };
+        if let Some(quote) = character_quote
+            && let Some(character_end) = rust_character_literal_end(&chars, quote)
+        {
+            let end = character_end?;
+            tokens.push(SourceToken::literal(
+                SourceTokenKind::CharacterLiteral,
+                chars[index..end].iter().collect::<String>(),
+            ));
+            index = end;
+            continue;
+        }
+
+        if chars[index].is_alphabetic() || chars[index] == '_' {
+            let start = index;
             index += 1;
-            while index < bytes.len() {
-                code.push(bytes[index]);
-                if bytes[index] == b'\\' {
-                    index += 1;
-                    if index < bytes.len() {
-                        code.push(bytes[index]);
-                    }
-                } else if bytes[index] == quote {
-                    index += 1;
-                    break;
-                }
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
                 index += 1;
             }
+            tokens.push(SourceToken::syntax(
+                chars[start..index].iter().collect::<String>(),
+            ));
             continue;
         }
 
-        if bytes[index] == b'\''
-            && let Some(end) = char_literal_end(bytes, index)
-        {
-            code.extend_from_slice(&bytes[index..end]);
-            index = end;
-            continue;
-        }
-
-        code.push(bytes[index]);
-        index += 1;
-    }
-
-    String::from_utf8(code).expect("comment removal preserves UTF-8")
-}
-
-fn quote_is_include_operand(code: &[u8], quote: usize) -> bool {
-    let line_start = code[..quote]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |newline| newline + 1);
-    let compact = code[line_start..quote]
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect::<Vec<_>>();
-    compact == b"#include"
-}
-
-fn source_tokens_for_evidence(code: &str) -> String {
-    let bytes = code.as_bytes();
-    let mut evidence = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if let Some((content_start, content_end, end)) = rust_raw_string_span(bytes, index) {
-            evidence.extend_from_slice(&bytes[index..content_start]);
-            for byte in &bytes[content_start..content_end] {
-                evidence.push(match byte {
-                    b'\n' => b'\n',
-                    b'\r' => b'\r',
-                    _ => b' ',
-                });
-            }
-            evidence.extend_from_slice(&bytes[content_end..end]);
-            index = end;
-            continue;
-        }
-
-        if bytes[index] == b'"' {
-            let preserve = quote_is_include_operand(bytes, index);
-            evidence.push(b'"');
+        if chars[index].is_ascii_digit() {
+            let start = index;
             index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' {
-                    evidence.push(if preserve { b'\\' } else { b' ' });
-                    index += 1;
-                    if index < bytes.len() {
-                        evidence.push(if preserve { bytes[index] } else { b' ' });
-                        index += 1;
-                    }
-                } else if bytes[index] == b'"' {
-                    evidence.push(b'"');
-                    index += 1;
-                    break;
-                } else {
-                    evidence.push(match bytes[index] {
-                        b'\n' => b'\n',
-                        b'\r' => b'\r',
-                        byte if preserve => byte,
-                        _ => b' ',
-                    });
-                    index += 1;
-                }
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || matches!(chars[index], '_' | '.'))
+            {
+                index += 1;
             }
+            tokens.push(SourceToken::syntax(
+                chars[start..index].iter().collect::<String>(),
+            ));
             continue;
         }
 
-        if bytes[index] == b'\''
-            && let Some(end) = char_literal_end(bytes, index)
-        {
-            evidence.push(b'\'');
-            for byte in &bytes[index + 1..end - 1] {
-                evidence.push(match byte {
-                    b'\n' => b'\n',
-                    b'\r' => b'\r',
-                    _ => b' ',
-                });
-            }
-            evidence.push(b'\'');
-            index = end;
-            continue;
-        }
-
-        evidence.push(bytes[index]);
+        tokens.push(SourceToken::syntax(chars[index].to_string()));
         index += 1;
     }
 
-    String::from_utf8(evidence).expect("token projection preserves UTF-8")
+    Ok(tokens)
+}
+
+fn c_include_operand(tokens: &[SourceToken], index: usize) -> bool {
+    index >= 2
+        && tokens[index - 2].kind == SourceTokenKind::Syntax
+        && tokens[index - 2].spelling == "#"
+        && tokens[index - 1].kind == SourceTokenKind::Syntax
+        && tokens[index - 1].spelling == "include"
+}
+
+fn project_evidence(language: SourceLanguage, tokens: &[SourceToken]) -> Vec<String> {
+    tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| match token.kind {
+            SourceTokenKind::Syntax => token.spelling.clone(),
+            SourceTokenKind::StringLiteral
+                if language == SourceLanguage::CFamily && c_include_operand(tokens, index) =>
+            {
+                token.spelling.clone()
+            }
+            SourceTokenKind::StringLiteral
+            | SourceTokenKind::CharacterLiteral
+            | SourceTokenKind::RawStringLiteral => "<literal>".to_owned(),
+        })
+        .collect()
+}
+
+fn project_active(tokens: &[SourceToken]) -> Vec<String> {
+    tokens
+        .iter()
+        .map(|token| match token.kind {
+            SourceTokenKind::RawStringLiteral => "<raw-string>".to_owned(),
+            SourceTokenKind::Syntax
+            | SourceTokenKind::StringLiteral
+            | SourceTokenKind::CharacterLiteral => token.spelling.clone(),
+        })
+        .collect()
+}
+
+fn contains_token_pattern(tokens: &[String], pattern: &[String]) -> bool {
+    !pattern.is_empty()
+        && tokens
+            .windows(pattern.len())
+            .any(|window| window == pattern)
 }
 
 fn missing_required_evidence(
@@ -547,7 +640,7 @@ fn missing_required_evidence(
         .filter(|needle| {
             !sources
                 .iter()
-                .any(|source| source.evidence.contains(**needle))
+                .any(|source| source.contains_evidence_pattern(needle))
         })
         .map(|needle| format!("{crate_name} ({role}): missing crate-level typed marker `{needle}`"))
         .collect()
@@ -561,7 +654,7 @@ fn forbidden_occurrences(
     let mut failures = Vec::new();
     for source in sources {
         for needle in forbidden {
-            if source.code.contains(needle) {
+            if source.contains_active_pattern(needle) {
                 failures.push(format!(
                     "{}: raw {vocabulary} consumer remains: `{needle}`",
                     source.path.display()
@@ -759,6 +852,138 @@ fn forbidden_raw_consumer_anywhere_in_scanned_roots_fails() {
             .iter()
             .any(|failure| failure.contains("device/raw.cuh")),
         "{failures:?}"
+    );
+}
+
+#[test]
+fn cxx_raw_strings_do_not_supply_evidence_or_forbidden_consumers() {
+    let raw_only = ScannedSource::new(
+        PathBuf::from("crates/example/runtime/raw.cpp"),
+        r####"
+static const char *notes = R"fermat_9(
+" arbitrary quote before marker text
+use chelis_vocab::EffectKind
+decode_effect_kind(list)
+if effect == "random"
+/* block opener in payload
+// line opener in payload
+second line
+)fermat_9";
+"####,
+    );
+
+    let missing = missing_required_evidence(
+        "example",
+        "C++ raw-string control",
+        &["use chelis_vocab::EffectKind", "decode_effect_kind("],
+        &[raw_only],
+    );
+    assert_eq!(
+        missing.len(),
+        2,
+        "a C++ raw-string payload must not authenticate positive evidence: {missing:?}"
+    );
+
+    let raw_only = ScannedSource::new(
+        PathBuf::from("crates/example/runtime/raw.cpp"),
+        r####"
+static const char *notes = R"guard_42(
+" quote
+if effect == "random"
+/* // marker text only
+)guard_42";
+"####,
+    );
+    let forbidden = forbidden_occurrences("EffectKind", &["if effect == \"random\""], &[raw_only]);
+    assert!(
+        forbidden.is_empty(),
+        "a forbidden spelling inside a C++ raw string is not active code: {forbidden:?}"
+    );
+}
+
+#[test]
+fn active_forbidden_code_after_cxx_raw_string_is_detected() {
+    let source = ScannedSource::new(
+        PathBuf::from("crates/example/runtime/active.cpp"),
+        r####"
+static const char *notes = R"xY_7(
+" quotes, /* block, // line, and
+newlines all stay in the raw payload
+)xY_7";
+if effect == "random" {}
+"####,
+    );
+    let forbidden = forbidden_occurrences("EffectKind", &["if effect == \"random\""], &[source]);
+    assert_eq!(
+        forbidden.len(),
+        1,
+        "raw-string payload syntax must not hide following active code: {forbidden:?}"
+    );
+}
+
+#[test]
+fn c_family_block_comments_do_not_nest() {
+    let source = ScannedSource::new(
+        PathBuf::from("crates/example/runtime/comment.c"),
+        "/* valid C comment with an inner /* opener */\n\
+         size_t width(void) { return sizeof(float); }\n",
+    );
+    let forbidden = forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[source]);
+    assert_eq!(
+        forbidden.len(),
+        1,
+        "C comments end at the first `*/`; following code is active: {forbidden:?}"
+    );
+}
+
+#[test]
+fn rust_block_comments_remain_nested() {
+    let source = ScannedSource::new(
+        PathBuf::from("crates/example/src/lib.rs"),
+        "/* outer /* inner */ if effect == \"random\" {} */\n\
+         use chelis_vocab::EffectKind;\n\
+         fn decide(list: &List, effect: &str) {\n\
+             let _ = decode_effect_kind(list);\n\
+             if effect == \"random\" {}\n\
+         }\n",
+    );
+    let missing = missing_required_evidence(
+        "example",
+        "Rust nested-comment control",
+        &["use chelis_vocab::EffectKind", "decode_effect_kind("],
+        std::slice::from_ref(&source),
+    );
+    assert!(missing.is_empty(), "{missing:?}");
+    let forbidden = forbidden_occurrences("EffectKind", &["if effect == \"random\""], &[source]);
+    assert_eq!(
+        forbidden.len(),
+        1,
+        "the nested-comment spelling is inert and the following Rust code is active"
+    );
+}
+
+#[test]
+fn escaped_literals_and_include_operands_keep_language_semantics() {
+    let header = ScannedSource::new(
+        PathBuf::from("crates/example/include/control.hpp"),
+        "#include \"chelis_runtime_dtype.h\"\n\
+         const char *text = \"if effect == \\\"random\\\" /* //\";\n\
+         const char quote = '\\'';\n",
+    );
+    let missing = missing_required_evidence(
+        "example",
+        "published include control",
+        &["#include \"chelis_runtime_dtype.h\""],
+        std::slice::from_ref(&header),
+    );
+    assert!(
+        missing.is_empty(),
+        "an active include operand remains positive evidence: {missing:?}"
+    );
+    let forbidden = forbidden_occurrences("EffectKind", &["if effect == \"random\""], &[header]);
+    assert!(
+        forbidden.is_empty(),
+        "escaped ordinary literal payload is not active token structure: {forbidden:?}"
     );
 }
 
