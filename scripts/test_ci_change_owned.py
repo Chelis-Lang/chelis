@@ -275,6 +275,38 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
 
+    def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
+        from scripts import bump_compiler_pins as bump
+
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        paths = [*bump.PINNED_REAL_TOML_FILES,
+                 *(path / "reef.lock" for path in bump.PINNED_REAL_LOCK_DIRS)]
+        example_paths = {str(path.relative_to(root)) for path in paths
+                         if path.is_relative_to(root / "examples")}
+        self.assertEqual(len(example_paths), 5)
+        for path in sorted(example_paths):
+            with self.subTest(path=path):
+                rules = [rule for rule in config.path_rules if rule.matches(path)]
+                self.assertEqual(len(rules), 1, path)
+                rule = rules[0]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual((rule.owner.workflow, rule.owner.job), ("ci.yml", "ci-fast"))
+        self.assertIn(owned.Identity("chelis-cli", "compiler_pin_tripwire"), config.standing_targets)
+        hull = str(bump.HULL_MANIFEST.relative_to(root))
+        rules = [rule for rule in config.path_rules if rule.matches(hull)]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].prefix, hull)
+        self.assertEqual((rules[0].owner.workflow, rules[0].owner.job),
+                         ("conformance.yml", "conformance"))
+        # Neighboring unreviewed sources must not inherit release-pin authority.
+        for path in ("examples/illustrative/phase3g_text_pipeline/new.ch",
+                     "examples/nautilus_quantile_contract/new.ch",
+                     "tests/conformance/hull/new.json"):
+            self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
+            self.assertFalse(owned.is_docs_only([path]))
+
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
             text = config_text() + (

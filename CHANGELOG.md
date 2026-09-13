@@ -10,6 +10,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Regular pull-request CI now requires every added or directly modified default-enabled integration target, while a separate informational lane measures broader changed-package coverage without changing the required verdict.
 
+- PR rejection-authority checks validate new or changed issue rows against GitHub while retaining complete source/manifest checks. The nightly canary continues to check every standing authority.
+
 ### Fixed
 
 - The host evaluator now keeps successful declaration initialization separate from
