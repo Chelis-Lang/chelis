@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 import yaml
 from unittest import mock
@@ -33,32 +34,86 @@ def listing():
     }} for name in ("p", "p::bin/app", "p::smoke")}}
 
 
+def shared_metadata():
+    data = metadata()
+    sibling = copy.deepcopy(data["packages"][0])
+    sibling.update(id="q", name="q")
+    data["packages"].append(sibling)
+    data["workspace_members"].append("q")
+    return data
+
+
+def write_junit(root, binaries):
+    document = ET.Element("testsuites")
+    for binary in binaries:
+        suite = ET.SubElement(document, "testsuite", name=binary)
+        ET.SubElement(suite, "testcase", name="positive", classname=binary)
+    path = root / "target/nextest/ci-fast/junit.xml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(document).write(path)
+
+
 class TargetSelectionTests(unittest.TestCase):
     def test_selects_all_units_and_only_named_integration_targets(self):
-        args = targets.cargo_args(metadata(), [("p", "smoke")])
-        self.assertEqual(args, ["--workspace", "--lib", "--bins", "--test", "smoke"])
+        groups = targets.cargo_selections(metadata(), [("p", "smoke")])
+        self.assertEqual(groups, [["--workspace", "--lib", "--bins", "--test", "smoke"]])
+        args = groups[0]
         self.assertNotIn("--tests", args)
         self.assertNotIn("--all-targets", args)
         targets.validate_listing(listing(), metadata(), [("p", "smoke")])
 
-    def test_missing_duplicate_or_ambiguous_target_is_rejected(self):
+    def test_missing_or_duplicate_identity_is_rejected(self):
         cases = [([], metadata()), ([("p", "missing")], metadata()),
                  ([("p", "smoke"), ("p", "smoke")], metadata()),
                  ([("missing", "smoke")], metadata())]
         duplicate = metadata()
-        sibling = copy.deepcopy(duplicate["packages"][0])
-        sibling.update(id="q", name="q")
-        duplicate["packages"].append(sibling)
-        duplicate["workspace_members"].append("q")
+        duplicate["packages"][0]["targets"].append(copy.deepcopy(duplicate["packages"][0]["targets"][2]))
         cases.append(([("p", "smoke")], duplicate))
         for selection, data in cases:
             with self.subTest(selection=selection), self.assertRaises(ValueError):
-                targets.cargo_args(data, selection)
+                targets.cargo_selections(data, selection)
+
+    def test_shared_names_are_scoped_to_exact_packages_without_repeating_units(self):
+        data = shared_metadata()
+        data["packages"][0]["targets"].append({"name": "unique", "kind": ["test"]})
+        self.assertEqual(targets.cargo_selections(data, [("p", "unique"), ("p", "smoke"), ("q", "exhaustive")]), [
+            ["--workspace", "--lib", "--bins", "--test", "unique"],
+            ["-p", "p", "--test", "smoke"],
+            ["-p", "q", "--test", "exhaustive"],
+        ])
+        self.assertEqual(targets.cargo_selections(data, [("q", "smoke")]), [
+            ["--workspace", "--lib", "--bins"], ["-p", "q", "--test", "smoke"],
+        ])
+
+    def test_listing_union_rejects_duplicate_execution_and_unselected_siblings(self):
+        units = listing()
+        del units["rust-suites"]["p::smoke"]
+        units["rust-suites"].update({name.replace("p", "q", 1): copy.deepcopy(suite)
+                                     for name, suite in list(units["rust-suites"].items())})
+        selected = {"rust-suites": {"p::smoke": listing()["rust-suites"]["p::smoke"]}}
+        merged = targets.merge_listings([units, selected])
+        targets.validate_listing(merged, shared_metadata(), [("p", "smoke")])
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            targets.merge_listings([units, selected, selected])
+        merged["rust-suites"]["q::smoke"] = selected["rust-suites"]["p::smoke"]
+        with self.assertRaisesRegex(ValueError, "extra"):
+            targets.validate_listing(merged, shared_metadata(), [("p", "smoke")])
+
+    def test_integration_required_features_must_be_default_enabled(self):
+        data = metadata()
+        data["packages"][0]["targets"][2]["required-features"] = ["probe"]
+        with self.assertRaisesRegex(ValueError, "default features"):
+            targets.cargo_selections(data, [("p", "smoke")])
+        data["packages"][0]["features"] = {"default": ["probe"], "probe": []}
+        self.assertEqual(targets.cargo_selections(data, [("p", "smoke")]),
+                         targets.cargo_selections(metadata(), [("p", "smoke")]))
 
     def test_manifest_requires_nonempty_exact_package_target_rows(self):
-        for content in ("", "version = 1", "version = 2\ntarget = []", "version = 1\ntarget = []",
-                        'version = 1\n[[target]]\npackage = "p"\nname = "smoke"\nextra = true',
-                        'version = 1\n[[target]]\npackage = ""\nname = "smoke"',
+        for content in ("", "version = 1", "version = 2\nstanding_target = []",
+                        'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\nextra = true',
+                        'version = 2\n[[standing_target]]\npackage = ""\nname = "smoke"',
+                        'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
+                        '[[target_exclusion]]\npackage = "p"\nname = "heavy"\n',
                         "invalid [["):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "selection.toml"
@@ -67,7 +122,7 @@ class TargetSelectionTests(unittest.TestCase):
                     targets.read_targets(path)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "selection.toml"
-            path.write_text('version = 1\n[[target]]\npackage = "p"\nname = "smoke"\n')
+            path.write_text('version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
             self.assertEqual(targets.read_targets(path), [("p", "smoke")])
 
     def test_receipts_reject_missing_units_extra_binaries_and_filtered_tests(self):
@@ -96,7 +151,7 @@ class TargetSelectionTests(unittest.TestCase):
     def test_new_unlisted_integration_is_automatically_outside_fast_lane(self):
         data = metadata()
         data["packages"][0]["targets"].append({"name": "new_heavy", "kind": ["test"], "test": True})
-        self.assertEqual(targets.cargo_args(data, [("p", "smoke")]), targets.cargo_args(metadata(), [("p", "smoke")]))
+        self.assertEqual(targets.cargo_selections(data, [("p", "smoke")]), targets.cargo_selections(metadata(), [("p", "smoke")]))
         targets.validate_listing(listing(), data, [("p", "smoke")])
 
     def test_ci_fast_is_separate_from_full_and_manual_gate_commands(self):
@@ -113,7 +168,7 @@ class TargetSelectionTests(unittest.TestCase):
                 (root / ".config").mkdir()
                 name = "absent" if failure == "missing-target" else "smoke"
                 (root / ".config/ci-test-targets.toml").write_text(
-                    f'version = 1\n[[target]]\npackage = "p"\nname = "{name}"\n')
+                    f'version = 2\n[[standing_target]]\npackage = "p"\nname = "{name}"\n')
                 calls = []
                 def run(command, **kwargs):
                     calls.append(command)
@@ -143,8 +198,15 @@ class TargetSelectionTests(unittest.TestCase):
         commands = [s.get("run", "") for s in worker["steps"]]
         self.assertIn("python3 scripts/gate.py ci-fast", commands)
         self.assertNotIn("cargo nextest run --workspace", str(jobs))
-        self.assertEqual(jobs["integration"]["needs"], ["changes", "ci-fast"])
+        self.assertEqual(
+            jobs["integration"]["needs"],
+            ["changes", "ci-fast", "change-owned-report"],
+        )
         self.assertIn("ci-fast=${{ needs.ci-fast.result }}", str(jobs["integration"]))
+        self.assertIn(
+            "change-owned-report=${{ needs.change-owned-report.result }}",
+            str(jobs["integration"]),
+        )
         sanitizer = [s.get("run") for s in jobs["backend-sanitizers"]["steps"]]
         self.assertIn("cargo test -p chelis-backend-c --lib", sanitizer)
         self.assertIn("cargo test -p chelis-backend-c --doc", sanitizer)
@@ -154,11 +216,14 @@ class TargetSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".config").mkdir()
-            (root / ".config/ci-test-targets.toml").write_text('version = 1\n[[target]]\npackage = "p"\nname = "smoke"\n')
+            (root / ".config/ci-test-targets.toml").write_text(
+                'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
             calls = []
             def run(command, **kwargs):
                 calls.append(command)
                 payload = metadata() if command[1] == "metadata" else listing()
+                if command[1:3] == ["nextest", "run"]:
+                    write_junit(root, listing()["rust-suites"])
                 return mock.Mock(stdout=json.dumps(payload), returncode=0)
             with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
                 targets.run(root)
@@ -171,6 +236,40 @@ class TargetSelectionTests(unittest.TestCase):
                 self.assertIn("--bins", command)
                 self.assertEqual(command[command.index("--test") + 1], "smoke")
             self.assertTrue((root / "target/ci-fast/selection.json").is_file())
+
+    def test_group_receipts_preserve_junit_commands_and_timings_and_reject_missing_junit(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".config").mkdir()
+                (root / ".config/ci-test-targets.toml").write_text(
+                    'version = 2\n[[standing_target]]\npackage = "p"\nname = "smoke"\n'
+                    '[[standing_target]]\npackage = "q"\nname = "smoke"\n')
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == "metadata":
+                        return mock.Mock(stdout=json.dumps(shared_metadata()), returncode=0)
+                    binaries = (["p", "p::bin/app", "q", "q::bin/app"] if "--workspace" in command
+                                else [command[command.index("-p") + 1] + "::smoke"])
+                    if command[1:3] == ["nextest", "run"] and not (missing and "q::smoke" in binaries):
+                        write_junit(root, binaries)
+                    suites = {binary: listing()["rust-suites"]["p::smoke"] for binary in binaries}
+                    return mock.Mock(stdout=json.dumps({"rust-suites": suites}), returncode=0)
+                with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
+                    if missing:
+                        with self.assertRaisesRegex(ValueError, "JUnit"):
+                            targets.run(root)
+                    else:
+                        targets.run(root)
+                self.assertEqual(sum(c[1] == "build" for c in calls), 1)
+                junit = ET.parse(root / "target/nextest/ci-fast/junit.xml")
+                cases = [case.get("classname") for case in junit.iter("testcase")]
+                self.assertEqual(len(cases), len(set(cases)))
+                self.assertEqual(set(cases), {"p", "p::bin/app", "q", "q::bin/app", "p::smoke"} | (set() if missing else {"q::smoke"}))
+                receipts = root / "target/ci-fast"
+                self.assertEqual(len(json.loads((receipts / "commands.json").read_text())), 7)
+                self.assertEqual(len(json.loads((receipts / "timing.json").read_text())), 7)
 
 
 if __name__ == "__main__":

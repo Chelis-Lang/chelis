@@ -15,7 +15,8 @@ manual heavy-E2E dtype job owns both censuses.
 `main` at `0e858f184` and later evidence through `72a1fb497`. This repository
 copy was first refreshed on 2026-09-13 against `23729c638`, then refreshed
 again against `main` at `8d1293f31` after the implementation sequence through
-chelis#2008. The companion
+chelis#2008. The CI implementation refresh uses `main` at `b38efcfbe`
+for the current integration inventory. The companion
 [`guard_artifact_proposal_evidence.md`](guard_artifact_proposal_evidence.md)
 records coverage, measurements, and known limits.
 
@@ -59,7 +60,7 @@ standing lane.
 | Surface | Result after implementation |
 |---|---|
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
-| Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The manifest is currently 68 package/target identities; the first implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the planned standing set to 70. |
+| Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
 | New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
 | New hosted package expansion | In separate non-required workers, informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
@@ -74,7 +75,7 @@ semantic impact closure. Nightly remains the completeness net for packages the
 pull request did not directly change and for exclusions too expensive or
 prerequisite-bound for the regular lane.
 
-The two planned standing additions resolve the concrete post-chelis#1968 case
+The two standing additions resolve the concrete post-chelis#1968 case
 recorded on chelis#1824. The retired spelling inventories no longer belong in
 CI, but their small behavioral replacements did not inherit a regular
 pull-request owner. `chelis-types::expand_insert_dispatch_family` protects the
@@ -103,7 +104,7 @@ ambiguous mappings, and paths with no disposition are planning failures. The
 first implementation should use a versioned configuration with four explicit
 row kinds:
 
-- `standing_target`: the current 68 package-qualified reviewed identities plus
+- `standing_target`: the base 73 package-qualified reviewed identities plus
   the two explicit replacement-expand additions above;
 - `target_exclusion`: one exact package/target excluded from the change-owned
   or package-expansion lane;
@@ -137,11 +138,13 @@ package expansion or an explicit shared-path disposition.
 
 A target whose `required-features` are all enabled by that package's
 default-feature closure is eligible; a target requiring a non-default feature
-is not. Package qualification is mandatory: current `main` has 770
+is not. Package qualification is mandatory: `main` at `b38efcfbe` has 779
 default-eligible integration targets in a 34-package workspace; 24 packages
 currently own at least one. Thirty-six target names, covering 78 identities,
-are shared by more than one package, so the present global target-name
-uniqueness check cannot be reused.
+are shared by more than one package, so execution must preserve package
+qualification. The standing runner groups
+globally unique names with units and runs shared names under exact package
+selectors, merging their listing and execution receipts.
 
 ### Execution and receipts
 
@@ -501,13 +504,13 @@ Pull-request execution reach remains the largest immediate gap:
 | Guard | Pull-request reach and delayed owner |
 |---|---|
 | retired `expand` spelling inventories | Correctly absent after chelis#1968/chelis#1998; they must not be restored |
-| `chelis-types::expand_insert_dispatch_family` | Small AST-position replacement is currently absent from regular PR selection; add it to the standing manifest |
-| `chelis-types::issue_1294_standard_lowerings` | Behavioral replacement runs in broader dtype closure but not ordinary PR selection; add it to the standing manifest |
+| `chelis-types::expand_insert_dispatch_family` | Small AST-position replacement is selected by the candidate standing manifest |
+| `chelis-types::issue_1294_standard_lowerings` | Behavioral replacement is selected by the candidate standing manifest, in addition to broader dtype closure |
 | rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
 | §C7.5 standing-liveness canary | Daily/manual workflow on `main`; the regular PR job still checks the standing manifest until changed-row narrowing lands |
-| newly added or changed package integration target | Nightly is automatic; regular PR execution is still omitted unless the target is in the 68-row standing manifest, pending the change-owned lane selected above |
+| newly added or changed package integration target | Candidate required change-owned shards derive its PR execution; merged-main acceptance remains outstanding |
 
 The former contrast between the two expand inventories remains historical
 evidence for execution reach. The selected insert inventory stayed
@@ -612,6 +615,14 @@ chelis#1973 trial.
 
 ## Remaining delivery order
 
+The candidate implements chelis#1824 delivery step 2: versioned ownership,
+required planning and four change-owned shards, isolated informational
+expansion, and package-qualified standing execution. Exact-head review and
+hosted execution must validate it before landing; merged-main acceptance and
+representative expansion receipts remain outstanding. The required acceptance
+surface is the hosted `Integration Tests (Linux)` context, backed by `ci-fast`
+and the receipt-validating change-owned report.
+
 1. Land the chelis#1824 design and change-owned execution guarantee with
    informational package expansion, collect exact-head cost/completeness
    receipts, then decide whether to require the broader expansion.
@@ -644,7 +655,7 @@ This assessment does not establish:
 - whether shared-path rules need additional package mappings after the
   informational trial; or
 - the evidence threshold for adding a target permanently to the standing
-  68-row layer instead of leaving it dynamically selected.
+  layer instead of leaving it dynamically selected.
 
 Those unknowns are reasons for the informational trial and its receipts, not
 reasons to silently remove coverage or resume indefinite target-list growth.
