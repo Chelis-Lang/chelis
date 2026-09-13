@@ -37,7 +37,9 @@ pub struct ProveOptions<'a> {
     pub tier: &'a str,
     #[allow(dead_code)]
     pub smt_timeout_ms: u64,
+    #[cfg_attr(not(feature = "chelis-prove"), allow(dead_code))]
     pub beacon_budget: std::time::Duration,
+    #[cfg_attr(not(feature = "chelis-prove"), allow(dead_code))]
     pub beacon_deadline: Option<std::time::Instant>,
     /// Floor for invariant rejection-sampling acceptance rate before the
     /// starvation classifier fires (RFC D-STARVE). `0.0` disables the
@@ -129,6 +131,12 @@ struct Summary {
 }
 
 pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
+    #[cfg(not(feature = "chelis-prove"))]
+    if options.tier == "beacon-only" {
+        return Err(
+            "beacon-only requires the chelis-prove feature in this compiler build".to_string(),
+        );
+    }
     let inputs = discover_inputs(options.path)?;
     if inputs.is_empty() {
         return Err("no .ch or .dp files selected for property discovery".to_string());
