@@ -1,9 +1,12 @@
+mod support;
+
 use chelis_prove::property_runner::{
     PropertyRunOptions, PropertyRunResult, PropertyStatus, run_surf_source_properties,
 };
 
 #[test]
 fn beacon_tier_rejects_missing_box_bounds_without_smt_or_fuzz_fallback() {
+    crate::support::isolate();
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
         ..Default::default()
@@ -18,6 +21,7 @@ fn beacon_tier_rejects_missing_box_bounds_without_smt_or_fuzz_fallback() {
 
 #[test]
 fn beacon_scalar_bridge_requires_explicit_f64_bounds_and_unshadowed_identity() {
+    crate::support::isolate();
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
         ..Default::default()
@@ -54,6 +58,7 @@ fn beacon_scalar_bridge_requires_explicit_f64_bounds_and_unshadowed_identity() {
 #[test]
 #[ignore = "requires current released CHELIS_BEACON_BIN with scalar v11 and Arb"]
 fn beacon_property_route_reaches_real_engine_and_preserves_all_outcomes() {
+    crate::support::isolate();
     assert!(std::env::var_os("CHELIS_BEACON_BIN").is_some());
     for (upper, budget, expected) in [
         (
@@ -101,6 +106,7 @@ fn beacon_property_route_reaches_real_engine_and_preserves_all_outcomes() {
 #[test]
 #[ignore = "requires released CHELIS_BEACON_BIN"]
 fn expired_outer_deadline_returns_engine_unknown_after_compiler_preparation() {
+    crate::support::isolate();
     let source = "@property bounded forall(x: tensor[f64]) where tensor_to_scalar(x) >= -1.0f64, tensor_to_scalar(x) <= 1.0f64:\n  tensor_to_scalar(x) <= 2.0f64\n";
     let options = PropertyRunOptions {
         tier: "beacon-only".into(),
@@ -122,6 +128,7 @@ fn expired_outer_deadline_returns_engine_unknown_after_compiler_preparation() {
 #[test]
 #[ignore = "requires released CHELIS_BEACON_BIN"]
 fn named_boxes_keep_parameter_order_and_exclude_unrelated_function_loads() {
+    crate::support::isolate();
     let source = "def unrelated(z: tensor[f64]) -> tensor[f64] = relu(z)\ndef combine(b: tensor[f64], a: tensor[f64]) -> tensor[f64] = b + scalar_to_tensor(2.0f64) * a\n@property bounded forall(b: tensor[f64], a: tensor[f64]) where tensor_to_scalar(b) >= 1.0f64, tensor_to_scalar(b) <= 2.0f64, tensor_to_scalar(a) >= -4.0f64, tensor_to_scalar(a) <= -3.0f64:\n  tensor_to_scalar(combine(b, a)) <= -3.0f64\n";
     for (source, expected) in [
         (source.to_string(), PropertyStatus::Passed),

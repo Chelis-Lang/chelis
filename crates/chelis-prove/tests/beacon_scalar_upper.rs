@@ -1,9 +1,12 @@
 //! One-sided real-arithmetic range goals retain the bound's typed bits.
+mod support;
+
 use chelis_prove::discharge::{Goal, GoalShape, IntervalBox};
 use chelis_types::{dtype_semantics::scalar_from_f64, types::Prim};
 
 #[test]
 fn upper_bound_goal_preserves_typed_threshold_and_rejects_invalid_boxes() {
+    crate::support::isolate();
     let upper = scalar_from_f64("proof transport", Prim::F64, 3.991125645861615).unwrap();
     let input = IntervalBox {
         dims: vec![("x".into(), -1.0, 1.0)],
