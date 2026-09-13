@@ -1,1 +1,0 @@
-Preserve selected zero cotangents, their caller shapes, and forward checks in fused `vmap(grad(...))` IR/evaluator lowering without treating unresolved callable values as constants. Native multi-result export remains outside this repair.

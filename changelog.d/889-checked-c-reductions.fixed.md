@@ -1,1 +1,0 @@
-Generated C reductions and Count now validate result shapes, reduction domains, indices, and scratch sizes through checked runtime metadata before allocation or access. Sum preserves its canonical adjacent-pair tree and explicit accumulator width.

@@ -1,1 +1,0 @@
-Generated C BLAS submissions validate matrix shapes, batch indices, vendor dimensions, and conversion scratch capacities through checked runtime metadata. Reduced-float scratch uses runtime tensor storage. Canonical contraction selection is unchanged.
