@@ -1001,7 +1001,7 @@ fn signature_entry_inventory(
     }
     assert_eq!(parameters.len(), signature.params.len());
     assert_eq!(parameters.len(), c_parameters.len());
-    let mut first = std::collections::HashMap::<Dim, (String, String)>::new();
+    let mut first = Vec::<(Dim, (String, String))>::new();
     let mut guards = Vec::new();
     for ((parameter, ty), c_name) in signature.params.iter().zip(parameters).zip(c_parameters) {
         let ty = match ty {
@@ -1022,7 +1022,9 @@ fn signature_entry_inventory(
                 }),
                 Dim::Name(name) if name == "*" => {}
                 Dim::Name(_) | Dim::Var(_) => {
-                    if let Some((canonical, canonical_witness)) = first.get(dimension) {
+                    if let Some((_, (canonical, canonical_witness))) =
+                        first.iter().find(|(key, _)| key == dimension)
+                    {
                         guards.push(EntryGuardReceipt {
                             comparison: format!("if ({observed} != {canonical}) {{"),
                             context: format!("{canonical_witness}, {witness}"),
@@ -1032,7 +1034,7 @@ fn signature_entry_inventory(
                             },
                         });
                     } else {
-                        first.insert(dimension.clone(), (observed, witness));
+                        first.push((dimension.clone(), (observed, witness)));
                     }
                 }
                 Dim::Wildcard | Dim::Rank(_) => {}

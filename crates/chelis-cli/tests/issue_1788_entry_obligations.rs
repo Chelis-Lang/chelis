@@ -147,6 +147,81 @@ fn higher_order_invocation_accepts_agreeing_claim() {
     );
 }
 
+fn app_and_pipe_entry_source(pipe: bool, invalid_first: bool, second_skip: usize) -> String {
+    let extra = usize::from(invalid_first);
+    let first = format!("cut(to_tensor([1.0f32, 2.0f32, 3.0f32]), 1i64, {extra}i64)");
+    let second = format!("cut(to_tensor([7.0f32, 8.0f32, 9.0f32]), {second_skip}i64, 0i64)");
+    let call = if pipe {
+        format!("{first} |> apply(twice, {second})")
+    } else {
+        format!("apply({first}, twice, {second})")
+    };
+    format!(
+        "def cut(x: tensor[n, f32], lo: int64, extra: int64) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"argument-ran\")\n shrink(x, [[lo, add(shape(x, 0i32), extra)]])\n}}\ndef twice(x: tensor[q, f32]) -> tensor[q, f32] = add(x, x)\ndef apply(v: tensor[p, f32], f: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), w)\nout = {{\n result = {call}\n _ = print(\"following-ran\")\n result\n}}\n"
+    )
+}
+
+#[test]
+fn higher_order_app_and_pipe_preserve_actual_before_entry_failure() {
+    for pipe in [false, true] {
+        for (invalid_first, expected_op, argument_effects) in
+            [(true, "shrink", 1), (false, "load", 2)]
+        {
+            let source = app_and_pipe_entry_source(pipe, invalid_first, 2);
+            for c in [false, true] {
+                let output = run(&source, c);
+                let rendered = text(&output);
+                assert!(!output.status.success(), "pipe={pipe}, C={c}: {rendered}");
+                let expected_trap = if invalid_first && !c {
+                    // Direct eval rejects intrinsic shrink bounds before the
+                    // IR evaluator's numeric-trap formatter is reached.
+                    "error: shrink axis 0 bound [1, 4] is out of range for input dim 3".into()
+                } else {
+                    format!("numeric trap: domain in {expected_op} at int64")
+                };
+                assert!(
+                    rendered.lines().any(|line| line == expected_trap),
+                    "pipe={pipe}, C={c}: {rendered}"
+                );
+                assert_eq!(
+                    rendered.matches("argument-ran").count(),
+                    argument_effects,
+                    "pipe={pipe}, C={c}: {rendered}"
+                );
+                assert!(!rendered.contains("following-ran"), "{rendered}");
+                if invalid_first {
+                    assert!(!rendered.contains("extent `p`"), "{rendered}");
+                    assert!(!rendered.contains("domain in load"), "{rendered}");
+                } else {
+                    assert!(
+                        rendered.contains("extent `p`: v axis 0 = 2, w axis 0 = 1"),
+                        "pipe={pipe}, C={c}: {rendered}"
+                    );
+                    assert!(!rendered.contains("domain in shrink"), "{rendered}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn higher_order_app_and_pipe_accept_agreeing_entry_claim() {
+    for pipe in [false, true] {
+        let source = app_and_pipe_entry_source(pipe, false, 1);
+        for c in [false, true] {
+            let output = run(&source, c);
+            let rendered = text(&output);
+            assert!(output.status.success(), "pipe={pipe}, C={c}: {rendered}");
+            assert_eq!(rendered.matches("argument-ran").count(), 2, "{rendered}");
+            assert_eq!(rendered.matches("following-ran").count(), 1, "{rendered}");
+            assert!(
+                rendered.contains("out = tensor(shape=[2], data=[12.0, 15.0])"),
+                "pipe={pipe}, C={c}: {rendered}"
+            );
+        }
+    }
+}
+
 fn mixed_literal_source(literal_first: bool, repeated_bad: bool, literal_bad: bool) -> String {
     let fixed = "fixed: tensor[2, f32]";
     let pair = "a: tensor[seq, f32], b: tensor[batch, seq, f32]";

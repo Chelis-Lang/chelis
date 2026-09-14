@@ -669,6 +669,20 @@
       "note": "The example census independently derives ordered entry obligations from checked source signatures and compares each emitted owned function, including empty actual guard sets. Alias/scope positives and missing/duplicate/reordered/wrong-axis negatives protect the comparison. Result-guard and refusal enumeration controls remain."
     },
     {
+      "phase": "b",
+      "id": "cli_mixed_callable_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1915_caller_actual_scope.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "existing_mixed_callable_parameters_keep_their_native_values"
+      ],
+      "note": "Retained #1947 interaction control: tensor and primitive-scalar callables in one signature preserve exact eval/native-C values [6,10]. Signature-entry failure and ordering counterparts remain in cli_signature_entry."
+    },
+    {
       "id": "cli_signature_entry",
       "package": "chelis-cli",
       "kind": "test",
@@ -678,6 +692,8 @@
       },
       "expected": [
         "every_unused_repeated_witness_is_checked",
+        "higher_order_app_and_pipe_accept_agreeing_entry_claim",
+        "higher_order_app_and_pipe_preserve_actual_before_entry_failure",
         "higher_order_entry_does_not_depend_on_shared_result_labels",
         "higher_order_entry_is_after_arguments_and_before_following_effects",
         "higher_order_invocation_accepts_agreeing_claim",
