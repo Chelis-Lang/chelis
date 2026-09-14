@@ -1,0 +1,1 @@
+Preserve authored named-extent claims when evaluating gradients of tensor, aggregate and primitive scalar targets, including multiple targets and unused zero cotangents. A rejected forward activation reports its required extent failure instead of producing a gradient.
