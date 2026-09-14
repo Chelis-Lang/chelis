@@ -65,7 +65,7 @@ script refuses to call that a pass:
 
 What this script never writes
 -----------------------------
-* `FROZEN_ATOM_DIGESTS` and `FROZEN_REGION_DIGESTS` in
+* `REQUIRED_ATOMS` and `REQUIRED_REGIONS` in
   `scripts/dtype_phase4b_oracle.py`;
 * `FREEZE_SHA256` in `scripts/runtime_representation_oracle.py`;
 * the `BASELINE` table in `crates/chelis-cli/tests/loud_unsupported_tripwire.rs`;
