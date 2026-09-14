@@ -59,6 +59,11 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the representation gate compares the live inventory with this reviewed foundation"
 tracking_issue = "chelis#893"
 
+[[path_rule]]
+prefix = "examples/grad_extent_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"
