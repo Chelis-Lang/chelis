@@ -1681,7 +1681,12 @@ both halves:
    recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
    loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
    and the capacity-census liveness sweep remain pending. Regular PRs validate
-   changed issue-authority rows under §C2.1. Therefore this scheduled slice
+   changed issue-authority rows under §C2.1. The capacity-liveness reader's
+   final-binding format repair is separate: native tagged transports and the
+   [05-OP-45] shape operation need no issue lookup, and retired binding
+   citations are rejected. That persisted-shape check supplies no current
+   graph/codec/execution authority and does not enroll another workflow leg.
+   Therefore this scheduled slice
    is only the standing rejection-authority drift canary; neither execution
    half nor §C7.5 as a whole is complete.
 

@@ -860,6 +860,15 @@ Deliverables, with phase homes:
    release cuts and red-team passes remain additional manual
    invocations, not the only ones.
 
+   The liveness reader accepts the final binding baseline's native tagged
+   transports and [05-OP-45] shape operation alongside CompilerJson and
+   nonnumeric rows. It rejects all binding citation/legacy fields, including
+   the retired four-signature native disposition. Current final binding rows
+   require no tracker lookup. This is persisted-shape validation only: the
+   Rust binding verifier retains current discovery, graph, codec and execution
+   authority. No final baseline or Rust admission rule changes for this adapter
+   repair; the wider execution matrix remains [#730] §C7.5 work.
+
    The census's lexical primitives live in
    `tests/support/c_lexical.rs`, shared by `#[path]` the way
    `capacity_census_authority.rs` already is: `strip_c_comments`,

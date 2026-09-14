@@ -619,6 +619,17 @@ continues to check every source-derived row, including unchanged authorities
 that acquire more citing sites. This delivers the issue-liveness split only;
 the structured diagnostic migration and broader §C7.5 matrix remain separate.
 
+The capacity-liveness adapter must read the final binding format already
+owned by the Rust binding guard: the three native tagged transports and the
+[05-OP-45] shape operation join the existing CompilerJson and nonnumeric rows.
+No binding row may regain a citation or the retired native legacy disposition.
+The Python reader checks this persisted shape, including exact contract/owner
+pairs and capacity flags; the Rust verifier still owns fresh source discovery,
+graph, codec and execution authority. No baseline is rewritten to repair the
+adapter. Current final rows require no issue lookup. The shared issue-record
+and tracker-fetch API remains available to rejection and prerequisite checks;
+this repair does not deliver the pending scheduled or pre-merge matrix.
+
 ## Deterrence and execution reach
 
 Deterrence is recorded where a guard failure demands a judgement an author
