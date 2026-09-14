@@ -159,8 +159,7 @@ const BOOL: &str = "(lit {type: (t-prim {} bool)} 1)";
 /// `literal_source: integer` bound directly to a float primitive. LEGAL as a
 /// literal; see the residue note at the end of this file for what it means in
 /// an axis slot.
-const F32_INT_SPELLED: &str =
-    "(lit {type: (t-prim {} f32), literal_source: integer} 1)";
+const F32_INT_SPELLED: &str = "(lit {type: (t-prim {} f32), literal_source: integer} 1)";
 
 // Zero-valued spellings, for the selector position where the index must be
 // in bounds for a two-element tuple.
