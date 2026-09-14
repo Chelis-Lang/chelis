@@ -1594,16 +1594,23 @@ impl<'a> EvalContext<'a> {
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
         let kids = children(list);
-        let cond = self.eval_expr(kids.first().ok_or_else(|| "if missing cond".to_string())?)?;
+        let cond =
+            self.eval_if_condition(kids.first().ok_or_else(|| "if missing cond".to_string())?)?;
         match cond {
-            RuntimeValue::Bool(true) => self.eval_expr(
+            true => self.eval_expr(
                 kids.get(1)
                     .ok_or_else(|| "if missing then branch".to_string())?,
             ),
-            RuntimeValue::Bool(false) => self.eval_expr(
+            false => self.eval_expr(
                 kids.get(2)
                     .ok_or_else(|| "if missing else branch".to_string())?,
             ),
+        }
+    }
+
+    fn eval_if_condition(&mut self, condition: &Expr) -> Result<bool, String> {
+        match self.eval_expr(condition)? {
+            RuntimeValue::Bool(condition) => Ok(condition),
             other => Err(format!("if condition must be bool, got {other:?}")),
         }
     }
@@ -1649,11 +1656,10 @@ impl<'a> EvalContext<'a> {
                 }
             }
             Some((DeepTag::If, kids)) => {
-                let condition = self.eval_expr(kids.first().ok_or("if missing cond")?)?;
+                let condition = self.eval_if_condition(kids.first().ok_or("if missing cond")?)?;
                 let selected = match condition {
-                    RuntimeValue::Bool(true) => kids.get(1).ok_or("if missing then branch")?,
-                    RuntimeValue::Bool(false) => kids.get(2).ok_or("if missing else branch")?,
-                    other => return Err(format!("if condition must be bool, got {other:?}")),
+                    true => kids.get(1).ok_or("if missing then branch")?,
+                    false => kids.get(2).ok_or("if missing else branch")?,
                 };
                 return self.eval_under_result_claim(selected, claims);
             }
