@@ -820,8 +820,8 @@ starting work and again before merging, as required by `AGENTS.md`.
 The remaining work has separate owners and acceptance conditions:
 
 1. **Broader PR execution, chelis#1824.** Keep the required change-owned
-   guarantee. Representative package expansion has exceeded its four
-   20-minute budgets and exposed feature/prerequisite failures. Narrow or
+   guarantee. The chelis#2040 merged-main trial had three expansion timeouts
+   and one failing receipt. Narrow or
    repartition it under the delivery sequence above, then collect complete
    receipts before promotion. A successful informational summary does not
    mean its tests passed. Standing-admission decisions and provisional-row
