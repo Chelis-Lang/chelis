@@ -2251,6 +2251,57 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
             });
         }
     }
+    // Physical dimension classes establish the comparison, while a typed
+    // result claim identifies which observation declared its requirement.
+    // A foreign producer can precede that declaring parameter. Preserve this
+    // exact edge's diagnostic orientation without changing the comparison's
+    // readiness position or joining any additional dimension classes.
+    let witness_axis = |id: NodeId| {
+        let node = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        Some((load_through_casts(dag, id, 0)?, usize::try_from(axis).ok()?))
+    };
+    for guard in &mut guards {
+        let EntryExtentGuard::Named {
+            claim,
+            canonical,
+            observed,
+        } = guard
+        else {
+            continue;
+        };
+        let declaring_pair = dag.nodes().iter().find_map(|node| {
+            let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                return None;
+            };
+            let here = witness_axis(node.id)?;
+            claims
+                .iter()
+                .zip(node.inputs.iter().skip(1))
+                .find_map(|(recorded, edge)| {
+                    let there = witness_axis(*edge)?;
+                    (recorded.claim == *claim
+                        && ((here == *canonical && there == *observed)
+                            || (there == *canonical && here == *observed)))
+                        .then_some(if recorded.requirement_declares {
+                            (there, here)
+                        } else {
+                            (here, there)
+                        })
+                })
+        });
+        if let Some((declaring, producing)) = declaring_pair {
+            *canonical = declaring;
+            *observed = producing;
+        }
+    }
     guards.sort_by_key(|guard| match guard {
         EntryExtentGuard::Named {
             canonical,

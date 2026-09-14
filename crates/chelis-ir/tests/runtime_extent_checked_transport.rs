@@ -731,3 +731,87 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
         assert!(!chelis_ir::verify::verify(&bad).is_empty());
     }
 }
+
+/// [04-NUM-9]: a named result claim reports its declaring observation first,
+/// even when that parameter occurs after the value whose extent is claimed.
+#[test]
+fn an_entry_result_claim_keeps_its_later_declaring_witness() {
+    use chelis_ir::axis_sources::{EntryExtentGuard, entry_extent_guards};
+    use chelis_ir::dag::{ExtentClaim, ExtentWitnessSite};
+    let mut dag = Dag::new();
+    let mut loads = Vec::new();
+    let mut witnesses = Vec::new();
+    for parameter in ["x", "y"] {
+        let load = dag.add_node(
+            RiscOp::Load {
+                name: parameter.into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("cols".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        loads.push(load);
+        witnesses.push(dag.add_node(
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: parameter.into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![],
+                claims: vec![],
+            },
+            vec![load],
+            scalar_type(),
+            None,
+        ));
+    }
+    let later = dag.node_mut(witnesses[1]).unwrap();
+    later.inputs.push(witnesses[0]);
+    let RiscOp::ExtentWitness { claims, .. } = &mut later.op else {
+        unreachable!()
+    };
+    claims.push(ExtentClaim {
+        claim: "cols".into(),
+        requirement_declares: false,
+    });
+    let result = dag.add_node(
+        RiscOp::Copy,
+        vec![loads[0]],
+        dag.get(loads[0]).unwrap().output_type.clone(),
+        None,
+    );
+    dag.add_shape_dep(result, witnesses[1]);
+    dag.add_root(result);
+    assert_eq!(
+        entry_extent_guards(&dag),
+        vec![EntryExtentGuard::Named {
+            claim: "cols".into(),
+            canonical: (loads[1], 0),
+            observed: (loads[0], 0)
+        }]
+    );
+    let inputs = |width| {
+        std::collections::BTreeMap::from([
+            (
+                "x".to_string(),
+                TensorValue::from_vec(vec![2], vec![1.0, 2.0]),
+            ),
+            (
+                "y".to_string(),
+                TensorValue::from_vec(vec![width], vec![1.0; width]),
+            ),
+        ])
+    };
+    let error = eval_tensor_with(&dag, |name| inputs(3).get(name).cloned())
+        .expect_err("later declaration must reject an earlier foreign extent");
+    assert_eq!(
+        error,
+        "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64"
+    );
+    let output = eval_tensor_with(&dag, |name| inputs(2).get(name).cloned())
+        .expect("agreeing claim executes");
+    assert_eq!(output[&result].shape, vec![2]);
+    assert_eq!(output[&result].to_f64_lossy_vec(), vec![1.0, 2.0]);
+}
