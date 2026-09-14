@@ -15,7 +15,8 @@ import re
 import subprocess
 import sys
 
-from faithful_observation_phase3_oracle import test_definition_spans
+from faithful_observation_phase3_oracle import test_declaration_matches, test_definition_spans
+from ci_change_owned import resolve_pr_commits
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,10 +27,6 @@ DOCTRINE = (
     "this report does not replace the Phase 3 oracle."
 )
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-TEST_DECLARATION = re.compile(
-    r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-    re.MULTILINE,
-)
 
 
 def read_required_tests(source: str) -> dict[str, set[str]]:
@@ -137,8 +134,7 @@ def definitions(source: str, required: set[str]) -> dict[str, tuple[str, list[in
     # Reuse the oracle's definition boundaries. Refuse its otherwise ambiguous
     # name-only identity when more than one declaration bears the same name.
     names = Counter(
-        match.group("name") for match in TEST_DECLARATION.finditer(source)
-        if "#[test]" in match.group("attrs")
+        match.group("name") for match in test_declaration_matches(source)
     )
     duplicates = sorted(name for name, count in names.items() if name in required and count != 1)
     if duplicates:
@@ -208,15 +204,28 @@ def changed_tests(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dic
     }
 
 
+def resolve_comparison(repo: Path, candidate: str, base: str, pr_head: str) -> tuple[str, str]:
+    candidate = commit(repo, candidate)
+    if bool(base) == bool(pr_head):
+        raise ValueError("provide exactly one of --base or --pr-head")
+    if pr_head:
+        if not re.fullmatch(r"[0-9a-f]{40}", pr_head):
+            raise ValueError("--pr-head must be the full event commit SHA")
+        return resolve_pr_commits(repo, candidate, pr_head)
+    return commit(repo, base), candidate
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True, help="comparison revision; derive its merge base with candidate")
+    parser.add_argument("--base", default="", help="push/local comparison revision")
+    parser.add_argument("--pr-head", default="", help="exact event head; validate candidate merge parents")
     parser.add_argument("--candidate", default="HEAD", help="committed candidate revision (default HEAD)")
     parser.add_argument("--output", type=Path, required=True, help="JSON report to publish")
     args = parser.parse_args(argv)
     try:
         args.output.unlink(missing_ok=True)
-        result = changed_tests(ROOT, args.base, args.candidate)
+        base, candidate = resolve_comparison(ROOT, args.candidate, args.base, args.pr_head)
+        result = changed_tests(ROOT, base, candidate)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")
     except (ValueError, OSError) as error:

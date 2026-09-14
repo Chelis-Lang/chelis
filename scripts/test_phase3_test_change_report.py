@@ -109,6 +109,18 @@ class CommittedChanges(unittest.TestCase):
         self.assertEqual(result["changes"][0]["changes"], ["definition removed"])
         self.assertIn("parity_example", "\n".join(result["problems"]))
 
+    def test_commented_required_definition_is_named_and_invalid(self):
+        base = self.commit()
+        self.commit('/*\n' + BODY + '*/\n')
+        result = self.compare(base)
+        self.assertEqual(result["changes"][0]["changes"], ["definition removed"])
+        self.assertIn("parity_example", "\n".join(result["problems"]))
+
+    def test_commented_duplicate_is_not_an_ambiguous_active_definition(self):
+        base = self.commit()
+        self.commit(BODY + '/*\n' + BODY + '*/\n')
+        self.assertEqual(self.compare(base)["changes"], [])
+
     def test_restoring_a_missing_required_definition_can_be_reported(self):
         base = self.commit("// missing test in the base\n")
         self.commit()
@@ -142,6 +154,29 @@ class CommittedChanges(unittest.TestCase):
         self.assertEqual(result["base"], base)
         self.assertEqual(result["comparison_ref"], sibling)
         self.assertEqual(result["changes"], [])
+
+    def test_regenerated_pr_merge_compares_its_actual_first_parent(self):
+        event_base = self.commit()
+        self.git("checkout", "-b", "candidate")
+        head = self.commit()
+        self.git("checkout", "fixture")
+        advanced = self.commit(BODY.replace("1, 1", "2, 2"))
+        self.git("merge", "--no-ff", "--no-edit", "candidate")
+        merge = self.git("rev-parse", "HEAD")
+        base, candidate = report.resolve_comparison(self.root, "HEAD", "", head)
+        self.assertEqual((base, candidate), (advanced, merge))
+        self.assertEqual(self.compare(base, candidate)["changes"], [])
+        self.assertTrue(self.compare(event_base, candidate)["changes"])
+        for candidate, wrong_head in [(head, head), (merge, event_base), (merge, "bad")]:
+            with self.subTest(candidate=candidate, head=wrong_head), self.assertRaises(ValueError):
+                report.resolve_comparison(self.root, candidate, "", wrong_head)
+        for base_ref, pr_head in [(advanced, head), ("", "")]:
+            with self.subTest(base=base_ref, head=pr_head), self.assertRaises(ValueError):
+                report.resolve_comparison(self.root, merge, base_ref, pr_head)
+        output = self.root / "report.json"
+        with mock.patch.object(report, "ROOT", self.root), redirect_stdout(io.StringIO()):
+            self.assertEqual(report.main(["--pr-head", head, "--output", str(output)]), 0)
+        self.assertEqual(json.loads(output.read_text())["base"], advanced)
 
     def test_ignores_uncommitted_working_tree_edits(self):
         base = self.commit()
@@ -213,7 +248,7 @@ class CommittedChanges(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    command = '.venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --output target/phase3-test-changes.json'
+    command = '.venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json'
 
     def workflow(self):
         root = Path(__file__).resolve().parents[1]
@@ -228,7 +263,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         step = reports[0]
         self.assertEqual(step["run"], self.command)
-        self.assertEqual(step["env"]["BASE_REF"], "${{ github.event.pull_request.base.sha || github.event.before }}")
+        self.assertEqual(step["env"]["BASE_REF"], "${{ github.event_name == 'push' && github.event.before || '' }}")
+        self.assertEqual(step["env"]["PR_HEAD"], "${{ github.event.pull_request.head.sha }}")
         self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("shell", step)
@@ -241,6 +277,17 @@ class WorkflowTests(unittest.TestCase):
 
     def test_docs_job_executes_and_publishes_report(self):
         self.assert_contract(self.workflow())
+
+    def test_synchronize_before_is_not_allowed_to_select_push_comparison(self):
+        # pull_request.synchronize includes `before`, the previous PR head.
+        # Presence alone cannot select the push mode; actual hosted synchronize
+        # execution exercises this event expression with both payload fields.
+        workflow = self.workflow()
+        step = next(s for s in workflow["jobs"]["docs"]["steps"]
+                    if "phase3_test_change_report.py" in s.get("run", ""))
+        step["env"]["BASE_REF"] = "${{ github.event.before }}"
+        with self.assertRaises(AssertionError):
+            self.assert_contract(workflow)
 
     def test_noop_skipped_or_suppressed_report_is_rejected(self):
         for mutation in ["noop", "skip", "suppress"]:

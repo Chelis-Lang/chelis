@@ -1,0 +1,1 @@
+Phase 3 guard and change-report discovery reject commented-out required tests; PR reports use the validated synthetic merge's actual base, and both Phase 3 and Phase 4B reports select push mode only for push events.

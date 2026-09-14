@@ -264,7 +264,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         step = reports[0]
         self.assertEqual(step["run"], self.command)
-        self.assertEqual(step["env"], {"BASE_REF": "${{ github.event.before }}", "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
+        self.assertEqual(step["env"], {"BASE_REF": "${{ github.event_name == 'push' && github.event.before || '' }}", "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
         for key in ("if", "continue-on-error", "shell"):
             self.assertNotIn(key, step)
         artifact = next(s for s in steps if s.get("with", {}).get("name") == "phase4b-contract-changes")
@@ -275,6 +275,14 @@ class WorkflowTests(unittest.TestCase):
 
     def test_report_has_required_execution_and_publication(self):
         self.check(self.workflow())
+
+    def test_synchronize_before_is_not_allowed_to_select_push_comparison(self):
+        workflow = self.workflow()
+        step = next(s for s in workflow["jobs"]["docs"]["steps"]
+                    if "phase4b_change_report.py" in s.get("run", ""))
+        step["env"]["BASE_REF"] = "${{ github.event.before }}"
+        with self.assertRaises(AssertionError):
+            self.check(workflow)
 
     def test_skipped_noop_or_suppressed_execution_does_not_satisfy_contract(self):
         for mutation in ("if", "continue-on-error", "run"):

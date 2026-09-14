@@ -327,18 +327,78 @@ def shipped_sources() -> dict[Path, str]:
     }
 
 
-def test_declarations(source: str) -> dict[str, str]:
-    tests: dict[str, str] = {}
-    pattern = re.compile(
-        r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-        re.MULTILINE,
-    )
-    for match in pattern.finditer(source):
-        attrs = match.group("attrs")
-        if "#[test]" not in attrs:
+TEST_DECLARATION = re.compile(
+    r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    re.MULTILINE,
+)
+RAW_STRING = re.compile(r'(?:br|cr|r)(?P<hashes>#{0,255})"')
+CHAR_LITERAL = re.compile(r"(?:b)?'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|[nrt\\0'\"])|[^'\\\n])'")
+
+
+def rust_code_mask(source: str) -> str:
+    """Blank comments/literals without changing source offsets or line numbers.
+
+    This is lexical source discovery, not Rust compilation or cfg evaluation.
+    Lifetimes and labels remain code; only complete character literals are blanked.
+    """
+    code = list(source)
+    index = 0
+    while index < len(source):
+        start = index
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline == -1 else newline
+        elif source.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < len(source) and depth:
+                if source.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif source.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                raise ValueError("unterminated Rust block comment")
+        elif raw := RAW_STRING.match(source, index):
+            delimiter = '"' + raw.group("hashes")
+            end = source.find(delimiter, raw.end())
+            if end == -1:
+                raise ValueError("unterminated Rust raw string")
+            index = end + len(delimiter)
+        elif source[index] == '"' or source.startswith(('b"', 'c"'), index):
+            index += 1 if source[index] == '"' else 2
+            while index < len(source):
+                if source[index] == "\\":
+                    index += 2
+                elif source[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            else:
+                raise ValueError("unterminated Rust string")
+        elif character := CHAR_LITERAL.match(source, index):
+            index = character.end()
+        else:
+            index += 1
             continue
-        tests[match.group("name")] = attrs.strip()
-    return tests
+        for offset in range(start, index):
+            if source[offset] != "\n":
+                code[offset] = " "
+    return "".join(code)
+
+
+def test_declaration_matches(source: str) -> list[re.Match[str]]:
+    return [match for match in TEST_DECLARATION.finditer(rust_code_mask(source))
+            if "#[test]" in match.group("attrs")]
+
+
+def test_declarations(source: str) -> dict[str, str]:
+    return {match.group("name"): source[match.start("attrs"):match.end("attrs")].strip()
+            for match in test_declaration_matches(source)}
 
 
 def ignored_tests(source: str) -> dict[str, str]:
@@ -351,83 +411,19 @@ def ignored_tests(source: str) -> dict[str, str]:
     return tests
 
 
-def _matching_rust_brace(source: str, opening: int) -> int:
+def _matching_rust_brace(source: str, opening: int, *, masked: bool = False) -> int:
     """Return the closing brace for a Rust block, ignoring literal/comment braces."""
-    if source[opening] != "{":
-        raise ValueError("opening offset does not point at a brace")
+    code = source if masked else rust_code_mask(source)
+    if code[opening] != "{":
+        raise ValueError("opening offset does not point at a code brace")
     depth = 0
-    index = opening
-    while index < len(source):
-        if source.startswith("//", index):
-            newline = source.find("\n", index + 2)
-            index = len(source) if newline == -1 else newline + 1
-            continue
-        if source.startswith("/*", index):
-            comment_depth = 1
-            index += 2
-            while index < len(source) and comment_depth:
-                if source.startswith("/*", index):
-                    comment_depth += 1
-                    index += 2
-                elif source.startswith("*/", index):
-                    comment_depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            if comment_depth:
-                raise ValueError("unterminated Rust block comment")
-            continue
-
-        raw = re.match(r'(?:br|r)(?P<hashes>#{0,255})"', source[index:])
-        if raw:
-            delimiter = '"' + raw.group("hashes")
-            end = source.find(delimiter, index + raw.end())
-            if end == -1:
-                raise ValueError("unterminated Rust raw string")
-            index = end + len(delimiter)
-            continue
-
-        quote_offset = 1 if source.startswith(('b"', "b'"), index) else 0
-        quote = source[index + quote_offset] if index + quote_offset < len(source) else ""
-        if quote == '"':
-            index += quote_offset + 1
-            while index < len(source):
-                if source[index] == "\\":
-                    index += 2
-                elif source[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-            else:
-                raise ValueError("unterminated Rust string")
-            continue
-        if quote == "'":
-            # Treat a quote as a character literal only when it closes before a
-            # newline; lifetime syntax contains no braces and can be skipped as text.
-            cursor = index + quote_offset + 1
-            escaped = False
-            closing = -1
-            while cursor < len(source) and source[cursor] != "\n":
-                if not escaped and source[cursor] == "'":
-                    closing = cursor
-                    break
-                if not escaped and source[cursor] == "\\":
-                    escaped = True
-                else:
-                    escaped = False
-                cursor += 1
-            if closing != -1:
-                index = closing + 1
-                continue
-
-        if source[index] == "{":
+    for index in range(opening, len(code)):
+        if code[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif code[index] == "}":
             depth -= 1
             if depth == 0:
                 return index
-        index += 1
     raise ValueError("unterminated Rust test body")
 
 
@@ -435,20 +431,17 @@ def test_definition_spans(source: str) -> dict[str, tuple[int, int, int, int]]:
     """Map each test to definition and body spans.
 
     Values are ``(definition_start, definition_end, body_start, body_end)``;
-    end offsets are exclusive.
+    end offsets are exclusive and index the original, unmodified source.
     """
     spans: dict[str, tuple[int, int, int, int]] = {}
-    pattern = re.compile(
-        r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-        re.MULTILINE,
-    )
-    for match in pattern.finditer(source):
+    code = rust_code_mask(source)
+    for match in TEST_DECLARATION.finditer(code):
         if "#[test]" not in match.group("attrs"):
             continue
-        opening = source.find("{", match.end())
+        opening = code.find("{", match.end())
         if opening == -1:
             raise ValueError(f"test {match.group('name')} has no body")
-        closing = _matching_rust_brace(source, opening)
+        closing = _matching_rust_brace(code, opening, masked=True)
         spans[match.group("name")] = (match.start(), closing + 1, opening, closing + 1)
     return spans
 
