@@ -763,41 +763,67 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
+      - name: Download integration change plan for shard selection
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: ${{ runner.temp }}/integration-change
+
+      - name: Preserve empty-shard evidence or request execution
+        id: shard-selection
+        run: >-
+          python3 scripts/ci_change_owned.py prepare-shard
+          --plan "${{ runner.temp }}/integration-change/plan.json"
+          --lane change-owned
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/change-owned-${{ matrix.shard }}
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Free disk space (Ubuntu)
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: ./.github/actions/free-disk-space
 
       - name: Install C dependencies
+        if: steps.shard-selection.outputs.has_targets == 'true'
         run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv + wire libpython rpath
+        if: steps.shard-selection.outputs.has_targets == 'true'
         run: python3 scripts/ci_setup_uv_python.py
 
       - name: Restore cargo registry and build cache
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
           save-if: false
 
       - name: Install Python binding dependencies
+        if: steps.shard-selection.outputs.has_targets == 'true'
         run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
 
       - name: Install cargo-nextest
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: taiki-e/install-action@nextest
 
       # Cache restoration can replace target/; install the current plan last.
       - name: Download integration change plan
+        if: steps.shard-selection.outputs.has_targets == 'true'
         uses: actions/download-artifact@v7
         with:
           name: integration-change-plan
           path: target/integration-change
 
       - name: Execute the exact change-owned shard
+        if: steps.shard-selection.outputs.has_targets == 'true'
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: >-

@@ -1188,6 +1188,59 @@ class ShardingAndExecutionTests(unittest.TestCase):
             )
         runner.assert_not_called()
 
+    def test_prepare_empty_shard_writes_explicit_receipt_without_a_runner(self) -> None:
+        plan = self._plan()
+        empty_shard = next(
+            shard
+            for shard in owned.SHARDS
+            if not plan["shards"]["change_owned"][str(shard)]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "_commit", return_value="b" * 40
+        ), mock.patch.object(owned, "run_command") as runner:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=empty_shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(
+                github_output.read_text(),
+                "has_targets=false\n",
+            )
+            self.assertIsNotNone(receipt)
+            self.assertTrue(receipt["success"])
+            self.assertEqual(receipt["selected_targets"], [])
+            self.assertEqual(receipt["executed_targets"], [])
+            self.assertEqual(receipt["selected_tests"], [])
+            self.assertEqual(receipt["executed_tests"], [])
+            self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+            runner.assert_not_called()
+
+    def test_prepare_nonempty_shard_defers_to_the_worker(self) -> None:
+        plan = self._plan()
+        shard = owned.shard_for(owned.Identity("p", "smoke"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "execute_shard"
+        ) as execute:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(github_output.read_text(), "has_targets=true\n")
+            self.assertIsNone(receipt)
+            execute.assert_not_called()
+
     def test_run_shard_returns_zero_after_captured_failure_receipt(self) -> None:
         plan = self._plan()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1212,6 +1265,28 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(result, 0)
+
+    def test_prepare_shard_cli_spelling(self) -> None:
+        args = owned.build_parser().parse_args(
+            [
+                "prepare-shard",
+                "--plan",
+                "plan.json",
+                "--lane",
+                "change-owned",
+                "--shard",
+                "2",
+                "--output",
+                "receipt",
+                "--github-output",
+                "github-output",
+            ]
+        )
+        self.assertEqual((args.command, args.lane, args.shard), (
+            "prepare-shard",
+            "change-owned",
+            2,
+        ))
 
     def test_cli_spellings_match_the_workflow_contract(self) -> None:
         parser = owned.build_parser()

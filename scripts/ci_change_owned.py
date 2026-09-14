@@ -1867,6 +1867,38 @@ def execute_shard(
     return receipt
 
 
+def prepare_shard(
+    plan: Mapping[str, Any],
+    *,
+    lane: str,
+    shard: int,
+    output: Path,
+    github_output: Path,
+    repo: Path = ROOT,
+) -> dict[str, Any] | None:
+    """Write an empty receipt or tell the hosted worker to prepare execution."""
+    verify_plan_digest(plan)
+    if lane not in LANE_KEYS:
+        raise ValueError(f"unsupported lane: {lane}")
+    if shard not in SHARDS:
+        raise ValueError(f"shard must be one of {SHARDS}")
+    selected = plan["shards"][LANE_KEYS[lane]][str(shard)]
+    has_targets = bool(selected)
+    github_output.parent.mkdir(parents=True, exist_ok=True)
+    github_output.write_text(
+        f"has_targets={'true' if has_targets else 'false'}\n"
+    )
+    if has_targets:
+        return None
+    return execute_shard(
+        plan,
+        lane=lane,
+        shard=shard,
+        output=output,
+        repo=repo,
+    )
+
+
 def _report_findings(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
@@ -2074,6 +2106,22 @@ def build_parser() -> argparse.ArgumentParser:
     run_shard.add_argument("--shard", type=int, choices=SHARDS, required=True)
     run_shard.add_argument("--output", type=Path, required=True)
 
+    prepare_shard_parser = subparsers.add_parser(
+        "prepare-shard",
+        help="emit empty evidence or select a shard for hosted preparation",
+    )
+    prepare_shard_parser.add_argument("--plan", type=Path, required=True)
+    prepare_shard_parser.add_argument(
+        "--lane", choices=tuple(LANE_KEYS), required=True
+    )
+    prepare_shard_parser.add_argument(
+        "--shard", type=int, choices=SHARDS, required=True
+    )
+    prepare_shard_parser.add_argument("--output", type=Path, required=True)
+    prepare_shard_parser.add_argument(
+        "--github-output", type=Path, required=True
+    )
+
     report = subparsers.add_parser("report", help="validate or summarize receipts")
     report.add_argument("--plan", type=Path, required=True)
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
@@ -2114,6 +2162,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{args.lane.upper()} SHARD {args.shard}: "
             f"{'PASS' if receipt['success'] else 'FAIL'}"
         )
+        return 0
+    if args.command == "prepare-shard":
+        plan = load_json(args.plan)
+        receipt = prepare_shard(
+            plan,
+            lane=args.lane,
+            shard=args.shard,
+            output=args.output,
+            github_output=args.github_output,
+        )
+        disposition = "EMPTY" if receipt is not None else "SELECTED"
+        print(f"{args.lane.upper()} SHARD {args.shard}: {disposition}")
         return 0
 
     if args.lane == "change-owned" and not args.required:
