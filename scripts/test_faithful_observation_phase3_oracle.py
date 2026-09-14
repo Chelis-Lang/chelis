@@ -71,7 +71,7 @@ class RustDeclarationTests(unittest.TestCase):
 class BodyRoleTests(unittest.TestCase):
     def test_export_covers_exactly_the_current_required_identities(self):
         contract = oracle.required_body_contract()
-        self.assertEqual(contract["schema_version"], 1)
+        self.assertEqual(contract["schema_version"], 2)
         observed = {
             oracle.Path(row["path"]): {test["name"] for test in row["tests"]}
             for row in contract["sources"]
@@ -99,14 +99,22 @@ class BodyRoleTests(unittest.TestCase):
         with mock.patch.object(oracle, "REQUIRED_TESTS", required), self.assertRaises(ValueError):
             oracle.required_body_contract()
 
-    def test_every_empty_definition_remains_rejected_by_the_parallel_hash(self):
-        original = oracle.shipped_sources()
-        for path, names in oracle.REQUIRED_TESTS.items():
-            for name in names:
-                with self.subTest(path=path, name=name):
-                    sources = dict(original)
-                    sources[path] = oracle.replace_test_body(sources[path], name, "{}")
-                    self.assertTrue(any(name in item for item in oracle.definition_digest_violations(sources)))
+    def test_result_roles_cover_the_reviewed_result_returning_entrypoints(self):
+        results = {test["name"]: test["result"]
+                   for source in oracle.required_body_contract()["sources"]
+                   for test in source["tests"] if test["result"] is not None}
+        self.assertEqual(len(results), 12)
+        self.assertEqual(results["parity_corpus_is_complete"],
+                         {"call": "parity_corpus::validate", "kind": "success"})
+        for name in ("parity_comparator_accepts_byte_identical_tensor_lines",
+                     "parity_comparator_byte_equal_for_non_tensor"):
+            self.assertEqual(results[name], {"call": "assert_parity", "kind": "assert_ok"})
+        self.assertEqual(results["agreement_compiled_observation_reaches_comparator"],
+                         {"call": "compare_lanes_with", "kind": "expect_err"})
+        self.assertEqual(results["agreement_width_nonconformance_is_behavioral"],
+                         {"call": "compare_rendered_elements", "kind": "expect_err"})
+        self.assertEqual(results["agreement_operation_identity_is_derived_from_ir"],
+                         {"call": "agreement_op_for_risc", "kind": "assert_eq"})
 
 
 class RunnerTests(unittest.TestCase):
@@ -114,9 +122,6 @@ class RunnerTests(unittest.TestCase):
         with (
             mock.patch.object(oracle, "source_violations", return_value=[]),
             mock.patch.object(oracle, "comparator_violations", return_value=[]),
-            mock.patch.object(
-                oracle, "definition_digest_violations", return_value=[]
-            ),
             mock.patch.object(oracle.shutil, "which", return_value="/usr/bin/tool"),
             mock.patch.object(oracle, "run_command", side_effect=fake_run),
             mock.patch.object(oracle, "receipt_violations", return_value=[]),
@@ -155,9 +160,6 @@ class RunnerTests(unittest.TestCase):
         with (
             mock.patch.object(oracle, "source_violations", return_value=[]),
             mock.patch.object(oracle, "comparator_violations", return_value=[]),
-            mock.patch.object(
-                oracle, "definition_digest_violations", return_value=[]
-            ),
             mock.patch.object(
                 oracle.shutil,
                 "which",
@@ -255,203 +257,10 @@ fn hidden_value_row() {}
         )
         self.assertIn("undeclared Phase 3 runtime receipt: fabricated-case", violations)
 
-    def test_forged_eval_receipts_cannot_replace_required_behavior(self) -> None:
-        sources = oracle.shipped_sources()
-        source = sources[oracle.EVAL_AGREEMENT_SOURCE]
-        for name, case in (
-            ("agreement_operation_identity_is_derived_from_ir", "operation-identity-canary"),
-            ("agreement_compiled_observation_reaches_comparator", "compiled-observation-canary"),
-            ("agreement_expected_value_reaches_comparator", "expected-value-canary"),
-            ("agreement_width_nonconformance_is_behavioral", "width-nonconformance-canary"),
-            ("agreement_sqrt_is_exact", "sqrt(4)"),
-        ):
-            source = oracle.replace_test_body(
-                source,
-                name,
-                f'{{ record_phase3_receipt("{case}", "forged"); }}',
-            )
-        sources[oracle.EVAL_AGREEMENT_SOURCE] = source
-
-        violations = oracle.definition_digest_violations(sources)
-
-        for name in (
-            "agreement_operation_identity_is_derived_from_ir",
-            "agreement_compiled_observation_reaches_comparator",
-            "agreement_expected_value_reaches_comparator",
-            "agreement_width_nonconformance_is_behavioral",
-            "agreement_sqrt_is_exact",
-        ):
-            self.assertTrue(any(name in item for item in violations), violations)
-
-    def test_empty_parity_and_rejected_drivers_fail_the_definition_ratchet(self) -> None:
-        sources = oracle.shipped_sources()
-        sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-            sources[oracle.PARITY_SOURCE],
-            "parity_tensor_structural_ops",
-            "{}",
-        )
-        sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-            sources[oracle.PARITY_SOURCE],
-            "parity_count_bool_axes",
-            "{}",
-        )
-        sources[oracle.REJECTED_SOURCE] = oracle.replace_test_body(
-            sources[oracle.REJECTED_SOURCE],
-            "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
-            "{}",
-        )
-
-        violations = oracle.definition_digest_violations(sources)
-
-        self.assertTrue(any("parity_tensor_structural_ops" in item for item in violations))
-        self.assertTrue(any("parity_count_bool_axes" in item for item in violations))
-        self.assertTrue(
-            any(
-                "rejected_cells_fail_the_build_with_their_pinned_diagnostics" in item
-                for item in violations
-            )
-        )
-
-    def test_checked_reshape_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_checked_reshape"
-        self.assertIn(name, oracle.REQUIRED_TESTS[oracle.PARITY_SOURCE])
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("checked_reshape.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(
-                    any(name in item for item in oracle.definition_digest_violations(sources))
-                )
-
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        sources[oracle.PARITY_SOURCE] = source.replace(
-            f"fn {name}()", "fn deleted_checked_reshape_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-
-    def test_literal_extent_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_literal_extent_claim"
-        self.assertIn(name, oracle.REQUIRED_TESTS[oracle.PARITY_SOURCE])
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("literal_extent_claim.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(
-                    any(name in item for item in oracle.definition_digest_violations(sources))
-                )
-
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        sources[oracle.PARITY_SOURCE] = source.replace(
-            f"fn {name}()", "fn deleted_literal_extent_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-
-    def test_generic_shape_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_generic_explicit_shape"
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("generic_explicit_shape.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(
-                    any(name in item for item in oracle.definition_digest_violations(sources))
-                )
-        sources = oracle.shipped_sources()
-        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
-            f"fn {name}()", "fn deleted_generic_shape_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-
-    def test_window_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_checked_window_geometry"
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("checked_window_geometry.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(any(name in item for item in oracle.definition_digest_violations(sources)))
-        sources = oracle.shipped_sources()
-        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
-            f"fn {name}()", "fn deleted_window_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-
-
-    def test_sparse_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_checked_sparse_axes"
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("checked_sparse_axes.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(any(name in item for item in oracle.definition_digest_violations(sources)))
-        sources = oracle.shipped_sources()
-        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
-            f"fn {name}()", "fn deleted_sparse_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-
-
-    def test_normalization_parity_remains_a_required_executable_row(self) -> None:
-        name = "parity_explicit_normalization"
-        for replacement in (
-            "{}",
-            '{ drive_parity(&examples_root().join("explicit_normalization.ch"), false); }',
-        ):
-            with self.subTest(replacement=replacement):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, replacement
-                )
-                self.assertTrue(
-                    any(name in item for item in oracle.definition_digest_violations(sources))
-                )
-        sources = oracle.shipped_sources()
-        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
-            f"fn {name}()", "fn deleted_normalization_row()"
-        )
-        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-    def test_shipped_definitions_match_the_reviewed_digests(self) -> None:
-        self.assertEqual(oracle.definition_digest_violations(), [])
-
-    def test_completeness_check_cannot_be_emptied_or_ignore_its_result(self) -> None:
-        name = "parity_corpus_is_complete"
-        for body in (
-            "{}",
-            '{ let _ = parity_corpus::validate(&examples_root(), include_str!("parity.rs")); }',
-        ):
-            with self.subTest(body=body):
-                sources = oracle.shipped_sources()
-                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
-                    sources[oracle.PARITY_SOURCE], name, body
-                )
-                self.assertTrue(
-                    any(name in item for item in oracle.definition_digest_violations(sources))
-                )
+    # Definition mutations now execute through phase3_body_contract's Rust AST
+    # audit: every empty/removed row and parity mode, the five forged receipts,
+    # and the discarded completeness result. Receipt and source controls above
+    # remain Python tests because those are this runner's own obligations.
 
 
 class ComparatorAdoptionTests(unittest.TestCase):

@@ -877,77 +877,69 @@ visible.
 `.venv/bin/python scripts/faithful_observation_phase3_oracle.py`, accepted at
 exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
 and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
-corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
-comparator adoption, forbidden legacy f64/epsilon paths, ignore ledger, and
-the exact reviewed definition of every required Rust test. The definition
-digests are a guard artifact: changing one requires independent evidence for
-the replacement behavior, and changing the digest merely to accept a test
-edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
-driver, or an eval test that emits a forged producer-authored receipt fail
-before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
-evidence; they are not trusted as evidence of their own free-form detail.
+corpus, and `eval_agreement.rs`. It retains required test identities,
+comparator adoption, forbidden legacy f64/epsilon paths and the ignore ledger.
+The standing `phase3_body_contract` Rust target checks every required body
+against call and result roles exported from the oracle's one required-identity
+inventory. There is no second stored identity list or per-definition checksum.
 
-Chelis#1868 trials a derived review report beside those digests. The required
-CI Docs job runs `scripts/phase3_test_change_report.py` against committed
-snapshots, computes their unique merge base, and publishes the comparison
-commits, changed required-test identities, source locations, and changes to
-required membership. Both revisions supply their literal `REQUIRED_TESTS`
-inventory, parsed without executing historical Python. A removed obligation
-therefore remains visible even when the candidate no longer declares it.
-Missing Git history, unreadable inventories, ambiguous definitions, and a
-missing candidate required definition fail closed. A definition missing from
-the base can be reported as restored by the candidate. Ordinary edits, including
-an emptied body, produce a review cue; this report does not certify behavior.
-It prints the existing doctrine that changing a guard merely to accept an edit
-is not a repair. The definition digests, comparator checks, receipts, mutation
-controls, and authoritative Phase 3 acceptance command above remain in force.
-The report also derives exact `Protected-test-change: <path>::<test name>`
-lines. The required Docs job checks each changed identity exactly once in the
-contiguous opening block of the PR description, before all prose and a
-separating blank line; later example lines do not count. Removed requirements remain
-acknowledgement obligations. Missing, duplicate, stale, unknown or malformed
-lines fail, as do missing required definitions even when acknowledged. This
-records review responsibility without certifying behavior or replacing the
-retained guards.
-Retirement still requires executable-example derivation, each body's owning
-comparator or receipt obligation, and equivalent mutation evidence under
-`guard_artifact_proposal_assessment.md`.
+Each body must retain its designated comparison or harness; evaluator canaries
+also name their receipt entrypoint. Parity drivers use the reviewed literal
+execution mode, including executable rows whose historical names still end in
+`library_only`. Result-returning roles use direct checked forms: success
+`unwrap`/`expect` or a directly panicking `unwrap_or_else`, the reviewed
+`assert!(call().is_ok()/is_err())` polarity, `expect_err`/`unwrap_err` for
+rejecting evaluator canaries, or an `assert_eq!` operand for the operation
+mapping. Parentheses are allowed. Discarded results, non-panicking fallbacks,
+wrong polarity and boolean inspection outside the assertion fail. Checking a
+result through an intermediate local/helper is outside the closed syntax
+contract and requires a reviewed extension.
+
+Only parsed eager expressions and standard assertion condition operands supply
+calls. Comments, literal payloads, unknown macros and deferred closures, async
+blocks or const bodies cannot substitute for them. Local items, conditional
+configuration and local patterns shadowing a required owner fail. Branches and
+loops are visited; the audit does not prove arbitrary control-flow reach,
+operand correctness or complete test semantics. The replacement tests execute
+every empty/removed definition, all parity-mode flips, the five former forged
+receipt witnesses, discarded comparison results and the original ignored
+completeness-result witness. Positive controls allow unrelated body edits and
+new tests without checksum updates. The full runtime suites and shared-helper
+canaries remain necessary. Eval/C receipts establish entry and multiplicity;
+their free-form detail is not trusted as proof of behavior.
+
+The required Docs job runs `scripts/phase3_test_change_report.py` on committed
+snapshots, computes the unique merge base, and publishes comparison commits,
+changed required identities, source locations and membership changes. Both
+revisions supply literal `REQUIRED_TESTS` inventories without executing
+historical Python. Removing a requirement cannot hide its old identity.
+Missing history, unreadable inventories, ambiguous definitions and missing
+candidate required definitions fail closed; restoring a missing base definition
+is reportable. An ordinary edit, including an emptied body, produces a review
+cue; the Rust audit owns the body rejection.
+
+Each changed identity owes one exact `Protected-test-change: <path>::<test name>`
+line in the contiguous opening block of the PR description, followed by a
+blank line and prose. Later example lines cannot acknowledge changes. Missing,
+duplicate, stale, unknown or malformed acknowledgements fail. Editing the body
+reruns CI. An acknowledgement cannot waive a missing test or another guard's
+rejection. Changing a guard merely to accept an edit is not a repair: review
+the behavior, its consumers and independent negative controls together.
 
 The parity completeness test compares executable root examples with inputs
-derived from the Rust syntax tree of its test declarations. Direct calls to
-the parity/check helpers accept literal root paths or immutable owned-path
-locals initialized by a root path or an owned-path move. Shared borrowing is
-permitted at the helper argument, not when establishing a local's input
-provenance; reference-valued bindings are outside this closed grammar. Local
-items in input-bearing tests are rejected rather than partially resolved;
-helper declarations belong at module scope. The copied filename array is
-gone; each new example still needs its per-file test. `parity_corpus_contract` supplies
-standing CI controls for discovery and missing, hidden, conditional or
-unresolved inputs, including removal of each current example input. The fixed
-completeness-test definition stays frozen, and every other required definition
-and ignore-ledger rule is retained. This membership check does not prove
-comparator execution or replace the full acceptance command above.
-
-The `phase3_body_contract` standing target and full oracle also parse every
-required body's Rust syntax against call roles exported by this oracle's one
-required-identity inventory. Each body must name its designated comparison or
-harness; evaluator canaries additionally name their receipt entrypoint. Parity
-calls retain their reviewed literal execution mode, including executable rows
-whose historical names still end in `library_only`. Standard assertion
-conditions count, while comments, literals, unknown macro payloads and deferred
-closure/async/const bodies do not. Local items, conditional configuration and
-local pattern bindings that shadow required owners are rejected. Branches and
-loops are visited without claiming that arbitrary control flow reaches them.
-This is a parallel structural trial: all definition hashes remain, including
-their ignored-result, empty-body, library-only and forged-receipt controls.
-Correct result handling and runtime behavior still require their own evidence.
-The Metal rank-2 rejection now checks its empty emitted artifact through the
-shared exact comparator, retaining its status and diagnostic assertions; only
-that intentionally reviewed definition digest moves.
+derived from the Rust syntax tree of test declarations. Direct parity/check
+helper calls accept literal root paths or immutable owned-path locals
+initialized by a root path or an owned-path move. Shared borrowing is permitted
+at the helper argument, not when establishing local input provenance. Local
+items in input-bearing tests fail; helpers belong at module scope. Each new
+example still needs its per-file test. `parity_corpus_contract` supplies standing
+CI controls for discovery and missing, hidden, conditional or unresolved inputs,
+including removal of every current example input. This is membership evidence;
+the body audit and complete acceptance command retain their separate roles.
 
 Chelis#1870 trials structured unsupported identity beside this frozen
 comparison rather than weakening it. The rejected-cell exact comparator and
-its mutations remain, including the Phase 3 definition digest. The actual
+its mutations remain alongside the required body audit. The actual
 nonliteral-window lowering witness additionally compares C, HIP, and Metal CLI
 stderr byte-for-byte because all three entry paths reject before
 target-specific code generation. Wording evidence shared by the two
@@ -1014,7 +1006,7 @@ two. Empty/deleted/library-only parity rows and corpus removal remain rejected.
 Independent native tests cover gradient geometry and invalid runtime target or
 cotangent shapes; this example does not claim window arithmetic remediation.
 
-Three digest-locked behavioral canaries perturb the compiled observation before
+Three protected behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the
 evaluator is marked nonconforming; together with the exact operation-identity
@@ -1024,9 +1016,9 @@ that chelis#897 blocks tolerance rather than relying on source-token presence.
 The expected-value canary closes chelis#1104: the source-level checks can only
 see that the comparator is NAMED in a suite, so a shared assertion helper
 neutered into a no-op used to delete the verbatim leg from every row at once
-while every frozen test definition, receipt, and comparator obligation stayed
+while every protected test definition, receipt, and comparator obligation stayed
 intact. Each leg of the comparison therefore owes a canary that runs the
-shipped helper, and the guard is behavioral: tampering with its digest does not
+shipped helper, and the guard is behavioral: changing a definition checksum did not
 make it pass.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
@@ -1151,7 +1143,7 @@ Every direct child of [#732] has one implementation owner in this design:
 | [#749] | §C1.5, §B2.4, and §C3.4: the nested renderer is a consumer of the canonical formatter, not a second dtype switch; closed |
 | [#775] | §C1.5 / [05-OBS-4]: scalar roots and rank-0 tensors use the bare form in both lanes; closed after re-verification on 2026-08-04 |
 | [#1078] | §B2.3 and the Phase 2 known-red ledger: repaired cells leave the ledger and the ordinary corpus atomically; closed |
-| [#1104] | Phase 3's definition-digest and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
+| [#1104] | Phase 3's protected-body and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
 | [#997] | §C1.6 and §B2.4, through the structural `FO-DIAG` package below; delivered 2026-08-21, no longer blocks class closure |
 | [#1059] | §C3's canonical formatter is the implementation dependency, but support for C-host tensor/list `to_string` is a separate capability package; open and does not weaken or reopen the existing loud-rejection contract |
 

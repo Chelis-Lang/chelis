@@ -95,7 +95,7 @@ class CommittedChanges(unittest.TestCase):
         self.assertEqual(row["before_lines"], [1, 2])
         self.assertEqual(row["after_lines"], [1, 2])
 
-    def test_empty_body_is_reported_and_original_digest_control_remains_separate(self):
+    def test_empty_body_is_reported_and_behavior_control_remains_separate(self):
         base = self.commit()
         self.commit('#[test]\nfn parity_example() {}\n')
         result = self.compare(base)
@@ -218,7 +218,7 @@ class CommittedChanges(unittest.TestCase):
             self.assertEqual(report.main(["--base", "0" * 40, "--output", str(output)]), 1)
         self.assertFalse(output.exists())
 
-    def test_real_guard_mutations_are_named_beside_the_retained_rejection(self):
+    def test_real_guard_mutations_require_exact_review_acknowledgements(self):
         original = oracle.shipped_sources()
         for path, source in original.items():
             target = self.root / path
@@ -239,8 +239,6 @@ class CommittedChanges(unittest.TestCase):
                     sources[path] = sources[path][:start] + sources[path][end:]
                 else:
                     sources[path] = oracle.replace_test_body(sources[path], name, replacement)
-                retained_failures = oracle.source_violations(sources) + oracle.definition_digest_violations(sources)
-                self.assertTrue(any(name in failure for failure in retained_failures))
                 (self.root / path).write_text(sources[path])
                 self.commit(oracle=(oracle.REPO_ROOT / ORACLE).read_text())
                 result = self.compare(baseline)
@@ -250,8 +248,10 @@ class CommittedChanges(unittest.TestCase):
                 self.assertEqual(result["required_acknowledgements"], [line])
                 self.assertTrue(report.acknowledgement_violations(result, ""))
                 self.assertEqual(report.acknowledgement_violations(result, line), [])
-                # Acknowledgement does not alter the independently rejected mutation.
-                self.assertTrue(any(name in failure for failure in retained_failures))
+                # The Rust body audit independently rejects all three named
+                # mutations; acknowledgement is a review cue, not that oracle.
+                if replacement is None:
+                    self.assertTrue(any(name in failure for failure in oracle.source_violations(sources)))
 
 
 class AcknowledgementTests(unittest.TestCase):

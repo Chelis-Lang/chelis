@@ -45,7 +45,7 @@ fn contract() -> &'static Contract {
             .expect("the oracle's managed Python exports current required call roles");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let contract: Contract = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(contract.schema_version, 1);
+        assert_eq!(contract.schema_version, 2);
         assert!(!contract.sources.is_empty(), "an empty authority is not coverage");
         for source in &contract.sources {
             assert!(!source.tests.is_empty(), "{}", source.path.display());
@@ -59,6 +59,7 @@ fn required(calls: &[&str]) -> Vec<RequiredTest> {
         name: "protected".to_owned(),
         calls: calls.iter().map(|s| (*s).to_owned()).collect(),
         run_parity: None,
+        result: None,
     }]
 }
 
@@ -229,6 +230,7 @@ fn executable_and_library_parity_keep_their_reviewed_modes() {
             name: "protected".to_owned(),
             calls: vec!["drive_parity".to_owned()],
             run_parity: Some(run),
+            result: None,
         }];
         let source = |argument: &str| {
             format!("#[test] fn protected() {{ drive_parity(&path, {argument}); }}")
@@ -260,4 +262,208 @@ fn exact_qualified_owners_and_unrelated_growth_are_allowed() {
     .unwrap();
     let text = "fn helper() {} #[test] fn added() {} #[test] fn protected() { compare(); }";
     body_contract::validate(text, &required(&["compare"])).unwrap();
+}
+
+fn checked(body: &str, kind: body_contract::ResultUse) -> Result<(), String> {
+    let mut rows = required(&["compare"]);
+    rows[0].result = Some(body_contract::RequiredResult {
+        call: "compare".into(),
+        kind,
+    });
+    body_contract::validate(&format!("#[test] fn protected() {{ {body} }}"), &rows)
+}
+
+#[test]
+fn direct_checked_result_forms_are_accepted() {
+    use body_contract::ResultUse::*;
+    for (kind, body) in [
+        (Success, "compare().unwrap();"),
+        (Success, "(compare()).expect(\"comparison\");"),
+        (
+            Success,
+            "compare().unwrap_or_else(|error| panic!(\"{error}\"));",
+        ),
+        (
+            Success,
+            "compare().unwrap_or_else(|error| { panic!(\"{error}\"); });",
+        ),
+        (AssertOk, "assert!((compare()).is_ok(), \"comparison\");"),
+        (AssertErr, "assert!(compare().is_err());"),
+        (
+            ExpectErr,
+            "let error = compare().expect_err(\"must reject\");",
+        ),
+        (ExpectErr, "compare().unwrap_err();"),
+        (AssertEq, "assert_eq!((compare()), expected);"),
+        (AssertEq, "assert_eq!(expected, compare(), \"mapping\");"),
+    ] {
+        checked(body, kind).unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+}
+
+#[test]
+fn discarded_suppressed_and_wrong_polarity_results_fail() {
+    use body_contract::ResultUse::*;
+    for (kind, body) in [
+        (Success, "let _ = compare();"),
+        (Success, "compare();"),
+        (Success, "compare().unwrap_or_else(|_| {});"),
+        (
+            Success,
+            "compare().unwrap_or_else(|_| { if false { panic!(); } });",
+        ),
+        (Success, "let pending = || compare().unwrap();"),
+        (Success, "assert!(true, \"{:?}\", compare().unwrap());"),
+        (Success, "let result = compare(); result.unwrap();"),
+        (Success, "compare().expect_err(\"opposite\");"),
+        (AssertOk, "assert!(compare().is_err());"),
+        (AssertOk, "let _ = compare().is_ok();"),
+        (AssertOk, "assert!(compare().is_ok() || true);"),
+        (AssertOk, "assert!(!compare().is_ok());"),
+        (AssertErr, "assert!(compare().is_ok());"),
+        (AssertErr, "let pending = || assert!(compare().is_err());"),
+        (ExpectErr, "compare().unwrap();"),
+        (ExpectErr, "let _ = compare();"),
+        (AssertEq, "assert_ne!(compare(), expected);"),
+        (
+            AssertEq,
+            "assert_eq!(actual, expected, \"{:?}\", compare());",
+        ),
+        (AssertEq, "let _ = compare();"),
+    ] {
+        assert!(checked(body, kind).is_err(), "{kind:?}: {body}");
+    }
+}
+
+fn changed_body(source: &Source, name: &str, body: &str) -> syn::File {
+    let text = std::fs::read_to_string(root().join(&source.path)).unwrap();
+    let mut file = syn::parse_file(&text).unwrap();
+    let function = file
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == name => Some(function),
+            _ => None,
+        })
+        .expect("required definition exists");
+    function.block = syn::parse_str(body).unwrap();
+    file
+}
+
+#[test]
+fn former_forged_receipt_witnesses_still_reject_independently() {
+    let source = contract()
+        .sources
+        .iter()
+        .find(|source| source.path.ends_with("eval_agreement.rs"))
+        .unwrap();
+    for (name, label) in [
+        (
+            "agreement_operation_identity_is_derived_from_ir",
+            "operation-identity-canary",
+        ),
+        (
+            "agreement_compiled_observation_reaches_comparator",
+            "compiled-observation-canary",
+        ),
+        (
+            "agreement_expected_value_reaches_comparator",
+            "expected-value-canary",
+        ),
+        (
+            "agreement_width_nonconformance_is_behavioral",
+            "width-nonconformance-canary",
+        ),
+        ("agreement_sqrt_is_exact", "sqrt(4)"),
+    ] {
+        let file = changed_body(
+            source,
+            name,
+            &format!("{{ record_phase3_receipt(\"{label}\", \"forged\"); }}"),
+        );
+        let error = body_contract::validate_file(&file, &source.tests).unwrap_err();
+        assert!(error.contains(name), "{error}");
+    }
+}
+
+#[test]
+fn every_actual_parity_mode_and_completeness_result_remains_blocking() {
+    let source = contract()
+        .sources
+        .iter()
+        .find(|source| source.path.ends_with("parity.rs"))
+        .unwrap();
+    for row in source.tests.iter().filter(|row| row.run_parity.is_some()) {
+        let mode = !row.run_parity.unwrap();
+        let file = changed_body(
+            source,
+            &row.name,
+            &format!("{{ drive_parity(&examples_root().join(\"example.ch\"), {mode}); }}"),
+        );
+        let error = body_contract::validate_file(&file, &source.tests).unwrap_err();
+        assert!(
+            error.contains(&row.name) && error.contains("execution mode"),
+            "{error}"
+        );
+    }
+    let file = changed_body(
+        source,
+        "parity_corpus_is_complete",
+        "{ let _ = parity_corpus::validate(&examples_root(), include_str!(\"parity.rs\")); }",
+    );
+    let error = body_contract::validate_file(&file, &source.tests).unwrap_err();
+    assert!(
+        error.contains("parity_corpus_is_complete") && error.contains("missing checked"),
+        "{error}"
+    );
+}
+
+#[test]
+fn each_exported_result_role_rejects_a_discarded_result() {
+    for source in &contract().sources {
+        for row in &source.tests {
+            let Some(result) = &row.result else {
+                continue;
+            };
+            let calls = row
+                .calls
+                .iter()
+                .map(|call| format!("let _ = {call}();"))
+                .collect::<String>();
+            let file = changed_body(source, &row.name, &format!("{{ {calls} }}"));
+            let error = body_contract::validate_file(&file, &source.tests).unwrap_err();
+            assert!(
+                error.contains(&format!("{}: missing checked", row.name))
+                    && error.contains(&result.call),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_body_edits_and_test_additions_need_no_checksum() {
+    for source in &contract().sources {
+        let text = std::fs::read_to_string(root().join(&source.path)).unwrap();
+        let mut file = syn::parse_file(&text).unwrap();
+        for row in &source.tests {
+            for item in &mut file.items {
+                if let syn::Item::Fn(function) = item
+                    && function.sig.ident == row.name
+                {
+                    function
+                        .block
+                        .stmts
+                        .insert(0, syn::parse_quote!(let unrelated_reviewed_local = ();));
+                }
+            }
+        }
+        file.items.push(syn::parse_quote!(
+            #[test]
+            fn added_coverage() {
+                assert!(true);
+            }
+        ));
+        body_contract::validate_file(&file, &source.tests).unwrap();
+    }
 }

@@ -30,7 +30,7 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 
 | Proposal | Recommendation | Required correction or condition |
 |---|---|---|
-| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports have landed; Phase 4B now requires granular acknowledgements. Corpus/per-body controls and digest retirement remain. |
+| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports have landed; Phase 4B now requires granular acknowledgements. Corpus/per-body controls and durable acknowledgements now replace Phase 3 definition hashes; Phase 4B atom/region hashes are retired. Conditional Nix retirement remains. |
 | chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
 | chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
 | chelis#1824, pull-request execution reach | Adopt the change-owned lane and package expansion below | Keep local `--fast` unchanged. Add the two small replacement expand controls to the standing `ci-fast` selection, require every added or directly modified integration target to execute, and trial broader package-qualified expansion informationally until exact-head cost receipts justify requiring it. |
@@ -248,7 +248,7 @@ additional passing test and no removed frozen identity. The test arrived in
 chelis#1826 before the local assessment, so this was a missed live instance,
 not a hypothetical replacement benefit.
 
-### Phase 3 required-test definition digests: replace, preserving the review cue
+### Phase 3 required-test definition digests: replaced with review and body checks
 
 Retire per-definition hashes only after a derived report can:
 
@@ -294,7 +294,7 @@ examples, missing inputs, and removed or hidden declarations before the copied
 filename array is removed. Its fixed completeness-test body remains frozen;
 the other definition freezes and the retirement obligations above stay active.
 
-The per-body trial adds a Rust AST check beside the definition hashes. The
+The initial per-body trial added a Rust AST check beside the definition hashes. The
 current Python oracle exports each required identity and its reviewed call role
 as transient JSON; there is no second stored identity inventory. Each body must
 name its designated harness, comparison or canary entrypoint, and evaluator
@@ -314,22 +314,37 @@ control flow reaches the call or that its arguments and result handling are
 correct. The existing receipt and shared-helper behavior checks retain those
 separate roles. The new target runs in standing CI and the complete oracle.
 
-This trial preserves every definition hash. In particular, the existing
-ignored-comparison-result and library-only mutations must remain blocking;
-simple call presence cannot replace their obligations. Tests compare the new
-check with the retained hashes for emptied and removed bodies, forged receipts
-and disabled executable parity. Retirement requires subsequent evidence for
-all named replacement conditions, including result handling and the durable
-changed-test acknowledgement, before removing any hash.
+The retirement slice replaces the 51 definition hashes with the derived review
+cue, corpus derivation and per-body audit. It adds a closed direct-result rule
+where the designated entrypoint returns a comparison result: completeness and
+rejected-cell comparisons must unwrap success or use a directly panicking error
+closure; comparator self-tests must assert the reviewed `is_ok()`/`is_err()`
+polarity; compiled-observation and width canaries must expect an error; the IR
+operation mapping must be an operand of `assert_eq!`. Parentheses are allowed.
+Discarded results, non-panicking fallback closures and boolean inspection
+outside the required assertion cannot satisfy these roles. Passing a result
+through another local or helper requires a separately reviewed contract change;
+this audit does not infer data flow or expand arbitrary macros.
+
+Before deleting the hashes, execute the existing named mutations through the
+Rust audit: every empty or removed body, each forged evaluator receipt, disabled
+executable parity, and the discarded completeness result. The source/ignore,
+per-file comparator, runtime receipt and shared-helper behavioral controls stay
+in force. Positive controls must admit ordinary unrelated body edits and test
+additions without a checksum update. The required Docs acknowledgement remains
+the durable review trigger for every protected definition change. This replaces
+specific mutation detection and review ownership; it does not prove arbitrary
+control-flow reach, operand correctness or the complete semantics of a test.
+Jeff's complete Phase 0 mutation binding, closed Phase A freeze and temporary
+Nix freeze are outside this retirement.
 
 The first trial runs `scripts/phase3_test_change_report.py` in the required
 Docs job and publishes its committed merge-base comparison as an artifact.
 It reads both literal required-test inventories, so removing a requirement
 cannot hide the old identity from the report. Changed definitions and
 membership are named with source locations and the guard doctrine. Missing
-comparison evidence or candidate required definitions fails closed. This is
-the review cue beside the existing digests; it does not retire them or replace
-the comparator, receipt, example-derivation, or mutation obligations above.
+comparison evidence or candidate required definitions fails closed. This report supplies the review cue; the body audit, comparator, receipt,
+example-derivation and mutation controls retain their separate obligations.
 
 The durable review cue requires each changed required-test identity to appear
 exactly once in a contiguous opening block of the PR description as
@@ -350,15 +365,14 @@ preceding Markdown context to interpret, so a quoted, fenced, inline-code or
 collapsed example cannot establish acknowledgement. Missing required
 definitions still fail even when acknowledged.
 Push/local report generation remains available without a PR body. This makes
-the review cue explicit and durable; definition hashes and all comparator,
-receipt and mutation controls remain until the other retirement conditions
-are satisfied. An acknowledgement records review responsibility, not evidence
+the review cue explicit and durable; comparator, receipt and mutation
+controls remain after the per-definition hashes are retired. An acknowledgement records review responsibility, not evidence
 that the author executed or understood a test.
 
 Declaration discovery and body boundaries share a Rust comment/literal scan:
 commenting out a protected test makes it missing, while declaration-like text
 inside comments or strings cannot supply or duplicate it. Original source
-offsets and definition bytes remain the digest input. This scan does not
+offsets and definition bytes remain the change-report input. This scan does not
 evaluate Rust configuration or prove comparator execution. PR reports validate
 the exact event head against the synthetic merge's second parent and compare
 against its first parent, so regenerating that merge after main advances does
