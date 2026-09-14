@@ -115,10 +115,26 @@ code; follow the build-concurrency instructions in AGENTS.md. CI supplies its
 own validated PR comparison. Do not use its `--pr-head` mode on an ordinary
 local branch.
 
-For protected Rust tests, the Docs job also publishes
-`phase3-test-changes.json`, identifying changed definitions and required
-membership. Review those changes and retain the existing test-definition
-freezes, comparator calls, receipt checks and negative controls. A changed
+For protected Rust tests, generate the required review lines after committing:
+
+```sh
+.venv/bin/python scripts/phase3_test_change_report.py --base origin/main --output target/phase3-test-changes.json
+```
+
+Begin the PR description with each `required_acknowledgements` line exactly
+once, in one contiguous block. Put a blank line between that block and your
+problem description. Lines later in the body do not count. For example:
+`Protected-test-change: crates/chelis-cli/tests/parity.rs::parity_corpus_is_complete`.
+CI requires the exact changed set, including removed requirements, and rejects
+missing, duplicate, stale, unknown or malformed lines. Editing the PR description
+reruns CI; keep the lines in the final description and wait for that run before
+merging. To check a saved body,
+add `--require-acknowledgement --acknowledgements-file target/pr-body.md` to the
+command above. The Docs job publishes the comparison and its enforcement result.
+
+Review those changes and retain the existing test-definition freezes,
+comparator calls, receipt checks and negative controls. An acknowledgement
+cannot waive a missing definition or another guard's rejection. A changed
 mutation witness still owes review of its implementation, command and expected
 rejection; producing the same error alone does not prove the witness stayed
 strong enough.
