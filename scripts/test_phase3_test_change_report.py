@@ -286,6 +286,8 @@ class AcknowledgementTests(unittest.TestCase):
             "```\n```still code\n" + line + "\n```",
             "<!--\n" + line + "\n-->",
             "<!-- closed --><!--\n" + line + "\n-->",
+            "<!--\n--><!--\n" + line + "\n-->",
+            "<pre>\n</pre><pre>\n" + line + "\n</pre>",
             "<?xml\n\n" + line + "\n?>",
             "<![CDATA[\n\n" + line + "\n]]>",
             "<!DOCTYPE\n\n" + line + "\n>",

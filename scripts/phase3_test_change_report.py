@@ -224,10 +224,15 @@ def acknowledgement_violations(result: dict, body: str) -> list[str]:
             if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
                 fence = None
             continue
+        continued_html = html_end is not None
         if html_end is not None:
-            if html_end in line.lower():
-                html_end = None
-            continue
+            position = line.lower().find(html_end)
+            if position < 0:
+                continue
+            line = line[position + len(html_end):]
+            html_end = None
+            # A closing line may open another block. Inspect its remainder,
+            # but it cannot supply a top-level acknowledgement itself.
         if html_block:
             if not line.strip():
                 html_block = False
@@ -264,6 +269,8 @@ def acknowledgement_violations(result: dict, body: str) -> list[str]:
             # Other block HTML ends at the next blank line. Conservatively
             # exclude custom tags too; acknowledgements belong in plain prose.
             html_block = True
+            continue
+        if continued_html:
             continue
         if line.startswith(ACKNOWLEDGEMENT_KEY):
             seen[line] += 1
