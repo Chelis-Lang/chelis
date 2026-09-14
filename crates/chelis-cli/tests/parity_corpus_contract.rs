@@ -318,3 +318,85 @@ fn conditional_attributes_on_input_subexpressions_fail_closed() {
         assert!(parity_corpus::declared_inputs(&source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn input_bindings_require_owned_paths_not_references() {
+    for initializer in [
+        r#"&mut examples_root().join("example.ch")"#,
+        r#"&examples_root().join("example.ch")"#,
+        r#"(&mut examples_root().join("example.ch"))"#,
+    ] {
+        regression_rejects_false_membership(&format!(
+            "#[test] fn case() {{ let path = {initializer}; drive_parity(&path, true); }}"
+        ));
+    }
+    regression_rejects_false_membership(
+        r#"#[test] fn case() {
+        let path = &mut examples_root().join("example.ch");
+        path.set_file_name("outside.ch");
+        drive_parity(&path, true);
+    }"#,
+    );
+    regression_rejects_false_membership(
+        r#"#[test] fn case() {
+        let path = examples_root().join("example.ch");
+        let alias = &path;
+        drive_parity(alias, true);
+    }"#,
+    );
+}
+
+#[test]
+fn owned_path_moves_and_shared_argument_borrows_are_admitted() {
+    for argument in ["&moved", "&&moved", "(&moved)"] {
+        let source = format!(
+            r#"#[test] fn case() {{
+            let path = (examples_root().join("example.ch"));
+            let moved: std::path::PathBuf = path;
+            drive_parity({argument}, true);
+        }}"#
+        );
+        assert_eq!(
+            parity_corpus::declared_inputs(&source).unwrap(),
+            names(&["example.ch"])
+        );
+    }
+    regression_rejects_false_membership(
+        r#"#[test] fn case() {
+        drive_parity(&mut examples_root().join("example.ch"), true);
+    }"#,
+    );
+}
+
+#[test]
+fn every_local_item_is_outside_the_input_bearing_test_grammar() {
+    for item in [
+        "const examples_root: fn() -> std::path::PathBuf = other_root;",
+        "static examples_root: fn() -> std::path::PathBuf = other_root;",
+        "const drive_parity: fn(&std::path::Path, bool) = other;",
+        "static drive_parity: fn(&std::path::Path, bool) = other;",
+        "fn local_helper() {}",
+        "struct LocalType;",
+        "enum LocalType { Value }",
+        "type LocalType = std::path::PathBuf;",
+        "use other::helper;",
+        "macro_rules! helper { () => {} }",
+    ] {
+        for body in [
+            format!(r#"{item} drive_parity(&examples_root().join("example.ch"), true);"#),
+            format!(r#"drive_parity(&examples_root().join("example.ch"), true); {item}"#),
+        ] {
+            regression_rejects_false_membership(&format!("#[test] fn case() {{ {body} }}"));
+        }
+    }
+    assert!(
+        parity_corpus::declared_inputs("#[test] fn independent() { struct LocalType; }")
+            .unwrap()
+            .is_empty()
+    );
+    let module_helper = format!("fn local_helper() {{}}\n{CASE}");
+    assert_eq!(
+        parity_corpus::declared_inputs(&module_helper).unwrap(),
+        names(&["example.ch"])
+    );
+}

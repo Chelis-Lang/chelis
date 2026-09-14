@@ -907,9 +907,13 @@ comparator or receipt obligation, and equivalent mutation evidence under
 
 The parity completeness test compares executable root examples with inputs
 derived from the Rust syntax tree of its test declarations. Direct calls to
-the parity/check helpers accept literal root filenames or immutable locals
-initialized from those paths. The copied filename array is gone; each new
-example still needs its per-file test. `parity_corpus_contract` supplies
+the parity/check helpers accept literal root paths or immutable owned-path
+locals initialized by a root path or an owned-path move. Shared borrowing is
+permitted at the helper argument, not when establishing a local's input
+provenance; reference-valued bindings are outside this closed grammar. Local
+items in input-bearing tests are rejected rather than partially resolved;
+helper declarations belong at module scope. The copied filename array is
+gone; each new example still needs its per-file test. `parity_corpus_contract` supplies
 standing CI controls for discovery and missing, hidden, conditional or
 unresolved inputs, including removal of each current example input. The fixed
 completeness-test definition stays frozen, and every other required definition

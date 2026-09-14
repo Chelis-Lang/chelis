@@ -35,24 +35,24 @@ pub fn discover(root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(names)
 }
 
-fn unwrapped(expression: &Expr) -> &Expr {
+// Parentheses do not change ownership; references do. Keep the two grammars separate.
+fn parenthesized(expression: &Expr) -> &Expr {
     match expression {
-        Expr::Reference(value) => unwrapped(&value.expr),
-        Expr::Paren(value) => unwrapped(&value.expr),
-        Expr::Group(value) => unwrapped(&value.expr),
+        Expr::Paren(value) => parenthesized(&value.expr),
+        Expr::Group(value) => parenthesized(&value.expr),
         _ => expression,
     }
 }
 
 fn identifier(expression: &Expr) -> Option<String> {
-    let Expr::Path(path) = unwrapped(expression) else {
+    let Expr::Path(path) = parenthesized(expression) else {
         return None;
     };
     path.path.get_ident().map(ToString::to_string)
 }
 
 fn filename(expression: &Expr) -> Result<String, String> {
-    let Expr::Lit(literal) = unwrapped(expression) else {
+    let Expr::Lit(literal) = parenthesized(expression) else {
         return Err("example input must have a literal filename".into());
     };
     let syn::Lit::Str(value) = &literal.lit else {
@@ -65,20 +65,24 @@ fn filename(expression: &Expr) -> Result<String, String> {
     Ok(name)
 }
 
-fn example_path(
+#[derive(Clone)]
+struct OwnedExamplePath(String);
+
+// This closed grammar constructs an owned PathBuf, never a reference-valued alias.
+fn owned_example_path(
     expression: &Expr,
-    locals: &BTreeMap<String, String>,
-) -> Result<Option<String>, String> {
+    locals: &BTreeMap<String, OwnedExamplePath>,
+) -> Result<Option<OwnedExamplePath>, String> {
     if let Some(name) = identifier(expression) {
         return Ok(locals.get(&name).cloned());
     }
-    let Expr::MethodCall(join) = unwrapped(expression) else {
+    let Expr::MethodCall(join) = parenthesized(expression) else {
         return Ok(None);
     };
     if join.method != "join" {
         return Ok(None);
     }
-    let Expr::Call(root) = unwrapped(&join.receiver) else {
+    let Expr::Call(root) = parenthesized(&join.receiver) else {
         return Ok(None);
     };
     if identifier(&root.func).as_deref() != Some("examples_root") || !root.args.is_empty() {
@@ -87,7 +91,30 @@ fn example_path(
     if join.args.len() != 1 || join.turbofish.is_some() {
         return Err("example path must use examples_root().join(literal)".into());
     }
-    filename(&join.args[0]).map(Some)
+    filename(&join.args[0]).map(|name| Some(OwnedExamplePath(name)))
+}
+
+fn input_argument(
+    expression: &Expr,
+    locals: &BTreeMap<String, OwnedExamplePath>,
+) -> Result<Option<OwnedExamplePath>, String> {
+    match parenthesized(expression) {
+        Expr::Reference(reference) if reference.mutability.is_none() => {
+            input_argument(&reference.expr, locals)
+        }
+        Expr::Reference(_) => Ok(None),
+        expression => owned_example_path(expression, locals),
+    }
+}
+
+fn input_helper(expression: &Expr) -> Option<(String, usize)> {
+    let helper = identifier(expression)?;
+    let arity = match helper.as_str() {
+        "drive_parity" | "check_dropout_eval_and_c_rejection" => 2,
+        "assert_check_clean" => 1,
+        _ => return None,
+    };
+    Some((helper, arity))
 }
 
 fn binding(pattern: &Pat) -> Option<&syn::PatIdent> {
@@ -101,10 +128,16 @@ fn binding(pattern: &Pat) -> Option<&syn::PatIdent> {
 #[derive(Default)]
 struct InputSyntax {
     conditional: bool,
+    local_item: bool,
     bindings: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for InputSyntax {
+    fn visit_item(&mut self, item: &'ast Item) {
+        self.local_item = true;
+        syn::visit::visit_item(self, item);
+    }
+
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
         if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
             self.conditional = true;
@@ -158,23 +191,17 @@ pub fn declared_inputs(source: &str) -> Result<BTreeSet<String>, String> {
                 "{name}: conditional test body cannot supply inputs"
             ));
         }
-        let mut locals = BTreeMap::new();
-        // Rust item declarations are in scope before their textual position.
-        let mut shadowed: BTreeSet<_> = test
-            .block
-            .stmts
-            .iter()
-            .filter_map(|statement| {
-                if let Stmt::Item(Item::Fn(function)) = statement {
-                    Some(function.sig.ident.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if shadowed.contains("examples_root") {
-            return Err(format!("{name}: shadowed examples_root input owner"));
+        let has_inputs = test.block.stmts.iter().any(|statement| {
+            matches!(statement, Stmt::Expr(Expr::Call(call), _)
+                if input_helper(&call.func).is_some())
+        });
+        if has_inputs && syntax.local_item {
+            return Err(format!(
+                "{name}: local items are outside the input grammar; declare helpers at module scope"
+            ));
         }
+        let mut locals = BTreeMap::new();
+        let mut shadowed = BTreeSet::new();
         for statement in &test.block.stmts {
             match statement {
                 Stmt::Local(local) => {
@@ -185,7 +212,7 @@ pub fn declared_inputs(source: &str) -> Result<BTreeSet<String>, String> {
                         && pattern.by_ref.is_none()
                         && let Some(init) = &local.init
                     {
-                        example_path(&init.expr, &locals)?
+                        owned_example_path(&init.expr, &locals)?
                     } else {
                         None
                     };
@@ -205,38 +232,25 @@ pub fn declared_inputs(source: &str) -> Result<BTreeSet<String>, String> {
                         }
                     }
                 }
-                Stmt::Item(Item::Fn(function)) => {
-                    shadowed.insert(function.sig.ident.to_string());
-                }
-                Stmt::Item(Item::Use(_)) => {
-                    return Err(format!(
-                        "{name}: local imports make harness input ownership ambiguous"
-                    ));
-                }
                 Stmt::Expr(Expr::Assign(assignment), _) => {
                     if let Some(key) = identifier(&assignment.left) {
                         locals.remove(&key);
                     }
                 }
                 Stmt::Expr(Expr::Call(call), _) => {
-                    let Some(helper) = identifier(&call.func) else {
+                    let Some((helper, arity)) = input_helper(&call.func) else {
                         continue;
-                    };
-                    let arity = match helper.as_str() {
-                        "drive_parity" | "check_dropout_eval_and_c_rejection" => 2,
-                        "assert_check_clean" => 1,
-                        _ => continue,
                     };
                     if shadowed.contains(&helper) || call.args.len() != arity {
                         return Err(format!("{name}: ambiguous {helper} input"));
                     }
                     let input = if helper == "check_dropout_eval_and_c_rejection" {
-                        filename(&call.args[0])?
+                        OwnedExamplePath(filename(&call.args[0])?)
                     } else {
-                        example_path(&call.args[0], &locals)?
+                        input_argument(&call.args[0], &locals)?
                             .ok_or_else(|| format!("{name}: unresolved {helper} example input"))?
                     };
-                    inputs.insert(input);
+                    inputs.insert(input.0);
                 }
                 _ => {}
             }

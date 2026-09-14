@@ -44,9 +44,12 @@ a reviewed coverage decision, not a list to extend for every new test. See
 
 For a new executable example under `examples/`, add its per-file parity test.
 Pass its literal root path to the existing parity/check helper, directly or
-through an immutable local. The completeness check derives membership from
-those test inputs; there is no second filename list to update. The test still
-owes its applicable execution and comparison checks.
+through an immutable owned-path local. Borrow it only when passing it to the
+helper; reference-valued local aliases are outside the accepted input grammar.
+Put helper declarations at module scope: local items in an input-bearing test
+are rejected. The completeness check derives membership from those inputs,
+without a second filename list. The test still owes its applicable execution
+and comparison checks.
 
 ## Updating an inventory
 
