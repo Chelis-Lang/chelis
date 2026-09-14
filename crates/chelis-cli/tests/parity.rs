@@ -57,6 +57,49 @@
 //! initial landing (forcing `tensor_trace_value` to return `sum + 1.0`
 //! causes `tensor_structural_ops` parity to fail with a precise
 //! line/element diff).
+//!
+//! # What green here does and does not establish (chelis#1351)
+//!
+//! This harness establishes that the two lanes AGREE. It does not
+//! establish that either lane is CORRECT.
+//!
+//! * It catches a defect present in one lane, whenever the corpus reaches
+//!   the input class on which the lanes diverge.
+//! * It cannot catch a defect present in both lanes. A differential test
+//!   is structurally blind to an error common to both sides of the
+//!   difference, and no amount of corpus width changes that.
+//!
+//! The blind spot is not hypothetical. chelis#1349: `diagonal` and `trace`
+//! reconstructed the source coordinate identically wrong in
+//! `tensor_diagonal_value` (host lane) and `chelis_tensor_diagonal` (C
+//! runtime), so the lanes agreed bit-for-bit on the wrong answer.
+//! `parity_tensor_structural_ops` ran both operations on every CI run and
+//! reported parity while they were wrong for 39 of 40 axis pairs and read
+//! unallocated heap.
+//!
+//! The two lanes are also not independent implementations: they are written
+//! from the same reading of the same spec atom, often in one change set,
+//! and in several operations one was transcribed from the other. Correlated
+//! implementations produce correlated errors, so their agreement carries
+//! less information than agreement between independent ones.
+//!
+//! The `tensor_trace_value` mutation recorded above is single-lane. A
+//! single-lane mutation necessarily produces a divergence, so it shows the
+//! comparator fires; it shows nothing about the class the comparator cannot
+//! see. The matching both-lane mutation is the one that makes the blind
+//! spot legible: give `tensor_diagonal_value` and `chelis_tensor_diagonal`
+//! the same wrong source coordinate (in each, take the `axis2` coordinate
+//! as `0` instead of the diagonal coordinate) and run this suite. Both
+//! lanes then print the same wrong elements, so parity passes.
+//!
+//! Spec-derived expectations are the supplement, not more corpus. For the
+//! structural axis operations they live in
+//! `crates/chelis-cli/tests/issue_1351_structural_axis_independent_oracle.rs`:
+//! it computes extents and elements from [05-OP-33] alone and requires each
+//! lane to agree with THAT, so it fails on both lanes at once and fails the
+//! both-lane mutation above. `crates/chelis-runtime/tests/op33_*.rs` do the
+//! same directly against the C runtime entry points. Every other operation
+//! in this corpus still rests on lane agreement alone.
 
 use assert_cmd::Command;
 use chelis_types::agreement::compare_exact_observations;
