@@ -8829,9 +8829,10 @@ fn grad_over_a_disagreeing_named_claim_traps_on_eval() {
 /// `main = tensor(shape=[2], data=[0.0, 0.0])` and exited 0.
 #[test]
 fn grad_over_a_disagreeing_named_claim_traps_on_c() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "grad_named_bad_c", &grad_named_claim_source(2));
     assert!(
@@ -8856,10 +8857,7 @@ fn grad_over_an_agreeing_named_claim_executes_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = eval_result(&dir, "grad_named_ok.ch", &grad_named_claim_source(3));
     assert!(ok, "an agreeing activation differentiates: {out}");
-    assert!(
-        out.contains("main = tensor(shape=[3], data=[0.0, 0.0, 0.0])"),
-        "the cotangent is unchanged: {out}"
-    );
+    assert_eq!(out, "main = tensor(shape=[3], data=[0.0, 0.0, 0.0])\n");
 }
 
 /// The agreeing twin on C.
@@ -8867,16 +8865,14 @@ fn grad_over_an_agreeing_named_claim_executes_on_eval() {
 /// EVIDENTIARY STATUS: disposition lock. Identical on `6abca2406`.
 #[test]
 fn grad_over_an_agreeing_named_claim_executes_on_c() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "grad_named_ok_c", &grad_named_claim_source(3));
     assert!(ok, "an agreeing activation differentiates on C too: {out}");
-    assert!(
-        out.contains("main = tensor(shape=[3], data=[0.0, 0.0, 0.0])"),
-        "byte-identical to the eval twin: {out}"
-    );
+    assert_eq!(out, "main = tensor(shape=[3], data=[0.0, 0.0, 0.0])\n");
 }
 
 /// grad.wrt_tensor.single.live_forward.eval: the claim's carrier dies even when the
@@ -8903,9 +8899,10 @@ fn grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval() {
 /// `main = tensor(shape=[2], data=[0.0, 0.0])` and exited 0.
 #[test]
 fn grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "grad_live_bad_c", &grad_live_forward_source(2));
     assert!(!ok, "a live forward does not excuse the lost claim: {out}");
@@ -8948,9 +8945,10 @@ fn grad_keeps_an_op_computed_local_guard_on_eval() {
 /// EVIDENTIARY STATUS: disposition lock. Identical on `6abca2406`.
 #[test]
 fn grad_keeps_an_op_computed_local_guard_on_c() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "grad_local_bad_c", &grad_op_computed_source(4));
     assert!(!ok, "{out}");
@@ -9001,9 +8999,10 @@ fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
 /// result binders must not replace the signature's `n` at the eval boundary.
 #[test]
 fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let source = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
                   def h(x: tensor[2, f32], z: tensor[2, f32]) -> tensor[f32] = \
@@ -9036,13 +9035,9 @@ fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
         c_run_result(&dir, "grad_multiwrt_agree_c", &agreeing),
     ] {
         assert!(ok, "{out}");
-        assert!(
-            out.contains("main.0 = tensor(shape=[2], data=[0.0, 0.0])"),
-            "{out}"
-        );
-        assert!(
-            out.contains("main.1 = tensor(shape=[2], data=[0.0, 0.0])"),
-            "{out}"
+        assert_eq!(
+            out,
+            "main.0 = tensor(shape=[2], data=[0.0, 0.0])\nmain.1 = tensor(shape=[2], data=[0.0, 0.0])\n"
         );
     }
 }
@@ -9223,9 +9218,10 @@ fn independent_grad_computed_claims_keep_producer_on_eval_and_c() {
 /// and compiled C; the historical name remains the corpus receipt identity.
 #[test]
 fn an_aggregate_typed_wrt_is_still_lane_divergent() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let callee = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n";
     let record = "type Params =\n  | Params { w: tensor[2, f32], b: tensor[2, f32] }\n";
@@ -9239,7 +9235,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
                  def main() = grad(h)(Params {{ w: to_tensor([1.0f32, 2.0f32]), \
                  b: to_tensor([3.0f32, 4.0f32]) }})\n"
             ),
-            "main = Params(tensor(shape=[2], data=[0.0, 0.0]), tensor(shape=[2], data=[0.0, 0.0]))",
+            "main = Params(tensor(shape=[2], data=[0.0, 0.0]), tensor(shape=[2], data=[0.0, 0.0]))\n",
         ),
         (
             "grad_agg_tuple",
@@ -9250,7 +9246,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
                  def main() = grad(h)((to_tensor([1.0f32, 2.0f32]), \
                  to_tensor([3.0f32, 4.0f32])))\n"
             ),
-            "main.0 = tensor(shape=[2], data=[0.0, 0.0])",
+            "main.0 = tensor(shape=[2], data=[0.0, 0.0])\nmain.1 = tensor(shape=[2], data=[0.0, 0.0])\n",
         ),
         (
             "grad_agg_multi",
@@ -9261,7 +9257,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
                  def main() = grad(h, wrt=(p, z))(Params {{ w: to_tensor([1.0f32, 2.0f32]), \
                  b: to_tensor([3.0f32, 4.0f32]) }}, to_tensor([5.0f32, 6.0f32]))\n"
             ),
-            "main.1 = tensor(shape=[2], data=[0.0, 0.0])",
+            "main.0 = Params(tensor(shape=[2], data=[0.0, 0.0]), tensor(shape=[2], data=[0.0, 0.0]))\nmain.1 = tensor(shape=[2], data=[0.0, 0.0])\n",
         ),
     ];
     let dir = tempfile::tempdir().expect("tempdir");
@@ -9289,7 +9285,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
             c_run_result(&dir, &format!("{stem}_agree_c"), &agreeing),
         ] {
             assert!(ok, "{stem}: {out}");
-            assert!(out.contains(zeros), "{stem}: {out}");
+            assert_eq!(out, zeros, "{stem}: complete cotangent group");
         }
     }
 }
@@ -9344,9 +9340,10 @@ fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
         "{rank0_out}"
     );
 
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let multi = source.replace("grad(h, wrt=s)(", "grad(h, wrt=(s, x))(");
     let (multi_ok, multi_out) = eval_result(&dir, "grad_prim_multi.ch", &multi);
     assert!(!multi_ok, "{multi_out}");
@@ -9412,9 +9409,10 @@ fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
 
 #[test]
 fn scalar_gradient_roots_keep_target_order_and_public_leaf_types() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "gradient receipts require compiling and executing C"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     // Written target order differs from the parameter order and repeats the
     // scalar. A rank-zero tensor remains a tensor beside primitive scalars.
