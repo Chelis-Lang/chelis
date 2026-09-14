@@ -507,9 +507,12 @@ def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
     YAML has enough scalar and expression spellings that a partial parser or a
     banlist can accept a semantically gated job. Bind every workflow byte so
     top-level defaults, concurrency, permissions, triggers, jobs, and steps are
-    one closed reviewed artifact. A future intentional policy or recipe change
-    must replace this digest explicitly rather than inheriting a permissive
-    spelling or selection-boundary gap.
+    one closed reviewed artifact. Retire this digest in the reviewed change
+    that ends the temporary manual-dispatch/published-release-only policy,
+    after replacement event/native-recipe controls and the complete native
+    flake and Devenv smoke checks pass on both supported systems under that
+    policy. A recipe edit while the temporary policy stands still requires
+    an explicit reviewed freeze move; it does not authorize retirement.
     """
     actual = hashlib.sha256(workflow.encode("utf-8")).hexdigest()
     if actual != _NIX_REVIEWED_WORKFLOW_SHA256:
