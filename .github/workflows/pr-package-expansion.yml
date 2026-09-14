@@ -29,6 +29,11 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Checkout trusted candidate validator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
       - name: Validate the requested pull request head
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,7 +46,8 @@ jobs:
           --pr-number "$PR_NUMBER"
           --expected-head-sha "$EXPECTED_HEAD_SHA"
 
-      - uses: actions/checkout@v6
+      - name: Checkout the requested pull request merge candidate
+        uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ inputs.pr_number }}/merge
           fetch-depth: 0

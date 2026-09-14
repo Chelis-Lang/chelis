@@ -128,6 +128,28 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertIn("--event-name", planner_text)
     test.assertIn("pull_request", planner_text)
     test.assertIn("--pr-head", planner_text)
+    planner_steps = planner["steps"]
+    checkouts = [
+        index
+        for index, step in enumerate(planner_steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    validator = next(
+        index
+        for index, step in enumerate(planner_steps)
+        if "scripts/ci_validate_pr_candidate.py" in step.get("run", "")
+    )
+    test.assertEqual(len(checkouts), 2)
+    test.assertLess(checkouts[0], validator)
+    test.assertLess(validator, checkouts[1])
+    test.assertEqual(
+        planner_steps[checkouts[0]].get("with", {}).get("ref"),
+        "${{ github.event.repository.default_branch }}",
+    )
+    test.assertEqual(
+        planner_steps[checkouts[1]].get("with", {}).get("ref"),
+        "refs/pull/${{ inputs.pr_number }}/merge",
+    )
 
     worker = jobs["package-expansion-shard"]
     test.assertEqual(worker["needs"], ["integration-plan"])
@@ -224,6 +246,16 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                     break
             with self.subTest(job=job_id), self.assertRaises(AssertionError):
                 assert_manual_expansion_workflow(self, manual)
+
+    def test_dispatch_cannot_validate_before_trusted_scripts_exist(self) -> None:
+        manual = copy.deepcopy(yaml.safe_load(EXPANSION.read_text()))
+        planner = manual["jobs"]["integration-plan"]
+        planner["steps"][0], planner["steps"][1] = (
+            planner["steps"][1],
+            planner["steps"][0],
+        )
+        with self.assertRaises(AssertionError):
+            assert_manual_expansion_workflow(self, manual)
 
 
 if __name__ == "__main__":
