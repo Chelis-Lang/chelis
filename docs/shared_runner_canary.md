@@ -73,6 +73,8 @@ The Cargo inputs and `chelis-prove` source match `origin/main` at `bdd7b961460ae
 
 The focused canary, CI parity, and ownership suites passed all 103 tests. The CI ownership plan passed with no required Rust integration targets for this change.
 
-The source-publication approval covers commits and pushes from the preparation worktree. It does not authorize a merge, dispatch, or runner cutover.
+The initial source-publication approval covered commits and pushes from the preparation worktree. The later user approval permits publication to main after the required tests and review.
+
+Source publication does not establish a deployed runner or authorize an automatic canary dispatch.
 
 No dispatch, runner registration, or cache write formed part of the local oracle.
