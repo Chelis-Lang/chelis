@@ -1290,3 +1290,12 @@ job = "runtime-extent-oracle"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the completion oracle validates structural wire roles against executed current-version codec cases"
 tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase0_inventory.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate compares the live inventory with this reviewed foundation"
+tracking_issue = "chelis#893"
