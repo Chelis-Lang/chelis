@@ -30,7 +30,7 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 
 | Proposal | Recommendation | Required correction or condition |
 |---|---|---|
-| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports remain. |
+| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports have landed; Phase 4B now requires granular acknowledgements. Corpus/per-body controls and digest retirement remain. |
 | chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
 | chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
 | chelis#1824, pull-request execution reach | Adopt the change-owned lane and package expansion below | Keep local `--fast` unchanged. Add the two small replacement expand controls to the standing `ci-fast` selection, require every added or directly modified integration target to execute, and trial broader package-qualified expansion informationally until exact-head cost receipts justify requiring it. |
@@ -330,9 +330,27 @@ The existing freeze normalization applies to atom/region text; file cues retain
 byte-level changes. Missing declared files, required atoms, registry owners, or
 unambiguous region markers are errors. Historical oracle code is never executed.
 
-This trial retains all digests, literal anchors, file acknowledgements, semantic
-registrations, and the authoritative Phase 4B oracle. It does not yet introduce
-atom/region acknowledgements or authorize retirement. Every current frozen atom
+The acknowledgement gate requires every changed report identity exactly once:
+`Frozen-contract-change: atom:05-OP-33` names an atom, and
+`Frozen-contract-change: region:"exact region label"` names a region using a JSON
+string. Existing repo-relative file lines remain required for every changed
+contract file, including edits outside atom/region boundaries. A registry edit
+also names each affected owning atom. Protection and region-declaration edits
+name their identities even when no contract file changes. Removed identities and contract-file declarations
+remain obligations because the report reads both inventories.
+
+The authoritative oracle parses one acknowledgement body and validates both the
+file and identity legs. Missing, duplicate, stale, malformed, and unknown
+identities fail the enforcing PR mode; a file acknowledgement cannot stand in
+for an atom or region. The identity comparison uses committed snapshots at the
+same unique merge base as the report. The PR step validates the event head and
+the synthetic merge's two parents before choosing that base; push/local runs
+remain advisory about acknowledgements. JSON evidence includes the exact
+required lines, while the PR body records the author's acknowledgement.
+
+This slice retains all digests, literal anchors, file acknowledgements, semantic
+registrations, and the authoritative Phase 4B oracle. It does not authorize
+retirement. Every current frozen atom
 and region has a parallel mutation control that checks both the retained guard's
 rejection and the report's named identity.
 

@@ -73,6 +73,133 @@ class GitChanges(unittest.TestCase):
     def identities(self, result):
         return {(row["kind"], row["identity"]) for row in result["changes"]}
 
+    def enforce(self, base, values=(), *, body=None, extra=()):
+        args = ["--base", base, "--require-acknowledgement", *extra]
+        for value in values:
+            args += ["--acknowledge", value]
+        if body is not None:
+            args += ["--acknowledgements-env", "PHASE4B_TEST_BODY"]
+        with mock.patch.object(oracle, "CONTRACT_FILES", tuple(p for p, text in self.files.items() if p != report.ORACLE and text is not None)), \
+             mock.patch.object(oracle, "run_oracle") as run, \
+             mock.patch.dict(oracle.os.environ, {"PHASE4B_TEST_BODY": body or ""}), \
+             redirect_stdout(io.StringIO()):
+            oracle.main(args, root=self.root)
+            run.assert_called_once()
+
+    def test_granular_acknowledgements_require_each_changed_identity(self):
+        base = self.commit()
+        self.commit({OP: ATOM.replace("Exact", "Rounded"), DESIGN: REGION.replace("The", "Another")})
+        values = [OP, DESIGN, "atom:05-OP-31", 'region:"example"']
+        self.enforce(base, values)
+        for missing in values:
+            with self.subTest(missing=missing), self.assertRaisesRegex(SystemExit, "unacknowledged"):
+                self.enforce(base, [v for v in values if v != missing])
+        result = self.compare(base)
+        self.assertEqual(set(result["required_acknowledgements"]),
+                         {"Frozen-contract-change: " + value for value in values})
+
+    def test_granular_stale_unknown_duplicate_and_aliases_are_rejected(self):
+        base = self.commit()
+        self.commit({DESIGN: REGION.replace("The", "Another")})
+        valid = [DESIGN, 'region:"example"']
+        self.enforce(base, valid)
+        for extra, reason in [('atom:04-NUM-8', "stale"), ('atom:05-OP-999', "stale"),
+                              ('region:"missing"', "stale"), ('region:"example"', "duplicate"),
+                              ('region:"ex\\u0061mple"', "duplicate")]:
+            with self.subTest(extra=extra), self.assertRaisesRegex(SystemExit, reason):
+                self.enforce(base, valid + [extra])
+
+    def test_granular_removed_and_protection_only_identities_cannot_disappear(self):
+        base = self.commit()
+        self.commit({report.ORACLE: inventory(atoms={}, regions={})})
+        result = self.compare(base)
+        self.assertEqual(result["changed_contract_files"], [])
+        self.enforce(base, ["atom:05-OP-31", 'region:"example"'])
+        with self.assertRaisesRegex(SystemExit, "unacknowledged.*atom:05-OP-31"):
+            self.enforce(base, ['region:"example"'])
+        with self.assertRaisesRegex(SystemExit, "unacknowledged.*region:"):
+            self.enforce(base, ["atom:05-OP-31"])
+
+    def test_removed_contract_file_still_owes_file_and_region_acknowledgement(self):
+        base = self.commit()
+        source = inventory(regions={}).replace(
+            repr((OP, TYPES, REGISTRY, BUILTINS, DESIGN)), repr((OP, TYPES, REGISTRY, BUILTINS))
+        )
+        self.commit({report.ORACLE: source, DESIGN: None})
+        self.enforce(base, [DESIGN, 'region:"example"'])
+        # Retiring the inventory declaration also owes the file cue if its bytes remain.
+        self.commit({DESIGN: REGION})
+        self.enforce(base, [DESIGN, 'region:"example"'])
+        with self.assertRaisesRegex(SystemExit, "unacknowledged.*example.md"):
+            self.enforce(base, ['region:"example"'])
+
+    def test_explicit_empty_or_invalid_pr_head_never_uses_default_base(self):
+        base = self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        for head in ("", "short", base):
+            with self.subTest(head=head), mock.patch.object(oracle, "run_oracle") as run:
+                with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                    oracle.main(["--pr-head", head, "--require-acknowledgement"], root=self.root)
+                run.assert_not_called()
+
+    def test_granular_registry_only_edit_requires_owning_atom(self):
+        base = self.commit()
+        self.commit({REGISTRY: "# Revised scalar rules\n"})
+        self.enforce(base, [REGISTRY, "atom:05-OP-31"])
+        with self.assertRaisesRegex(SystemExit, "unacknowledged.*atom:05-OP-31"):
+            self.enforce(base, [REGISTRY])
+
+    def test_granular_body_grammar_and_fences_fail_closed(self):
+        base = self.commit()
+        self.commit({OP: ATOM.replace("Exact", "Rounded")})
+        self.enforce(base, body=f"Frozen-contract-change: {OP}\nFrozen-contract-change: atom:05-OP-31\n")
+        for value in ['atom:[05-OP-31]', 'atom:05-OP-0', 'atom:05-op-31',
+                      'region:example', 'region:["example"]', 'region:""',
+                      'region:"example" trailing', 'region:"bad\\nlabel"']:
+            with self.subTest(value=value), self.assertRaisesRegex(SystemExit, "malformed"):
+                self.enforce(base, [OP, "atom:05-OP-31", value])
+        for body in ['```\nFrozen-contract-change: atom:05-OP-31\n```',
+                     '~~~\nFrozen-contract-change: atom:05-OP-31\n~~~']:
+            with self.assertRaisesRegex(SystemExit, "unacknowledged.*atom:05-OP-31"):
+                self.enforce(base, [OP], body=body)
+
+    def test_granular_region_label_round_trip_and_body_cli_duplicate(self):
+        label = 'exact "quoted" region: contract'
+        base = self.commit({report.ORACLE: inventory(regions={label: (DESIGN, "## Start", "## End", "0" * 64)})})
+        self.commit({DESIGN: REGION.replace("The", "Another")})
+        address = "region:" + json.dumps(label)
+        body = report.acknowledgement_line("region", label)
+        self.enforce(base, [DESIGN], body=body)
+        with self.assertRaisesRegex(SystemExit, "duplicate"):
+            self.enforce(base, [DESIGN, address], body=body)
+        with self.assertRaisesRegex(SystemExit, "unclosed"):
+            self.enforce(base, [DESIGN, address], body="```\n")
+
+    def test_granular_advisory_reports_missing_and_strict_unreadable_fails(self):
+        base = self.commit()
+        self.commit({OP: ATOM.replace("Exact", "Rounded")})
+        output = io.StringIO()
+        with mock.patch.object(oracle, "run_oracle"), redirect_stdout(output):
+            oracle.main(["--base", base], root=self.root)
+        self.assertIn("NEEDS Frozen-contract-change: atom:05-OP-31", output.getvalue())
+        with self.assertRaisesRegex(SystemExit, "cannot|resolve"):
+            self.enforce("absent-base")
+
+    def test_granular_oracle_validates_synthetic_merge_event_head(self):
+        base = self.commit()
+        self.git("checkout", "-b", "pr")
+        head = self.commit({OP: ATOM.replace("Exact", "Rounded")})
+        self.git("checkout", "fixture")
+        advanced = self.commit({OP: ATOM, DESIGN: REGION.replace("The", "Main")})
+        self.git("merge", "--no-ff", "pr", "-m", "synthetic")
+        # The candidate uses the first parent; main-only region edits owe no PR acknowledgement.
+        with mock.patch.object(oracle, "run_oracle") as run, redirect_stdout(io.StringIO()):
+            oracle.main(["--pr-head", head, "--require-acknowledgement",
+                         "--acknowledge", OP, "--acknowledge", "atom:05-OP-31"], root=self.root)
+            run.assert_called_once()
+        with self.assertRaisesRegex(SystemExit, "second parent|event pull-request head"):
+            oracle.main(["--pr-head", advanced, "--require-acknowledgement"], root=self.root)
+
     def test_unchanged_and_working_tree_edits(self):
         base = self.commit()
         (self.root / OP).write_text("uncommitted invalid text")
@@ -247,6 +374,13 @@ class RetainedMutationTests(unittest.TestCase):
                 self.assertTrue(any(identity in failure for failure in failures))
                 changes = report.compare_snapshots(before, report.snapshot(mutated.__getitem__))
                 self.assertIn((kind, identity), {(row["kind"], row["identity"]) for row in changes})
+                result = {"changes": changes}
+                named = [(row["kind"], row["identity"]) for row in changes]
+                self.assertEqual(report.identity_acknowledgement_violations(result, named), [])
+                failures = report.identity_acknowledgement_violations(result, [key for key in named if key != (kind, identity)])
+                self.assertTrue(any(report.acknowledgement_line(kind, identity) in failure for failure in failures))
+                address = report.acknowledgement_line(kind, identity).removeprefix("Frozen-contract-change: ")
+                self.assertEqual(oracle.acknowledgement_identity(address), (kind, identity))
 
 
 class WorkflowTests(unittest.TestCase):
@@ -272,6 +406,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(artifact["if"], "${{ always() }}")
         self.assertEqual(artifact["with"]["path"], "target/phase4b-contract-changes.json")
         self.assertEqual(artifact["with"]["if-no-files-found"], "error")
+
+    def test_acknowledgement_step_requires_the_same_event_evidence(self):
+        workflow = self.workflow()
+        step = next(s for s in workflow["jobs"]["docs"]["steps"]
+                    if s.get("name") == "Require frozen contract acknowledgements")
+        self.assertEqual(step["if"], "github.event_name == 'pull_request'")
+        self.assertEqual(step["env"], {"PR_BODY": "${{ github.event.pull_request.body }}",
+                                      "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
+        self.assertEqual(step["run"], 'uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY')
+        self.assertNotIn("continue-on-error", step)
 
     def test_report_has_required_execution_and_publication(self):
         self.check(self.workflow())
