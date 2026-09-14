@@ -693,6 +693,15 @@ reason = "metadata-only CI routing, acknowledgement isolation and manual dispatc
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/test_hosted_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "hosted Docs coverage and metadata-edit negative controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_validate_pr_candidate.py"
 disposition = "owner"
 workflow = "ci.yml"
