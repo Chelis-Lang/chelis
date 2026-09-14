@@ -80,7 +80,10 @@ same PR; those still need a fresh fragment or the normal `no-changelog` exemptio
 
 The tag-publishing workflow extracts the committed version section into its
 GitHub Release body. It refuses missing, duplicate, or empty notes, a workspace
-version mismatch, `[Unreleased]`, and unconsumed fragments. Local extraction:
+version mismatch, `[Unreleased]`, and unconsumed fragments. The tag push runs
+this extraction first, in the workflow's preflight job, so a tag whose commit
+still carries fragments fails within a minute instead of after the platform
+builds. Local extraction:
 
 ```sh
 .venv/bin/python scripts/changelog.py extract --version v0.18.8 --output /tmp/chelis-release-notes.md
