@@ -247,6 +247,121 @@ class CommittedChanges(unittest.TestCase):
                 self.assertEqual([(r["path"], r["test"]) for r in rows], [(str(path), name)])
 
 
+class AcknowledgementTests(unittest.TestCase):
+    setUp = CommittedChanges.setUp
+    git = CommittedChanges.git
+    commit = CommittedChanges.commit
+    compare = CommittedChanges.compare
+
+    def changed(self):
+        base = self.commit()
+        self.commit(BODY.replace("1, 1", "2, 2"))
+        return base, self.compare(base)
+
+    def test_report_names_the_exact_line_and_requires_it(self):
+        _, result = self.changed()
+        line = f"Protected-test-change: {SOURCE}::parity_example"
+        self.assertEqual(result["required_acknowledgements"], [line])
+        self.assertEqual(report.acknowledgement_violations(result, line), [])
+        self.assertTrue(report.acknowledgement_violations(result, ""))
+        self.assertTrue(report.acknowledgement_violations(result, line + "\n" + line))
+
+    def test_stale_unknown_malformed_quoted_or_hidden_lines_do_not_count(self):
+        _, result = self.changed()
+        line = f"Protected-test-change: {SOURCE}::parity_example"
+        for body in [
+            line.replace("parity_example", "unknown"),
+            line.lower(), " " + line, "- " + line, "> " + line,
+            line.replace(": ", ":  "), line + " trailing explanation",
+            "```text\n" + line + "\n```", "~~~\n" + line + "\n~~~",
+            "````\n```\n" + line + "\n````",
+            "```\n~~~\n" + line + "\n```",
+            "```\n```still code\n" + line + "\n```",
+            "<!--\n" + line + "\n-->",
+            "<!-- closed --><!--\n" + line + "\n-->",
+            "<?xml\n\n" + line + "\n?>",
+            "<![CDATA[\n\n" + line + "\n]]>",
+            "<!DOCTYPE\n\n" + line + "\n>",
+            "<details>\n" + line + "\n</details>",
+            "<pre>\n\n" + line + "\n</pre>",
+        ]:
+            with self.subTest(body=body):
+                self.assertTrue(report.acknowledgement_violations(result, body))
+        unchanged = {**result, "required_acknowledgements": []}
+        self.assertTrue(report.acknowledgement_violations(unchanged, line))
+        self.assertTrue(report.acknowledgement_violations(result, line + "\nProtected_test_change: invalid"))
+
+    def test_unrelated_prose_and_closed_examples_allow_the_real_line(self):
+        _, result = self.changed()
+        line = result["required_acknowledgements"][0]
+        for prefix in [
+            "Review evidence follows.\n\n",
+            "```example\n" + line + "\n```\n\n",
+            "<!-- example -->\n\n",
+            "<details>\n<summary>Evidence</summary>\n</details>\n\n",
+            "<pre>ignored example</pre>\n\n",
+        ]:
+            with self.subTest(prefix=prefix):
+                self.assertEqual(report.acknowledgement_violations(result, prefix + line), [])
+
+    def run_cli(self, base, body, *, enforce=True, env=False):
+        output = self.root / "ack-report.json"
+        args = ["--base", base, "--output", str(output)]
+        if enforce:
+            args += ["--require-acknowledgement"]
+        if env:
+            args += ["--acknowledgements-env", "TEST_PR_BODY"]
+            context = mock.patch.dict("os.environ", {"TEST_PR_BODY": body})
+        else:
+            path = self.root / "body.txt"
+            path.write_text(body)
+            args += ["--acknowledgements-file", str(path)]
+            context = mock.patch.dict("os.environ", {})
+        with context, mock.patch.object(report, "ROOT", self.root), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            status = report.main(args)
+        return status, json.loads(output.read_text()) if output.exists() else None
+
+    def test_cli_enforces_file_and_environment_and_preserves_failure_artifact(self):
+        base, result = self.changed()
+        line = result["required_acknowledgements"][0]
+        for env in (False, True):
+            with self.subTest(env=env):
+                self.assertEqual(self.run_cli(base, line, env=env)[0], 0)
+                status, failed = self.run_cli(base, "", env=env)
+                self.assertEqual(status, 1)
+                self.assertEqual(failed["required_acknowledgements"], [line])
+                self.assertTrue(failed["acknowledgement_problems"])
+        self.assertEqual(self.run_cli(base, "", enforce=False)[0], 0)
+
+    def test_removed_requirement_still_requires_its_historical_identity(self):
+        other = '#[test]\nfn another() {}\n'
+        base = self.commit(BODY + other)
+        self.commit(other, inventory(names=("another",)))
+        result = self.compare(base)
+        lines = result["required_acknowledgements"]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(report.acknowledgement_violations(result, "\n".join(lines)), [])
+        for omitted in lines:
+            self.assertTrue(report.acknowledgement_violations(result, "\n".join(x for x in lines if x != omitted)))
+
+    def test_acknowledgement_cannot_admit_a_missing_definition(self):
+        base = self.commit()
+        self.commit("// missing\n")
+        line = f"Protected-test-change: {SOURCE}::parity_example"
+        status, result = self.run_cli(base, line)
+        self.assertEqual(status, 1)
+        self.assertTrue(result["problems"])
+        self.assertEqual(result["acknowledgement_problems"], [])
+
+    def test_missing_body_source_and_invalid_comparison_fail_closed(self):
+        base, _ = self.changed()
+        output = self.root / "missing.json"
+        for extra in [[], ["--acknowledgements-file", str(self.root / "absent")], ["--acknowledgements-env", "MISSING_PR_BODY"]]:
+            with self.subTest(extra=extra), mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(report, "ROOT", self.root), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(report.main(["--base", base, "--output", str(output), "--require-acknowledgement", *extra]), 1)
+        self.assertEqual(self.run_cli("0" * 40, "")[0], 1)
+
+
 class WorkflowTests(unittest.TestCase):
     command = '.venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json'
 
@@ -255,11 +370,13 @@ class WorkflowTests(unittest.TestCase):
         return yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
 
     def assert_contract(self, workflow):
+        events = workflow.get("on", workflow.get(True))
+        self.assertEqual(set(events["pull_request"]["types"]), {"opened", "synchronize", "reopened", "edited"})
         job = workflow["jobs"]["docs"]
         steps = job["steps"]
         checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout@")]
         self.assertEqual(checkouts[0]["with"]["fetch-depth"], 0)
-        reports = [s for s in steps if "phase3_test_change_report.py" in s.get("run", "")]
+        reports = [s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" not in s.get("run", "")]
         self.assertEqual(len(reports), 1)
         step = reports[0]
         self.assertEqual(step["run"], self.command)
@@ -269,11 +386,36 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("shell", step)
         self.assertNotIn("continue-on-error", job)
+        enforcing = [s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" in s.get("run", "")]
+        self.assertEqual(len(enforcing), 1)
+        enforce = enforcing[0]
+        self.assertEqual(enforce["if"], "github.event_name == 'pull_request'")
+        self.assertEqual(enforce["run"], '.venv/bin/python scripts/phase3_test_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase3-test-changes.json')
+        self.assertEqual(enforce["env"], {"PR_HEAD": "${{ github.event.pull_request.head.sha }}", "PR_BODY": "${{ github.event.pull_request.body }}"})
+        self.assertNotIn("continue-on-error", enforce)
+        self.assertNotIn("shell", enforce)
+        self.assertLess(steps.index(enforce), steps.index(next(s for s in steps if s.get("with", {}).get("name") == "phase3-test-changes")))
         artifacts = [s for s in steps if s.get("with", {}).get("name") == "phase3-test-changes"]
         self.assertEqual(len(artifacts), 1)
         self.assertTrue(artifacts[0]["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(artifacts[0]["with"]["path"], "target/phase3-test-changes.json")
         self.assertEqual(artifacts[0]["with"]["if-no-files-found"], "error")
+
+    def test_missing_skipped_suppressed_or_untrusted_enforcement_fails(self):
+        for mutation in ("remove", "skip", "suppress", "body", "head", "interpolate", "edited"):
+            workflow = self.workflow()
+            steps = workflow["jobs"]["docs"]["steps"]
+            step = next((s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" in s.get("run", "")), None)
+            if step is not None:
+                if mutation == "edited": workflow.get("on", workflow.get(True))["pull_request"] = None
+                elif mutation == "remove": steps.remove(step)
+                elif mutation == "skip": step["if"] = "false"
+                elif mutation == "suppress": step["continue-on-error"] = True
+                elif mutation == "body": step["env"].pop("PR_BODY")
+                elif mutation == "head": step["env"]["PR_HEAD"] = "${{ github.event.before }}"
+                else: step["run"] += " ${{ github.event.pull_request.body }}"
+            with self.subTest(mutation=mutation), self.assertRaises((AssertionError, TypeError)):
+                self.assert_contract(workflow)
 
     def test_docs_job_executes_and_publishes_report(self):
         self.assert_contract(self.workflow())
@@ -292,7 +434,7 @@ class WorkflowTests(unittest.TestCase):
     def test_noop_skipped_or_suppressed_report_is_rejected(self):
         for mutation in ["noop", "skip", "suppress"]:
             workflow = self.workflow()
-            candidates = [s for s in workflow["jobs"]["docs"]["steps"] if "phase3_test_change_report.py" in s.get("run", "")]
+            candidates = [s for s in workflow["jobs"]["docs"]["steps"] if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" not in s.get("run", "")]
             if candidates:
                 step = candidates[0]
                 if mutation == "noop":

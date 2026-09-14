@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report committed Phase 3 required-test changes alongside existing guards.
+"""Report and acknowledge committed Phase 3 required-test changes.
 
 The report is a review cue, not a behavioral acceptance oracle. Definition
 digests, comparator checks, receipts, and mutation controls remain in force.
@@ -10,6 +10,7 @@ import argparse
 import ast
 from collections import Counter
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -26,6 +27,7 @@ DOCTRINE = (
     "Changed definitions require review and independent behavior evidence; "
     "this report does not replace the Phase 3 oracle."
 )
+ACKNOWLEDGEMENT_KEY = "Protected-test-change: "
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -201,7 +203,82 @@ def changed_tests(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dic
     return {
         "version": 1, "comparison_ref": comparison, "base": base, "candidate": candidate,
         "changes": changes, "problems": problems, "doctrine": DOCTRINE,
+        "required_acknowledgements": [
+            f'{ACKNOWLEDGEMENT_KEY}{row["path"]}::{row["test"]}' for row in changes
+        ],
     }
+
+
+def acknowledgement_violations(result: dict, body: str) -> list[str]:
+    """Require exact top-level lines; fenced/HTML examples cannot acknowledge."""
+    expected = set(result["required_acknowledgements"])
+    seen: Counter[str] = Counter()
+    problems = []
+    fence: str | None = None
+    html_end: str | None = None
+    html_block = False
+    near_miss = re.compile(r"^[\s>]*(?:[-*+]\s+)?protected[-_ ]?test[-_ ]?change\s*:", re.I)
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
+                fence = None
+            continue
+        if html_end is not None:
+            if html_end in line.lower():
+                html_end = None
+            continue
+        if html_block:
+            if not line.strip():
+                html_block = False
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+            continue
+        if "<!--" in line:
+            remaining = line
+            while "<!--" in remaining:
+                remaining = remaining.split("<!--", 1)[1]
+                if "-->" not in remaining:
+                    html_end = "-->"
+                    break
+                remaining = remaining.split("-->", 1)[1]
+            continue
+        special_html = next((ending for opening, ending in
+                             (("<?", "?>"), ("<![CDATA[", "]]>"))
+                             if line.lstrip(" ").startswith(opening)), None)
+        if special_html is None and re.match(r"^ {0,3}<![A-Z]", line):
+            special_html = ">"
+        if special_html is not None:
+            if special_html not in line:
+                html_end = special_html
+            continue
+        raw_html = re.match(r"^ {0,3}<(script|pre|style|textarea)(?:\s|>|$)", line, re.I)
+        if raw_html:
+            ending = f"</{raw_html[1].lower()}>"
+            if ending not in line.lower():
+                html_end = ending
+            continue
+        if re.match(r"^ {0,3}(?:</?[a-zA-Z][a-zA-Z0-9-]*(?:\s|/?>)|<!|<\?)", line):
+            # Other block HTML ends at the next blank line. Conservatively
+            # exclude custom tags too; acknowledgements belong in plain prose.
+            html_block = True
+            continue
+        if line.startswith(ACKNOWLEDGEMENT_KEY):
+            seen[line] += 1
+        elif near_miss.match(line):
+            problems.append(f"malformed protected-test acknowledgement: {line!r}")
+    if fence is not None or html_end is not None:
+        problems.append("unclosed fenced or HTML example in acknowledgement body")
+    for line in sorted(expected - seen.keys()):
+        problems.append(f"missing acknowledgement: {line}")
+    for line in sorted(seen.keys() - expected):
+        problems.append(f"stale or unknown acknowledgement: {line}")
+    for line, count in sorted(seen.items()):
+        if count != 1:
+            problems.append(f"duplicate acknowledgement ({count}): {line}")
+    return problems
 
 
 def resolve_comparison(repo: Path, candidate: str, base: str, pr_head: str) -> tuple[str, str]:
@@ -221,11 +298,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr-head", default="", help="exact event head; validate candidate merge parents")
     parser.add_argument("--candidate", default="HEAD", help="committed candidate revision (default HEAD)")
     parser.add_argument("--output", type=Path, required=True, help="JSON report to publish")
+    parser.add_argument("--require-acknowledgement", action="store_true", help="require every changed identity exactly once in the PR body")
+    body_source = parser.add_mutually_exclusive_group()
+    body_source.add_argument("--acknowledgements-file", type=Path, help="saved PR body")
+    body_source.add_argument("--acknowledgements-env", help="environment variable containing the PR body")
     args = parser.parse_args(argv)
     try:
         args.output.unlink(missing_ok=True)
         base, candidate = resolve_comparison(ROOT, args.candidate, args.base, args.pr_head)
         result = changed_tests(ROOT, base, candidate)
+        result["acknowledgement_problems"] = []
+        if args.require_acknowledgement:
+            if args.acknowledgements_file is not None:
+                body = args.acknowledgements_file.read_text()
+            elif args.acknowledgements_env is not None and args.acknowledgements_env in os.environ:
+                body = os.environ[args.acknowledgements_env]
+            else:
+                raise ValueError("enforcing acknowledgement requires an available PR body file or environment variable")
+            result["acknowledgement_problems"] = acknowledgement_violations(result, body)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")
     except (ValueError, OSError) as error:
@@ -234,10 +324,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f'Phase 3 required-test comparison: {result["base"]} -> {result["candidate"]}')
     for row in result["changes"]:
         print(f'  {row["path"]}::{row["test"]}: {", ".join(row["changes"])}')
+    for line in result["required_acknowledgements"]:
+        print(line)
     print(DOCTRINE)
-    for problem in result["problems"]:
+    problems = result["problems"] + result["acknowledgement_problems"]
+    for problem in problems:
         print(problem, file=sys.stderr)
-    if result["problems"]:
+    if problems:
         print("PHASE 3 TEST CHANGE REPORT: FAIL", file=sys.stderr)
         return 1
     print(f'PHASE 3 TEST CHANGE REPORT: PASS ({len(result["changes"])} changed identities; behavior not certified)')
