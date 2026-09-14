@@ -608,6 +608,11 @@ reason = "the standing issue_1915_caller_actual_scope target checks this exact e
 tracking_issue = "chelis#1956"
 
 [[path_rule]]
+prefix = "examples/grad_scalar_extent_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = ".cargo/"
 disposition = "packages"
 packages = [
