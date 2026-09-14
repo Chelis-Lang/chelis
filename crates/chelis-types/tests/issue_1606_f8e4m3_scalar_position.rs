@@ -39,10 +39,14 @@ fn assert_rejected(src: &str, position: &str) {
                 let report = result.err().unwrap_or_else(|| {
                     panic!("{name} in {position} must reject at {carrier}/{entry}: {source}")
                 });
-                assert!(report.errors.iter().any(|error| {
-                    error.message.contains(name)
-                        && error.message.contains("spec/04-type-system.md §1.1.1")
-                }), "{carrier}/{entry}/{position}: {:?}", report.errors);
+                assert!(
+                    report.errors.iter().any(|error| {
+                        error.message.contains(name)
+                            && error.message.contains("spec/04-type-system.md §1.1.1")
+                    }),
+                    "{carrier}/{entry}/{position}: {:?}",
+                    report.errors
+                );
             }
         }
     }
@@ -57,11 +61,55 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
         for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
-            let report = result.err().expect("reserved primitive must reject");
-            assert!(report.errors.iter().any(|error| {
-                error.message.contains(name)
-                    && error.message.contains("spec/04-type-system.md §1.1.1")
-            }), "{:?}", report.errors);
+            let report = result.expect_err("reserved primitive must reject");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.message.contains(name)
+                        && error.message.contains("spec/04-type-system.md §1.1.1")
+                }),
+                "{:?}",
+                report.errors
+            );
+        }
+    }
+}
+
+#[test]
+fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let source = format!(
+            "(defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n\
+             (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
+        );
+        let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
+        for result in [check_ir_program(&exprs), check_typed_program(&exprs)] {
+            let report = result.expect_err("reserved type variable must reject");
+            assert!(
+                report.errors.iter().any(|error| {
+                    error.message.contains(name)
+                        && error.message.contains("spec/04-type-system.md §1.1.1")
+                }),
+                "{:?}",
+                report.errors
+            );
+        }
+    }
+}
+
+#[test]
+fn aliases_fields_and_value_annotations_reject_fp8() {
+    assert_rejected("type ReservedAlias = f8e4m3", "a type alias");
+    assert_rejected("type Holder = | Holder { value: f8e4m3 }", "an ADT field");
+    assert_rejected("value: f8e4m3 = 1.0", "a value annotation");
+}
+
+fn assert_accepted(source: &str) {
+    let desugared = surf_to_deep(source);
+    let text = chelis_deep::printer::print_canonical_flat(&desugared);
+    let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
+    for exprs in [&desugared, &stamped] {
+        for result in [check_ir_program(exprs), check_typed_program(exprs)] {
+            assert!(result.is_ok(), "{source}: {result:?}");
         }
     }
 }
@@ -76,10 +124,7 @@ fn scalar_parameter_and_return_rejected() {
 
 #[test]
 fn standalone_sig_rejected() {
-    assert_rejected(
-        "sig f: f8e4m3 -> f8e4m3\ndef f(x) = x",
-        "a standalone sig",
-    );
+    assert_rejected("sig f: f8e4m3 -> f8e4m3\ndef f(x) = x", "a standalone sig");
 }
 
 #[test]
@@ -141,13 +186,7 @@ fn tensor_slot_and_cast_target_still_rejected() {
 fn every_active_float_is_still_accepted() {
     for name in ["f32", "f64", "f16", "bf16"] {
         let src = format!("def f(x: {name}) -> {name} = x");
-        let deep = surf_to_deep(&src);
-        let res = check_ir_program(&deep);
-        assert!(
-            res.is_ok(),
-            "`{name}` must still check clean; got: {:?}",
-            res.err().map(|e| e.errors)
-        );
+        assert_accepted(&src);
     }
 }
 
@@ -155,11 +194,7 @@ fn every_active_float_is_still_accepted() {
 /// checks clean; the reserved-name routing must not widen to catch it.
 #[test]
 fn an_ordinary_type_variable_still_checks_clean() {
-    let deep = surf_to_deep("def f(x: a) -> a = x");
-    let res = check_ir_program(&deep);
-    assert!(
-        res.is_ok(),
-        "an ordinary type variable must still check clean; got: {:?}",
-        res.err().map(|e| e.errors)
-    );
+    assert_accepted("def f(x: a) -> a = x");
+    assert_accepted("type ScalarAlias = f32\nvalue: ScalarAlias = 1.0");
+    assert_accepted("type Holder = | Holder { value: f32 }");
 }

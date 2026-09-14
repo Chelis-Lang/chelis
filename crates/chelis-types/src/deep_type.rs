@@ -1013,17 +1013,19 @@ pub(crate) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<Che
     ))
 }
 
-/// True if `name` is one of the remaining reserved-but-deferred dtype
-/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
-/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
-/// the unsigned family has its own predicate above). These spellings
-/// never resolve through `Prim::parse_name`, so without a dedicated arm
-/// they would fall to the generic unknown-name rejections with no
-/// §1.1.1 citation.
+/// Reserved non-unsigned numeric names from spec/04 §1.1.1.
+/// The internal `Prim::F8e4m3` variant is also reserved as a type-variable name.
 pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
     matches!(
         name,
-        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
+        "f8e4m3"
+            | "f8e5m2"
+            | "int4"
+            | "uint4"
+            | "complex64"
+            | "complex128"
+            | "decimal128"
+            | "decimal256"
     )
 }
 
@@ -1031,6 +1033,9 @@ pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
 /// appearing as a cast target or a tensor element type. Returns `None`
 /// for other names so call sites can short-circuit.
 pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if name == "f8e4m3" {
+        return Some(f8e4m3_diagnostic(tensor));
+    }
     if !is_deferred_dtype_name(name) {
         return None;
     }
