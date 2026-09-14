@@ -122,7 +122,12 @@ The current implementation has one explicit ownership chain:
 3. Deep type syntax crosses one located `DeepTypeResolver`. The resolver owns
    its use site, binder mode, nominal-header environment, variable generator,
    and source/owner location, reports a failure once, and returns
-   `Result<ResolvedDeepType, ErrorWitness>`.
+   `Result<ResolvedDeepType, ErrorWitness>`. Failed signature registration
+   binds the existing witness rather than leaving an absent declaration.
+   Body inference and callers propagate that failure without resolving the
+   copied parameter annotation again. This is declaration-level propagation,
+   not deletion or deduplication of reported diagnostics. Distinct declarations
+   retain their own source locations and diagnostics (chelis#1527).
 4. Source binder state is lexical, not ambient. A serde-skipped
    `TypeResolutionScope` field on `Env` is installed on the cloned environment
    for one declaration and inherited only by its nested lexical clones; it

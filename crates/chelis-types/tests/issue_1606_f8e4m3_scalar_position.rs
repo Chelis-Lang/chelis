@@ -52,6 +52,83 @@ fn assert_rejected(src: &str, position: &str) {
     }
 }
 
+/// A source site owns one diagnostic, even when inference revisits its declaration.
+fn assert_one_report_per_site(source: &str, names: &[&str]) {
+    let program = surf_to_deep(source);
+    let mut expected: Vec<_> = names
+        .iter()
+        .flat_map(|name| {
+            source.match_indices(name).map(move |(offset, _)| {
+                (
+                    *name,
+                    offset,
+                    format!("source:{offset}..{}", offset + name.len()),
+                )
+            })
+        })
+        .collect();
+    expected.sort_by_key(|(_, offset, _)| *offset);
+    for (entry, result) in [
+        ("ir", check_ir_program(&program)),
+        ("typed", check_typed_program(&program)),
+    ] {
+        let report = result.expect_err("reserved dtype sites must reject");
+        assert_eq!(
+            report.errors.len(),
+            expected.len(),
+            "{entry}: {source}: {:?}",
+            report.errors
+        );
+        for (error, (name, offset, span)) in report.errors.iter().zip(&expected) {
+            assert!(
+                matches!(
+                    error.kind,
+                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                ),
+                "{entry}: {error:?}"
+            );
+            assert!(error.message.contains(name), "{entry}: {error:?}");
+            assert_eq!(error.span_offset, Some(*offset), "{entry}: {error:?}");
+            assert_eq!(
+                error.span_id.as_deref(),
+                Some(span.as_str()),
+                "{entry}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reserved_parameter_site_reports_once_at_both_entries() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        assert_one_report_per_site(&format!("def classify(x: {name}) -> int32 = 0i32"), &[name]);
+    }
+}
+
+#[test]
+fn separate_reserved_sites_keep_separate_diagnostics() {
+    assert_one_report_per_site(
+        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e5m2) -> int32 = 0i32",
+        &["f8e4m3", "f8e5m2"],
+    );
+}
+
+#[test]
+fn repeated_reserved_spelling_at_distinct_sites_is_not_deduplicated() {
+    assert_one_report_per_site(
+        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e4m3) -> int32 = 0i32",
+        &["f8e4m3"],
+    );
+}
+
+#[test]
+fn calls_propagate_the_failed_signature_without_a_second_report() {
+    assert_one_report_per_site(
+        "def classify(x: f8e4m3) -> int32 = 0i32\nresult = classify(1i32)",
+        &["f8e4m3"],
+    );
+}
+
 #[test]
 fn handwritten_deep_cannot_bypass_the_type_resolver() {
     for name in ["f8e4m3", "f8e5m2"] {

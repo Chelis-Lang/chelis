@@ -2049,20 +2049,28 @@ pub(super) fn collect_declarations(
                     Err(_) => Ok(()),
                 };
                 subst.leave_level(signature_level, vg);
-                if let (Ok(resolved), Ok(())) = (resolved, installed) {
-                    let scheme = env.generalize(&resolved.ty, subst);
-                    env.bind(name.to_string(), scheme);
-                    // chelis#260: keep the source names of the declared dim
-                    // and type parameters. This is the only point where `n`,
-                    // `m` and `t` are still associated with their variables.
-                    env.record_declared_dim_names(name, resolved.dim_names);
-                    // chelis#1486 / [04-INF-6]: the type-name recording has a
-                    // second consumer. It covers authored binders, explicit
-                    // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
-                    // alike, so the post-body rigidity check can name `a`
-                    // rather than `t44`. An inference hole never reaches this
-                    // map ([04-INF-5]).
-                    env.record_declared_type_names(name, resolved.type_names);
+                match (resolved, installed) {
+                    (Ok(resolved), Ok(())) => {
+                        let scheme = env.generalize(&resolved.ty, subst);
+                        env.bind(name.to_string(), scheme);
+                        // chelis#260: keep the source names of the declared dim
+                        // and type parameters. This is the only point where `n`,
+                        // `m` and `t` are still associated with their variables.
+                        env.record_declared_dim_names(name, resolved.dim_names);
+                        // chelis#1486 / [04-INF-6]: the type-name recording has a
+                        // second consumer. It covers authored binders, explicit
+                        // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
+                        // alike, so the post-body rigidity check can name `a`
+                        // rather than `t44`. An inference hole never reaches this
+                        // map ([04-INF-5]).
+                        env.record_declared_type_names(name, resolved.type_names);
+                    }
+                    (Err(witness), _) | (_, Err(witness)) => {
+                        // A failed signature is not an absent signature. Keep
+                        // its witness so body inference and callers propagate
+                        // the original failure instead of resolving it again.
+                        env.bind(name.to_string(), Scheme::mono(propagate(&witness)));
+                    }
                 }
             }
         }
@@ -2606,6 +2614,10 @@ pub(super) fn infer_top_level(
         // behave the same as the annotated path. See
         // `crates/chelis-cli/tests/bareref_return_inference.rs`.
         let body_ty = if let Some(witness) = prebound_type_failure {
+            propagate(witness)
+        } else if let Some(Type::Error(witness)) = &declared_ty {
+            // The declaration boundary already rejected this signature.
+            // Its copied parameter annotation must not report that site again.
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
             let inferred = infer_def_body_with_sig(
