@@ -734,8 +734,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
         identity = owned.Identity("p", "smoke")
         shard = owned.shard_for(identity)
         later = next(
-            owned.Identity("p", f"z{n}") for n in range(100)
-            if owned.shard_for(owned.Identity("p", f"z{n}")) == shard
+            owned.Identity("q", f"z{n}") for n in range(100)
+            if owned.shard_for(owned.Identity("q", f"z{n}")) == shard
         )
         for expired_call, truncated_junit in (
             (0, False), (1, False), (2, False), (3, False),
@@ -765,16 +765,20 @@ class ShardingAndExecutionTests(unittest.TestCase):
                         )
                     if command[1] == "build":
                         return subprocess.CompletedProcess(command, 0, "", "")
+                    package = command[command.index("-p") + 1]
                     name = command[command.index("--test") + 1]
                     if command[2] == "list":
                         cases = {"fast_case": {"ignored": False, "filter-match": {"status": "matches"}}}
                         if name == "smoke":
                             cases["slow_case"] = {"ignored": False, "filter-match": {"status": "mismatch"}}
-                        payload = {"rust-suites": {f"p::{name}": {"testcases": cases}}}
+                        payload = {"rust-suites": {f"{package}::{name}": {"testcases": cases}}}
                         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
                     junit = target / "nextest/ci-full/junit.xml"
                     junit.parent.mkdir(parents=True, exist_ok=True)
-                    junit.write_text('<testsuite><testcase name="fast_case"/></testsuite>')
+                    junit.write_text(
+                        f'<testsuite><testcase name="fast_case" '
+                        f'classname="{package}::{name}"/></testsuite>'
+                    )
                     return subprocess.CompletedProcess(command, 0, "", "")
 
                 with (
@@ -803,7 +807,13 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
                 if truncated_junit:
                     self.assertIn("malformed JUnit", " ".join(receipt["failures"]))
-                    self.assertEqual(owned._junit_tests(root / "receipt/junit.xml", identity), ["p::smoke::fast_case"])
+                    self.assertEqual(
+                        owned._junit_tests(
+                            root / "receipt/junit.xml",
+                            identity,
+                        ),
+                        ["p::smoke::fast_case"],
+                    )
 
     def test_budget_is_shared_and_no_command_starts_after_it_expires(self) -> None:
         plan = self._plan(lane="package-expansion")
@@ -904,6 +914,162 @@ class ShardingAndExecutionTests(unittest.TestCase):
             manual[manual.index("--run-ignored") + 1],
             "all",
         )
+
+    def test_expansion_groups_ordinary_targets_by_package_only(self) -> None:
+        ordinary = (
+            owned.Identity("p", "alpha"),
+            owned.Identity("p", "beta"),
+        )
+        excluded = owned.Identity("p", "filtered")
+        manual = owned.Identity("p", "manual")
+        other = owned.Identity("q", "alpha")
+        plan = self._plan(lane="package-expansion")
+        plan["manual_only_targets"] = [
+            {"identity": manual.canonical, "owner": OWNER}
+        ]
+        plan["test_exclusions"] = [
+            {
+                "identity": f"{excluded.canonical}::slow_case",
+                "owner": OWNER,
+            }
+        ]
+        groups = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[
+                identity.canonical
+                for identity in (*ordinary, excluded, manual, other)
+            ],
+        )
+        self.assertEqual(
+            groups,
+            [
+                ordinary,
+                (excluded,),
+                (manual,),
+                (other,),
+            ],
+        )
+        command = owned.target_group_command(
+            ordinary,
+            {},
+            list_only=False,
+            manual_only=False,
+        )
+        self.assertEqual(command.count("--test"), 2)
+        self.assertEqual(
+            [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--test"
+            ],
+            ["alpha", "beta"],
+        )
+
+    def test_package_batch_preserves_exact_targets_tests_and_missing_results(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        sibling = next(
+            owned.Identity("p", f"z{index}")
+            for index in range(100)
+            if owned.shard_for(owned.Identity("p", f"z{index}"))
+            == owned.shard_for(identity)
+        )
+        for missing in (False, True):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                plan = self._plan(lane="package-expansion")
+                plan["eligible_targets"].append(sibling.canonical)
+                plan["package_expansion"].append(sibling.canonical)
+                plan["test_exclusions"] = []
+                plan["shards"]["package_expansion"] = owned.shard_map(
+                    [identity, sibling]
+                )
+                owned.attach_plan_digest(plan)
+                calls = []
+
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    names = [
+                        command[index + 1]
+                        for index, value in enumerate(command)
+                        if value == "--test"
+                    ]
+                    if command[2] == "list":
+                        suites = {}
+                        for name in names:
+                            cases = {
+                                "fast_case": {
+                                    "ignored": False,
+                                    "filter-match": {"status": "matches"},
+                                }
+                            }
+                            suites[f"p::{name}"] = {"testcases": cases}
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            json.dumps({"rust-suites": suites}),
+                            "",
+                        )
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    cases = [
+                        f'<testcase name="fast_case" classname="p::{name}"/>'
+                        for name in names
+                        if not (missing and name == sibling.target)
+                    ]
+                    junit.write_text(
+                        "<testsuite>" + "".join(cases) + "</testsuite>"
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"CARGO_TARGET_DIR": str(target)},
+                    ),
+                    mock.patch.object(
+                        owned,
+                        "_commit",
+                        return_value="b" * 40,
+                    ),
+                ):
+                    receipt = owned.execute_shard(
+                        plan,
+                        lane="package-expansion",
+                        shard=owned.shard_for(identity),
+                        output=root / "receipt",
+                        repo=root,
+                        runner=run,
+                    )
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[1].count("--test"), 2)
+                self.assertEqual(calls[2].count("--test"), 2)
+                self.assertEqual(
+                    receipt["selected_targets"],
+                    sorted([identity.canonical, sibling.canonical]),
+                )
+                self.assertEqual(receipt["success"], not missing)
+                if missing:
+                    self.assertNotIn(
+                        sibling.canonical,
+                        receipt["executed_targets"],
+                    )
+                    self.assertIn(
+                        "incomplete",
+                        " ".join(receipt["failures"]),
+                    )
+                else:
+                    self.assertEqual(
+                        receipt["executed_targets"],
+                        receipt["selected_targets"],
+                    )
+                    self.assertEqual(
+                        receipt["executed_tests"],
+                        receipt["selected_tests"],
+                    )
 
     def _plan(self, *, lane: str = "change-owned") -> dict:
         lane_key = owned.LANE_KEYS[lane]

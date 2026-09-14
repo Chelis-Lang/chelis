@@ -1604,6 +1604,150 @@ def target_command(
     return command
 
 
+def execution_groups(
+    plan: Mapping[str, Any],
+    *,
+    lane: str,
+    selected: Sequence[str],
+) -> list[tuple[Identity, ...]]:
+    """Batch ordinary manual-expansion targets by package."""
+    identities = [Identity.parse(canonical) for canonical in selected]
+    if lane != "package-expansion":
+        return [(identity,) for identity in identities]
+    manual_only = {
+        row["identity"] for row in plan["manual_only_targets"]
+    }
+    excluded_targets = {
+        TestIdentity.parse(row["identity"]).target_identity
+        for row in plan["test_exclusions"]
+    }
+    groups: list[list[Identity]] = []
+    ordinary_by_package: dict[str, int] = {}
+    for identity in identities:
+        special = (
+            identity.canonical in manual_only
+            or identity in excluded_targets
+        )
+        if special:
+            groups.append([identity])
+            continue
+        index = ordinary_by_package.get(identity.package)
+        if index is None:
+            ordinary_by_package[identity.package] = len(groups)
+            groups.append([identity])
+        else:
+            groups[index].append(identity)
+    return [tuple(group) for group in groups]
+
+
+def target_group_command(
+    identities: Sequence[Identity],
+    exclusions: Mapping[TestIdentity, Any],
+    *,
+    list_only: bool,
+    manual_only: bool = False,
+) -> list[str]:
+    if not identities:
+        raise ValueError("target command group must not be empty")
+    if len(identities) == 1:
+        return target_command(
+            identities[0],
+            exclusions,
+            list_only=list_only,
+            manual_only=manual_only,
+        )
+    packages = {identity.package for identity in identities}
+    if len(packages) != 1:
+        raise ValueError("target command group must name one exact package")
+    if manual_only:
+        raise ValueError("manual-only targets must execute in singleton groups")
+    if any(
+        exclusion.target_identity in identities for exclusion in exclusions
+    ):
+        raise ValueError(
+            "targets with exact test exclusions must execute in singleton groups"
+        )
+    action = "list" if list_only else "run"
+    command = [
+        "cargo",
+        "nextest",
+        action,
+        "-p",
+        identities[0].package,
+    ]
+    for identity in identities:
+        command.extend(["--test", identity.target])
+    command.extend(
+        [
+            "--locked",
+            "--profile",
+            "ci-full",
+            "--ignore-default-filter",
+        ]
+    )
+    if list_only:
+        command.extend(["--message-format", "json"])
+    else:
+        command.append("--no-fail-fast")
+    return command
+
+
+def _listing_tests_for_group(
+    data: Mapping[str, Any],
+    identities: Sequence[Identity],
+    exclusions: Mapping[TestIdentity, Any],
+    *,
+    manual_only: bool = False,
+) -> list[str]:
+    suites = data.get("rust-suites")
+    if not isinstance(suites, dict):
+        raise ValueError("nextest listing has no rust-suites object")
+    expected = {identity.canonical for identity in identities}
+    if set(suites) != expected:
+        raise ValueError(
+            "package-scoped listing mismatch for target group: "
+            f"expected={sorted(expected)}, got={sorted(suites)}"
+        )
+    selected = []
+    for identity in identities:
+        selected.extend(
+            _listing_tests(
+                {"rust-suites": {identity.canonical: suites[identity.canonical]}},
+                identity,
+                exclusions,
+                manual_only=manual_only,
+            )
+        )
+    if len(selected) != len(set(selected)):
+        raise ValueError("target group listing contains duplicate tests")
+    return sorted(selected)
+
+
+def _junit_tests_for_group(
+    path: Path,
+    identities: Sequence[Identity],
+) -> list[str]:
+    expected = {identity.canonical for identity in identities}
+    tests = []
+    observed_targets = set()
+    for case in ET.parse(path).iter("testcase"):
+        classname = case.get("classname")
+        name = case.get("name")
+        if classname not in expected:
+            raise ValueError(
+                f"JUnit testcase has unexpected target {classname!r}: {path}"
+            )
+        if not name:
+            raise ValueError(f"JUnit testcase has no name: {path}")
+        observed_targets.add(classname)
+        tests.append(f"{classname}::{name}")
+    if len(tests) != len(set(tests)):
+        raise ValueError(f"JUnit contains duplicate test results: {path}")
+    if not observed_targets <= expected:
+        raise ValueError(f"JUnit target mismatch: {path}")
+    return sorted(tests)
+
+
 def _listing_tests(
     data: Mapping[str, Any],
     identity: Identity,
@@ -1774,19 +1918,15 @@ def execute_shard(
     executed_tests: list[str] = []
     executed_targets: list[str] = []
     failures: list[str] = []
-    command_started = False
 
     def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        nonlocal deadline_exhausted, command_started
-        command_started = False
+        nonlocal deadline_exhausted
         if deadline is None:
-            command_started = True
             return runner(command, **kwargs)
         remaining = deadline - time.monotonic()
         try:
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, 0, output="", stderr="")
-            command_started = True
             return runner(command, timeout=remaining, **kwargs)
         except subprocess.TimeoutExpired as error:
             deadline_exhausted = True
@@ -1873,13 +2013,18 @@ def execute_shard(
         }
 
     if build_succeeded:
-        for canonical in selected:
+        groups = execution_groups(plan, lane=lane, selected=selected)
+        for group_index, identities in enumerate(groups):
             if deadline_exhausted:
                 break
-            identity = Identity.parse(canonical)
-            manual_only = canonical in manual_only_targets
-            list_command = target_command(
-                identity,
+            canonicals = [identity.canonical for identity in identities]
+            label = ", ".join(canonicals)
+            manual_only = (
+                len(identities) == 1
+                and identities[0].canonical in manual_only_targets
+            )
+            list_command = target_group_command(
+                identities,
                 exclusions,
                 list_only=True,
                 manual_only=manual_only,
@@ -1895,16 +2040,19 @@ def execute_shard(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
-                listed_tests = _listing_tests(
+                listed_tests = _listing_tests_for_group(
                     json.loads(listed.stdout),
-                    identity,
+                    identities,
                     exclusions,
                     manual_only=manual_only,
                 )
                 selected_tests.extend(listed_tests)
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "list",
                         "argv": list_command,
                         "started_at": list_started_at,
@@ -1920,10 +2068,13 @@ def execute_shard(
                 json.JSONDecodeError,
                 subprocess.CalledProcessError,
             ) as error:
-                failures.append(f"{canonical}: list failed: {error}")
+                failures.append(f"{label}: list failed: {error}")
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "list",
                         "argv": list_command,
                         "started_at": list_started_at,
@@ -1933,19 +2084,22 @@ def execute_shard(
                         "stderr": getattr(error, "stderr", "") or str(error),
                     }
                 )
-                target_timings[canonical] = {
-                    "list_started_at": list_started_at,
-                    "list_finished_at": commands[-1]["finished_at"],
-                    "list_seconds": round(time.monotonic() - started, 3),
-                    "run_started_at": None,
-                    "run_finished_at": None,
-                    "run_seconds": 0.0,
-                }
+                for canonical in canonicals:
+                    target_timings[canonical] = {
+                        "command_group": canonicals,
+                        "list_started_at": list_started_at,
+                        "list_finished_at": commands[-1]["finished_at"],
+                        "list_seconds": round(time.monotonic() - started, 3),
+                        "run_started_at": None,
+                        "run_finished_at": None,
+                        "run_seconds": 0.0,
+                    }
                 continue
             list_seconds = round(time.monotonic() - started, 3)
+            list_finished_at = commands[-1]["finished_at"]
 
-            run_command = target_command(
-                identity,
+            run_command = target_group_command(
+                identities,
                 exclusions,
                 list_only=False,
                 manual_only=manual_only,
@@ -1964,7 +2118,10 @@ def execute_shard(
                 )
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "run",
                         "argv": run_command,
                         "started_at": run_started_at,
@@ -1976,11 +2133,14 @@ def execute_shard(
                 )
             except subprocess.CalledProcessError as error:
                 failures.append(
-                    f"{canonical}: test run failed with {error.returncode}"
+                    f"{label}: test run failed with {error.returncode}"
                 )
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "run",
                         "argv": run_command,
                         "started_at": run_started_at,
@@ -1990,36 +2150,59 @@ def execute_shard(
                         "stderr": error.stderr or "",
                     }
                 )
-            if command_started:
-                executed_targets.append(canonical)
             run_seconds = round(time.monotonic() - started, 3)
-            target_timings[canonical] = {
-                "list_started_at": list_started_at,
-                "list_finished_at": commands[-2]["finished_at"],
-                "list_seconds": list_seconds,
-                "run_started_at": run_started_at,
-                "run_finished_at": commands[-1]["finished_at"],
-                "run_seconds": run_seconds,
-            }
+            for canonical in canonicals:
+                target_timings[canonical] = {
+                    "command_group": canonicals,
+                    "list_started_at": list_started_at,
+                    "list_finished_at": list_finished_at,
+                    "list_seconds": list_seconds,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": commands[-1]["finished_at"],
+                    "run_seconds": run_seconds,
+                }
             if produced_junit.is_file():
-                target_junit = scratch / (
-                    identity.package.replace("/", "_")
-                    + "__"
-                    + identity.target.replace("/", "_")
-                    + ".xml"
-                )
+                target_junit = scratch / f"group-{group_index}.xml"
                 shutil.copyfile(produced_junit, target_junit)
                 try:
-                    executed_tests.extend(_junit_tests(target_junit, identity))
+                    group_executed_tests = (
+                        _junit_tests(target_junit, identities[0])
+                        if len(identities) == 1
+                        else _junit_tests_for_group(
+                            target_junit,
+                            identities,
+                        )
+                    )
                 except (ValueError, ET.ParseError) as error:
-                    failures.append(f"{canonical}: malformed JUnit: {error}")
+                    failures.append(f"{label}: malformed JUnit: {error}")
                 else:
+                    executed_tests.extend(group_executed_tests)
+                    for canonical in canonicals:
+                        prefix = f"{canonical}::"
+                        target_selected = sorted(
+                            test
+                            for test in listed_tests
+                            if test.startswith(prefix)
+                        )
+                        target_executed = sorted(
+                            test
+                            for test in group_executed_tests
+                            if test.startswith(prefix)
+                        )
+                        if target_selected == target_executed:
+                            executed_targets.append(canonical)
+                        else:
+                            failures.append(
+                                f"{canonical}: incomplete test results: "
+                                f"selected={target_selected}, "
+                                f"executed={target_executed}"
+                            )
                     # A deadline may interrupt nextest's XML write. Keep that
                     # failure, but merge only validated suites so receipt
                     # finalization still preserves earlier completed evidence.
                     suite_documents.append(target_junit)
             else:
-                failures.append(f"{canonical}: test run produced no JUnit")
+                failures.append(f"{label}: test run produced no JUnit")
 
     _write_junit(junit_output, suite_documents)
     shard_finished_at = _utc_timestamp()
