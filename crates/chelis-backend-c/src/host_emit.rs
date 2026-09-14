@@ -213,6 +213,7 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_tensor_abi_helpers(&mut body);
     body.push(String::new());
+    append_host_result_claim_support(&mut body);
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
@@ -268,7 +269,7 @@ pub(crate) fn emit_host_abi_program(
             internal_names
                 .get(&function.name)
                 .expect("authored function has owned-body name"),
-            private_random_params(&params)
+            private_host_params(&params)
         ));
     }
     if program
@@ -364,7 +365,6 @@ pub(crate) fn emit_host_abi_program(
         match emit_function(
             &mut fn_buf,
             function,
-            &program.functions,
             emitted_name,
             &internal_names,
             &function_specializations,
@@ -1606,7 +1606,7 @@ fn emit_host_declarations(
                 .join(", ");
             let emitted_name = emitted_function_name(program_name, &function.name);
             let params = if function.is_monomorphized_specialization() {
-                private_random_params(&params)
+                private_host_params(&params)
             } else {
                 params
             };
@@ -1855,7 +1855,7 @@ fn append_unreachable_fn_abort_stub(
         ""
     };
     let params = if function.is_monomorphized_specialization() {
-        private_random_params(&params)
+        private_host_params(&params)
     } else {
         params
     };
@@ -1872,12 +1872,6 @@ fn append_unreachable_fn_abort_stub(
     out.push("}".to_string());
     Ok(())
 }
-
-/// How far the declared-result producer walk follows let chains and callee
-/// bodies before giving up. The interpreter's
-/// `runtime::eval::RESULT_PRODUCER_DEPTH` is the same budget, so both lanes
-/// stop naming a producer at the same nesting.
-const RESULT_PRODUCER_DEPTH: usize = 32;
 
 /// Resolve a returned alias outside its local let chain. Consuming bindings
 /// backwards preserves the scope in which each initializer read its value.
@@ -1905,7 +1899,7 @@ fn host_tail_binding_name(body: &HostExpr) -> Option<&str> {
 }
 
 /// Select the original producing binding through sequential value aliases.
-/// Producer naming and guard placement both consume this same selection.
+/// Guard placement follows this identity, not a later use of the same name.
 fn host_result_binding_index(bindings: &[HostBinding], body: &HostExpr) -> Option<usize> {
     let mut name = host_tail_binding_name(body)?;
     let mut found = None;
@@ -1921,68 +1915,19 @@ fn host_result_binding_index(bindings: &[HostBinding], body: &HostExpr) -> Optio
     found
 }
 
-/// The canonical primitive name that produces `expr`'s value, resolving through
-/// let bindings and callee bodies (chelis#1771).
-///
-/// `[04-NUM-9]` requires the LOWERED primitive name and forbids renaming it to
-/// the composed source operation, so a block, a binding and a user call are all
-/// transparent here.
-///
-/// A `TensorCall` is deliberately NOT transparent: a lowered helper carries the
-/// DAG lane's own literal-result claim, and descending into it would place a
-/// second guard on one obligation.
-fn host_result_producer_op<'f>(
-    expr: &'f HostExpr,
-    functions: &'f [HostFunction],
-    depth: usize,
-) -> Option<&'f str> {
-    if depth == 0 {
-        return None;
-    }
-    match &expr.kind {
-        HostExprKind::Builtin { name, .. } => Some(name.as_str()),
-        HostExprKind::Let { bindings, body, .. } => {
-            match host_result_binding_index(bindings, body) {
-                Some(index) => {
-                    host_result_producer_op(&bindings[index].value, functions, depth - 1)
-                }
-                None => host_result_producer_op(body, functions, depth - 1),
-            }
-        }
-        HostExprKind::Call { function, .. } => {
-            let callee = functions.iter().find(|other| other.name == *function)?;
-            host_result_producer_op(&callee.body, functions, depth - 1)
-        }
-        _ => None,
-    }
-}
-
-/// chelis#1739 and chelis#1771. A host-lane function whose declared result
-/// carries a literal extent owes that extent a runtime verdict against the
-/// tensor it actually produces.
-///
-/// The host lane has no `ExtentWitness`: `diagonal`, `sort`, `where` and the
-/// rest of `HOST_ONLY_BUILTINS` never reach a `RiscOp`, so the DAG lane's
-/// literal-result claim cannot see them and a declaration the body cannot
-/// satisfy executed silently. The guard belongs here rather than inside a
-/// `chelis_tensor_*` kernel, because the literal lives on the enclosing
-/// signature and a per-builtin check would be a second guard model.
+/// One declaration's ordered literal axes. Its invocation frame is forwarded
+/// unchanged through branches and calls; the selected producer supplies `<op>`.
 struct HostResultClaim {
-    /// `(axis, required)` for every literal declared dimension.
+    rank: usize,
     axes: Vec<(usize, usize)>,
-    /// `[04-NUM-9]`'s `<op>` slot, already sanitized for a format string.
-    op: String,
 }
 
 impl HostResultClaim {
-    /// The claim a function's declared result makes, or `None` when the
-    /// declaration carries no literal extent or the producing primitive cannot
-    /// be named.
-    fn of(function: &HostFunction, functions: &[HostFunction]) -> Option<Self> {
+    fn of(function: &HostFunction) -> Option<Self> {
         let HostAbiType::Tensor(ty) = &function.ret_ty else {
             return None;
         };
-        let axes: Vec<(usize, usize)> = ty
+        let axes = ty
             .dims
             .iter()
             .enumerate()
@@ -1990,34 +1935,59 @@ impl HostResultClaim {
                 DimInfo::Lit(required) => Some((axis, *required)),
                 _ => None,
             })
-            .collect();
-        if axes.is_empty() {
-            return None;
-        }
-        let op = host_result_producer_op(&function.body, functions, RESULT_PRODUCER_DEPTH)?;
-        Some(Self {
+            .collect::<Vec<_>>();
+        (!axes.is_empty()).then_some(Self {
+            rank: ty.dims.len(),
             axes,
-            op: chelis_ir::span_sanitize::sanitize_for_format_string(op).into_owned(),
         })
     }
 
-    fn guard_lines(&self, indent: &str, target: &str) -> Vec<String> {
-        let op = &self.op;
-        let mut lines = Vec::new();
-        for &(axis, required) in &self.axes {
-            lines.push(format!(
-                "{indent}if (chelis_tensor_shape({target}, {axis}) != {required}) {{"
-            ));
-            lines.push(format!(
-                "{indent}    fprintf(stderr, \"extent `{required}`: claimed = {required}, {op} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape({target}, {axis}));"
-            ));
-            lines.push(format!(
-                "{indent}    chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
-            ));
-            lines.push(format!("{indent}}}"));
+    fn frame_lines(&self, indent: &str) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{indent}const int64_t __chelis_result_axes[][2] = {{"
+        )];
+        for (axis, required) in &self.axes {
+            lines.push(format!("{indent}    {{ {axis}, {required} }},"));
         }
+        lines.push(format!("{indent}}};"));
+        lines.push(format!("{indent}const __chelis_host_result_claim __chelis_declared_result = {{ __chelis_caller_result_claims, {}, {}, __chelis_result_axes }};", self.rank, self.axes.len()));
+        lines.push(format!("{indent}const __chelis_host_result_claim *__chelis_result_claims = &__chelis_declared_result;"));
         lines
     }
+}
+
+/// This context is translation-unit private. Public wrappers retain their
+/// authored signatures, while one owned callee accepts any caller's literals.
+fn private_host_params(params: &str) -> String {
+    format!(
+        "{}, const __chelis_host_result_claim *__chelis_caller_result_claims",
+        private_random_params(params)
+    )
+}
+
+fn append_host_result_claim_support(out: &mut Vec<String>) {
+    out.push(r#"typedef struct __chelis_host_result_claim {
+    const struct __chelis_host_result_claim *next;
+    int64_t rank;
+    int64_t count;
+    const int64_t (*axes)[2];
+} __chelis_host_result_claim;
+
+static void __chelis_check_host_result_claims(const __chelis_host_result_claim *claims, const chelis_tensor *value, const char *op, const char *trap) {
+    for (; claims != NULL; claims = claims->next) {
+        if (chelis_tensor_rank(value) != claims->rank) continue;
+        for (int64_t i = 0; i < claims->count; ++i) {
+            int64_t axis = claims->axes[i][0];
+            int64_t required = claims->axes[i][1];
+            int64_t observed = chelis_tensor_shape(value, axis);
+            if (observed != required) {
+                fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)required, (long long)required, op, (long long)axis, (long long)observed);
+                chelis_numeric_trap(trap);
+            }
+        }
+    }
+}
+"#.to_string());
 }
 
 /// The complete signature owns entry order; helper partitioning does not.
@@ -2106,7 +2076,6 @@ fn signature_entry_lines(
 fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
-    all_functions: &[HostFunction],
     emitted_name: &str,
     internal_names: &UnordMap<String, String>,
     function_specializations: &UnordMap<String, HostFunctionSpecialization>,
@@ -2137,7 +2106,7 @@ fn emit_function(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
         body_name,
-        private_random_params(&params)
+        private_host_params(&params)
     ));
     out.push("    (void)__chelis_rng;".to_string());
     let mut emitter = HostEmitter::new(
@@ -2219,22 +2188,16 @@ fn emit_function(
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
-    // chelis#1771: the declared-result guard travels with the expression that
-    // produces the returned value. `emit_expr_to_var` hands the flag to
-    // `assign_expr`, which either discharges the claim at `__result` or
-    // forwards it into the let chain.
-    emitter.result_claim = HostResultClaim::of(function, all_functions);
-    emitter.claim_on_spine = emitter.result_claim.is_some();
-    emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
-    if emitter.result_claim.is_some() {
-        return Err(invalid_abi_shape(
-            format!(
-                "declared-result claim on `{}` reached no producing expression",
-                function.name
-            ),
-            "verified C host ownership emission",
-        ));
+    // A frame belongs to this invocation, not to a selected callee name.
+    // The expression spine forwards the frame; branch arms share its immutable
+    // contents and arguments/sibling bindings never inherit it.
+    match HostResultClaim::of(function) {
+        Some(claim) => emitter.lines.extend(claim.frame_lines(&emitter.indent)),
+        None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
+    emitter.result_claims = Some("__chelis_result_claims".to_string());
+    emitter.claim_on_spine = true;
+    emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
     let terminal = ownership_sites
         .iter()
         .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
@@ -2289,6 +2252,7 @@ fn emit_function(
             }
         }
         append_private_context_args(&mut args);
+        args.push("NULL".to_string());
         out.push(format!(
             "    {} __result = {}({});",
             c_type(&function.ret_ty)?,
@@ -2336,6 +2300,7 @@ fn emit_function(
                 }
             }
             append_private_context_args(&mut args);
+            args.push("NULL".to_string());
             out.push(format!(
                 "    {} __result = {}({});",
                 c_type(&function.ret_ty)?,
@@ -2895,14 +2860,10 @@ struct HostEmitter<'a> {
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
     temp_counter: usize,
-    /// chelis#1771. The declared-result claim this function still owes a
-    /// guard, taken by the expression that actually produces the returned
-    /// value. `None` once the guard has been emitted.
-    result_claim: Option<HostResultClaim>,
-    /// Set immediately before emitting the expression that carries the
-    /// function's returned value, and consumed by `assign_expr`. A `Let` on
-    /// that spine re-sets it for the binding it forwards to, so the guard
-    /// lands at the producing operation rather than at the return boundary.
+    /// Immutable invocation context. Only the expression on the returned-value
+    /// spine receives it; nested arguments and sibling bindings get no context.
+    result_claims: Option<String>,
+    /// Taken at each expression entry and forwarded to its returned-value child.
     claim_on_spine: bool,
 }
 
@@ -2970,7 +2931,7 @@ impl<'a> HostEmitter<'a> {
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
             temp_counter: 0,
-            result_claim: None,
+            result_claims: None,
             claim_on_spine: false,
         }
     }
@@ -3842,14 +3803,6 @@ impl<'a> HostEmitter<'a> {
                 &frame,
             ));
         }
-        // The claim is still pending only when this expression, and not a
-        // binding it forwarded to, produced the returned value. Section 4.7
-        // puts the guard at that operation's source position, so it is emitted
-        // here rather than after the function's return terminals.
-        if on_result_spine && let Some(claim) = self.result_claim.take() {
-            let lines = claim.guard_lines(&self.indent, target);
-            self.lines.extend(lines);
-        }
         Ok(())
     }
 
@@ -3862,6 +3815,9 @@ impl<'a> HostEmitter<'a> {
         on_result_spine: bool,
     ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
+        let result_claims = on_result_spine
+            .then(|| self.result_claims.clone())
+            .flatten();
         match &expr.kind {
             HostExprKind::Int(value) => {
                 // The positive magnitude of i64::MIN is not a signed C
@@ -3920,7 +3876,14 @@ impl<'a> HostEmitter<'a> {
                 ty: call_ty,
             } => {
                 require_same_abi_type(ty, call_ty, "call expression")?;
-                self.assign_call(target, function, args, arg_tys, call_ty, site)?;
+                self.assign_call(
+                    (target, call_ty),
+                    function,
+                    args,
+                    arg_tys,
+                    site,
+                    result_claims.as_deref(),
+                )?;
             }
             HostExprKind::Builtin {
                 name,
@@ -3929,6 +3892,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty)?;
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref(), name);
             }
             HostExprKind::AdtConstruct {
                 ctor,
@@ -3979,6 +3943,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &then_edge)?;
+                self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, then_expr, ty)?;
                 self.emit_expression_block_actions(site, then_block, target)?;
                 self.indent = previous.clone();
@@ -3986,6 +3951,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &else_edge)?;
+                self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, else_expr, ty)?;
                 self.emit_expression_block_actions(site, else_block, target)?;
                 self.indent = previous;
@@ -4074,6 +4040,7 @@ impl<'a> HostEmitter<'a> {
                 // keeps emitted C unchanged for every program that does not
                 // shadow: a reference to it dead-ends exactly as it does
                 // today.
+                self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, some_expr, ty)?;
                 self.emit_expression_block_terminal_for_owner(
                     site,
@@ -4086,6 +4053,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &none_edge)?;
+                self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, none_expr, ty)?;
                 self.emit_expression_block_terminal_for_owner(
                     site,
@@ -4104,7 +4072,14 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT match")?;
-                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty, site)?;
+                self.assign_match_adt(
+                    (target, ty),
+                    scrutinee,
+                    arms,
+                    default_expr.as_deref(),
+                    site,
+                    on_result_spine,
+                )?;
                 return Ok(());
             }
             HostExprKind::Let {
@@ -4322,6 +4297,21 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.emit_expression_site(site, target)
+    }
+
+    fn emit_result_claim_guard(
+        &mut self,
+        target: &str,
+        ty: &HostType,
+        claims: Option<&str>,
+        op: &str,
+    ) {
+        if let Some(claims) = claims
+            && matches!(ty, HostType::Tensor(_))
+        {
+            let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
+            self.lines.push(format!("{}__chelis_check_host_result_claims({claims}, {target}, \"{op}\", \"numeric trap: domain in {op} at int64\");", self.indent));
+        }
     }
 
     fn assign_builtin(
@@ -6875,13 +6865,14 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_call(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         function: &str,
         args: &[HostExpr],
         arg_tys: &[HostType],
-        ty: &HostType,
         site: &ProjectedHostSite<'a>,
+        result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        let (target, ty) = destination;
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
                 HostFunctionSpecialization::BlasMatmul(summary) => {
@@ -6952,6 +6943,7 @@ impl<'a> HostEmitter<'a> {
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
             append_private_context_args(&mut arg_vars);
+            arg_vars.push(result_claims.unwrap_or("NULL").to_string());
         }
         self.lines.push(format!(
             "{}{target} = {}({});",
@@ -7050,13 +7042,14 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_match_adt(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         scrutinee: &HostExpr,
         arms: &[HostMatchArm],
         default_expr: Option<&HostExpr>,
-        expr_ty: &HostType,
         site: &ProjectedHostSite<'a>,
+        on_result_spine: bool,
     ) -> Result<(), Unsupported> {
+        let (target, expr_ty) = destination;
         let (scrutinee_owner, arm_edges) = site
             .directives
             .iter()
@@ -7132,6 +7125,7 @@ impl<'a> HostEmitter<'a> {
                     &binding.name,
                 )?;
             }
+            self.claim_on_spine = on_result_spine;
             self.assign_expr(target, &arm.expr, expr_ty)?;
             self.emit_expression_block_actions(site, arm_blocks[index], target)?;
             self.indent = previous;
@@ -7142,6 +7136,7 @@ impl<'a> HostEmitter<'a> {
         let previous = std::mem::replace(&mut self.indent, nested_indent);
         if let Some(default_expr) = default_expr {
             self.emit_edge_terminals(site.id, &arm_edges[arms.len()])?;
+            self.claim_on_spine = on_result_spine;
             self.assign_expr(target, default_expr, expr_ty)?;
             self.emit_expression_block_actions(site, arm_blocks[arms.len()], target)?;
         } else {
@@ -7800,6 +7795,7 @@ impl<'a> HostEmitter<'a> {
                 let mut arg_vars = arg_vars.to_vec();
                 if self.emitted_names.contains_key(function) {
                     append_private_context_args(&mut arg_vars);
+                    arg_vars.push("NULL".to_string());
                 }
                 self.lines.push(format!(
                     "{}{target} = {}({});",

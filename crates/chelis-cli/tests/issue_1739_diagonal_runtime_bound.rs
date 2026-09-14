@@ -32,19 +32,11 @@
 //! introduces the extent, so an effect bound after the producing binding is
 //! observed only when the guard passes.
 //!
-//! That holds WITHIN the guarded function's own body. Across a function
-//! boundary it does not: a call-bodied return is guarded AT THE CALL in the
-//! caller's body, and the callee's own effects after the producing operation
-//! are observed first. `an_effect_inside_the_callee_after_the_producing_operation_is_still_observed`
-//! measures that on both lanes and chelis#1945 tracks it; it is not repaired
-//! here because threading a caller's claim into a callee is unbounded on the C
-//! lane, where a callee is emitted once as a shared function and two callers
-//! with different declared literals would need two specializations of it.
-//!
-//! A branchy tail names no single
-//! primitive and stays the residual `a_branchy_tail_is_not_guarded_and_is_residual`
-//! locks; so does a NAMED (non-literal) declared result on the host lane, which
-//! `a_symbolic_declared_result_is_not_guarded` locks and chelis#1900 tracks.
+//! Claims follow the selected branch and cross direct host calls through the
+//! private invocation context. The producer checks them before following
+//! effects in its own body. Shared callees receive each caller's obligations
+//! separately; an untaken branch receives none. Named host result obligations
+//! remain separately tracked by chelis#1900.
 //!
 //! # Evidentiary status
 //!
@@ -179,9 +171,7 @@ fn callee_effect_root(declared: usize, operand: &str) -> String {
     )
 }
 
-/// Root form: the return expression is an `if`, whose two branches are two
-/// different applications of the producing primitive. The walk names no single
-/// producer for a branchy tail, so no guard is emitted. chelis#1771's residual.
+/// Root form: an if selects one producing application at runtime.
 fn branchy_root(declared: usize, operand: &str) -> String {
     format!(
         "def d(x: tensor[n, 4, f32], flag: bool) -> tensor[{declared}, f32] = \
@@ -600,22 +590,11 @@ fn value_aliases_keep_the_guard_at_the_original_producer() {
     }
 }
 
-/// RESIDUAL LOCK, chelis#1945, and A PASS HERE IS NOT EVIDENCE OF CORRECTNESS.
-/// The guard's `<op>` name resolves into the callee, but its POSITION is the
-/// call in the caller's body, so an effect the callee runs after the producing
-/// operation is observed before the trap. Section 4.7's placement sentence says
-/// it should not be. The row exists so the divergence is measured rather than
-/// assumed, and so that closing it turns this test red on purpose.
-///
-/// Both halves matter. The trap assertions prove the guard still fires through
-/// the callee, so this is a placement residual and not an unguarded one; the
-/// `inside-after` assertions record exactly which placement ships. The
-/// companion row `eval_traps_before_an_effect_that_follows_the_producing_operation`
-/// proves the same effect IS suppressed when it sits in the caller's body,
-/// which is what locates the gap at the function boundary rather than in the
-/// guard.
+/// The caller's literal must reach the callee's producer before its following
+/// effect. This was a measured nonconforming rejection: both lanes trapped,
+/// but only after printing `inside-after` (chelis#1945).
 #[test]
-fn an_effect_inside_the_callee_after_the_producing_operation_is_still_observed() {
+fn an_effect_inside_the_callee_after_the_producing_operation_is_suppressed() {
     let dir = tempdir().expect("tempdir");
     let source = callee_effect_root(3, TWO_BY_FOUR);
     check_scores_one(&dir, "residual-callee-effect", &source);
@@ -626,9 +605,8 @@ fn an_effect_inside_the_callee_after_the_producing_operation_is_still_observed()
     );
     assert_bound_trap(&stderr, 3, 0, 2, "eval");
     assert!(
-        stdout.contains("inside-after"),
-        "the residual: the callee's own effect after the producing operation is \
-         observed before the trap, got {stdout}"
+        !stdout.contains("inside-after"),
+        "the callee's following effect must be suppressed, got {stdout}"
     );
     if !gcc_available() {
         return;
@@ -637,37 +615,226 @@ fn an_effect_inside_the_callee_after_the_producing_operation_is_still_observed()
     assert!(!ran, "the C lane traps through the callee too: {output}");
     assert_bound_trap(&output, 3, 0, 2, "the C lane");
     assert!(
-        output.contains("inside-after"),
-        "and both lanes agree on the residual, got {output}"
+        !output.contains("inside-after"),
+        "the callee's following effect must be suppressed on C, got {output}"
     );
 }
 
-/// RESIDUAL LOCK, chelis#1771, and A PASS HERE IS NOT EVIDENCE OF CORRECTNESS.
-/// A branchy tail has one producing primitive per branch, so the walk names
-/// none for the return as a whole and emits no guard: the same disagreement
-/// that traps through a block tail still executes silently here, on both lanes.
-/// The row exists so the residual is measured rather than assumed, and so that
-/// closing it turns this test red on purpose.
+/// An if tail carries the claim to its selected producing expression. Before
+/// #1771's branch repair both lanes returned the denying extent silently.
 #[test]
-fn a_branchy_tail_is_not_guarded_and_is_residual() {
+fn a_branchy_tail_checks_its_selected_producer() {
     let dir = tempdir().expect("tempdir");
     let source = branchy_root(3, TWO_BY_FOUR);
     check_scores_one(&dir, "residual-branchy", &source);
     let (ok, stdout, stderr) = eval_source(&dir, "residual-branchy", &source);
-    assert!(ok, "the residual path still executes; stderr was {stderr}");
-    assert!(
-        stdout.contains("out = tensor(shape=[2], data=[1.0, 6.0])"),
-        "the unguarded residual returns the produced extent under a declared 3, got {stdout}"
-    );
+    assert!(!ok, "the selected branch must trap, got {stdout}");
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
     if !gcc_available() {
         return;
     }
     let (ran, output) = build_link_run(&dir, "c_residual_branchy", &source);
-    assert!(ran, "the residual path still executes on C: {output}");
-    assert!(
-        output.contains("shape=[2], data=[1.0, 6.0]"),
-        "both lanes agree on the unguarded residual, got {output}"
-    );
+    assert!(!ran, "the selected C branch must trap: {output}");
+    assert_bound_trap(&output, 3, 0, 2, "C");
+}
+
+/// Every branch owns its selected producer, even through a binding and alias.
+/// The other branch produces an invalid extent but must remain unexecuted.
+fn selected_branch_root(form: &str, second: bool, agrees: bool) -> String {
+    let branch = |op: &str, input: &str| {
+        let producer = if op == "cumsum" {
+            format!("cumsum(diagonal({input}, 0, 1), 0)")
+        } else {
+            format!("diagonal({input}, 0, 1)")
+        };
+        format!(
+            "{{\n _ = print(\"{op}-before\")\n y = {producer}\n z = y\n y = to_tensor([99.0f32])\n _ = print(\"{op}-after\")\n z\n}}"
+        )
+    };
+    let first = branch("diagonal", "x");
+    let other = branch("cumsum", "y");
+    let (preamble, param, selection, actual) = match form {
+        "if" => (
+            "",
+            "flag: bool",
+            format!("if flag then {first} else {other}"),
+            (!second).to_string(),
+        ),
+        "option" => (
+            "",
+            "flag: Option[bool]",
+            format!("match flag with {{\n | Some(value) => {first}\n | None => {other}\n}}"),
+            if second { "None" } else { "Some(true)" }.into(),
+        ),
+        "adt" => (
+            "type Choice = | First | Second\n",
+            "flag: Choice",
+            format!("match flag with {{\n | First => {first}\n | Second => {other}\n}}"),
+            if second { "Second" } else { "First" }.into(),
+        ),
+        "default" => (
+            "type Choice = | First | Second\n",
+            "flag: Choice",
+            format!("match flag with {{\n | First => {first}\n | _ => {other}\n}}"),
+            if second { "Second" } else { "First" }.into(),
+        ),
+        _ => panic!("unknown branch fixture"),
+    };
+    let selected = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
+    let (x, y) = if second {
+        (TWO_BY_FOUR, selected)
+    } else {
+        (selected, TWO_BY_FOUR)
+    };
+    format!(
+        "{preamble}def d(x: tensor[n, 4, f32], y: tensor[m, 4, f32], {param}) -> tensor[3, f32] ! {{ IO }} = {{\n result = {selection}\n alias = result\n _ = print(\"outer-after\")\n alias\n}}\nout = d(to_tensor({x}), to_tensor({y}), {actual})\n"
+    )
+}
+
+fn canonical_fixture(dir: &TempDir, source: &str) -> String {
+    let input = dir.path().join("fixture.ch");
+    fs::write(&input, source).expect("write fixture");
+    let formatted = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .arg("fmt")
+        .arg(input)
+        .output()
+        .expect("format fixture");
+    assert!(formatted.status.success(), "{formatted:?}");
+    String::from_utf8(formatted.stdout).expect("formatted fixture")
+}
+
+fn assert_selected_branch(form: &str, c_lane: bool) {
+    if c_lane && !gcc_available() {
+        return;
+    }
+    for second in [false, true] {
+        for agrees in [false, true] {
+            let dir = tempdir().expect("tempdir");
+            let source = canonical_fixture(&dir, &selected_branch_root(form, second, agrees));
+            check_scores_one(&dir, "selected", &source);
+            let (ok, output) = if c_lane {
+                build_link_run(&dir, "selected", &source)
+            } else {
+                let (ok, stdout, stderr) = eval_source(&dir, "selected", &source);
+                (ok, format!("{stdout}{stderr}"))
+            };
+            let (op, untaken) = if second {
+                ("cumsum", "diagonal")
+            } else {
+                ("diagonal", "cumsum")
+            };
+            assert_eq!(ok, agrees, "{source}\n{output}");
+            assert!(output.contains(&format!("{op}-before")), "{output}");
+            assert_eq!(output.contains(&format!("{op}-after")), agrees, "{output}");
+            assert_eq!(output.contains("outer-after"), agrees, "{output}");
+            assert!(!output.contains(&format!("{untaken}-before")), "{output}");
+            if agrees {
+                assert!(
+                    output.contains(if second {
+                        "shape=[3], data=[1.0, 7.0, 18.0]"
+                    } else {
+                        "shape=[3], data=[1.0, 6.0, 11.0]"
+                    }),
+                    "{output}"
+                );
+                assert!(!output.contains("numeric trap:"), "{output}");
+            } else {
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+                    "{output}"
+                );
+                assert!(
+                    output.contains(&format!("extent `3`: claimed = 3, {op} axis 0 = 2")),
+                    "{output}"
+                );
+                assert!(!output.contains("shape=["), "{output}");
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_selected_if_result_claims() {
+    assert_selected_branch("if", false);
+}
+
+#[test]
+fn c_selected_if_result_claims() {
+    assert_selected_branch("if", true);
+}
+
+#[test]
+fn eval_selected_match_result_claims() {
+    for form in ["option", "adt", "default"] {
+        assert_selected_branch(form, false);
+    }
+}
+
+#[test]
+fn c_selected_match_result_claims() {
+    for form in ["option", "adt", "default"] {
+        assert_selected_branch(form, true);
+    }
+}
+
+fn assert_shared_callee_claims(c_lane: bool) {
+    if c_lane && !gcc_available() {
+        return;
+    }
+    for agrees in [false, true] {
+        let dir = tempdir().expect("tempdir");
+        let last = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
+        let source = format!(
+            "def inner(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n _ = print(\"inside-before\")\n z = diagonal(x, 0, 1)\n _ = print(\"inside-after\")\n z\n}}\ndef middle(x: tensor[n, 4, f32]) -> tensor[k, f32] ! {{ IO }} = {{\n y = inner(x)\n _ = print(\"middle-after\")\n y\n}}\ndef two(x: tensor[n, 4, f32]) -> tensor[2, f32] ! {{ IO }} = middle(x)\ndef three(x: tensor[n, 4, f32]) -> tensor[3, f32] ! {{ IO }} = middle(x)\na = two(to_tensor({TWO_BY_FOUR}))\nb = three(to_tensor({THREE_BY_FOUR}))\nc = three(to_tensor({last}))\n"
+        );
+        let source = canonical_fixture(&dir, &source);
+        check_scores_one(&dir, "shared", &source);
+        let (ok, output) = if c_lane {
+            build_link_run(&dir, "shared", &source)
+        } else {
+            let (ok, stdout, stderr) = eval_source(&dir, "shared", &source);
+            (ok, format!("{stdout}{stderr}"))
+        };
+        assert_eq!(ok, agrees, "{source}\n{output}");
+        assert_eq!(output.matches("inside-before").count(), 3, "{output}");
+        assert_eq!(
+            output.matches("inside-after").count(),
+            if agrees { 3 } else { 2 },
+            "{output}"
+        );
+        assert_eq!(
+            output.matches("middle-after").count(),
+            if agrees { 3 } else { 2 },
+            "{output}"
+        );
+        if agrees {
+            assert_eq!(
+                output.matches("shape=[2], data=[1.0, 6.0]").count(),
+                1,
+                "{output}"
+            );
+            assert_eq!(
+                output.matches("shape=[3], data=[1.0, 6.0, 11.0]").count(),
+                2,
+                "{output}"
+            );
+        } else {
+            assert_bound_trap(&output, 3, 0, 2, if c_lane { "C" } else { "eval" });
+        }
+    }
+}
+
+#[test]
+fn eval_shared_callee_result_claims_are_invocation_scoped() {
+    assert_shared_callee_claims(false);
+}
+
+#[test]
+fn c_shared_callee_result_claims_are_invocation_scoped() {
+    assert_shared_callee_claims(true);
 }
 
 /// REGRESSION TEST, C lane. The same program built to C, linked and run must
@@ -845,40 +1012,76 @@ fn emitted_shape_guard_blocks(c_source: &str) -> Vec<EmittedShapeGuard<'_>> {
     found
 }
 
-/// Every emitted declared-result guard, as
-/// `(enclosing function, guarded variable, axis, required extent)`.
-/// Read the shipped comparison and its result diagnostic together: literal
-/// signature entries also compare shapes with literals, while a moved result
-/// guard may target a let temporary rather than `__result`.
+/// Host result frames with an executable producer check or forwarded call.
 fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
     let mut found = Vec::new();
-    for guard in emitted_shape_guard_blocks(c_source) {
-        if !guard.diagnostic.starts_with("fprintf(stderr, \"extent `")
-            || !guard.diagnostic.contains("`: claimed = ")
+    let mut enclosing: Option<String> = None;
+    let mut axes = Vec::<(String, String)>::new();
+    let mut reading_axes = false;
+    for line in c_source.lines() {
+        if let Some(head) = line.split("__chelis_owned_body(").next()
+            && line.contains("__chelis_owned_body(")
+            && line.trim_end().ends_with('{')
         {
+            enclosing = Some(
+                head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("<none>")
+                    .to_string(),
+            );
+            axes.clear();
+            reading_axes = false;
             continue;
         }
-        let Some(rest) = guard.condition.strip_prefix("if (chelis_tensor_shape(") else {
-            continue;
-        };
-        let Some((target, rest)) = rest.split_once(", ") else {
-            continue;
-        };
-        let Some((axis, tail)) = rest.split_once(") != ") else {
-            continue;
-        };
-        let Some(required) = tail.split(')').next() else {
-            continue;
-        };
-        if required.trim().parse::<i64>().is_err() {
+        if line == "}" {
+            enclosing = None;
             continue;
         }
-        found.push((
-            guard.function,
-            target.to_string(),
-            axis.to_string(),
-            required.trim().to_string(),
-        ));
+        let Some(function) = enclosing.as_ref() else {
+            continue;
+        };
+        let line = line.trim();
+        if line == "const int64_t __chelis_result_axes[][2] = {" {
+            reading_axes = true;
+            continue;
+        }
+        if reading_axes {
+            if line == "};" {
+                reading_axes = false;
+            } else {
+                let row = line
+                    .strip_prefix("{ ")
+                    .and_then(|s| s.strip_suffix(" },"))
+                    .expect("a declared-result row has two literal integers");
+                let (axis, required) = row.split_once(", ").expect("axis and requirement");
+                axis.parse::<usize>().expect("literal axis");
+                required.parse::<usize>().expect("literal requirement");
+                axes.push((axis.to_string(), required.to_string()));
+            }
+            continue;
+        }
+        // Local checks and forwarded call obligations are both executable
+        // uses of this declaration's frame. A dormant context parameter, or a
+        // DAG helper's independent guard, supplies no declaration evidence.
+        let target = line
+            .strip_prefix("__chelis_check_host_result_claims(__chelis_result_claims, ")
+            .and_then(|rest| rest.split_once(", ").map(|(target, _)| target))
+            .or_else(|| {
+                line.ends_with(", __chelis_result_claims);")
+                    .then(|| line.split_once(" = "))
+                    .flatten()
+                    .and_then(|(lhs, _)| lhs.split_whitespace().last())
+            });
+        if let Some(target) = target {
+            for (axis, required) in &axes {
+                found.push((
+                    function.clone(),
+                    target.to_string(),
+                    axis.clone(),
+                    required.clone(),
+                ));
+            }
+        }
     }
     found
 }
@@ -1387,30 +1590,30 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
         target, "__result",
         "a block-bodied return guards the producing binding, not the return boundary"
     );
+
+    let call_path = dir.path().join("call_witness.ch");
+    fs::write(&call_path, call_bodied_root(3, TWO_BY_FOUR)).expect("write call fixture");
+    let call_source = emit_c(
+        call_path.to_str().expect("UTF-8 path"),
+        &dir.path().join("call-witness-out"),
+    );
+    assert_eq!(
+        emitted_guards(&call_source),
+        vec![("d".into(), "__result".into(), "0".into(), "3".into())],
+        "the caller's declaration remains visible when its frame is forwarded"
+    );
+    let no_forwarding = call_source.replace(", __chelis_result_claims);", ", NULL);");
+    assert!(
+        emitted_guards(&no_forwarding).is_empty(),
+        "an unused frame declaration must not certify a forwarded guard"
+    );
 }
 
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
-/// capability refusals are asserted; every successfully emitted host-lane
-/// declared-result guard is collected. The guard fires only where a host-lane
-/// function's returned value resolves to a named primitive AND its declared
-/// tensor result carries a literal extent, which no shipped example does today,
-/// so this change adds no result guard to the corpus and surfaces no pre-existing
-/// declaration divergence. chelis#1771 widened the resolution through block
-/// tails, bindings and callees and this census stayed empty, which is the
-/// measured blast radius of that widening on the shipped corpus.
+/// capability refusals are asserted; local and forwarded declared-result
+/// obligations are read back from the generated program. No shipped example
+/// currently adds one of these host-owned literal result checks.
 ///
-/// A function the checker already proved statically (two literal selected axes)
-/// still gets a compare it cannot fail. That is kept rather than special-cased:
-/// the guard reads the declared ABI type, and teaching it which declarations the
-/// checker had already settled would make it depend on checker state the ABI
-/// does not carry.
-///
-/// `examples/illustrative/` is excluded by the repository's example-corpus
-/// policy: it is deliberately not on the executable Phase 0 path.
-///
-/// If a future example gains a result guard this test goes red with its name, which is
-/// the point. Add the row here after checking, on both lanes, that the
-/// declaration the guard now enforces is the one the body really produces.
 /// Entry guards have a different contract: compare their emitted conditions
 /// and labels with an independent parameter-axis traversal of checked source
 /// signatures, including functions where the reader finds no guards. Existing

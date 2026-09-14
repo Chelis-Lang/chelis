@@ -1446,6 +1446,19 @@ and project already discharged helper guards. The structural scan finds no new
 representation seam; the universe contains 86 sources (75 Rust and eleven
 C/C++/Objective-C), with no foundation or mutation change.
 
+Invocation-local literal result claims extend the Phase 0 foundation with two
+`load-store-template` owners in `chelis-backend-c/src/host_emit.rs`:
+`HostResultClaim::frame_lines` emits the immutable axis/extent pairs and private
+frame, and `append_host_result_claim_support` reads those pairs at the selected
+producer. These are host metadata templates, with no tensor element access or
+public ABI change. Both retain Phase 4 as their deletion owner. The amendment
+preserves every prior foundation identity, classifier rule, source-universe
+rule and frozen mutation. The existing load-store-template mutation must still
+reject an additional unregistered template; the selected-result eval/C corpus
+checks that the admitted frames execute at the producer with the required
+primitive attribution and effect order. No dtype, width or numbered semantic
+contract changes.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

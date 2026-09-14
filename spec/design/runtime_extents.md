@@ -1,7 +1,7 @@
 # Runtime Extents: values, claims, and their witnesses
 
 **Status:** IN PROGRESS. Slice A and Slice B's mechanisms have landed, and
-every row of the oracle's recorded phase-A and phase-B corpus is at an exit
+every non-deferred row of the recorded phase-A and phase-B corpus is at an exit
 state: `runtime_extent_oracle.py --phase final` passes on the host lanes, with
 the HIP and Metal hardware receipts still owed separately at the same head and
 corpus digest. Slice C is withdrawn: `expand` broadcasts a singleton axis and
@@ -373,29 +373,36 @@ representation of the same obligation, not distinct trapping operations.
 
 ##### Host declared-result guards (#1771)
 
-The DECLARED-RESULT guard compares a declared literal result extent against
-the tensor the function produced. Its `<op>` slot resolves through a block
-tail, a let binding and a callee body, because [04-NUM-9] requires the lowered
-primitive name and forbids renaming it to the composed source operation. Its
-POSITION is the producing expression inside the guarded function's own body,
-which is what section 4.7 asks for: an effect bound after that expression is
-observed only when the guard passes.
+A declared literal result creates an obligation independently of whether its
+return expression names one producer. The obligation retains the declaring
+result and its ordered literal axes. Producer attribution is selected when
+the producing expression executes: [04-NUM-9] requires that primitive's name,
+not the enclosing user function's name. Lexical aliases retain their defining
+scope; an `if` or `match` forwards the obligation only into its selected arm.
+An untaken arm neither evaluates its producer nor checks its obligation.
 
-Across a function BOUNDARY it is not what section 4.7 asks for. The guard sits
-at the CALL, so a callee's own effects after the producing operation are
-observed first. Threading a caller's claim into a callee is unbounded on the C
-lane, where a callee is emitted once as a shared function and two callers with
-different declared literals would need two specializations of it; the two lanes
-have to agree on placement, so the interpreter must not thread it either.
-Closing this needs a decision about how a declared-result obligation crosses a
-function boundary at all, which is #1945. The divergence is measured on both
-lanes and locked rather than assumed.
+The implementation selected for #1771/#1945 carries inherited obligations
+through the private owned-function calling interface. A shared callee has one
+body and receives its caller's obligations per invocation, alongside its own
+declared-result obligations. Published wrappers start without inherited
+obligations; no public ABI parameter or per-literal specialization is needed.
+The evaluator carries the same invocation-local information. Argument
+evaluation does not inherit a claim on the call's result, and one invocation's
+claims must not leak into a later invocation.
 
-Two shapes name no single producer and
-emit nothing: a branchy tail, whose branches each have their own primitive,
-and a lowered tensor helper, whose DAG carries the literal-result claim
-already. A NAMED declared result is unguarded on this lane in every form,
-because the guard reads a literal declared extent only; that is #1900.
+The selected producer consumes the applicable obligations before effects that
+follow it in source order. Distinct declarations remain distinct obligations;
+forwarding the same obligation twice does not create another check. A helper's
+existing DAG guard owns only the obligation it actually represents, not every
+claim reaching a call that happens to use that helper. Entry guards retain
+their separate position before body execution. The acceptance receipts must
+check branch selection, primitive attribution, lexical shadowing, effects on
+both sides of the producer, and different callers of one shared callee on Eval
+and compiled C. These receipts cover host-builtin producing expressions. An inherited claim
+ending in a lowered tensor helper still needs distinct producer-site transport;
+the helper's existing local claim is not evidence for that inherited claim.
+The receipts do not establish general preallocation coverage for every host
+primitive. Named host declared-result claims remain #1900.
 
 ##### Host entry guards (#1788)
 
@@ -921,10 +928,10 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The phase-B corpus contains 162 rows. Completion requires `--phase b` to
+The phase-B corpus contains 170 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 35 non-`executes_exactly` values against 127
+column contains 35 non-`executes_exactly` values against 135
 `executes_exactly`; the dispositions below account for the thirty-five. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:
@@ -1062,7 +1069,7 @@ the marker, so both lanes refused a program that checks at 1.0. The repair
 reads the same fact the tensor-helper extractor reads. The partition's
 exactly-one check is unchanged: it is what caught this.
 
-What a passing `--phase final` claims is exactly this: every row of the two
+What a passing `--phase final` claims is exactly this: every non-deferred row of the two
 recorded corpora is at an exit state, every named receipt executed and passed
 at one clean exact head, and both baselines match their generated corpora. It
 claims nothing about the rows those corpora do not contain, and the class's

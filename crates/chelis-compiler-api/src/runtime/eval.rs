@@ -22,12 +22,6 @@ use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
-/// How far the declared-result producer walk follows let chains and callee
-/// bodies before giving up. A mutually recursive pair of defs would otherwise
-/// walk forever. A body that needs a deeper walk names no producing primitive,
-/// so it emits no guard and stays a residual.
-const RESULT_PRODUCER_DEPTH: usize = 32;
-
 thread_local! {
     /// Counts how many times an [`EvalContext`] cloned the whole program's
     /// top-level defs to classify an execution profile (chelis#2059). The
@@ -109,8 +103,8 @@ fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
 }
 
 /// chelis#1739 and chelis#1771. A host function's declared literal result
-/// extents, and the canonical name of the primitive whose value has to satisfy
-/// them.
+/// extents. Attribution belongs to the selected producing expression, not to
+/// the declaration: two branches may produce the result with different ops.
 ///
 /// `diagonal` and the rest of `HOST_ONLY_BUILTINS` never become a `RiscOp`, so
 /// `expr_is_dag_lowerable` is false for a def that calls one and the DAG lane's
@@ -118,6 +112,7 @@ fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
 /// them. Without this, `def d(x: tensor[n, 4, f32]) -> tensor[3, f32] =
 /// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
 /// three-element declaration, on both lanes and with no diagnostic.
+#[derive(Clone)]
 struct DeclaredResultClaim {
     /// Declared rank. A rank disagreement is NOT this guard's business: the
     /// checker owns rank, and reporting it here would duplicate a verdict with
@@ -125,20 +120,16 @@ struct DeclaredResultClaim {
     rank: usize,
     /// `(axis, required)` for every literal declared dimension.
     axes: Vec<(usize, i64)>,
-    /// `[04-NUM-9]`'s `<op>` slot: the canonical name of the primitive that
-    /// produced the returned value.
-    op: String,
 }
 
 impl DeclaredResultClaim {
-    fn verdict(&self, produced: &RuntimeValue) -> Result<(), String> {
+    fn verdict(&self, produced: &RuntimeValue, op: &str) -> Result<(), String> {
         let RuntimeValue::Tensor(tensor) = produced else {
             return Ok(());
         };
         if tensor.value.shape.len() != self.rank {
             return Ok(());
         }
-        let op = &self.op;
         for &(axis, required) in &self.axes {
             let observed = tensor.value.shape[axis];
             if required < 0 || required as usize != observed {
@@ -1377,6 +1368,14 @@ impl<'a> EvalContext<'a> {
     }
 
     fn eval_app(&mut self, list: &List) -> Result<RuntimeValue, String> {
+        self.eval_app_under_result_claim(list, &[])
+    }
+
+    fn eval_app_under_result_claim(
+        &mut self,
+        list: &List,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
         let kids = children(list);
         let func = kids
             .first()
@@ -1530,7 +1529,12 @@ impl<'a> EvalContext<'a> {
         }
 
         if let Some(name) = self.active_builtin_name(func) {
-            return self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
+            let value =
+                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
+            for claim in claims {
+                claim.verdict(&value, name)?;
+            }
+            return Ok(value);
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -1579,94 +1583,43 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
-        self.apply_resolved_callable_with_arg_types(
+        self.apply_resolved_callable_under_result_claim(
             callable,
             args,
             &arg_type_exprs,
             result_type_expr.as_ref(),
+            claims,
         )
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
         let kids = children(list);
-        let cond = self.eval_expr(kids.first().ok_or_else(|| "if missing cond".to_string())?)?;
+        let cond =
+            self.eval_if_condition(kids.first().ok_or_else(|| "if missing cond".to_string())?)?;
         match cond {
-            RuntimeValue::Bool(true) => self.eval_expr(
+            true => self.eval_expr(
                 kids.get(1)
                     .ok_or_else(|| "if missing then branch".to_string())?,
             ),
-            RuntimeValue::Bool(false) => self.eval_expr(
+            false => self.eval_expr(
                 kids.get(2)
                     .ok_or_else(|| "if missing else branch".to_string())?,
             ),
+        }
+    }
+
+    fn eval_if_condition(&mut self, condition: &Expr) -> Result<bool, String> {
+        match self.eval_expr(condition)? {
+            RuntimeValue::Bool(condition) => Ok(condition),
             other => Err(format!("if condition must be bool, got {other:?}")),
         }
     }
 
-    /// The canonical primitive name that produces `expr`'s value, resolving
-    /// through block tails, let bindings and callee bodies (chelis#1771).
-    ///
-    /// `[04-NUM-9]` requires the LOWERED primitive name and forbids renaming it
-    /// to the composed source operation, so a block, a binding and a user call
-    /// are all transparent here: the name is `diagonal` whether the return
-    /// expression applies it directly, reaches it through
-    /// `{ y = diagonal(...) ; y }`, or reaches it through `inner(x)`.
-    ///
-    /// A branchy tail (`if`, `match`) names no single primitive and is
-    /// deliberately `None`: it emits no guard and stays a residual rather than
-    /// picking one branch's name for the other's value.
-    fn result_producer_op(&self, expr: &Expr, depth: usize) -> Option<String> {
-        if depth == 0 {
-            return None;
-        }
-        let (expr_tag, kids) = tagged_expr_children(expr)?;
-        match expr_tag {
-            DeepTag::Let => {
-                let bind_list = kids.first()?;
-                let body = kids.get(1)?;
-                match let_result_binding_index(bind_list, body) {
-                    Some(index) => {
-                        let (_, bind_kids) = tagged_expr_children(bind_list)?;
-                        self.result_producer_op(bind_kids.get(index + 1)?, depth - 1)
-                    }
-                    None => self.result_producer_op(body, depth - 1),
-                }
-            }
-            DeepTag::Block => self.result_producer_op(kids.last()?, depth - 1),
-            DeepTag::App => {
-                let head = kids.first()?;
-                if let Some(name) = builtin_name(head) {
-                    return Some(name.to_string());
-                }
-                let callee = var_name(head)?;
-                // A local binding wins, exactly as `eval_var` resolves one. A
-                // sibling top-level def is NOT in the closure's captured
-                // environment, so the static walk reads its DEFINITION rather
-                // than requiring a callable value to already exist.
-                if let Some(RuntimeValue::Closure { body, .. }) = self.bindings.get(callee) {
-                    return self.result_producer_op(body, depth - 1);
-                }
-                let (_, definition) = self.lookup_top_level_def(callee)?;
-                let (DeepTag::Fn, fn_kids) = tagged_expr_children(&definition)? else {
-                    return None;
-                };
-                self.result_producer_op(fn_kids.last()?, depth - 1)
-            }
-            _ => None,
-        }
-    }
-
-    /// The declared-result claim a host function owes a runtime verdict on, or
-    /// `None` when the declaration carries no literal extent or the producing
-    /// primitive cannot be named.
-    fn declared_result_claim(
-        &self,
-        declared: Option<&Expr>,
-        body: &Expr,
-    ) -> Option<DeclaredResultClaim> {
+    /// One declaration contributes one invocation-local obligation. A producer
+    /// need not be known until the returned branch or callee actually executes.
+    fn declared_result_claim(declared: Option<&Expr>) -> Option<DeclaredResultClaim> {
         let (rank, axes) = declared_literal_result_extents(declared)?;
-        let op = self.result_producer_op(body, RESULT_PRODUCER_DEPTH)?;
-        Some(DeclaredResultClaim { rank, axes, op })
+        Some(DeclaredResultClaim { rank, axes })
     }
 
     /// Evaluate a host function's body and discharge its declared-result claim
@@ -1678,44 +1631,63 @@ impl<'a> EvalContext<'a> {
     fn eval_under_result_claim(
         &mut self,
         expr: &Expr,
-        claim: &DeclaredResultClaim,
+        claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        if claims.is_empty() {
+            return self.eval_expr(expr);
+        }
+        // The ordinary evaluator bridges typed nodes through the same list
+        // dispatch. Preserve that route instead of making a second AST walk.
+        if let Expr::Node(node, span) = expr {
+            return self.eval_under_result_claim(&Expr::List(node.to_list(*span), *span), claims);
+        }
         match tagged_expr_children(expr) {
             Some((DeepTag::Block, kids)) => {
                 if let Some((last, init)) = kids.split_last() {
                     for child in init {
                         self.eval_expr(child)?;
                     }
-                    return self.eval_under_result_claim(last, claim);
+                    return self.eval_under_result_claim(last, claims);
                 }
             }
             Some((DeepTag::Let, _)) => {
                 if let Some(list) = as_list(expr) {
-                    return self.eval_let_under_result_claim(list, claim);
+                    return self.eval_let_under_result_claim(list, claims);
                 }
-                if let Expr::Node(node, span) = expr {
-                    let bridged = node.to_list(*span);
-                    return self.eval_let_under_result_claim(&bridged, claim);
+            }
+            Some((DeepTag::If, kids)) => {
+                let condition = self.eval_if_condition(kids.first().ok_or("if missing cond")?)?;
+                let selected = match condition {
+                    true => kids.get(1).ok_or("if missing then branch")?,
+                    false => kids.get(2).ok_or("if missing else branch")?,
+                };
+                return self.eval_under_result_claim(selected, claims);
+            }
+            Some((DeepTag::Match, _)) => {
+                if let Some(list) = as_list(expr) {
+                    return self.eval_match_under_result_claim(list, claims);
+                }
+            }
+            Some((DeepTag::App, _)) => {
+                if let Some(list) = as_list(expr) {
+                    return self.eval_app_under_result_claim(list, claims);
                 }
             }
             _ => {}
         }
-        let value = self.eval_expr(expr)?;
-        claim.verdict(&value)?;
-        Ok(value)
+        self.eval_expr(expr)
     }
 
     /// [`Self::eval_let`], forwarding a declared-result claim to the binding
     /// whose value the let returns.
     ///
-    /// This walk and [`Self::result_producer_op`] must agree on which binding
-    /// that is, and they do: both route through
-    /// [`let_result_binding_index`], so the guard lands exactly where the
-    /// `<op>` name came from.
+    /// The lexical selector retains each alias's defining scope. A binding
+    /// initialized by a branch passes the obligations into that branch before
+    /// subsequent effects execute; other bindings never inherit them.
     fn eval_let_under_result_claim(
         &mut self,
         list: &List,
-        claim: &DeclaredResultClaim,
+        claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
         let kids = children(list);
         let (Some(bind_list_expr), Some(body)) = (kids.first(), kids.get(1)) else {
@@ -1740,7 +1712,7 @@ impl<'a> EvalContext<'a> {
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
                 let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
                 let value = if guarded == Some(index) {
-                    self.eval_under_result_claim(&bind_kids[index + 1], claim)?
+                    self.eval_under_result_claim(&bind_kids[index + 1], claims)?
                 } else {
                     self.eval_expr(&bind_kids[index + 1])?
                 };
@@ -1751,7 +1723,7 @@ impl<'a> EvalContext<'a> {
             if guarded.is_some() {
                 self.eval_expr(body)
             } else {
-                self.eval_under_result_claim(body, claim)
+                self.eval_under_result_claim(body, claims)
             }
         })();
         self.bindings = saved;
@@ -1825,6 +1797,14 @@ impl<'a> EvalContext<'a> {
     }
 
     fn eval_match(&mut self, list: &List) -> Result<RuntimeValue, String> {
+        self.eval_match_under_result_claim(list, &[])
+    }
+
+    fn eval_match_under_result_claim(
+        &mut self,
+        list: &List,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
         let kids = children(list);
         let scrutinee = self.eval_expr(
             kids.first()
@@ -1857,7 +1837,7 @@ impl<'a> EvalContext<'a> {
                         self.binding_types.insert(name.clone(), None);
                     }
                 }
-                let value = self.eval_expr(&arm_kids[2]);
+                let value = self.eval_under_result_claim(&arm_kids[2], claims);
                 self.bindings = saved;
                 self.binding_types = saved_types;
                 return value;
@@ -1888,6 +1868,23 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
+        self.apply_resolved_callable_under_result_claim(
+            callable,
+            args,
+            arg_type_exprs,
+            result_type_expr,
+            &[],
+        )
+    }
+
+    fn apply_resolved_callable_under_result_claim(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+        claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
         let saved_exclusion = self.execution_exclusion;
         if let RuntimeValue::Closure { body, params, .. } = &callable {
             self.admit_execution_profile(body, params);
@@ -1897,6 +1894,7 @@ impl<'a> EvalContext<'a> {
             args,
             arg_type_exprs,
             result_type_expr,
+            claims,
         );
         self.execution_exclusion = saved_exclusion;
         result
@@ -1908,6 +1906,7 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
+        inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
@@ -2175,10 +2174,13 @@ impl<'a> EvalContext<'a> {
                         .and_then(checked_function_children)
                         .and_then(<[Expr]>::last)
                         .or(return_type.as_ref());
-                    match self.declared_result_claim(declared_result, &body) {
-                        Some(claim) => self.eval_under_result_claim(&body, &claim),
-                        None => self.eval_expr(&body),
-                    }
+                    // Frames retain distinct declarations even when the literal
+                    // values agree. Forwarding a frame does not append it again.
+                    let mut claims = Self::declared_result_claim(declared_result)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    claims.extend_from_slice(inherited_claims);
+                    self.eval_under_result_claim(&body, &claims)
                 })();
                 self.bindings = saved;
                 self.binding_types = saved_types;
