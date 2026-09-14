@@ -485,6 +485,7 @@
         "no_environment_variable_disables_the_named_claim_guard",
         "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
         "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+        "scalar_gradient_roots_keep_target_order_and_public_leaf_types",
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
         "the_applied_spelling_of_the_same_expand_is_unchanged",

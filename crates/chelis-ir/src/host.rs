@@ -9639,25 +9639,25 @@ fn try_lower_scalar_grad_app(
 }
 
 #[derive(Clone)]
-enum ListGradPackPlan {
+enum GradPackPlan {
     Leaf(HostTypeTerm),
     Unit,
     List {
         ty: HostTypeTerm,
-        items: Vec<ListGradPackPlan>,
+        items: Vec<GradPackPlan>,
     },
     Tuple {
         ty: HostTypeTerm,
-        items: Vec<ListGradPackPlan>,
+        items: Vec<GradPackPlan>,
     },
     Adt {
         ty: HostTypeTerm,
         ctor: String,
-        items: Vec<ListGradPackPlan>,
+        items: Vec<GradPackPlan>,
     },
 }
 
-impl ListGradPackPlan {
+impl GradPackPlan {
     fn host_type(&self) -> HostTypeTerm {
         match self {
             Self::Leaf(ty)
@@ -9688,9 +9688,12 @@ impl ListGradPackPlan {
         }
     }
 
-    fn is_structured(&self) -> bool {
+    fn needs_host_reconstruction(&self) -> bool {
         match self {
-            Self::List { .. } | Self::Tuple { .. } | Self::Adt { .. } => true,
+            Self::List { .. }
+            | Self::Tuple { .. }
+            | Self::Adt { .. }
+            | Self::Leaf(HostTypeTerm::Scalar(_)) => true,
             Self::Leaf(_) | Self::Unit => false,
         }
     }
@@ -9751,11 +9754,11 @@ fn resolve_list_grad_shape_expr(
     resolved
 }
 
-fn list_grad_pack_plan(
+fn grad_pack_plan(
     ty: &HostTypeTerm,
     actual: &Expr,
     program: &HostLoweringSession<'_>,
-) -> Option<ListGradPackPlan> {
+) -> Option<GradPackPlan> {
     if let HostTypeTerm::Adt(name, arguments) = ty
         && let Some((_, alias)) = program
             .adt_registry()
@@ -9779,7 +9782,7 @@ fn list_grad_pack_plan(
             .cloned()
             .zip(arguments.iter().cloned())
             .collect();
-        return list_grad_pack_plan(
+        return grad_pack_plan(
             &substitute_host_type_term(expanded, &substitutions),
             actual,
             program,
@@ -9790,9 +9793,9 @@ fn list_grad_pack_plan(
             let items = static_list_spine_items(actual)?;
             let items = items
                 .iter()
-                .map(|item| list_grad_pack_plan(element_ty, item, program))
+                .map(|item| grad_pack_plan(element_ty, item, program))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ListGradPackPlan::List {
+            Some(GradPackPlan::List {
                 ty: ty.clone(),
                 items,
             })
@@ -9807,10 +9810,10 @@ fn list_grad_pack_plan(
             let items = item_tys
                 .iter()
                 .zip(item_exprs)
-                .map(|(item_ty, item)| list_grad_pack_plan(item_ty, item, program))
+                .map(|(item_ty, item)| grad_pack_plan(item_ty, item, program))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ListGradPackPlan::Tuple {
-                ty: HostTypeTerm::Tuple(items.iter().map(ListGradPackPlan::host_type).collect()),
+            Some(GradPackPlan::Tuple {
+                ty: HostTypeTerm::Tuple(items.iter().map(GradPackPlan::host_type).collect()),
                 items,
             })
         }
@@ -9873,21 +9876,21 @@ fn list_grad_pack_plan(
                 .fields
                 .iter()
                 .zip(field_exprs)
-                .map(|(field, expr)| list_grad_pack_plan(&field.ty, expr, program))
+                .map(|(field, expr)| grad_pack_plan(&field.ty, expr, program))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ListGradPackPlan::Adt {
+            Some(GradPackPlan::Adt {
                 ty: ty.clone(),
                 ctor,
                 items,
             })
         }
         HostTypeTerm::Tensor(tensor) if tensor.precision.is_float() => {
-            Some(ListGradPackPlan::Leaf(ty.clone()))
+            Some(GradPackPlan::Leaf(ty.clone()))
         }
         HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) if precision.is_float() => {
-            Some(ListGradPackPlan::Leaf(ty.clone()))
+            Some(GradPackPlan::Leaf(ty.clone()))
         }
-        _ => Some(ListGradPackPlan::Unit),
+        _ => Some(GradPackPlan::Unit),
     }
 }
 
@@ -9913,17 +9916,13 @@ fn tensor_helper_root_expr(
     })
 }
 
-fn pack_list_grad_roots(
-    plan: &ListGradPackPlan,
-    roots: &mut impl Iterator<Item = HostExpr>,
-) -> HostExpr {
+fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExpr>) -> HostExpr {
     match plan {
-        ListGradPackPlan::Leaf(ty) => {
-            let root = roots.next().expect("List gradient root count was checked");
-            let Some(tensor_ty) = tensor_type_from_host_input(ty) else {
-                unreachable!("List gradient leaf type was checked")
-            };
-            if tensor_ty.dims.is_empty() {
+        GradPackPlan::Leaf(ty) => {
+            let root = roots.next().expect("gradient root count was checked");
+            // A primitive cotangent crosses the existing tensor-to-scalar
+            // boundary. Rank-zero tensor cotangents keep their tensor identity.
+            if matches!(ty, HostTypeTerm::Scalar(_)) {
                 HostExpr::new(HostExprKind::Builtin {
                     name: "tensor_to_scalar".to_string(),
                     args: vec![root],
@@ -9933,36 +9932,37 @@ fn pack_list_grad_roots(
                 force_host_expr_type(root, ty.clone())
             }
         }
-        ListGradPackPlan::Unit => HostExpr::new(HostExprKind::Unit),
-        ListGradPackPlan::List { ty, items } => HostExpr::new(HostExprKind::List(
+        GradPackPlan::Unit => HostExpr::new(HostExprKind::Unit),
+        GradPackPlan::List { ty, items } => HostExpr::new(HostExprKind::List(
             items
                 .iter()
-                .map(|item| pack_list_grad_roots(item, roots))
+                .map(|item| pack_grad_roots(item, roots))
                 .collect(),
             ty.clone(),
         )),
-        ListGradPackPlan::Tuple { ty, items } => HostExpr::new(HostExprKind::Tuple(
+        GradPackPlan::Tuple { ty, items } => HostExpr::new(HostExprKind::Tuple(
             items
                 .iter()
-                .map(|item| pack_list_grad_roots(item, roots))
+                .map(|item| pack_grad_roots(item, roots))
                 .collect(),
             ty.clone(),
         )),
-        ListGradPackPlan::Adt { ty, ctor, items } => HostExpr::new(HostExprKind::AdtConstruct {
+        GradPackPlan::Adt { ty, ctor, items } => HostExpr::new(HostExprKind::AdtConstruct {
             ctor: ctor.clone(),
             fields: items
                 .iter()
-                .map(|item| pack_list_grad_roots(item, roots))
+                .map(|item| pack_grad_roots(item, roots))
                 .collect(),
             ty: ty.clone(),
         }),
     }
 }
 
-/// Own public reconstruction for finite recursive List/tuple/ADT cotangents.
-/// The IR stages each structure as typed leaves plus runtime List controls,
-/// emits one reverse DAG, and appends private check roots. This host step only
-/// projects those roots back into the checked recursive result type.
+/// Reconstruct primitive and finite recursive cotangents from one reverse DAG.
+/// The IR stages each target as typed leaves plus runtime List controls and
+/// retains the forward activation as a dependency of its cotangents. This host
+/// step projects those roots into the checked public result type, preserving
+/// primitive scalars, rank-zero tensors and recursive structures distinctly.
 fn try_lower_general_list_grad_app(
     app_expr: &Expr,
     list: &List,
@@ -9983,6 +9983,18 @@ fn try_lower_general_list_grad_app(
     let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
         return Ok(None);
     };
+    // Keep recursive pure-scalar callables at the existing scalar host
+    // boundary. Entering the tensor DAG for that previously rejected surface
+    // would replace its bounded scalar refusal with an inlining diagnostic.
+    // This applicability decision precedes lowering: entered extent failures
+    // and other deliberate DAG diagnostics still propagate without fallback.
+    let pure_scalar_callable =
+        lookup_declared_fn_type(program, fn_name).is_some_and(|(parameters, result)| {
+            parameters.iter().all(is_dual_scalar_type) && is_dual_scalar_type(&result)
+        });
+    if pure_scalar_callable && top_level_fn_needs_host_lane_tensor_lowering(program, fn_name) {
+        return Ok(None);
+    }
     let Some(Expr::List(fn_list, _)) = lookup_program_def(&defs, fn_name) else {
         return Ok(None);
     };
@@ -10010,7 +10022,7 @@ fn try_lower_general_list_grad_app(
     );
 
     let mut rewritten_elements = list.elements.clone();
-    let mut selected_plans = Vec::new();
+    let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
         let Some(param_ty) = param_host_type(param) else {
             return Ok(None);
@@ -10030,7 +10042,7 @@ fn try_lower_general_list_grad_app(
         if wrt_names.contains(&param_names[param_index]) {
             let shape_actual =
                 resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref());
-            let Some(plan) = list_grad_pack_plan(&param_ty, &shape_actual, program) else {
+            let Some(plan) = grad_pack_plan(&param_ty, &shape_actual, program) else {
                 return Ok(None);
             };
             rewritten_actual = shape_actual;
@@ -10041,11 +10053,34 @@ fn try_lower_general_list_grad_app(
             // `List[f32]`) because its checked element type still defines a
             // differentiable, shape-preserving empty cotangent.
             if has_explicit_wrt || plan.leaf_count() != 0 {
-                selected_plans.push(plan);
+                parameter_plans.insert(param_names[param_index].clone(), plan);
             }
         }
     }
-    if !selected_plans.iter().any(ListGradPackPlan::is_structured) {
+    // The IR already orders complete cotangent groups by the written target
+    // list. Reconstruct in that same order, including repeated selectors;
+    // argument rewriting above still visits each primal exactly once.
+    let mut selected_plans = Vec::with_capacity(wrt_names.len());
+    for name in &wrt_names {
+        if let Some(plan) = parameter_plans.get(name) {
+            selected_plans.push(plan.clone());
+        } else if has_explicit_wrt {
+            // Explicit names were validated against the parameters and each
+            // selected parameter must have a plan, even with zero leaves.
+            return Err(crate::lower::LowerDiagnostic::new(
+                format!("gradient target `{name}` has no result reconstruction plan"),
+                Some(app_expr.span()),
+                None,
+            )
+            .fatal());
+        }
+        // An implicit selection intentionally excludes nondifferentiable
+        // parameters, whose plans were omitted above.
+    }
+    if !selected_plans
+        .iter()
+        .any(GradPackPlan::needs_host_reconstruction)
+    {
         return Ok(None);
     }
 
@@ -10053,12 +10088,7 @@ fn try_lower_general_list_grad_app(
     let inferred_result_ty = if selected_plans.len() == 1 {
         selected_plans[0].host_type()
     } else {
-        HostTypeTerm::Tuple(
-            selected_plans
-                .iter()
-                .map(ListGradPackPlan::host_type)
-                .collect(),
-        )
+        HostTypeTerm::Tuple(selected_plans.iter().map(GradPackPlan::host_type).collect())
     };
     let result_ty = expected_ty
         .filter(|ty| !ty.is_unresolved())
@@ -10068,7 +10098,7 @@ fn try_lower_general_list_grad_app(
     let plan = if selected_plans.len() == 1 {
         selected_plans.pop().expect("one selected plan")
     } else {
-        ListGradPackPlan::Tuple {
+        GradPackPlan::Tuple {
             ty: result_ty.clone(),
             items: selected_plans,
         }
@@ -10109,16 +10139,16 @@ fn try_lower_general_list_grad_app(
     }
     if root_tys.is_empty() {
         let mut roots = std::iter::empty();
-        return Ok(Some(pack_list_grad_roots(&plan, &mut roots)));
+        return Ok(Some(pack_grad_roots(&plan, &mut roots)));
     }
 
     let helper_number = tensor_helpers.len();
     let call = finish_tensor_helper_call(lowered.dag, scope, tensor_helpers, expected);
-    let binding_name = format!("__list_grad_result_{helper_number}");
+    let binding_name = format!("__grad_result_{helper_number}");
     let binding_ty = host_expr_type(&call);
     let mut value_roots = (0..lowered.value_root_count)
         .map(|index| tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, index));
-    let mut body = pack_list_grad_roots(&plan, &mut value_roots);
+    let mut body = pack_grad_roots(&plan, &mut value_roots);
 
     let mut control_offset = lowered.value_root_count + expected_control_roots;
     for check in lowered.list_checks.iter().rev() {
