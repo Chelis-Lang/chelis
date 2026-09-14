@@ -501,10 +501,16 @@ class PlanningTests(unittest.TestCase):
             ]
         )
         self.assertEqual(plan["change_owned"], ["p::smoke"])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(
+            plan["shards"]["change_owned"],
+            owned.shard_map([]),
+        )
         self.assertIn("p::default_gated", plan["package_expansion"])
         self.assertNotIn("p::smoke", plan["package_expansion"])
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
+        self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
         owned.verify_plan_digest(plan)
 
     def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
@@ -698,10 +704,15 @@ class PlanningTests(unittest.TestCase):
 
     def test_plan_digest_detects_mutation(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs")])
-        mutated = copy.deepcopy(plan)
-        mutated["change_owned"] = []
-        with self.assertRaises(ValueError):
-            owned.verify_plan_digest(mutated)
+        for key, value in (
+            ("change_owned", []),
+            ("standing_coverage_reuse", []),
+            ("config_digest", "0" * 64),
+        ):
+            mutated = copy.deepcopy(plan)
+            mutated[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                owned.verify_plan_digest(mutated)
 
     def test_pr_candidate_requires_two_parents_and_exact_event_head(self) -> None:
         with mock.patch.object(owned, "git_output") as git_output:
@@ -898,11 +909,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
         lane_key = owned.LANE_KEYS[lane]
         identity = owned.Identity("p", "smoke")
         plan = {
-            "version": 1,
+            "version": owned.PLAN_VERSION,
             "mode": "push",
             "base_sha": "a" * 40,
             "candidate_sha": "b" * 40,
             "event_pr_head": None,
+            "config_digest": "c" * 64,
             "changed_records": [],
             "path_dispositions": [],
             "target_dispositions": [],
@@ -915,6 +927,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 [identity.canonical] if lane_key == "package_expansion" else []
             ),
             "standing_targets": [],
+            "standing_coverage_reuse": [],
             "manual_only_targets": [],
             "target_exclusions": [],
             "test_exclusions": [
@@ -1433,11 +1446,12 @@ class BoundedCommandTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.plan = {
-            "version": 1,
+            "version": owned.PLAN_VERSION,
             "mode": "push",
             "base_sha": "a" * 40,
             "candidate_sha": "b" * 40,
             "event_pr_head": None,
+            "config_digest": "c" * 64,
             "changed_records": [],
             "path_dispositions": [],
             "target_dispositions": [],
@@ -1445,7 +1459,8 @@ class ReportTests(unittest.TestCase):
             "eligible_targets": ["p::smoke", "q::smoke"],
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],
-            "standing_targets": [],
+            "standing_targets": ["p::smoke"],
+            "standing_coverage_reuse": ["p::smoke"],
             "manual_only_targets": [],
             "target_exclusions": [{"identity": "p::heavy", "owner": OWNER}],
             "test_exclusions": [
@@ -1453,12 +1468,28 @@ class ReportTests(unittest.TestCase):
             ],
             "shards": {
                 "change_owned": owned.shard_map(
-                    [owned.Identity("p", "smoke"), owned.Identity("q", "smoke")]
+                    [owned.Identity("q", "smoke")]
                 ),
                 "package_expansion": owned.shard_map([]),
             },
         }
         owned.attach_plan_digest(self.plan)
+
+    def standing_coverage(self) -> dict:
+        coverage = {
+            "version": 1,
+            "candidate_sha": self.plan["candidate_sha"],
+            "config_digest": self.plan["config_digest"],
+            "execution": dict(owned.STANDING_EXECUTION),
+            "selected_targets": ["p::smoke"],
+            "executed_targets": ["p::smoke"],
+            "selected_tests": ["p::smoke::fast_case"],
+            "executed_tests": ["p::smoke::fast_case"],
+            "success": True,
+            "failures": [],
+        }
+        owned.attach_standing_coverage_digest(coverage)
+        return coverage
 
     def receipts(self, *, surface: str = "change_owned") -> list[dict]:
         result = []
@@ -1500,24 +1531,35 @@ class ReportTests(unittest.TestCase):
 
     def assert_required_fails(self, mutate) -> None:
         receipts = self.receipts()
-        mutate(receipts)
+        coverage = self.standing_coverage()
+        mutate(receipts, coverage)
         with self.assertRaises(ValueError):
-            owned.validate_change_owned_report(self.plan, receipts)
+            owned.validate_change_owned_report(self.plan, receipts, coverage)
 
     def test_required_report_accepts_exact_four_shard_cover(self) -> None:
-        report = owned.validate_change_owned_report(self.plan, self.receipts())
+        report = owned.validate_change_owned_report(
+            self.plan,
+            self.receipts(),
+            self.standing_coverage(),
+        )
         self.assertTrue(report["success"])
         self.assertEqual(report["covered_targets"], sorted(self.plan["change_owned"]))
 
     def test_required_report_rejects_missing_digest_duplicate_uncovered_excluded_and_failure(self) -> None:
         mutations = [
-            lambda rows: rows.pop(),
-            lambda rows: rows[0].update(plan_digest="bad"),
-            lambda rows: rows.append(copy.deepcopy(rows[0])),
-            lambda rows: rows[0].update(executed_targets=[]),
-            lambda rows: rows[0]["executed_targets"].append("p::heavy"),
-            lambda rows: rows[0].update(success=False, failures=["command failed"]),
-            lambda rows: rows[0]["executed_tests"].append("p::smoke::slow_case"),
+            lambda rows, coverage: rows.pop(),
+            lambda rows, coverage: rows[0].update(plan_digest="bad"),
+            lambda rows, coverage: rows.append(copy.deepcopy(rows[0])),
+            lambda rows, coverage: next(
+                row for row in rows if row["selected_targets"]
+            ).update(executed_targets=[]),
+            lambda rows, coverage: rows[0]["executed_targets"].append("p::heavy"),
+            lambda rows, coverage: rows[0].update(
+                success=False, failures=["command failed"]
+            ),
+            lambda rows, coverage: rows[0]["executed_tests"].append(
+                "p::smoke::slow_case"
+            ),
         ]
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -1525,8 +1567,47 @@ class ReportTests(unittest.TestCase):
 
     def test_receipt_digest_mismatch_is_rejected(self) -> None:
         self.assert_required_fails(
-            lambda rows: rows[0]["selected_targets"].append("p::invented")
+            lambda rows, coverage: rows[0]["selected_targets"].append(
+                "p::invented"
+            )
         )
+
+    def test_required_report_rejects_missing_stale_or_incomplete_standing_coverage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "standing coverage"):
+            owned.validate_change_owned_report(self.plan, self.receipts(), None)
+        mutations = (
+            lambda coverage: coverage.update(candidate_sha="d" * 40),
+            lambda coverage: coverage.update(config_digest="d" * 64),
+            lambda coverage: coverage["execution"].update(profile="ci-full"),
+            lambda coverage: coverage.update(executed_targets=[]),
+            lambda coverage: coverage.update(executed_tests=[]),
+            lambda coverage: coverage.update(
+                success=False, failures=["tests failed"]
+            ),
+            lambda coverage: coverage["selected_tests"].append(
+                "p::smoke::missing_result"
+            ),
+        )
+        for mutate in mutations:
+            coverage = self.standing_coverage()
+            mutate(coverage)
+            owned.attach_standing_coverage_digest(coverage)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                owned.validate_change_owned_report(
+                    self.plan,
+                    self.receipts(),
+                    coverage,
+                )
+
+    def test_standing_coverage_digest_rejects_tampering(self) -> None:
+        coverage = self.standing_coverage()
+        coverage["executed_tests"] = []
+        with self.assertRaisesRegex(ValueError, "coverage digest mismatch"):
+            owned.validate_change_owned_report(
+                self.plan,
+                self.receipts(),
+                coverage,
+            )
 
     def test_informational_summary_records_failures_but_does_not_raise(self) -> None:
         self.plan["package_expansion"] = ["p::default_gated"]

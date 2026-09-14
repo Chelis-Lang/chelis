@@ -847,7 +847,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, integration-plan, change-owned-shard]
+    needs: [changes, ci-fast, integration-plan, change-owned-shard]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
@@ -863,6 +863,7 @@ jobs:
       - name: Require the planner and every change-owned shard
         run: >-
           python3 scripts/ci_require_success.py
+          ci-fast=${{ needs.ci-fast.result }}
           integration-plan=${{ needs.integration-plan.result }}
           change-owned-shard=${{ needs.change-owned-shard.result }}
 
@@ -878,12 +879,19 @@ jobs:
           pattern: integration-change-owned-*
           path: target/integration-change/receipts/change-owned
 
+      - name: Download standing coverage receipt
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-fast-receipts
+          path: target/integration-change/standing
+
       - name: Validate required change-owned execution
         run: >-
           .venv/bin/python scripts/ci_change_owned.py report
           --plan target/integration-change/plan.json
           --lane change-owned
           --receipts-root target/integration-change/receipts/change-owned
+          --standing-coverage target/integration-change/standing/ci-fast/coverage.json
           --output target/integration-change/change-owned-report
           --required
 

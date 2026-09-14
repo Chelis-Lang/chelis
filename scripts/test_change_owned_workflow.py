@@ -118,7 +118,7 @@ def assert_change_owned_topology(
     required_report = jobs["change-owned-report"]
     test.assertEqual(
         required_report["needs"],
-        ["changes", "integration-plan", "change-owned-shard"],
+        ["changes", "ci-fast", "integration-plan", "change-owned-shard"],
     )
     test.assertIn("always()", required_report["if"])
     test.assertFalse(required_report.get("continue-on-error", False))
@@ -128,6 +128,8 @@ def assert_change_owned_topology(
         "change-owned-shard=${{ needs.change-owned-shard.result }}",
         required_report_commands,
     )
+    test.assertIn("ci-fast-receipts", str(required_report))
+    test.assertIn("--standing-coverage", required_report_commands)
     test.assertIn("scripts/ci_change_owned.py report", required_report_commands)
     test.assertIn("--lane change-owned", required_report_commands)
     test.assertIn("--required", required_report_commands)
