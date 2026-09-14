@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.9] - 2026-09-14
+
+### Added
+
+- CI publishes a merge-base report of changed Phase 3 required-test definitions and membership alongside the existing definition digests and behavioral oracle.
+
+- CI publishes changed normative atoms, their registered text, and contract regions beside the existing Phase 4B freeze checks.
+
+### Changed
+
+- Replace protected atom and contract-region checksum updates with required identities, preserved semantic checks and exact PR change acknowledgements.
+
+- Replace protected-test definition checksums with required change acknowledgements and parsed comparison/result checks, preserving coverage and behavioral controls.
+
+- Derive parity-corpus membership from Rust test inputs and executable examples, with standing controls for missing or hidden inputs instead of a copied filename list.
+
+- Phase 4B pull-request validation now requires exact atom and region acknowledgements alongside changed-file acknowledgements, including registry ownership and removed protection boundaries. Existing digests and semantic controls remain active.
+
+- Document the validation required to retire the temporary Nix workflow digest when its event policy is replaced.
+
+- Require explicit PR-description acknowledgement of each changed protected test, preserving its definition and behavioral guards.
+
+- Protected comparison tests now have a standing syntax check for their required calls and executable modes, alongside the existing definition freezes.
+
+- Document the guard-inventory rule: derive tree membership, retain reviewed dispositions and coverage floors, and never generate semantic authority from a census.
+
+- Add an AGENTS-linked PR-author guide for test coverage, inventories, protected-contract acknowledgements, rejection messages and the temporary Nix workflow freeze.
+
+### Fixed
+
+- A tensor whose dtype is a declared type parameter can flow through an `if`/`then`/`else`. Previously any such program aborted the compiler with an internal `BUG: monomorphization missed precision var` message and exit 101 instead of returning a verdict, so a dtype-generic definition containing a conditional could not be checked, built, or run at all. The abort came from a routing predicate that asked whether an `if` could be lowered to the float DAG and read the node's precision through a reader that panicked on an unresolved binder; an unresolved dtype simply means the predicate cannot establish a float DAG join, so it now answers "no" and the item takes the general host lane. Generic definitions monomorphize at their concrete call sites as before, including under the `Float` and `Int` dtype-family bounds of `spec/04-type-system.md` §5.9, and the `§5.8.1` backend assertion is unchanged on the emission path where it belongs (chelis#1541).
+
+- Restore each integration worker's current test plan after its Cargo cache, so cache replacement cannot remove or overwrite the plan before execution.
+
+- Phase 3 guard and change-report discovery reject commented-out required tests; PR reports use the validated synthetic merge's actual base, and both Phase 3 and Phase 4B reports select push mode only for push events.
+
+- Capacity-census liveness now reads final native binding contracts and rejects their retired legacy citations.
+
+- Typed unsupported lowering rejections now report `unsupported_feature` through the compiler API, preserving their stage, message and source association; ordinary lowering errors retain `lower_error`.
+
+- Host gradients whose original operand directly names a checked function
+  declaration, without a captured binding for that target name, now read free
+  tensor values from the declaration environment instead of caller-local shadows.
+  Required captures reuse successful initialization and preserve entered errors;
+  optional shape queries do not initialize absent declarations. Argument order
+  and anonymous creation-time captures are unchanged. This does not extend alias
+  or captured-target admission, general gradient support, or backend coverage.
+
+- Selected Host evaluation entries now receive their required caller-supplied tensor
+  arguments, including inputs used only by lowered shape witnesses. Missing inputs
+  leave the declaration unentered, while dead and unrelated bindings remain
+  unobserved. Prepared library calls preserve fresh actuals, existing Random
+  behavior, and runtime error ordering. Fixes
+  [#2013](https://github.com/Chelis-Lang/chelis/issues/2013).
+
 ## [0.18.8] - 2026-09-13
 
 ### Changed
