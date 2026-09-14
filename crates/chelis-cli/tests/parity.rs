@@ -621,6 +621,11 @@ fn parity_ordered_extent_claims() {
 }
 
 #[test]
+fn parity_pure_helper_result_claims() {
+    drive_parity(&examples_root().join("pure_helper_result_claims.ch"), true);
+}
+
+#[test]
 fn parity_literal_extent_claim() {
     drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
 }

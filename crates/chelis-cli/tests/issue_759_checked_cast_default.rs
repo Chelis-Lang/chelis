@@ -115,30 +115,32 @@ fn tensor_fractional_float_to_int_traps_domain() {
 
 #[test]
 fn scalar_fractional_float_to_int_traps_domain() {
-    let stderr = eval_lane_str("cast(3.5, int8)").expect_err("fractional cast must trap");
-    assert!(
-        stderr.contains("numeric trap: domain in cast at int8"),
-        "expected branded Domain trap: {stderr}"
-    );
-    // chelis#759's float-to-int rung SHIPPED as `cast_trunc`
-    // ([05-OP-6]), so the hint now names it as the migration target
-    // rather than calling it future work.
-    let expected_hint_suffix = "; hint: fractional float-to-int conversion must state its \
+    for prim in ["int8", "int64"] {
+        let stderr =
+            eval_lane_str(&format!("cast(3.5, {prim})")).expect_err("fractional cast must trap");
+        assert!(
+            stderr.contains(&format!("numeric trap: domain in cast at {prim}")),
+            "expected branded Domain trap: {stderr}"
+        );
+        // chelis#759's float-to-int rung SHIPPED as `cast_trunc`
+        // ([05-OP-6]), so the hint now names it as the migration target
+        // rather than calling it future work.
+        let expected_hint_suffix = "; hint: fractional float-to-int conversion must state its \
         rounding explicitly: use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
         `floor` or `round` before `cast`; the remaining named lossy cast forms are tracked \
         by chelis#759";
-    assert!(
-        stderr.contains(expected_hint_suffix),
-        "fractional runtime cast must carry the complete teaching suffix: {stderr}"
-    );
-    for spelling in ["cast_trunc", "floor", "round", "chelis#759"] {
         assert!(
-            stderr.contains(spelling),
-            "fractional cast diagnostic must teach `{spelling}`: {stderr}"
+            stderr.contains(expected_hint_suffix),
+            "fractional runtime cast must carry the complete teaching suffix: {stderr}"
         );
+        for spelling in ["cast_trunc", "floor", "round", "chelis#759"] {
+            assert!(
+                stderr.contains(spelling),
+                "fractional cast diagnostic must teach `{spelling}`: {stderr}"
+            );
+        }
     }
 }
-
 #[test]
 fn integral_float_to_int_casts_exactly_on_both_eval_surfaces() {
     let tensor = eval_lane_str("cast(to_tensor([3.0, -3.0]), int8)").expect("integral tensor");

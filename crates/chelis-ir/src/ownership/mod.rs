@@ -251,6 +251,10 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::local_dim_guard_sites(self.dag)
     }
 
+    pub fn result_extent_sites(self, root: NodeId) -> Vec<crate::axis_sources::ResultExtentSite> {
+        crate::axis_sources::result_extent_sites(self.dag, root)
+    }
+
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
         crate::axis_sources::derive_runtime_dim_classes(self.dag)
             .into_iter()

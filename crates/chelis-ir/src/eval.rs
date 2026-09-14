@@ -20,7 +20,7 @@ use std::borrow::Cow;
 
 use crate::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, TensorType, bind_symbolic_dims,
+    ReduceWindowKind, RiscOp, RtAxis, RtDim, SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -2194,7 +2194,30 @@ fn eval_tensor_internal<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     random_counter: u64,
+    execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
+    load_input: F,
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal_with_result_claims(
+        dag,
+        live,
+        strict_loads,
+        random_counter,
+        execution,
+        &[],
+        load_input,
+    )
+}
+
+fn eval_tensor_internal_with_result_claims<F>(
+    dag: &Dag,
+    live: Option<&[bool]>,
+    strict_loads: bool,
+    random_counter: u64,
     mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
+    result_claims: &[crate::TensorType],
     mut load_input: F,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
@@ -2364,6 +2387,32 @@ where
             .entry(NodeId(node))
             .or_default()
             .push((axis, claim));
+    }
+    if !result_claims.is_empty() && dag.roots().len() == 1 {
+        let root = dag.roots()[0];
+        let rank = dag.get(root).expect("result root").output_type.dims.len();
+        let result_sites = crate::axis_sources::result_extent_sites(dag, root);
+        for claim in result_claims
+            .iter()
+            .filter(|claim| claim.dims.len() == rank)
+        {
+            for site in &result_sites {
+                let RtAxis::Lit(output_axis) = site.output_axis();
+                let RtAxis::Lit(producer_axis) = site.producer_axis();
+                let DimInfo::Lit(required) = &claim.dims[output_axis as usize] else {
+                    continue;
+                };
+                local_guard_sites.entry(site.producer()).or_default().push((
+                    producer_axis as usize,
+                    crate::axis_sources::LocalGuardClaim {
+                        claim: required.to_string(),
+                        canonical: crate::axis_sources::CanonicalExtent::Resolved(*required),
+                        op: site.operation(),
+                        observed: site.observation().clone(),
+                    },
+                ));
+            }
+        }
     }
     let mut runtime_dims = prebound_dims;
 
@@ -3320,6 +3369,33 @@ where
     .map(|(values, _)| values)
 }
 
+/// Execute the same source plan with invocation-local literal result claims.
+/// The extra obligations neither modify the DAG nor replace its own guards.
+pub fn eval_tensor_plan_with_result_claims<F>(
+    plan: &crate::evaluation::EvaluationPlan,
+    context: &mut crate::evaluation::RandomExecutionContext,
+    result_claims: &[crate::TensorType],
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let dag = plan.dag_for_inspection();
+    let starting_counter = context.state().counter;
+    let mut frame = plan.frame(context)?;
+    let live = vec![true; dag.len()];
+    eval_tensor_internal_with_result_claims(
+        dag,
+        Some(&live),
+        true,
+        starting_counter,
+        Some(&mut frame),
+        result_claims,
+        load_input,
+    )
+    .map(|(values, _)| values)
+}
+
 /// Why a selected-input preparation callback is being queried.
 /// This is an input obligation, not declaration identity or a cache certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3634,6 +3710,31 @@ where
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
+}
+
+/// Evaluate roots with the caller's literal result obligations at their
+/// producing operations, retaining the ordinary executed Random prefix.
+pub fn eval_tensor_roots_with_result_claims<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    random_counter: u64,
+    result_claims: &[crate::TensorType],
+    load_input: F,
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    reject_drop_roots(dag, roots)?;
+    let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal_with_result_claims(
+        dag,
+        Some(&live),
+        true,
+        random_counter,
+        None,
+        result_claims,
+        load_input,
+    )
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {

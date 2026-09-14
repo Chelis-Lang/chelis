@@ -443,6 +443,23 @@ both sides of the producer, and different callers of one shared callee on Eval
 and compiled C. These receipts cover host-builtin producing expressions. An inherited claim
 ending in a lowered tensor helper still needs distinct producer-site transport;
 the helper's existing local claim is not evidence for that inherited claim.
+
+The continuation carries inherited literal obligations across tensor helpers
+and supported callable invocations. Each invocation supplies its obligations;
+the selected producing operation consumes them independently of helper-local
+claims and signature-entry checks. Preserve producer provenance through aliases
+and dynamic selection. When the selector is available before production, only
+its selected producer receives the inherited claim. When a later computation
+determines selection, retain provenance and check the selected value once the
+guard operands are available, before subsequent effects. This follows section
+4.7's readiness and source-order requirements: do not speculate selector effects
+or impose an inherited claim on an unselected alternative. Acceptance covers
+both selector timings with exact primitive attribution and effects before and
+after the guard. The existing host-builtin receipts alone do not establish this
+continuation's completion.
+The pure-helper slice enrolls `return.pure_helper.literal.{eval,c}`. Callable
+transport and selected-alias provenance remain separate continuation slices;
+their pending witnesses do not count as passing pure-helper receipts.
 The receipts do not establish general preallocation coverage for every host
 primitive. Named host declared-result claims remain #1900.
 
@@ -980,10 +997,10 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The phase-B corpus contains 188 rows. Completion requires `--phase b` to
+The phase-B corpus contains 190 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 30 non-`executes_exactly` values against 158
+column contains 30 non-`executes_exactly` values against 160
 `executes_exactly`; the dispositions below account for the thirty.
 Twenty-nine rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the

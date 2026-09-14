@@ -718,6 +718,7 @@ impl<'a> EvalContext<'a> {
         kernel: &DefEvaluationKernel,
         params: &[String],
         args: Vec<RuntimeValue>,
+        inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
         let execution_plan = kernel.plan();
         let staged_execution = kernel.staged_plan();
@@ -779,6 +780,26 @@ impl<'a> EvalContext<'a> {
                 "host runtime: kernel `{name}` lowering produced no roots"
             ));
         }
+        let result_claims = inherited_claims
+            .iter()
+            .map(|claim| {
+                let mut dims = vec![DimInfo::Named("*".to_string(), None); claim.rank];
+                for (axis, required) in &claim.axes {
+                    dims[*axis] = DimInfo::Lit(usize::try_from(*required).map_err(|_| {
+                        "declared result extent is outside the admitted range".to_string()
+                    })?);
+                }
+                Ok(TensorType {
+                    dims,
+                    precision: kernel
+                        .dag
+                        .get(roots[0])
+                        .expect("result")
+                        .output_type
+                        .precision,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let draws_random = kernel_draws_random(kernel);
         let path_sensitive_random =
             kernel.dag.nodes().iter().any(|node| {
@@ -792,25 +813,10 @@ impl<'a> EvalContext<'a> {
                 seed: self.random_seed,
                 counter: self.random_counter,
             });
-            let result =
-                chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, |load| {
-                    staged
-                        .get(load)
-                        .cloned()
-                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
-                        .or_else(|| match host_bindings.get(load) {
-                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
-                            _ => None,
-                        })
-                });
-            self.random_counter = context.state().counter;
-            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
-        }
-        let (values, executed_counter) =
-            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                &kernel.dag,
-                &roots,
-                starting_counter,
+            let result = chelis_ir::eval::eval_tensor_plan_with_result_claims(
+                plan,
+                &mut context,
+                &result_claims,
                 |load| {
                     staged
                         .get(load)
@@ -821,7 +827,26 @@ impl<'a> EvalContext<'a> {
                             _ => None,
                         })
                 },
-            )?;
+            );
+            self.random_counter = context.state().counter;
+            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
+        }
+        let (values, executed_counter) = chelis_ir::eval::eval_tensor_roots_with_result_claims(
+            &kernel.dag,
+            &roots,
+            starting_counter,
+            &result_claims,
+            |load| {
+                staged
+                    .get(load)
+                    .cloned()
+                    .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
+                    .or_else(|| match host_bindings.get(load) {
+                        Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                        _ => None,
+                    })
+            },
+        )?;
         if draws_random {
             self.random_counter = if path_sensitive_random {
                 executed_counter
@@ -2048,7 +2073,8 @@ impl<'a> EvalContext<'a> {
                     let saved = std::mem::take(&mut self.bindings);
                     let saved_types = std::mem::take(&mut self.binding_types);
                     let saved_precisions = std::mem::take(&mut self.precision_bindings);
-                    let result = self.apply_def_kernel(name, &kernel, &params, args);
+                    let result =
+                        self.apply_def_kernel(name, &kernel, &params, args, inherited_claims);
                     self.bindings = saved;
                     self.binding_types = saved_types;
                     self.precision_bindings = saved_precisions;

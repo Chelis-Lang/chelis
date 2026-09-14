@@ -112,6 +112,8 @@ pub struct CEmitter {
     /// Claim names this function actually declares as C variables. Resolved
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
+    inherited_result_sites: Vec<chelis_ir::axis_sources::ResultExtentSite>,
+    inherited_result_rank: usize,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -546,6 +548,16 @@ impl CEmitter {
             runtime_dim_sites,
             local_dim_guard_sites,
             declared_dim_names: chelis_unord::UnordSet::new(),
+            inherited_result_sites: if private_random_context && dag.roots().len() == 1 {
+                dag.result_extent_sites(dag.roots()[0])
+            } else {
+                Vec::new()
+            },
+            inherited_result_rank: dag
+                .roots()
+                .first()
+                .and_then(|id| dag.get(*id))
+                .map_or(0, |node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
         };
 
@@ -655,9 +667,12 @@ impl CEmitter {
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
         let random_param = if private_random_context {
-            private_random_context_param()
+            format!(
+                "{}, const __chelis_host_result_claim *__chelis_caller_result_claims",
+                private_random_context_param()
+            )
         } else {
-            ""
+            String::new()
         };
         e.line(&format!(
             "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param}) {{"
@@ -919,6 +934,25 @@ impl CEmitter {
                     e.emit_node(node, dag)?;
                 }
             }
+            let realized = e
+                .inherited_result_sites
+                .iter()
+                .filter(|site| {
+                    site.producer() == node.id
+                        && matches!(
+                            site.observation(),
+                            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+                        )
+                })
+                .map(|site| {
+                    let chelis_ir::dag::RtAxis::Lit(axis) = site.producer_axis();
+                    (
+                        axis as usize,
+                        format!("chelis_tensor_shape(t{}, {axis})", node.id.0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            e.emit_inherited_result_guards(node.id.0, &realized);
         }
 
         // Every generated allocation is canonical contiguous storage.  Keep
@@ -6628,6 +6662,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
         if self.runtime_dim_sites.contains_key(&(id, axis))
             || self.local_dim_guard_sites.contains_key(&id)
+            || self
+                .inherited_result_sites
+                .iter()
+                .any(|site| site.producer() == NodeId(id))
         {
             self.emit_runtime_dim_sites(id, &[(axis, extent.clone())]);
         }
@@ -6761,9 +6799,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // entry path emits for a `Literal` claim (chelis#1377). Keying it on
         // whether a C variable happened to be allocated narrowed a required
         // check to an implementation convenience.
-        let Some(sites) = self.local_dim_guard_sites.get(&id).cloned() else {
-            return;
-        };
+        let sites = self
+            .local_dim_guard_sites
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
         // Consume claims, not axes: multiple claims on one axis can be
         // interleaved with claims on another axis in declaration order.
         for (axis, site) in sites {
@@ -6794,6 +6834,34 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.indent -= 1;
             self.line("}");
         }
+        self.emit_inherited_result_guards(id, extents);
+    }
+
+    /// Consume invocation frames in declaration/axis order at one producer.
+    fn emit_inherited_result_guards(&mut self, id: usize, extents: &[(usize, String)]) {
+        let sites = self
+            .inherited_result_sites
+            .iter()
+            .filter(|site| site.producer() == NodeId(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let observations = sites
+            .iter()
+            .filter_map(|site| {
+                let chelis_ir::dag::RtAxis::Lit(producer_axis) = site.producer_axis();
+                let chelis_ir::dag::RtAxis::Lit(output_axis) = site.output_axis();
+                extents
+                    .iter()
+                    .find(|(axis, _)| *axis == producer_axis as usize)
+                    .map(|(_, value)| format!("{{ {output_axis}, {producer_axis}, ({value}) }}"))
+            })
+            .collect::<Vec<_>>();
+        if observations.is_empty() {
+            return;
+        }
+        let op = sites[0].operation();
+        self.line(&format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at int64\");",
+            self.inherited_result_rank, observations.join(", "), observations.len()));
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim

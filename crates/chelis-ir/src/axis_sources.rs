@@ -2684,6 +2684,96 @@ pub struct LocalGuardClaim {
     pub observed: LocalGuardObservation,
 }
 
+/// A returned axis and the operation where its inherited claim becomes ready.
+/// This is derived from the current graph, never serialized or attached to a
+/// tensor's physical shape. Each caller supplies its own literal obligations.
+#[derive(Clone, Debug)]
+pub struct ResultExtentSite {
+    output_axis: RtAxis,
+    producer: NodeId,
+    producer_axis: RtAxis,
+    observation: LocalGuardObservation,
+    operation: &'static str,
+}
+
+impl ResultExtentSite {
+    pub fn output_axis(&self) -> RtAxis {
+        self.output_axis
+    }
+    pub fn producer(&self) -> NodeId {
+        self.producer
+    }
+    pub fn producer_axis(&self) -> RtAxis {
+        self.producer_axis
+    }
+    pub fn observation(&self) -> &LocalGuardObservation {
+        &self.observation
+    }
+    pub fn operation(&self) -> &'static str {
+        self.operation
+    }
+}
+
+/// Locate inherited result checks without changing graph or execution identity.
+/// A graph's own declaration guards remain separate obligations.
+pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
+    let Some(result) = dag.get(root) else {
+        return Vec::new();
+    };
+    (0..result.output_type.dims.len())
+        .map(|output_axis| {
+            // Copy is administrative; an actual conversion still owns the
+            // returned value's diagnostic. §4.7 gives a cast the placement of
+            // its input, independently of that primitive attribution.
+            let mut attributed = root;
+            while let Some(node) = dag.get(attributed) {
+                if !matches!(node.op, RiscOp::Copy) {
+                    break;
+                }
+                let Some(input) = node.inputs.first() else {
+                    break;
+                };
+                attributed = *input;
+            }
+            let mut producer = attributed;
+            while let Some(node) = dag.get(producer) {
+                if !matches!(
+                    node.op,
+                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                ) {
+                    break;
+                }
+                let Some(input) = node.inputs.first() else {
+                    break;
+                };
+                producer = *input;
+            }
+            let axis = output_axis;
+            let node = dag.get(producer).expect("result source belongs to graph");
+            let attributed_node = dag
+                .get(attributed)
+                .expect("result producer belongs to graph");
+            let observation = if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
+                LocalGuardObservation::Carrier(carrier.clone())
+            } else if let Some(computed) = op_computed_axis_extent(&node.op, axis) {
+                LocalGuardObservation::ComputedExtent(computed)
+            } else {
+                LocalGuardObservation::RealizedExtent
+            };
+            ResultExtentSite {
+                output_axis: RtAxis::Lit(i32::try_from(output_axis).expect("rank fits int32")),
+                producer,
+                producer_axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                observation,
+                operation: expansion_kind(dag, attributed).map_or_else(
+                    || crate::grad::risc_op_name(&attributed_node.op),
+                    ExpansionKind::primitive_name,
+                ),
+            }
+        })
+        .collect()
+}
+
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
 /// site guards against.
 ///

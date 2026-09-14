@@ -1654,7 +1654,7 @@ fn append_helper(
         out.push(format!(
             "static void {}({}) {{",
             helper_name,
-            private_random_params(
+            private_host_params(
                 "chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out"
             ),
         ));
@@ -1663,6 +1663,7 @@ fn append_helper(
         out.push("    (void)__chelis_rng;".to_string());
         #[cfg(feature = "native-random-observer")]
         out.push("    (void)__chelis_observer;".to_string());
+        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at int64\");".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -1973,6 +1974,23 @@ fn append_host_result_claim_support(out: &mut Vec<String>) {
     const int64_t (*axes)[2];
 } __chelis_host_result_claim;
 
+static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
+    for (; claims != NULL; claims = claims->next) {
+        if (rank != claims->rank) continue;
+        for (int64_t i = 0; i < claims->count; ++i) {
+            for (int64_t j = 0; j < count; ++j) {
+                if (claims->axes[i][0] != observations[j][0]) continue;
+                int64_t required = claims->axes[i][1];
+                int64_t observed = observations[j][2];
+                if (required != observed) {
+                    fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)required, (long long)required, op, (long long)observations[j][1], (long long)observed);
+                    chelis_numeric_trap(trap);
+                }
+            }
+        }
+    }
+}
+
 static void __chelis_check_host_result_claims(const __chelis_host_result_claim *claims, const chelis_tensor *value, const char *op, const char *trap) {
     for (; claims != NULL; claims = claims->next) {
         if (chelis_tensor_rank(value) != claims->rank) continue;
@@ -2192,8 +2210,9 @@ fn emit_function(
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it.
     match HostResultClaim::of(function) {
-        Some(claim) => emitter.lines.extend(claim.frame_lines(&emitter.indent)),
-        None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
+        Some(claim) if !matches!(function.body.kind, HostExprKind::TensorCall { .. }) =>
+            emitter.lines.extend(claim.frame_lines(&emitter.indent)),
+        Some(_) | None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;
@@ -4277,7 +4296,13 @@ impl<'a> HostEmitter<'a> {
                             "signature entry projection",
                         )
                     })?;
-                self.assign_tensor_call(target, *helper, variant, args, ty)?;
+                self.assign_tensor_call(
+                    (target, ty),
+                    *helper,
+                    variant,
+                    args,
+                    result_claims.as_deref(),
+                )?;
             }
             HostExprKind::SignatureEntry { plan, args } => {
                 require_same_abi_type(ty, &HostType::Unit, "signature entry")?;
@@ -6238,12 +6263,13 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_call(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         helper: usize,
         entry_variant: usize,
         args: &[HostExpr],
-        ty: &HostType,
+        result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        let (target, ty) = destination;
         if let Some(host_helper) = self.tensor_helpers.get(helper) {
             match host_helper.specialization.as_ref() {
                 Some(HostTensorSpecialization::BlasMatmul(summary)) => {
@@ -6367,6 +6393,9 @@ impl<'a> HostEmitter<'a> {
             root_count.to_string(),
         ];
         append_private_context_args(&mut helper_args);
+        if !self.external_helpers.contains(&base) {
+            helper_args.push(result_claims.unwrap_or("NULL").to_string());
+        }
         self.lines.push(format!(
             "{}{}({});",
             self.indent,

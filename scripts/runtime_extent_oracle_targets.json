@@ -912,6 +912,21 @@
         "result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport"
       ],
       "note": "Exact ResultClaim site identity round-trips through versioned wire transport; malformed fields and relationships cannot enter a graph."
+    },
+    {
+      "phase": "b",
+      "id": "cli_result_pure_helper",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1771_pure_helper_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_inherited_result_claim_enters_pure_helpers",
+        "eval_inherited_result_claim_enters_pure_helpers"
+      ],
+      "note": "Inherited literal claims cross pure helpers with exact producing primitives, helper-local claims and source effect order. Native receipts require a compiler and execute the generated binary. Callback and selected-alias continuations are separately enrolled when implemented."
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "35d89ba5ced58625c2fa134d93bdc5b2761d0cb1573c6e975a50c1fad72b9e3d",
+  "corpus_sha256": "dcad3230409376cfc87db3c1677d661525b3f919ad4b57ebfb1638ee078873af",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -991,6 +991,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_return_boundary.eval_selected_match_result_claims"
+    },
+    {
+      "id": "return.pure_helper.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_pure_helper.c_inherited_result_claim_enters_pure_helpers"
+    },
+    {
+      "id": "return.pure_helper.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_pure_helper.eval_inherited_result_claim_enters_pure_helpers"
     },
     {
       "id": "return.shared_callee.literal.c",
