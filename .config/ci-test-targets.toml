@@ -702,6 +702,24 @@ reason = "hosted Docs coverage and metadata-edit negative controls execute in sc
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/openspec_controller.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required-context credential evidence is exercised by the OpenSpec controller script tests"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_openspec_controller.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required-context credential evidence executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_validate_pr_candidate.py"
 disposition = "owner"
 workflow = "ci.yml"
