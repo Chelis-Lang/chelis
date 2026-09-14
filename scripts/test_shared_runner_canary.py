@@ -1,4 +1,4 @@
-"""Positive and negative contracts for docs/shared-runner-canary.md."""
+"""Positive and negative contracts for docs/shared_runner_canary.md."""
 
 from __future__ import annotations
 

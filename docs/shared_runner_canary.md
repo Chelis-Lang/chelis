@@ -53,9 +53,23 @@ The workflow inventory classifies this manual probe outside the per-PR developer
 
 The PR `script-unit` job runs the portable contract suite. The ownership records bind each new control path to that job, not to live acceptance.
 
-The pre-push gate failed at the first regeneration stage after 1106.8 seconds. `arb-sys 0.3.6` reported `Invalid MPFR directory`.
+The first pre-push gate failed during regeneration with `Invalid MPFR directory`. The pinned Arb build omits the MPFR path.
 
-The gate did not run the remaining stages. The Cargo inputs and `chelis-prove` source match `origin/main` at `6c696c08409ea97756fe1bbbb004bbefc0ea47b2`.
+A local build supplied that path and used the existing `ARB_SYS_CACHE` interface. Cargo inputs, compiler features, and required gate stages remain unchanged.
+
+An extra upstream C test stalled at `arb_hypgeom_erf_bb` for exact input `7/8`, complement `0`, and precision `623`. A bounded probe reproduced the stall.
+
+The locked dependency disables those C tests by default. This extra result is a recorded limitation, not a claimed test pass.
+
+The repaired environment passed `cargo check -p chelis-prove --features arb --tests` and gate regeneration. The next gate exposed this document's invalid filename.
+
+This document now uses the required snake_case name. The complete fast gate passed all four stages in 520.4 seconds.
+
+The tripwire stage passed 76 tests and skipped one test. The gate changed no files.
+
+The local receipt is `target/gate-reports/20260914T130407.608878Z-53548-fast.json`. It covers the renamed document and its updated test reference before commit.
+
+The Cargo inputs and `chelis-prove` source match `origin/main` at `bdd7b961460ae7213893bb996ebc955023face55`. The local cache does not provision the future shared host.
 
 The focused canary, CI parity, and ownership suites passed all 103 tests. The CI ownership plan passed with no required Rust integration targets for this change.
 
