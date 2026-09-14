@@ -293,13 +293,6 @@ fn hidden_value_row() {}
             f"fn {name}()", "fn deleted_checked_reshape_row()"
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-        sources[oracle.PARITY_SOURCE] = source.replace('        "checked_reshape.ch",\n', "")
-        self.assertTrue(
-            any(
-                "parity_corpus_is_complete" in item
-                for item in oracle.definition_digest_violations(sources)
-            )
-        )
 
     def test_literal_extent_parity_remains_a_required_executable_row(self) -> None:
         name = "parity_literal_extent_claim"
@@ -323,13 +316,6 @@ fn hidden_value_row() {}
             f"fn {name}()", "fn deleted_literal_extent_row()"
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
-        sources[oracle.PARITY_SOURCE] = source.replace('        "literal_extent_claim.ch",\n', "")
-        self.assertTrue(
-            any(
-                "parity_corpus_is_complete" in item
-                for item in oracle.definition_digest_violations(sources)
-            )
-        )
 
     def test_generic_shape_parity_remains_a_required_executable_row(self) -> None:
         name = "parity_generic_explicit_shape"
@@ -369,14 +355,6 @@ fn hidden_value_row() {}
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
 
-    def test_window_cannot_leave_the_frozen_corpus_inventory(self) -> None:
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
-        body = source[start:end].replace('        "checked_window_geometry.ch",\n', "")
-        self.assertNotEqual(body, source[start:end])
-        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
-        self.assertTrue(any("parity_corpus_is_complete" in item for item in oracle.definition_digest_violations(sources)))
 
     def test_sparse_parity_remains_a_required_executable_row(self) -> None:
         name = "parity_checked_sparse_axes"
@@ -396,14 +374,6 @@ fn hidden_value_row() {}
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
 
-    def test_sparse_cannot_leave_the_frozen_corpus_inventory(self) -> None:
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
-        body = source[start:end].replace('        "checked_sparse_axes.ch",\n', "")
-        self.assertNotEqual(body, source[start:end])
-        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
-        self.assertTrue(any("parity_corpus_is_complete" in item for item in oracle.definition_digest_violations(sources)))
 
     def test_normalization_parity_remains_a_required_executable_row(self) -> None:
         name = "parity_explicit_normalization"
@@ -424,34 +394,23 @@ fn hidden_value_row() {}
             f"fn {name}()", "fn deleted_normalization_row()"
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
+    def test_shipped_definitions_match_the_reviewed_digests(self) -> None:
+        self.assertEqual(oracle.definition_digest_violations(), [])
 
-    def test_normalization_cannot_leave_the_frozen_corpus_inventory(self) -> None:
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
-        body = source[start:end].replace('        "explicit_normalization.ch",\n', "")
-        self.assertNotEqual(body, source[start:end])
-        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
-        self.assertTrue(
-            any(
-                "parity_corpus_is_complete" in item
-                for item in oracle.definition_digest_violations(sources)
-            )
-        )
-
-    def test_generic_shape_cannot_leave_the_frozen_corpus_inventory(self) -> None:
-        sources = oracle.shipped_sources()
-        source = sources[oracle.PARITY_SOURCE]
-        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
-        body = source[start:end].replace('        "generic_explicit_shape.ch",\n', "")
-        self.assertNotEqual(body, source[start:end])
-        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
-        self.assertTrue(
-            any(
-                "parity_corpus_is_complete" in item
-                for item in oracle.definition_digest_violations(sources)
-            )
-        )
+    def test_completeness_check_cannot_be_emptied_or_ignore_its_result(self) -> None:
+        name = "parity_corpus_is_complete"
+        for body in (
+            "{}",
+            '{ let _ = parity_corpus::validate(&examples_root(), include_str!("parity.rs")); }',
+        ):
+            with self.subTest(body=body):
+                sources = oracle.shipped_sources()
+                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+                    sources[oracle.PARITY_SOURCE], name, body
+                )
+                self.assertTrue(
+                    any(name in item for item in oracle.definition_digest_violations(sources))
+                )
 
 
 class ComparatorAdoptionTests(unittest.TestCase):
