@@ -124,7 +124,7 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertIn("pull-requests", str(planner["permissions"]))
     test.assertIn("refs/pull/", planner_text)
     test.assertIn("expected_head_sha", planner_text)
-    test.assertIn("state", planner_text)
+    test.assertIn("scripts/ci_validate_pr_candidate.py", planner_text)
     test.assertIn("--event-name", planner_text)
     test.assertIn("pull_request", planner_text)
     test.assertIn("--pr-head", planner_text)
@@ -141,11 +141,13 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     summary_text = str(summary)
     test.assertIn("--lane package-expansion", summary_text)
     test.assertNotIn("--required", str(summary))
-    test.assertIn(".head.sha", summary_text)
-    test.assertIn(".base.sha", summary_text)
-    test.assertIn('["base_sha"]', summary_text)
-    test.assertIn("stale head", summary_text)
-    test.assertIn("stale base", summary_text)
+    test.assertIn("scripts/ci_validate_pr_candidate.py", summary_text)
+    test.assertIn("--plan target/integration-change/plan.json", summary_text)
+    workflow_text = str(workflow)
+    test.assertEqual(
+        workflow_text.count("scripts/ci_validate_pr_candidate.py"),
+        2,
+    )
 
 
 def assert_author_contract(test: unittest.TestCase) -> None:
@@ -212,6 +214,16 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         del actions_events(manual)["workflow_dispatch"]["inputs"]["expected_head_sha"]
         with self.assertRaises(AssertionError):
             assert_manual_expansion_workflow(self, manual)
+
+    def test_dispatch_cannot_drop_initial_or_final_candidate_validation(self) -> None:
+        for job_id in ("integration-plan", "package-expansion-summary"):
+            manual = copy.deepcopy(yaml.safe_load(EXPANSION.read_text()))
+            for step in manual["jobs"][job_id]["steps"]:
+                if "ci_validate_pr_candidate.py" in step.get("run", ""):
+                    step["run"] = "true"
+                    break
+            with self.subTest(job=job_id), self.assertRaises(AssertionError):
+                assert_manual_expansion_workflow(self, manual)
 
 
 if __name__ == "__main__":

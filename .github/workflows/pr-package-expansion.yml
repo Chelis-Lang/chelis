@@ -35,21 +35,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
-        run: |
-          if ! [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "expected_head_sha must be a lowercase 40-character commit SHA" >&2
-            exit 1
-          fi
-          state=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .state)
-          head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
-          if [ "$state" != "open" ]; then
-            echo "pull request #$PR_NUMBER is not open" >&2
-            exit 1
-          fi
-          if [ "$head" != "$EXPECTED_HEAD_SHA" ]; then
-            echo "stale candidate: expected $EXPECTED_HEAD_SHA, current head is $head" >&2
-            exit 1
-          fi
+        run: >-
+          python3 scripts/ci_validate_pr_candidate.py
+          --repository "$REPOSITORY"
+          --pr-number "$PR_NUMBER"
+          --expected-head-sha "$EXPECTED_HEAD_SHA"
 
       - uses: actions/checkout@v6
         with:
@@ -196,21 +186,14 @@ jobs:
         run: |
           mkdir -p target/integration-change/package-expansion-summary
           if [ -f target/integration-change/plan.json ]; then
-            state=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .state)
-            head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
-            base=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .base.sha)
-            plan_base=$(
-              .venv/bin/python -c \
-                'import json; print(json.load(open("target/integration-change/plan.json"))["base_sha"])'
-            )
-            candidate_problem=
-            if [ "$state" != "open" ]; then
-              candidate_problem="pull request #$PR_NUMBER is no longer open"
-            elif [ "$head" != "$EXPECTED_HEAD_SHA" ]; then
-              candidate_problem="stale head: expected $EXPECTED_HEAD_SHA, current head is $head"
-            elif [ "$base" != "$plan_base" ]; then
-              candidate_problem="stale base: planned $plan_base, current base is $base"
-            fi
+            candidate_status=0
+            candidate_output=$(
+              .venv/bin/python scripts/ci_validate_pr_candidate.py \
+                --repository "$REPOSITORY" \
+                --pr-number "$PR_NUMBER" \
+                --expected-head-sha "$EXPECTED_HEAD_SHA" \
+                --plan target/integration-change/plan.json 2>&1
+            ) || candidate_status=$?
             report_status=0
             .venv/bin/python scripts/ci_change_owned.py report \
               --plan target/integration-change/plan.json \
@@ -222,13 +205,13 @@ jobs:
               echo
               echo "## Final candidate validation"
               echo
-              if [ -n "$candidate_problem" ]; then
-                echo "FAIL: $candidate_problem"
+              if [ "$candidate_status" -ne 0 ]; then
+                echo "FAIL: ${candidate_output}"
               else
-                echo "PASS: PR #$PR_NUMBER still names head \`$EXPECTED_HEAD_SHA\` and base \`$plan_base\`."
+                echo "PASS: ${candidate_output}"
               fi
             } >> target/integration-change/package-expansion-summary/summary.md
-            if [ "$report_status" -ne 0 ] || [ -n "$candidate_problem" ]; then
+            if [ "$report_status" -ne 0 ] || [ "$candidate_status" -ne 0 ]; then
               exit 1
             fi
           else
