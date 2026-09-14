@@ -70,6 +70,191 @@ fn multi_target_gradient_rejects_the_same_activation_as_the_forward_call() {
 
 const CLAIM_FUNCTION: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n";
 
+fn independent_activation_source(
+    distinct_function: bool,
+    distinct_binders: bool,
+    second_width: usize,
+    producing_widths: (usize, usize),
+    zero_gradient: bool,
+) -> String {
+    let tensor = |width: usize| {
+        format!(
+            "to_tensor([{}])",
+            (1..=width)
+                .map(|value| format!("{value}.0f32"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let (second_function, declaration) = if distinct_function {
+        let (input, output) = if distinct_binders {
+            ("p", "q")
+        } else {
+            ("n", "m")
+        };
+        (
+            "g",
+            format!(
+                "def g(x: tensor[{input}, f32], y: tensor[{output}, f32]) -> tensor[{input}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, shape(y, 0i32))\n"
+            ),
+        )
+    } else {
+        ("f", String::new())
+    };
+    let left = format!("f(copy(a), {})", tensor(producing_widths.0));
+    let right = format!("{second_function}(copy(b), {})", tensor(producing_widths.1));
+    let (left, right) = if zero_gradient {
+        (left, right)
+    } else {
+        (format!("mul({left}, a)"), format!("mul({right}, b)"))
+    };
+    format!(
+        "{CLAIM_FUNCTION}{declaration}def h(a: tensor[2, f32], b: tensor[{second_width}, f32]) -> tensor[f32] = add(sum({left}, 0i32), sum({right}, 0i32))\ndef main() = grad(h, wrt=(b, a))({}, {})\n",
+        tensor(2),
+        tensor(second_width)
+    )
+}
+
+#[test]
+fn independent_gradient_activations_keep_declaring_extent_witnesses() {
+    for (distinct_function, distinct_binders) in [(false, false), (true, false), (true, true)] {
+        for second_width in [2, 3] {
+            for zero_gradient in [false, true] {
+                let source = independent_activation_source(
+                    distinct_function,
+                    distinct_binders,
+                    second_width,
+                    (2, second_width),
+                    zero_gradient,
+                );
+                let result = eval_selected(request(source.clone()), &["main".into()])
+                    .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+                let leaves = result
+                    .roots
+                    .iter()
+                    .flat_map(|root| tensor_leaves(&root.value))
+                    .collect::<Vec<_>>();
+                let left = if zero_gradient { 0.0 } else { 7.0 };
+                let right = if zero_gradient {
+                    0.0
+                } else if distinct_function {
+                    11.0
+                } else {
+                    7.0
+                };
+                assert_eq!(
+                    leaves,
+                    vec![
+                        (vec![second_width as i64], vec![right; second_width]),
+                        (vec![2], vec![left; 2])
+                    ],
+                    "{source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_gradient_activations_reject_only_their_own_claims_in_source_order() {
+    for (distinct_function, distinct_binders) in [(false, false), (true, false), (true, true)] {
+        for zero_gradient in [false, true] {
+            for (producing_widths, label, claimed, actual) in [
+                ((4, 5), "n", 2, 4),
+                ((2, 5), if distinct_binders { "p" } else { "n" }, 3, 5),
+            ] {
+                let source = independent_activation_source(
+                    distinct_function,
+                    distinct_binders,
+                    3,
+                    producing_widths,
+                    zero_gradient,
+                );
+                let error = eval_selected(request(source.clone()), &["main".into()])
+                    .expect_err("each activation must discharge its own result claim");
+                let messages = error
+                    .errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    messages.contains(&format!(
+                        "extent `{label}`: x axis 0 = {claimed}, y axis 0 = {actual}"
+                    )),
+                    "{source}\n{messages}"
+                );
+                assert!(
+                    messages
+                        .lines()
+                        .any(|line| line == "numeric trap: domain in load at int64"),
+                    "{messages}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_gradient_activations_preserve_computed_only_claims() {
+    for (distinct_function, distinct_binders) in [(false, false), (true, false), (true, true)] {
+        for zero_gradient in [false, true] {
+            for mismatch in [false, true] {
+                let source = independent_activation_source(
+                    distinct_function,
+                    distinct_binders,
+                    3,
+                    (2, if mismatch { 5 } else { 3 }),
+                    zero_gradient,
+                )
+                .replace("shape(y, 0i32))", "add(shape(y, 0i32), 0i64))");
+                let result = eval_selected(request(source.clone()), &["main".into()]);
+                if mismatch {
+                    let error = result.expect_err("a computed result has its own extent claim");
+                    let messages = error
+                        .errors
+                        .iter()
+                        .map(|error| error.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let label = if distinct_binders { "p" } else { "n" };
+                    assert!(
+                        messages
+                            .contains(&format!("extent `{label}`: claimed = 3, insert axis 0 = 5")),
+                        "{source}\n{messages}"
+                    );
+                    assert!(
+                        messages
+                            .lines()
+                            .any(|line| line == "numeric trap: domain in insert at int64"),
+                        "{messages}"
+                    );
+                } else {
+                    let result = result.unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+                    let leaves = result
+                        .roots
+                        .iter()
+                        .flat_map(|root| tensor_leaves(&root.value))
+                        .collect::<Vec<_>>();
+                    let left = if zero_gradient { 0.0 } else { 7.0 };
+                    let right = if zero_gradient {
+                        0.0
+                    } else if distinct_function {
+                        11.0
+                    } else {
+                        7.0
+                    };
+                    assert_eq!(
+                        leaves,
+                        vec![(vec![3], vec![right; 3]), (vec![2], vec![left; 2])],
+                        "{source}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn aggregate_gradient_preserves_the_named_claim_for_every_leaf_layout() {
     for (declaration, parameter_type, selected_leaf, actual) in [

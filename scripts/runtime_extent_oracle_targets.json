@@ -466,6 +466,9 @@
         "grad_over_a_disagreeing_named_claim_traps_on_eval",
         "grad_over_an_agreeing_named_claim_executes_on_c",
         "grad_over_an_agreeing_named_claim_executes_on_eval",
+        "independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        "independent_grad_entry_claims_agree_on_eval_and_c",
+        "independent_grad_entry_failures_are_ordered_on_eval_and_c",
         "issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         "issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         "issue_1556_uniform_over_an_inlined_parameter_builds_and_runs",
@@ -687,6 +690,9 @@
         "aggregate_gradient_preserves_the_named_claim_for_every_leaf_layout",
         "agreeing_multi_target_gradient_keeps_unused_zero_cotangent_slots",
         "fixed_control_gradients_keep_the_same_authored_activation_claim",
+        "independent_gradient_activations_keep_declaring_extent_witnesses",
+        "independent_gradient_activations_preserve_computed_only_claims",
+        "independent_gradient_activations_reject_only_their_own_claims_in_source_order",
         "multi_target_gradient_rejects_the_same_activation_as_the_forward_call",
         "primitive_scalar_gradient_preserves_the_named_claim_for_single_and_multiple_targets",
         "subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling"
@@ -794,6 +800,35 @@
         "two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently"
       ],
       "note": "Retain the original apply4 witness identity while requiring the authored p/load entry failure; the original false-k/shrink disposition is no longer accepted."
+    },
+    {
+      "phase": "b",
+      "id": "ir_result_claim_identity",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_checked_transport.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "result_claim_admission_requires_its_declaring_observation_and_producing_axis",
+        "result_claim_witnesses_survive_rebuilds_without_joining_same_labels"
+      ],
+      "note": "Exact declaring witness and producer edges survive graph rebuilding; malformed observation/producer relationships are rejected."
+    },
+    {
+      "phase": "b",
+      "id": "wire_result_claim_identity",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_extent_witness.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport"
+      ],
+      "note": "Exact ResultClaim site identity round-trips through versioned wire transport; malformed fields and relationships cannot enter a graph."
     }
   ]
 }

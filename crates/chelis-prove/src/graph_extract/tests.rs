@@ -65,6 +65,43 @@ fn expected_sha256_hex(bytes: &[u8]) -> String {
 // ===========================================================================
 
 #[test]
+fn result_claim_dependencies_remain_outside_the_scalar_proof_envelope() {
+    use chelis_compiler_api::schema::{WireExtentWitnessSite, WireRtAxis};
+    let mut dag = single_op_dag(WireRiscOp::Load { name: "x".into() });
+    let mut witness = dag.nodes[0].clone();
+    witness.id = 1;
+    witness.op = WireRiscOp::ExtentWitness {
+        site: WireExtentWitnessSite::Caller,
+        parameter: "x".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+        requirements: vec![],
+        claims: vec![],
+    };
+    witness.inputs = vec![0];
+    witness.output_type = WireTensorType {
+        dims: vec![],
+        precision: "int64".into(),
+    };
+    dag.nodes.push(witness.clone());
+    witness.id = 2;
+    witness.shape_deps = vec![1];
+    let WireRiscOp::ExtentWitness { site, .. } = &mut witness.op else {
+        unreachable!()
+    };
+    *site = WireExtentWitnessSite::ResultClaim {
+        claim: "n".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    dag.nodes.push(witness);
+    dag.roots = vec![2];
+    dag.validate_wire_contract()
+        .expect("current transport admits the exact discrete obligation");
+    let error = scalar_root_closure(&dag, 2)
+        .expect_err("a discrete obligation has no float proof encoding");
+    assert!(error.contains("no shape dependencies"), "{error}");
+}
+
+#[test]
 fn real_source_yields_box_range_goal_with_populated_handle() {
     let extracted = box_range_goal_from_source(
         SINGLE_OUTPUT_SOURCE,

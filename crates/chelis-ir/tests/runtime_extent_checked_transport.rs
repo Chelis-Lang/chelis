@@ -68,6 +68,243 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
     );
     (x, witness, checked)
 }
+
+fn declared_producer(dag: &mut Dag, parameter: &str, actual: usize) -> NodeId {
+    use chelis_ir::dag::ExtentWitnessSite;
+    let input = dag.add_node(
+        RiscOp::Load {
+            name: parameter.into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named(format!("{parameter}_length"), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let declared = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: parameter.into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![input],
+        scalar_type(),
+        None,
+    );
+    let required = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::ResultClaim {
+                claim: "n".into(),
+                axis: RtAxis::Lit(0),
+            },
+            parameter: parameter.into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![input],
+        scalar_type(),
+        None,
+    );
+    dag.add_shape_dep(required, declared);
+    let value = scalar(dag, 7);
+    let actual = scalar(dag, i64::try_from(actual).unwrap());
+    let produced = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::Node(1),
+        },
+        vec![value, actual],
+        TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_shape_dep(produced, required);
+    dag.add_root(produced);
+    produced
+}
+
+#[test]
+fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
+    for actual in [3, 4] {
+        let mut dag = Dag::new();
+        declared_producer(&mut dag, "left", 2);
+        declared_producer(&mut dag, "right", actual);
+        let mut folded = dag.clone();
+        constant_fold(&mut folded);
+        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        for (rebuilt, batched) in [
+            (dag.clone(), false),
+            (common_subexpr_eliminate(&dag), false),
+            (dead_code_eliminate(&dag), false),
+            (folded, false),
+            (
+                chelis_ir::specialize::specialize_for_exact_arithmetic(&dag),
+                false,
+            ),
+            (mapped, true),
+        ] {
+            let errors = chelis_ir::verify::verify(&rebuilt);
+            assert!(errors.is_empty(), "{errors:?}");
+            let owned = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(rebuilt.clone()).unwrap(),
+            )
+            .unwrap();
+            let plan = chelis_ir::ownership::plan_c_storage(owned).unwrap();
+            for node in rebuilt.nodes() {
+                for dependency in &node.shape_deps {
+                    if matches!(
+                        rebuilt.get(*dependency).unwrap().op,
+                        RiscOp::ExtentWitness {
+                            site: chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. },
+                            ..
+                        }
+                    ) {
+                        let slot = plan
+                            .slot_for_node(*dependency)
+                            .expect("claim scalar owns storage");
+                        assert!(
+                            plan.slot(slot).unwrap().last_use_index() >= node.id.0,
+                            "claim bytes remain live until their producer reads them"
+                        );
+                        for intermediate in (dependency.0 + 1)..node.id.0 {
+                            assert_ne!(
+                                plan.slot_for_node(NodeId(intermediate)),
+                                Some(slot),
+                                "claim storage cannot be overwritten before its producer"
+                            );
+                        }
+                    }
+                }
+            }
+            let result = eval_tensor_with(&rebuilt, |name| {
+                let width = if name == "left" { 2 } else { 3 };
+                let shape = if batched { vec![2, width] } else { vec![width] };
+                let count = if batched { 2 * width } else { width };
+                Some(TensorValue::from_vec(shape, vec![0.0; count]))
+            });
+            if actual == 3 {
+                let values = result.unwrap();
+                assert_eq!(
+                    values[&rebuilt.roots()[0]].shape,
+                    if batched { vec![2, 2] } else { vec![2] }
+                );
+                assert_eq!(
+                    values[&rebuilt.roots()[1]].shape,
+                    if batched { vec![2, 3] } else { vec![3] }
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains(&format!(
+                        "extent `n`: claimed = 3, insert axis {} = 4",
+                        usize::from(batched)
+                    )),
+                    "{error}"
+                );
+                assert!(
+                    error.ends_with("numeric trap: domain in insert at int64"),
+                    "{error}"
+                );
+            }
+        }
+    }
+    // Two declarations can constrain the same produced axis. The dependency
+    // list retains both values and the declaration order, even with one label.
+    for (first, second, actual, failure) in
+        [(3, 3, 3, None), (2, 3, 2, Some(3)), (2, 3, 4, Some(2))]
+    {
+        let mut dag = Dag::new();
+        let left = declared_producer(&mut dag, "left", first);
+        let right = declared_producer(&mut dag, "right", actual);
+        let first_token = dag.get(left).unwrap().shape_deps[0];
+        dag.node_mut(right)
+            .unwrap()
+            .shape_deps
+            .insert(0, first_token);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        let result = eval_tensor_with(&dag, |name| {
+            let width = if name == "left" { first } else { second };
+            Some(TensorValue::from_vec(vec![width], vec![0.0; width]))
+        });
+        if let Some(required) = failure {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "extent `n`: claimed = {required}, insert axis 0 = {actual}"
+                )),
+                "{error}"
+            );
+        } else {
+            assert_eq!(result.unwrap()[&right].shape, [3]);
+        }
+    }
+    // A captured named obligation cannot discharge an independent literal
+    // claim on that same axis. The named claim agrees in both executions.
+    for literal in [2, 3] {
+        let mut dag = Dag::new();
+        let producer = declared_producer(&mut dag, "x", 2);
+        dag.node_mut(producer).unwrap().output_type.dims[0] = DimInfo::Lit(literal);
+        let errors = chelis_ir::verify::verify(&dag);
+        assert!(errors.is_empty(), "{errors:?}");
+        let result = eval_tensor_with(&dag, |_| Some(TensorValue::from_vec(vec![2], vec![0.0; 2])));
+        if literal == 2 {
+            assert_eq!(result.unwrap()[&producer].shape, [2]);
+        } else {
+            let error =
+                result.expect_err("an agreeing named token cannot hide the disagreeing literal");
+            assert!(
+                error.contains("extent `3`: claimed = 3, insert axis 0 = 2"),
+                "{error}"
+            );
+            assert!(
+                error.ends_with("numeric trap: domain in insert at int64"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn result_claim_admission_requires_its_declaring_observation_and_producing_axis() {
+    let mut dag = Dag::new();
+    let producer = declared_producer(&mut dag, "x", 2);
+    let token = dag.get(producer).unwrap().shape_deps[0];
+    assert!(
+        !chelis_ir::axis_sources::witness_is_entry_obligation(&dag, token),
+        "the producer reads this witness's scalar through its explicit dependency"
+    );
+    assert!(
+        chelis_ir::axis_sources::witness_entry_obligations(&dag, token).is_none(),
+        "a local result requirement cannot be waived as an empty entry check"
+    );
+    let errors = chelis_ir::verify::verify(&dag);
+    assert!(errors.is_empty(), "{errors:?}");
+    for mutation in ["declaration", "axis", "producer"] {
+        let mut bad = dag.clone();
+        match mutation {
+            "declaration" => bad.node_mut(token).unwrap().shape_deps.clear(),
+            "axis" => {
+                let RiscOp::ExtentWitness {
+                    site: chelis_ir::dag::ExtentWitnessSite::ResultClaim { axis, .. },
+                    ..
+                } = &mut bad.node_mut(token).unwrap().op
+                else {
+                    unreachable!()
+                };
+                *axis = RtAxis::Lit(1);
+            }
+            "producer" => bad.node_mut(producer).unwrap().op = RiscOp::Copy,
+            _ => unreachable!(),
+        }
+        assert!(!chelis_ir::verify::verify(&bad).is_empty(), "{mutation}");
+    }
+}
 #[test]
 fn computed_claim_checks_independent_values_before_returning_a_scalar() {
     for actual in [2, 3] {

@@ -428,7 +428,7 @@ fn parity_grad_extent_claim() {
     drive_parity(&path, true);
     assert_eq!(
         run_eval(&path),
-        b"out.0 = tensor(shape=[3], data=[0.0, 0.0, 0.0])\nout.1 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\n"
+        b"out.0 = tensor(shape=[3], data=[0.0, 0.0, 0.0])\nout.1 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\nindependent.0 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\nindependent.1 = tensor(shape=[2], data=[7.0, 7.0])\n"
     );
 }
 

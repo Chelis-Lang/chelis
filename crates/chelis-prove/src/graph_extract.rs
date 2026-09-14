@@ -556,7 +556,10 @@ const _: () = {
     // themselves. Every added field is discrete and the edges name other
     // witnesses, so the box/range float-bound extraction contract is
     // unchanged; the version moves because the witness payload shape did.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 11);
+    // Version 12 adds a discrete result-claim site to ExtentWitness. Witnesses
+    // remain outside float-envelope extraction, and its dependency edges are
+    // refused by the existing shape-dependency boundary above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 12);
 };
 
 #[cfg(test)]

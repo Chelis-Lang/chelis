@@ -7486,6 +7486,11 @@ impl<'program> LowerCtx<'program> {
                     DimInfo::Lit(n) => n.to_string(),
                     DimInfo::Named(name, _) => name.clone(),
                 };
+                let required = if matches!(dim, DimInfo::Named(_, _)) {
+                    self.capture_result_claim(required, label.clone(), axis)
+                } else {
+                    required
+                };
                 Some((axis, label, required))
             })
             .collect::<Vec<_>>();
@@ -14357,11 +14362,81 @@ impl<'program> LowerCtx<'program> {
                     self.current_span_id.clone(),
                 ),
             ),
+            DimInfo::Named(_, _) if !self.signature_is_authored => None,
             DimInfo::Named(name, _) => self
                 .signature_witnesses
                 .iter()
                 .find_map(|(binder, witness)| (binder == name).then_some(*witness)),
         }
+    }
+
+    /// Capture the declaring activation before lowering can enter another
+    /// same-spelled signature. This is another shape observation, with the
+    /// original witness as a dependency so its entry obligations run first.
+    fn capture_result_claim(&mut self, required: NodeId, claim: String, axis: usize) -> NodeId {
+        let original = self.dag.get(required).expect("declaring extent witness");
+        let RiscOp::ExtentWitness {
+            parameter,
+            axis: observed,
+            ..
+        } = &original.op
+        else {
+            unreachable!("named result claims resolve to signature witnesses")
+        };
+        let op = RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::ResultClaim {
+                claim,
+                axis: RtAxis::Lit(i32::try_from(axis).expect("result rank fits int32")),
+            },
+            parameter: parameter.clone(),
+            axis: *observed,
+            requirements: Vec::new(),
+            claims: Vec::new(),
+        };
+        let input = original.inputs[0];
+        let token = self.dag.add_node(
+            op,
+            vec![input],
+            original.output_type.clone(),
+            self.current_span_id.clone(),
+        );
+        self.dag.add_shape_dep(token, required);
+        token
+    }
+
+    fn attach_result_claim(&mut self, producer: NodeId, axis: usize, required: NodeId) {
+        let Some(RiscOp::ExtentWitness {
+            site:
+                crate::dag::ExtentWitnessSite::ResultClaim {
+                    axis: claimed_axis, ..
+                },
+            ..
+        }) = self.dag.get(required).map(|node| &node.op)
+        else {
+            return;
+        };
+        // The dependency belongs to the origin's axis, which may differ from
+        // the returned axis after a permutation or inserted dimension.
+        let mut site = self.dag.get(required).expect("captured claim").op.clone();
+        if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32")) {
+            let RiscOp::ExtentWitness {
+                site:
+                    crate::dag::ExtentWitnessSite::ResultClaim {
+                        axis: claimed_axis, ..
+                    },
+                ..
+            } = &mut site
+            else {
+                unreachable!()
+            };
+            *claimed_axis = RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32"));
+            self.dag.node_mut(required).expect("captured claim").op = site;
+        }
+        assert!(
+            required.0 < producer.0,
+            "a producer claim must capture its declaring extent first"
+        );
+        self.dag.add_shape_dep(producer, required);
     }
 
     /// Follow actual per-axis sources, never output-type numbers or binder
@@ -14375,6 +14450,23 @@ impl<'program> LowerCtx<'program> {
         required: NodeId,
     ) {
         use crate::axis_sources::AxisSource;
+        let captured_declaration = self.dag.get(required).and_then(|token| {
+            matches!(
+                token.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                    ..
+                }
+            )
+            .then(|| token.shape_deps.first().copied())
+            .flatten()
+        });
+        if captured_declaration.is_some()
+            && captured_declaration == self.signature_witness(&label)
+            && self.preserve_named_result_axis(id, axis, &label)
+        {
+            return;
+        }
         let Some(source) = crate::axis_sources::output_axis_sources(&self.dag, id)
             .get(axis)
             .cloned()
@@ -14392,6 +14484,7 @@ impl<'program> LowerCtx<'program> {
             AxisSource::ScalarInput { input } => {
                 let target = self.dag.get(id).expect("result").inputs[input];
                 let Some(&reshape_axis) = self.reshape_targets.get(&target) else {
+                    self.attach_result_claim(id, axis, required);
                     return;
                 };
                 let axis =
@@ -14430,6 +14523,16 @@ impl<'program> LowerCtx<'program> {
                         self.current_span_id.clone(),
                     );
                     self.invocation_witnesses.push(checked);
+                }
+            }
+            AxisSource::OpComputed { axis: computed, .. } => {
+                if crate::axis_sources::op_computed_axis_extent(
+                    &self.dag.get(id).expect("producer").op,
+                    computed,
+                )
+                .is_some()
+                {
+                    self.attach_result_claim(id, computed, required);
                 }
             }
             _ => {}
@@ -14493,24 +14596,23 @@ impl<'program> LowerCtx<'program> {
             // either record a check for a comparison that cannot hold or
             // decline silently.
             self.reject_refuted_result_axis(id, axis, dim, owner);
-            // The op-computed arm may RESOLVE the dim it stamps rather than
-            // taking the declared spelling verbatim (chelis#1800's M3), so it
-            // reports what to stamp instead of only whether it resolved. The
-            // two witness arms stamp the declaration as written.
+            // Literal result metadata retains its existing guard path.
+            // Named requirements retain graph identity independently of shape.
             let resolved = match dim {
                 DimInfo::Lit(required) => {
                     if self.preserve_literal_result_axis(id, axis, *required) {
                         Some(dim.clone())
                     } else {
-                        self.preserve_op_computed_result_axis(id, axis, dim)
+                        self.preserve_op_computed_result_axis(id, axis, *required)
                     }
                 }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
-                    if self.preserve_named_result_axis(id, axis, binder) {
-                        Some(dim.clone())
-                    } else {
-                        self.preserve_op_computed_result_axis(id, axis, dim)
-                    }
+                    // The equality is carried by exact entry witnesses or by
+                    // lower_expr_with_claim's captured producer requirement.
+                    // Stamping its spelling onto a physical extent would make
+                    // unrelated activations (and their adjoints) one class.
+                    self.preserve_named_result_axis(id, axis, binder);
+                    None
                 }
                 _ => None,
             };
@@ -14554,7 +14656,7 @@ impl<'program> LowerCtx<'program> {
     /// from, matching [`Self::preserve_literal_result_axis`], which is
     /// likewise ungated. A NAMED claim is refutable only once chelis#1800
     /// has RESOLVED its declaring witness to a number, and it carries
-    /// [`Self::preserve_op_computed_result_axis`]'s gate with it: a
+    /// [`Self::required_extent_for_claim`]'s gate with it: a
     /// synthesized multi-root kernel's signature is not an author's claim, so
     /// `signature_is_authored` must hold and the binder must name a parameter
     /// axis of this same activation, or there is nothing to refute.
@@ -14661,6 +14763,42 @@ impl<'program> LowerCtx<'program> {
         let DimInfo::Named(name, _) = checked else {
             return;
         };
+        // A checked caller view renames the diagnostic of an existing exact
+        // obligation, never its declaring witness or physical result extent.
+        let (mut origin, mut origin_axis) = (id, axis);
+        while let Some(crate::axis_sources::AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(source_axis),
+        }) = crate::axis_sources::output_axis_sources(&self.dag, origin).get(origin_axis)
+        {
+            origin = self.dag.get(origin).expect("axis source").inputs[*input];
+            origin_axis = usize::try_from(*source_axis).expect("verified source axis");
+        }
+        let dependencies = self
+            .dag
+            .get(origin)
+            .expect("result origin")
+            .shape_deps
+            .clone();
+        let mut refined_claim = false;
+        for dependency in dependencies {
+            if let RiscOp::ExtentWitness {
+                site:
+                    crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim,
+                        axis: RtAxis::Lit(claimed_axis),
+                    },
+                ..
+            } = &mut self.dag.node_mut(dependency).expect("claim dependency").op
+                && usize::try_from(*claimed_axis).ok() == Some(origin_axis)
+            {
+                *claim = name.clone();
+                refined_claim = true;
+            }
+        }
+        if refined_claim {
+            return;
+        }
         let Some(existing) = self
             .dag
             .get(id)
@@ -14677,160 +14815,26 @@ impl<'program> LowerCtx<'program> {
             DimInfo::Named(name.clone(), known_extent);
     }
 
-    /// chelis#1397's declaration half: keep a declared result dimension over an
-    /// extent the OPERATION computes.
-    ///
-    /// The witness arms above both need a witness that OBSERVED the produced
-    /// extent, and an [`AxisSource::OpComputed`] axis has none: no input
-    /// carries the extent, so `axis_literal_witness` and
-    /// `axis_interface_witness` both decline and the declared dimension was
-    /// dropped, leaving the lowered result carrying the synthesized
-    /// `_rt_shrink_dim_N_A` instead of the `tensor[2, f32]` the user wrote.
-    /// Measured before this arm: `def f(x: tensor[rows, f32]) -> tensor[2, f32]
-    /// = shrink(x, [[1i64, shape(x, 0i32)]])` printed `shape=[3]` and exited
-    /// zero on both lanes.
-    ///
-    /// So this arm records NO requirement edge. Section 4.7 places the check at
-    /// "the source position of the operation that introduces the guarded
-    /// extent", and `local_dim_guard_sites`' op-computed arm is that site; a
-    /// witness comparison would be a second, differently placed check of the
-    /// same claim.
-    ///
-    /// Two conditions, and both are about not stamping a claim nothing checks:
-    ///
-    /// - `axis_sources::op_computed_axis_extent` must admit the owner. It is
-    ///   the SAME call the guard site makes, so an unadmitted owner keeps its
-    ///   existing disposition rather than gaining a claim with no guard, which
-    ///   on the evaluator would be a silently wrong shape.
-    /// - A NAMED claim must be declared by a parameter of this AUTHORED
-    ///   signature. `signature_is_authored` is PR #1773's gate, so a
-    ///   synthesized multi-root kernel stamps nothing, and `signature_witness`
-    ///   requires the binder to be a parameter axis of the same activation.
-    ///
-    ///   The claim then makes that parameter a DEPENDENCY of the result, and
-    ///   this arm records it. Without that the declaring parameter can be
-    ///   eliminated as dead before the kernel is formed: PR #1773 mints one
-    ///   witness per declared parameter axis but
-    ///   `retain_invocation_witnesses` keeps only the ones carrying a
-    ///   requirement or a claim, which a binder declared by a SINGLE parameter
-    ///   has neither of. For `f(w: tensor[n, f32], x: tensor[r, f32]) ->
-    ///   tensor[n, f32]` with `w` unread, the kernel was then not even given
-    ///   `w`, the class had one member, and the program returned the extent the
-    ///   operation computed at exit zero on both lanes. Recording the
-    ///   dependency makes `w` a kernel input exactly as `scope.unread`'s
-    ///   repeated binder already made its unread parameter one, and the
-    ///   canonical value is then the caller's, not the operation's own.
-    ///
-    ///   This records a data dependency, not a second check. The comparison
-    ///   stays where section 4.7 puts it, at the operation that introduces the
-    ///   extent, so the trap names `shrink` rather than `load`.
-    ///
-    ///   A result name declared NOWHERE else needs no such gate: it is the
-    ///   checker's fresh-extent representation under section 4.7.2 and is still
-    ///   published as `*`, which reaches neither this arm nor a class.
-    ///
-    /// One origin is out of reach, and it is the operand slot rather than the
-    /// walk: `shape_preserving` takes the first rank-matching input, so an
-    /// op-computed origin reachable only through operand 1 is unstamped.
-    /// Measured: the elementwise operand shape check refuses those programs
-    /// before they run, so nothing executes silently, which is why this is
-    /// recorded rather than repaired.
-    ///
-    /// chelis#1798 widened WHICH axis this arm reads. It dispatched on the
-    /// RESULT node's own source, so a body ending in an operation that merely
-    /// FORWARDS an op-computed extent stamped nothing: `add(shrink(x, ..),
-    /// shrink(y, ..))` under a declared `tensor[n, f32]` carries
-    /// `AxisSource::InputAxis` on the `add`, the two witness arms walk those
-    /// hops looking for an `ExtentWitness` an op-computed origin never has,
-    /// and this arm refused the forwarded source outright. Measured at
-    /// `6abca2406`: `shape=[3]` at exit zero on both lanes under `n` = 2.
-    ///
-    /// [`crate::axis_sources::op_computed_axis_origin`] now reports the
-    /// operation that INTRODUCES the extent, crossing pass-through hops and
-    /// stopping at any axis the operation sets, and the claim is stamped on
-    /// that origin's axis as well as on the result. The origin is where
-    /// section 4.7 puts the guard and where `local_dim_guard_sites` keys its
-    /// site; the result's own forwarded axis is refused membership by
-    /// `is_member`, so stamping only the result would leave a claim no site
-    /// checks. Rejected: teaching the derivation to walk pass-through members
-    /// instead, which puts one claim on two nodes and lets two consumers
-    /// disagree, and observing the result AFTER it runs, which section 4.7
-    /// forbids because the origin's own allocation is the allocation the
-    /// guard has to precede.
+    /// Retain a literal result obligation on the operation introducing its
+    /// extent, including an origin reached through shape-preserving wrappers.
+    /// Named claims use captured ResultClaim witnesses; they cannot enter this
+    /// physical-metadata path.
     fn preserve_op_computed_result_axis(
         &mut self,
         id: NodeId,
         axis: usize,
-        declared: &DimInfo,
+        required: usize,
     ) -> Option<DimInfo> {
-        let binder = match declared {
-            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
-                Some(binder.as_str())
-            }
-            _ => None,
-        };
-        if let Some(binder) = binder
-            && (!self.signature_is_authored || self.signature_witness(binder).is_none())
-        {
-            return None;
-        }
         let (origin, computed) = crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
         let node = self.dag.get(origin)?;
-        // The admission answer itself belongs to the guard site rather than to
-        // this stamp; what matters here is that there IS one, because a claim
-        // stamped onto an unadmitted owner would have no site to check it.
+        // A stamp is meaningful only when the shared derivation admits a
+        // local guard for the original producing operation.
         crate::axis_sources::op_computed_axis_extent(&node.op, computed)?;
-        // chelis#1800's second site: a NAMED claim whose declaring witness
-        // observes a graph-fixed extent is stamped RESOLVED, as
-        // `DimInfo::Named(binder, Some(v))`.
-        //
-        // `axis_claim` keeps that a `Name` claim, and `local_dim_guard_sites`
-        // already renders a resolved member as `CanonicalExtent::Resolved(v)`,
-        // so the guard reports the binder and compares against the number.
-        // Without it the class keyed by the binder had ONE member, because the
-        // declaring axis carries `Lit(v)` and so belongs to the `Literal(v)`
-        // class instead, and C2.4 does not make a one-member `Name` class a
-        // class: `g`'s kernel declared `int64_t k = chelis_movement_extent(..)`
-        // and compared nothing. The matching derivation change is the
-        // single-member rule in `derive_runtime_dim_classes`.
-        let declared = match (binder, self.signature_witness_extent(binder)) {
-            (Some(binder), Some(value)) => DimInfo::Named(binder.to_owned(), Some(value)),
-            _ => declared.clone(),
-        };
-        let declared = &declared;
-        // chelis#1798: the claim belongs to the operation that INTRODUCES the
-        // extent, which is the origin rather than whichever node ends the
-        // body. Section 4.7 puts the guard at "the source position of the
-        // operation that introduces the guarded extent", and the class member
-        // the guard site is keyed on is that origin's axis: the result's own
-        // forwarded axis is excluded from membership by `is_member`, so
-        // stamping only the result leaves a claim with no site to check it.
-        if origin != id && !self.stamp_op_computed_origin(origin, computed, declared) {
+        let declared = DimInfo::Lit(required);
+        if origin != id && !self.stamp_op_computed_origin(origin, computed, &declared) {
             return None;
         }
-        // A NAMED claim's canonical value is the declaring parameter's axis, so
-        // the kernel needs that parameter even when the body never reads it.
-        // Record the dependency; without it the declaring `Load` is eliminated
-        // as dead, the kernel is not given the parameter, the class has one
-        // member and the claim executes unchecked.
-        //
-        // This is the same retention `scope.unread` relies on, reached a
-        // different way. `retain_invocation_witnesses` keeps a witness that
-        // carries a requirement or a claim, and PR #1773 gives one to a binder
-        // REPEATED across parameters; a binder declared once has neither, so
-        // the claim this arm stamps is what makes its witness live. The
-        // comparison itself stays where section 4.7 puts it, at the operation
-        // that introduces the extent, so the trap names `shrink` rather than
-        // `load`: this records a data dependency, not a second check.
-        if let Some(binder) = binder
-            && let Some(witness) = self.signature_witness(binder)
-        {
-            let result = self.dag.node_mut(id).expect("result");
-            if !result.shape_deps.contains(&witness) {
-                result.shape_deps.push(witness);
-            }
-        }
-        Some(declared.clone())
+        Some(declared)
     }
 
     /// The graph-fixed extent a named claim's declaring witness observes.
@@ -15127,6 +15131,9 @@ impl<'program> LowerCtx<'program> {
     /// check, so both resolve to the witness that reads that `Load` axis.
     fn axis_interface_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
         use crate::axis_sources::AxisSource;
+        if let Some(witness) = self.caller_witness_for(id, axis) {
+            return Some(witness);
+        }
         if let Some(witness) = self.axis_literal_witness(id, axis) {
             return Some(witness);
         }
@@ -15156,8 +15163,10 @@ impl<'program> LowerCtx<'program> {
             else {
                 return None;
             };
-            (usize::try_from(*observed).ok() == Some(axis) && node.inputs.first() == Some(&tensor))
-                .then_some(node.id)
+            (self.activation_witnesses.contains(&node.id)
+                && usize::try_from(*observed).ok() == Some(axis)
+                && node.inputs.first() == Some(&tensor))
+            .then_some(node.id)
         })
     }
 

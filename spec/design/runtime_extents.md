@@ -293,6 +293,48 @@ to the corresponding replacement axis or preserves the necessary guard
 computation; it does not keep both the obsolete tensor computation and its
 replacement merely to preserve a stale node id.
 
+The #1821 independent-activation repair separates the producer's physical
+shape from declaration claims. A printable binder or checked caller label
+cannot join different activations or supply the runtime extent of a producing
+operation. Existing parameter-witness equality checks own result obligations
+only where the observed result source is that exact checked witness; this
+discharge requires the source relationship, never equal spelling. Such an
+entry-owned equality executes once in signature order and creates no duplicate
+local guard.
+
+For a locally computed named result, lowering captures the declaring witness
+before entering nested callees. A fresh shape-only `ExtentWitness` with a
+`ResultClaim` site records its diagnostic label and claimed result axis,
+observes the declaring tensor axis, and retains the declaring witness as a
+dependency. The actual introducing primitive retains each claim token through
+`shape_deps`. Guard derivation compares the primitive's observed axis against
+the token's scalar by node identity, preserving multiple requirements in
+declaration order and the original primitive's trap attribution. It never
+uses the printed label as a runtime dimension lookup or overwrites physical
+result metadata with that label. Existing literal and checked-reshape carriers
+retain their own obligations. Checked helper-label views remain a separate
+concern; adding a view is not evidence that a claim survived.
+
+The additive site role requires exact wire transport and admission, including
+its axis and dependency validation; predecessor artifacts must reject. AD,
+DCE, graph splicing and vectorization must preserve or correctly remap both
+the token and its owning producer edge. Storage lifetime planning follows
+`shape_deps` as well as value inputs: a claim token's buffer remains live until
+its producer consumes the guard, so later shape computations cannot overwrite
+the required extent. Ownership borrowing and storage reuse must agree on those
+same edges. These are implementation obligations, not completed receipts. The regression selection must include independent
+same-spelled calls, computed-only claims, unused/zero cotangents, and #1991's
+lost parameter/result equality and original-`shrink` attribution controls.
+No arbitrary eager value or effect is encoded as a shape-only dependency.
+
+Six additional eval/C corpus rows preserve independent-call agreement, ordered
+entry failures and computed-result claim attribution. Their tests exercise
+same and distinct callees, renamed binders, written target order and zero or
+nonzero cotangents. The computed case requires the original `insert` failure
+before a later elementwise operation; the agreeing case checks every gradient
+value. Existing #1991 helper-label controls retain their historical result,
+including the separately tracked missing `seq` binding.
+
 The typed rebuild interface must require remapping the axis contract together
 with the node's inputs/type. No pass may copy just a printable dimension and
 silently default the claims to empty. This change is bounded to extent
@@ -669,11 +711,15 @@ reshape obligation. HIP entry selection retains the checked realizability lane
 through helper extraction on both CLI and API paths. The host C artifact is
 executed independently in the oracle; genuine tensor roots still select device
 emission. HIP device execution remains with the platform owners.
-WireDag v11 carries both checked operations, integer remainder and the named
-claims an extent witness owes against another witness. Stdlib/library/context cache
-versions 18/14/20 require the authored signature ledger and revalidate it
-against fresh lowering. Missing fields and a forged ledger with a valid
-checksum and unchanged proof identity reject at admission.
+WireDag v12 carries checked operations, integer remainder, witness-to-witness
+requirements and the exact `ResultClaim` site with its declaring and producer
+edges. Stdlib/context formats 21/23 retain the lowered graph and require these
+roles; checked-library format 15 retains its existing checked-program payload.
+The authored signature ledger is revalidated against fresh lowering. Earlier
+serialized-graph formats reject before payload decoding, including formats
+20/22 used by concurrent declaration-admission work. Missing fields and a
+forged ledger with a valid checksum and unchanged proof identity reject at
+admission.
 
 The completion oracle for these two host obligations is:
 
@@ -923,12 +969,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 162 rows and none of them is an unexplained
+The recorded phase-B corpus has 168 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 30 non-`executes_exactly` values
-against 132 `executes_exactly`, and every one of the thirty is accounted
+against 138 `executes_exactly`, and every one of the thirty is accounted
 for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:

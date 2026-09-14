@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "12a55fca21ed4688584e0c6d51c994859ef2ef60887dafd30608989c0a5db281",
+  "corpus_sha256": "b9486c4c2f9a6ee7b643bc5472618eb18caf299fcedfbb8b498da251a022f455",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -481,6 +481,42 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "rejects_exactly",
       "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
+    },
+    {
+      "id": "grad.independent_calls.agree.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.agree.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
     },
     {
       "id": "grad.wrt_aggregate.multi.dead_forward.c",

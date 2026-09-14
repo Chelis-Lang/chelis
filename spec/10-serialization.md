@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 10 is explicitly
+WireDag JSON is an exact-version contract. Schema version 12 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 9, and every future version are decode errors before any IR
+versions 1 through 11, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -39,10 +39,21 @@ be within the tensor input's rank. Every requirement uses the exact
 `NonnegativeExtent` adapter over a nonnegative `int64`; an absent vector,
 non-integer or negative requirement,
 invalid axis, arity, or output type is an encoding and decoding error.
-`site` is mandatory and is exactly `caller` or `local_expand`. It preserves
+`site` is mandatory. Its `caller` and `local_expand` forms preserve
 whether failure belongs to call entry (`load`, with parameter context) or a
 local broadcast (`expand`, with the observed input node context); missing or
-unknown sites are decoding errors. `parameter` is diagnostic text, not dimension identity. The node's source
+unknown sites are decoding errors. Its `result_claim` form is an object with
+mandatory `claim` and `axis` fields: a nonempty diagnostic label and a
+normalized nonnegative `WireRtAxis`. This witness observes the declaring
+tensor axis and has exactly one shape dependency on the earlier `caller`
+witness observing that identical tensor and axis. Its own `requirements` and
+`claims` vectors are empty. A producing operation's shape dependency on this
+token retains an equality against its scalar value at the token's result axis.
+The producer must support observing that axis before allocation; the token's
+node identity, not the label, identifies the required extent. Missing or
+inconsistent declaring dependencies, entry obligations on a result token,
+and unsupported producing axes are encoding and decoding errors.
+`parameter` is diagnostic text, not dimension identity. The node's source
 provenance and invocation dependencies survive transport as ordinary node
 fields and edges. Requirement order and duplicates are preserved; an empty
 requirements vector is valid. `claims` is mandatory and its entries correspond
