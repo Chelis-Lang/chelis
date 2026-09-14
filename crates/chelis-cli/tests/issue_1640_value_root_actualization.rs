@@ -176,13 +176,14 @@ fn an_unconstrained_generic_value_is_not_given_a_fallback_dtype() {
         "def f[p: Float]() -> tensor[p] = scalar_to_tensor(cast(1.5, p))\nout = f()\n",
     )
     .unwrap();
-    // Checking a generalized value does not supply a concrete execution instance.
+    // [04-INF-9] rejects the unresolved result at its declaration boundary:
+    // neither checking nor execution may invent a contract or a dtype.
     Command::cargo_bin("chelis")
         .unwrap()
         .arg("check")
         .arg(&path)
         .assert()
-        .success();
+        .failure();
     for action in ["eval", "build"] {
         let mut command = Command::cargo_bin("chelis").unwrap();
         command.arg(action);
@@ -202,8 +203,7 @@ fn an_unconstrained_generic_value_is_not_given_a_fallback_dtype() {
         );
         assert!(output.stdout.is_empty(), "{output:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("monomorphization missed precision var"),
+            String::from_utf8_lossy(&output.stderr).contains("declared contract"),
             "{output:?}"
         );
     }

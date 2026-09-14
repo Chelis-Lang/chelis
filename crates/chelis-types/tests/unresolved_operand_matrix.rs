@@ -643,11 +643,19 @@ fn run_cell(cell: &Cell) {
     let late = check(late_invalid).expect_err(&format!(
         "{route}: an invalid call over a late-bound operand must be rejected"
     ));
-    if matches!(*route, "add" | "mean" | "sqrt" | "softmax") {
+    if matches!(*route, "add" | "mean" | "sqrt" | "softmax" | "shl" | "shr") {
         assert_family_error(
             &late,
-            if *route == "add" { "Numeric" } else { "Float" },
-            if *route == "add" { "bool" } else { "int32" },
+            match *route {
+                "add" => "Numeric",
+                "shl" | "shr" => "Int",
+                _ => "Float",
+            },
+            match *route {
+                "add" => "bool",
+                "shl" | "shr" => "f32",
+                _ => "int32",
+            },
         );
     } else {
         assert!(
@@ -932,21 +940,24 @@ fn run_dtype_cell(row: &DtypeCell) {
     // same kind, same message. Measured equal on all eleven routes.
     let eager = check(row.cell.resolved_invalid).expect_err("checked by run_cell");
     let late = check(row.cell.late_invalid).expect_err("checked by run_cell");
-    if matches!(row.cell.route, "sqrt" | "add" | "mean" | "softmax") {
+    if matches!(
+        row.cell.route,
+        "sqrt" | "add" | "mean" | "softmax" | "shl" | "shr"
+    ) {
         // The operation's checked family now travels with the inferred lambda.
         // Its use owns the error; no body replay recreates the direct spelling.
         assert_eq!(late.len(), 1, "{}", summary(&late));
         assert_family_error(
             &late,
-            if row.cell.route == "add" {
-                "Numeric"
-            } else {
-                "Float"
+            match row.cell.route {
+                "add" => "Numeric",
+                "shl" | "shr" => "Int",
+                _ => "Float",
             },
-            if row.cell.route == "add" {
-                "bool"
-            } else {
-                "int32"
+            match row.cell.route {
+                "add" => "bool",
+                "shl" | "shr" => "f32",
+                _ => "int32",
             },
         );
         return;
@@ -1106,15 +1117,9 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 
 /// The dtype half of the per-route-kind acceptance boundary.
 ///
-/// A dtype-admissibility validator's operand is not required to carry a shape,
-/// so a lambda that is never applied keeps its unconstrained result and is
-/// accepted in silence, exactly as the collection, host and string routes are.
-/// The validation is not lost: it runs at each binding instead, which is the
-/// cell the table above asserts.
-///
-/// The explicit generic contract policy changes the unconstrained `sqrt`
-/// case. Concrete body inference and operations without a family restriction
-/// retain their previous disposition; do not reject all unused lambdas.
+/// New unresolved Float/Int requirements cannot become implicit generic
+/// contracts. Concrete body inference and operations outside this family
+/// mechanism retain their previous disposition; do not reject all unused lambdas.
 #[test]
 fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
     for (route, program) in [
@@ -1135,20 +1140,22 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
             "def f() -> int32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
-        if route == "sqrt" {
-            let errors = check(program).expect_err("a new Float requirement cannot escape");
+        if matches!(route, "sqrt" | "mod" | "shl") {
+            let family = if route == "sqrt" { "Float" } else { "Int" };
+            let parameter = if route == "sqrt" { "f32" } else { "int32" };
+            let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
                     matches!(
                         error.kind,
                         chelis_types::errors::CheckErrorKind::PrecisionMismatch
-                    ) && error.message.contains("Float")
+                    ) && error.message.contains(family)
                 }),
                 "{}",
                 summary(&errors)
             );
-            check(&program.replace("fn (t)", "fn (t: f32)"))
-                .expect("the explicit concrete contract admits sqrt");
+            check(&program.replace("fn (t)", &format!("fn (t: {parameter})")))
+                .expect("the explicit concrete contract admits the operation");
             continue;
         }
         check(program).unwrap_or_else(|e| {

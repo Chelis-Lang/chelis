@@ -141,14 +141,17 @@ fn check_ill_typed_dp_reports_type_mismatch_and_exits_two() {
         !errors.is_empty(),
         "ill-typed .dp must produce a non-empty errors array; stdout={stdout}"
     );
+    // [04-INF-9]: the numeric admission check rejects bool before ordinary
+    // operand unification. Deep ingestion must preserve that diagnostic.
     let has_type_error = errors.iter().any(|e| {
-        let kind = e["kind"].as_str().unwrap_or("");
-        let message = e["message"].as_str().unwrap_or("");
-        kind == "TypeMismatch" || message.to_lowercase().contains("mismatch")
+        e["kind"] == "PrecisionMismatch"
+            && e["message"].as_str().is_some_and(|message| {
+                message.contains("add on bool operands") && message.contains("04-NUM-4")
+            })
     });
     assert!(
         has_type_error,
-        "ill-typed .dp must name a type mismatch (kind or message); stdout={stdout}"
+        "ill-typed .dp must preserve the numeric admission error; stdout={stdout}"
     );
     assert!(
         report["score"].as_f64().unwrap_or(1.0) < 1.0,

@@ -182,4 +182,38 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
         assert_eq!(report["score"].as_f64(), Some(1.0));
         assert!(report["errors"].as_array().unwrap().is_empty());
     }
+    let path = dir.path().join("comparison.ch");
+    for (source, accepted) in [
+        (
+            "def less[p](x: p, y: p) -> bool = lt(x, y)\nout = less(true, false)\n",
+            false,
+        ),
+        (
+            "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\nout = less(1i32, 2i32)\n",
+            true,
+        ),
+    ] {
+        fs::write(&path, source).unwrap();
+        let checked = cli("check", &path, &dir.path().join("comparison-out"));
+        assert_eq!(
+            checked.status.success(),
+            accepted,
+            "{source}: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        if accepted {
+            assert_eq!(report["score"].as_f64(), Some(1.0));
+            assert!(report["errors"].as_array().unwrap().is_empty());
+        } else {
+            assert!(
+                report["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| error["kind"] == "PrecisionMismatch"),
+                "{report}"
+            );
+        }
+    }
 }

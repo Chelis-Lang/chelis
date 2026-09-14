@@ -984,6 +984,12 @@ This is the dtype implementation of the general policy in
 of collection relations or the checker-wide protocol investigated by
 [#2073](https://github.com/Chelis-Lang/chelis/issues/2073).
 
+The `mod`/bitwise/shift acceptance controls in this slice use scalar operands;
+[#2076](https://github.com/Chelis-Lang/chelis/issues/2076) owns the existing
+bounded-tensor integer validator limitation. Checked function-value transport
+also does not certify evaluator resolution through every aggregate
+([#2077](https://github.com/Chelis-Lang/chelis/issues/2077)).
+
 The call-site body walker is retired with this integration, not extended to
 follow more syntax. The acceptance matrix covers each family route,
 standalone and inline signatures, wrappers, higher-order values, local

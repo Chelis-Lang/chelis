@@ -190,7 +190,7 @@ pub(super) fn family_policy_rejection(
 ) -> (CheckErrorKind, String, Vec<String>) {
     let rendered = subject.render();
     let (kind, message, mut hints) = match fname {
-        "matmul" | "add" | "mul" | "sub" | "neg" | "floor_div" => (
+        _ if (required != OperandFamily::Float && fname != "trunc_div") || fname == "matmul" => (
             CheckErrorKind::PrecisionMismatch,
             format!(
                 "{fname} requires {} but operand precision {rendered} admits other types (spec/04-type-system.md §3.1, [04-DTYPE-2])",

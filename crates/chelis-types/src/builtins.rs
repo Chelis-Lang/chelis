@@ -2054,8 +2054,15 @@ pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
         | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip" => {
             Some(ActiveFloat)
         }
-        "trunc_div" => Some(ActiveInt),
-        "add" | "mul" | "sub" | "neg" | "floor_div" => Some(ActiveNumeric),
+        // [05-OP-64], [05-OP-47] and truncating division.
+        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
+        // and the arithmetic rows of spec/04 section 5.4.
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
+        | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce" => {
+            Some(ActiveNumeric)
+        }
         _ => None,
     }
 }
@@ -2153,7 +2160,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2396,7 +2403,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(

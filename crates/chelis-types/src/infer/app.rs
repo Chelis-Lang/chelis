@@ -438,6 +438,20 @@ fn infer_app_inner(
     // their checked function value carries the restriction itself.
     // Matmul's concrete integer refusal belongs to its signature checker.
     // Run that existing refusal before the scheme's family error can hide it.
+    if let Some(fname) = func_name.as_deref()
+        && (INT_BINOPS.contains(&fname) || INT_SHIFT_OPS.contains(&fname))
+        && arg_tys.iter().any(|ty| {
+            matches!(type_for_readonly_check(ty, subst),
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
+        })
+        && let Some(rejected) = integer_binop_result_type(
+            list, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+        )
+    {
+        // Preserve the existing direct operation's diagnostic. Symbolic
+        // family requirements still travel through ordinary unification.
+        return rejected;
+    }
     if func_name.as_deref() == Some("matmul") && arg_tys.len() == 2 {
         let lhs = type_for_readonly_check(&arg_tys[0], subst);
         let rhs = type_for_readonly_check(&arg_tys[1], subst);

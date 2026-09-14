@@ -152,6 +152,68 @@ fn primitive_scalar_contracts_require_bounds_too() {
     check("def g[p: Float](x: p) -> p = sin(x)\n", true);
 }
 
+#[test]
+fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
+    // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16].
+    for (operations, args, result) in [
+        ("abs floor ceil round", "x", "tensor[3, p]"),
+        ("max_elem min_elem", "x, x", "tensor[3, p]"),
+        ("cmplt lt gt gte lte", "x, x", "tensor[3, bool]"),
+        (
+            "sum max_reduce min_reduce prod_reduce",
+            "x, 0i32",
+            "tensor[p]",
+        ),
+        ("argmax_reduce argmin_reduce", "x, 0i32", "tensor[int64]"),
+    ] {
+        for operation in operations.split_whitespace() {
+            for binder in ["p", "p: Numeric"] {
+                for alias in [false, true] {
+                    let prefix = if alias {
+                        format!("op = {operation}\n")
+                    } else {
+                        String::new()
+                    };
+                    let callee = if alias { "op" } else { operation };
+                    check(
+                        &format!(
+                            "{prefix}def g[{binder}](x: tensor[3, p]) -> {result} = {callee}({args})\n"
+                        ),
+                        binder == "p: Numeric",
+                    );
+                }
+            }
+        }
+    }
+    // [05-OP-64], [05-OP-47]. Scalar controls avoid claiming a repair of
+    // the separate pre-existing bounded-tensor integer validator limitation.
+    for operation in ["mod", "bitand", "bitor", "bitxor", "shl", "shr"] {
+        for binder in ["p", "p: Numeric", "p: Int"] {
+            for alias in [false, true] {
+                let prefix = if alias {
+                    format!("op = {operation}\n")
+                } else {
+                    String::new()
+                };
+                let callee = if alias { "op" } else { operation };
+                check(
+                    &format!("{prefix}def g[{binder}](x: p) -> p = {callee}(x, x)\n"),
+                    binder == "p: Int",
+                );
+            }
+        }
+        check(&format!("def g(x) = {operation}(x, x)\n"), false);
+    }
+    check(
+        "def less[p](x: p, y: p) -> bool = lt(x, y)\nout = less(true, false)\n",
+        false,
+    );
+    check(
+        "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\nout = less(1i32, 2i32)\n",
+        true,
+    );
+}
+
 // [04-INF-9], proposed in #2074: missing annotations are inference holes,
 // not permission to publish a newly inferred constrained generic contract.
 #[test]

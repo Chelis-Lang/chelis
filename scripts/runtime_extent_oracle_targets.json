@@ -689,6 +689,7 @@
         "inferred_local_operands_still_bind_before_the_declaration_boundary",
         "later_callers_do_not_supply_an_omitted_generic_contract",
         "local_lambda_and_aggregate_projection_check_the_declared_precision",
+        "numeric_and_integer_operation_contracts_cover_each_spec_family",
         "omitted_signatures_do_not_publish_inferred_dtype_contracts",
         "primitive_scalar_contracts_require_bounds_too",
         "standalone_signatures_express_the_same_contract",

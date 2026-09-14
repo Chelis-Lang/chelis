@@ -224,9 +224,13 @@ fn bool_sum_is_not_reclassified_as_a_726_arithmetic_cell() {
         "module M.Main\nout = print(sum(to_tensor([true, false, true]), 0))\n",
         "bool_sum_existing_rejection",
     );
+    // The checked Numeric contract now rejects this before the IR's
+    // reduce_sum refusal. It still is not a #726 arithmetic diagnostic.
     assert!(
-        stderr.contains("reduce_sum is not defined on bool tensors"),
-        "the pre-existing reduction disposition should remain explicit: {stderr}"
+        stderr.contains("PrecisionMismatch")
+            && stderr.contains("dtype family `Numeric`")
+            && stderr.contains("`bool`"),
+        "sum's checked family rejection should name Numeric and bool: {stderr}"
     );
     assert!(
         !stderr.contains("chelis#726"),

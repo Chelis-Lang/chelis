@@ -76,6 +76,11 @@ fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
             true,
         ),
         ("def source() = sin\ndef make() = source()\n", true),
+        ("def less[p](x: p, y: p) -> bool = lt(x, y)\n", false),
+        (
+            "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\n",
+            true,
+        ),
     ] {
         let declarations = parse_str(source).unwrap();
         assert_eq!(
