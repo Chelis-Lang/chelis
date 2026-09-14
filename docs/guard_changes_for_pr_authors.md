@@ -42,6 +42,12 @@ add an unrelated mapping just to satisfy the planner. The standing test list is
 a reviewed coverage decision, not a list to extend for every new test. See
 [CI ownership and execution](ci_validation.md).
 
+For a new executable example under `examples/`, add its per-file parity test.
+Pass its literal root path to the existing parity/check helper, directly or
+through an immutable local. The completeness check derives membership from
+those test inputs; there is no second filename list to update. The test still
+owes its applicable execution and comparison checks.
+
 ## Updating an inventory
 
 First determine what each row means.

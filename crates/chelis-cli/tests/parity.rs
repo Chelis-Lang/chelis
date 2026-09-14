@@ -69,6 +69,9 @@ use tempfile::tempdir;
 #[path = "common/unsupported_wording.rs"]
 mod unsupported_wording;
 
+#[path = "common/parity_corpus.rs"]
+mod parity_corpus;
+
 // -----------------------------------------------------------------------------
 // Corpus discovery
 // -----------------------------------------------------------------------------
@@ -78,23 +81,6 @@ fn examples_root() -> PathBuf {
         .join("../../examples")
         .canonicalize()
         .expect("examples directory should exist")
-}
-
-/// Discover every `.ch` file directly under `examples/`. Skip the
-/// `examples/illustrative/` subtree (those are syntax/design specimens, not
-/// the executable Phase 0 corpus), and skip any other subtrees.
-fn discover_executable_examples() -> Vec<PathBuf> {
-    let root = examples_root();
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(&root).expect("read examples dir") {
-        let entry = entry.expect("dir entry");
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ch") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths
 }
 
 // -----------------------------------------------------------------------------
@@ -413,7 +399,7 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // -----------------------------------------------------------------------------
 //
 // One test per executable-corpus file so that a failure points straight at
-// the file. The corpus is small (~10 files) so individual tests are
+// the file. Individual tests are
 // preferable to a parametric loop that hides which file regressed.
 //
 // Files split into two shapes:
@@ -423,8 +409,8 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 //                   We compile the C source as an object file to confirm the
 //                   backend output is well-formed.
 //
-// If the corpus list changes, update `parity_corpus_is_complete` below so
-// the harness fails loud rather than silently shrinking.
+// The completeness check derives membership from these test inputs. A new
+// example needs its per-file test, with no second filename list to update.
 
 #[test]
 fn parity_generic_value_roots() {
@@ -782,71 +768,8 @@ fn parity_caller_actual_scope() {
 /// fails so the harness can't quietly stop covering the new file.
 #[test]
 fn parity_corpus_is_complete() {
-    let known: &[&str] = &[
-        "annotated_concat_softmax.ch",
-        "beacon_scalar_range.ch",
-        "caller_actual_scope.ch",
-        "source-file-names.ch",
-        "checked_reshape.ch",
-        "checked_sparse_axes.ch",
-        "checked_window_geometry.ch",
-        "constraint_directed_risk_guards.ch",
-        "count_bool_axes.ch",
-        "count_bool_device_entry.ch",
-        "dict_foundation.ch",
-        "dropout_entry.ch",
-        "dropout_fixed_stream.ch",
-        "dropout_staged_claim.ch",
-        "dropout_static_rate.ch",
-        "explicit_normalization.ch",
-        "generic_explicit_shape.ch",
-        "generic_value_roots.ch",
-        "grad_wrt_order.ch",
-        "grad_fused_zero.ch",
-        "hash_order_determinism.ch",
-        "hello_tensor.ch",
-        "induction_bond.ch",
-        "integer_functions.ch",
-        "iter_foundation.ch",
-        "kinded_nominal_dimensions.ch",
-        "linreg.ch",
-        "list_foundation.ch",
-        "literal_extent_claim.ch",
-        "ordered_extent_claims.ch",
-        "checked_runtime_extents.ch",
-        "mnist.ch",
-        "opaque_invariants.ch",
-        "opaque_invariants_simplex.ch",
-        "rank_poly_borrow.ch",
-        "record_input_broadcast.ch",
-        "recursive_cast_targets.ch",
-        "recursive_generic.ch",
-        "resource_target_cpu.ch",
-        "scalar_string_foundation.ch",
-        "signed_seed.ch",
-        "tensor_structural_ops.ch",
-        "transformer_block.ch",
-        "vmap_relu.ch",
-        "vmap_shape_value.ch",
-        "wildcard_extents.ch",
-    ];
-    let actual: Vec<String> = discover_executable_examples()
-        .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
-        .collect();
-    let missing: Vec<&str> = known
-        .iter()
-        .copied()
-        .filter(|name| !actual.iter().any(|a| a == name))
-        .collect();
-    let extra: Vec<&String> = actual
-        .iter()
-        .filter(|name| !known.contains(&name.as_str()))
-        .collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "parity harness corpus drifted from examples/.\n  known but missing on disk: {missing:?}\n  on disk but not wired into harness: {extra:?}\nUpdate parity.rs to add a per-file test for any new entries.",
-    );
+    parity_corpus::validate(&examples_root(), include_str!("parity.rs"))
+        .unwrap_or_else(|error| panic!("parity corpus: {error}"));
 }
 
 // -----------------------------------------------------------------------------

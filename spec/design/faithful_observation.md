@@ -905,6 +905,17 @@ Retirement still requires executable-example derivation, each body's owning
 comparator or receipt obligation, and equivalent mutation evidence under
 `guard_artifact_proposal_assessment.md`.
 
+The parity completeness test compares executable root examples with inputs
+derived from the Rust syntax tree of its test declarations. Direct calls to
+the parity/check helpers accept literal root filenames or immutable locals
+initialized from those paths. The copied filename array is gone; each new
+example still needs its per-file test. `parity_corpus_contract` supplies
+standing CI controls for discovery and missing, hidden, conditional or
+unresolved inputs, including removal of each current example input. The fixed
+completeness-test definition stays frozen, and every other required definition
+and ignore-ledger rule is retained. This membership check does not prove
+comparator execution or replace the full acceptance command above.
+
 Chelis#1870 trials structured unsupported identity beside this frozen
 comparison rather than weakening it. The rejected-cell exact comparator and
 its mutations remain, including the Phase 3 definition digest. The actual

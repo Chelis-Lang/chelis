@@ -274,6 +274,19 @@ provided no value; it is that a derived changed-test report can provide the
 same cue without allowing a stale hash to certify a stale definition. The
 replacement must make that review step unavoidable and durable.
 
+The corpus-membership slice derives the filenames from parsed Rust test inputs
+and compares them with the executable `.ch` files directly under `examples/`.
+It retains the existing per-example bodies and their executable, library-only,
+or rejection behavior. The accepted input forms are direct top-level
+calls to the parity/check helpers, using a literal example path or an immutable
+local initialized from one; helper literals, comments, strings, and conditional
+test declarations cannot supply membership. The existing ignore ledger still
+owns the one declared manual prerequisite. This is input-membership evidence,
+not proof of comparator execution. Tests exercise discovery, added/uncovered
+examples, missing inputs, and removed or hidden declarations before the copied
+filename array is removed. Its fixed completeness-test body remains frozen;
+the other definition freezes and the retirement obligations above stay active.
+
 The first trial runs `scripts/phase3_test_change_report.py` in the required
 Docs job and publishes its committed merge-base comparison as an artifact.
 It reads both literal required-test inventories, so removing a requirement
