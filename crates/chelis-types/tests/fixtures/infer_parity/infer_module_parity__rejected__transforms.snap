@@ -1,5 +1,5 @@
-typed_nodes = 5
-total_nodes = 5
+typed_nodes = 6
+total_nodes = 6
 diagnostics = 1
 
 [0] kind = TypeMismatch

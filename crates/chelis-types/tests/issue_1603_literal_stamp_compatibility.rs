@@ -228,6 +228,32 @@ fn vmap_program(axis: &str) -> String {
 }
 
 #[test]
+fn an_explicit_axis_adds_one_real_inference_visit() {
+    let omitted = stamped(&format!(
+        "{VMAP_SIG}\n(def {{}} g (vmap {{}} (var {{}} f)))"
+    ));
+    let explicit = stamped(&vmap_program(INT32_0));
+    for (without_axis, with_axis) in [
+        (check_ir_program(&omitted), check_ir_program(&explicit)),
+        (
+            check_typed_program(&omitted),
+            check_typed_program(&explicit),
+        ),
+    ] {
+        let without_axis = without_axis.expect("the default axis remains accepted");
+        let with_axis = with_axis.expect("an explicit zero axis remains accepted");
+        assert_eq!(
+            with_axis.infer_stats().typed_nodes,
+            without_axis.infer_stats().typed_nodes + 1
+        );
+        assert_eq!(
+            with_axis.infer_stats().total_nodes,
+            without_axis.infer_stats().total_nodes + 1
+        );
+    }
+}
+
+#[test]
 fn vmap_axis_legal_stamps_stay_accepted() {
     assert_accepted("axis/bare", &vmap_program(BARE));
     assert_accepted("axis/int32", &vmap_program(INT32));
