@@ -109,7 +109,11 @@ fn names(rows: &[WireInferredSignature]) -> Vec<&str> {
 
 fn signatures(slug: &str, source: &str) -> Vec<WireInferredSignature> {
     let (parsed, output) = check_json(slug, source);
-    assert!(output.status.success(), "check failed: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     parsed.inferred_signatures.unwrap_or_else(|| {
         panic!(
@@ -176,9 +180,13 @@ def claims_pure(path: string) -> Json ! { } = load_json(path)
         !output.status.success(),
         "`! {{}}` over an imported IO wrapper must be rejected; stderr:\n{stderr}"
     );
-    assert!(parsed.errors.iter().any(|error| {
-        error.message.contains("declared with effects") && error.message.contains("IO")
-    }), "wrong rejection: {:?}", parsed.errors);
+    assert!(
+        parsed.errors.iter().any(|error| {
+            error.message.contains("declared with effects") && error.message.contains("IO")
+        }),
+        "wrong rejection: {:?}",
+        parsed.errors
+    );
     let rows = parsed
         .inferred_signatures
         .expect("a rejected check still emits the requested member");

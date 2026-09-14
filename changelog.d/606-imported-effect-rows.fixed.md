@@ -1,1 +1,0 @@
-`chelis check --show-inferred` now reports the effects a function inherits from an imported package. A caller of a `Std.Io.*` wrapper such as `load_json` reported an empty `inferred_signatures[].effect_row` while effect enforcement correctly treated it as `IO`; reporting and enforcement now read one inferred effect result, so a purity gate built on the reported row is sound.
