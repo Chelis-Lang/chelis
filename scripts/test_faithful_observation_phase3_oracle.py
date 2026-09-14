@@ -6,6 +6,68 @@ from unittest import mock
 import faithful_observation_phase3_oracle as oracle
 
 
+class RustDeclarationTests(unittest.TestCase):
+    definition = '#[test]\nfn protected() { assert!(true); }'
+
+    def test_comments_and_literals_cannot_supply_test_declarations(self):
+        for hidden in [
+            '/* ' + self.definition + ' */',
+            '/* outer /* inner */ ' + self.definition + ' */',
+            '// #[test]\n// fn protected() {}',
+            'const TEXT: &str = r###"' + self.definition + '"###;',
+            'const TEXT: &[u8] = br#"' + self.definition + '"#;',
+            'const TEXT: &CStr = cr#"' + self.definition + '"#;',
+            'const TEXT: &str = "' + self.definition + '";',
+        ]:
+            with self.subTest(hidden=hidden):
+                self.assertEqual(oracle.test_declarations(hidden), {})
+                self.assertEqual(oracle.test_definition_spans(hidden), {})
+                real = hidden + '\n' + self.definition
+                spans = oracle.test_definition_spans(real)
+                self.assertEqual(set(spans), {'protected'})
+                start, end, _, _ = spans['protected']
+                self.assertEqual(real[start:end], self.definition)
+
+    def test_real_attributes_keep_their_literal_ignore_reason(self):
+        source = '#[test]\n#[ignore = "requires device"]\nfn protected() {}'
+        self.assertEqual(oracle.ignored_tests(source), {'protected': 'requires device'})
+        self.assertEqual(oracle.ignored_tests('/* ' + source + ' */'), {})
+
+    def test_definition_boundaries_ignore_comment_literal_and_lifetime_braces(self):
+        body = '''{
+    let _ = r##"} #[test] fn fake() {"##;
+    let _ = br#"}"#;
+    let _ = cr#"}"#;
+    let _ = "\\\"}";
+    let _ = b'}'; let _ = '\\u{7d}';
+    /* outer { /* inner } */ } */
+    'outer: { let _: &'static str = "}"; break 'outer; }
+}'''
+        source = '#[test] /* separator { */ fn protected() ' + body
+        start, end, opening, closing = oracle.test_definition_spans(source)['protected']
+        self.assertEqual(source[start:end], source)
+        self.assertEqual(source[opening:closing], body)
+        self.assertEqual(oracle.replace_test_body(source, 'protected', '{}'), source[:opening] + '{}')
+
+    def test_unterminated_comment_or_string_cannot_hide_source(self):
+        for suffix in ['/*', '"', 'r#"', 'br##"', 'cr#"']:
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                oracle.test_definition_spans(self.definition + '\n' + suffix)
+
+    def test_commenting_each_required_definition_is_a_missing_row(self):
+        original = oracle.shipped_sources()
+        for path, required in oracle.REQUIRED_TESTS.items():
+            spans = oracle.test_definition_spans(original[path])
+            for name in required:
+                with self.subTest(path=path, name=name):
+                    start, end, _, _ = spans[name]
+                    sources = dict(original)
+                    source = sources[path]
+                    sources[path] = source[:start] + '/*\n' + source[start:end] + '\n*/' + source[end:]
+                    self.assertTrue(any(name in item and 'missing required' in item
+                                        for item in oracle.source_violations(sources)))
+
+
 class RunnerTests(unittest.TestCase):
     def _run_main_with(self, fake_run):
         with (

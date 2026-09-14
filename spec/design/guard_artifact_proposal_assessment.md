@@ -283,6 +283,15 @@ comparison evidence or candidate required definitions fails closed. This is
 the review cue beside the existing digests; it does not retire them or replace
 the comparator, receipt, example-derivation, or mutation obligations above.
 
+Declaration discovery and body boundaries share a Rust comment/literal scan:
+commenting out a protected test makes it missing, while declaration-like text
+inside comments or strings cannot supply or duplicate it. Original source
+offsets and definition bytes remain the digest input. This scan does not
+evaluate Rust configuration or prove comparator execution. PR reports validate
+the exact event head against the synthetic merge's second parent and compare
+against its first parent, so regenerating that merge after main advances does
+not attribute main-only changes to the pull request.
+
 ### Phase 4B atom and region digests: replace only with an owning report
 
 Retire `FROZEN_ATOM_DIGESTS` and `FROZEN_REGION_DIGESTS` only if the replacement:
