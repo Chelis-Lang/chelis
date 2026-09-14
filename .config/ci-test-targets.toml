@@ -1245,3 +1245,30 @@ tracking_issue = "chelis#1870"
 prefix = "examples/mixed_signature_extents.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_envelopes.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes current wire graph, codec and admission cases including result-claim transport"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/dtype_direct_arithmetic_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "direct arithmetic oracle version and receipt-selection contracts execute in the script unit suite"
+tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_direct_arithmetic_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1306"

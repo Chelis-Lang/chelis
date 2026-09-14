@@ -820,10 +820,11 @@
         "mode": "exact"
       },
       "expected": [
+        "an_entry_result_claim_keeps_its_later_declaring_witness",
         "result_claim_admission_requires_its_declaring_observation_and_producing_axis",
         "result_claim_witnesses_survive_rebuilds_without_joining_same_labels"
       ],
-      "note": "Exact declaring witness and producer edges survive graph rebuilding; malformed observation/producer relationships are rejected."
+      "note": "Exact declaring witness and producer edges survive graph rebuilding; malformed relationships are rejected and entry diagnostics retain the declaring observation."
     },
     {
       "phase": "b",
