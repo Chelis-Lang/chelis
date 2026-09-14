@@ -598,11 +598,17 @@
         "mode": "exact"
       },
       "expected": [
-        "a_branchy_tail_is_not_guarded_and_is_residual",
-        "an_effect_inside_the_callee_after_the_producing_operation_is_still_observed",
+        "a_branchy_tail_checks_its_selected_producer",
+        "an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
         "both_lanes_execute_exactly_on_an_agreeing_block_bodied_return",
         "both_lanes_execute_exactly_on_an_agreeing_call_bodied_return",
         "both_lanes_observe_the_following_effect_when_the_guard_passes",
+        "c_selected_if_result_claims",
+        "c_selected_match_result_claims",
+        "c_shared_callee_result_claims_are_invocation_scoped",
+        "eval_selected_if_result_claims",
+        "eval_selected_match_result_claims",
+        "eval_shared_callee_result_claims_are_invocation_scoped",
         "eval_traps_before_an_effect_that_follows_the_producing_operation",
         "eval_traps_on_a_block_bodied_return",
         "eval_traps_on_a_call_bodied_return",
@@ -612,7 +618,7 @@
         "the_census_reader_finds_the_guard_a_block_tail_moved",
         "value_aliases_keep_the_guard_at_the_original_producer"
       ],
-      "note": "chelis#1771's three witness pairs plus their negative parity. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `issue_1739_diagonal_runtime_bound.rs` also holds chelis#1739's own direct-return rows and the shipped-example census, which this phase does not own. The agreeing twins, the branchy residual lock and the moved-guard census control run here because a trap row proves nothing on its own: without them, a guard that fired on every host-lane return would satisfy every regression row in this target."
+      "note": "chelis#1771 and chelis#1945: block/call/selected if/match returns, lexical aliases, producer attribution, invocation-local caller claims and effects before/after the producer. Matching and mismatching controls include untaken invalid arms and different callers of one shared callee. The selector preserves the earlier block/call and moved-guard census controls without selecting chelis#1739's separately owned direct-return and shipped-example census rows."
     },
     {
       "phase": "b",

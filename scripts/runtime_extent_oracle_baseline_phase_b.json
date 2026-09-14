@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "476694aae0004b3f1fc36ef21c0ff78579f74c6d30d4f6a88db74c638201f8e4",
+  "corpus_sha256": "58cef04be7943099212e298bb3fdf82377ec6032fede0d75be773b8ad9bfa142",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -753,6 +753,18 @@
       "receipt": "cli_return_boundary.eval_traps_on_a_block_bodied_return"
     },
     {
+      "id": "return.call_bodied.effect_order.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed"
+    },
+    {
+      "id": "return.call_bodied.effect_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed"
+    },
+    {
       "id": "return.call_bodied.literal.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -763,6 +775,42 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_return_boundary.eval_traps_on_a_call_bodied_return"
+    },
+    {
+      "id": "return.if.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_selected_if_result_claims"
+    },
+    {
+      "id": "return.if.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_selected_if_result_claims"
+    },
+    {
+      "id": "return.match.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_selected_match_result_claims"
+    },
+    {
+      "id": "return.match.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_selected_match_result_claims"
+    },
+    {
+      "id": "return.shared_callee.literal.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_shared_callee_result_claims_are_invocation_scoped"
+    },
+    {
+      "id": "return.shared_callee.literal.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_shared_callee_result_claims_are_invocation_scoped"
     },
     {
       "id": "root.dim_variable.argument_order.c",

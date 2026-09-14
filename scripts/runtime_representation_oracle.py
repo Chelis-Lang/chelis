@@ -65,7 +65,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "854c5457c5d819373e8494c918ca1c8607f43a1ff8e735b660349d92af514f92"
+FREEZE_SHA256 = "f3cc94de2060c98709083685433b9f57aa65a8fe6ba3ed7bf9f32e3c771e7702"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"

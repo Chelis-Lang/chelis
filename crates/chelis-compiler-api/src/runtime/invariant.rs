@@ -818,6 +818,7 @@ pub(crate) fn revalidate_adt_value(
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs: module_constants.clone(),
+        sorted_defs_snapshot: None,
         declared_signatures: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         type_env: UnordMap::new(),

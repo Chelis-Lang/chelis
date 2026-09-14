@@ -1230,6 +1230,59 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_return_boundary.eval_traps_on_a_call_bodied_return",
         ),
+        # #1771/#1945: select the actual branch producer and carry each
+        # caller's literal obligations to that producer inside a shared
+        # callee. The call-order rows already rejected on the baseline, but
+        # observed following effects before rejecting: that rejection did
+        # not conform to the required observable ordering.
+        _row(
+            "return.if.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_selected_if_result_claims",
+        ),
+        _row(
+            "return.if.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.c_selected_if_result_claims",
+        ),
+        _row(
+            "return.match.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_selected_match_result_claims",
+        ),
+        _row(
+            "return.match.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.c_selected_match_result_claims",
+        ),
+        _row(
+            "return.call_bodied.effect_order.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
+        ),
+        _row(
+            "return.call_bodied.effect_order.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
+        ),
+        _row(
+            "return.shared_callee.literal.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.eval_shared_callee_result_claims_are_invocation_scoped",
+        ),
+        _row(
+            "return.shared_callee.literal.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.c_shared_callee_result_claims_are_invocation_scoped",
+        ),
         # chelis#1923 and chelis#1791: pipe application semantics.
         # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument
         # insertion, and every consumer that met a `pipe` node reconstructed
