@@ -291,6 +291,9 @@ evaluate Rust configuration or prove comparator execution. PR reports validate
 the exact event head against the synthetic merge's second parent and compare
 against its first parent, so regenerating that merge after main advances does
 not attribute main-only changes to the pull request.
+Both contract-report steps select the push base by event name. A pull request's
+`synchronize` payload also carries `before`; that previous PR head must not
+select push mode or compete with the validated PR comparison.
 
 ### Phase 4B atom and region digests: replace only with an owning report
 

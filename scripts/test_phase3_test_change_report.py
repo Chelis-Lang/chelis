@@ -263,7 +263,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         step = reports[0]
         self.assertEqual(step["run"], self.command)
-        self.assertEqual(step["env"]["BASE_REF"], "${{ github.event.before }}")
+        self.assertEqual(step["env"]["BASE_REF"], "${{ github.event_name == 'push' && github.event.before || '' }}")
         self.assertEqual(step["env"]["PR_HEAD"], "${{ github.event.pull_request.head.sha }}")
         self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", step)
@@ -277,6 +277,17 @@ class WorkflowTests(unittest.TestCase):
 
     def test_docs_job_executes_and_publishes_report(self):
         self.assert_contract(self.workflow())
+
+    def test_synchronize_before_is_not_allowed_to_select_push_comparison(self):
+        # pull_request.synchronize includes `before`, the previous PR head.
+        # Presence alone cannot select the push mode; actual hosted synchronize
+        # execution exercises this event expression with both payload fields.
+        workflow = self.workflow()
+        step = next(s for s in workflow["jobs"]["docs"]["steps"]
+                    if "phase3_test_change_report.py" in s.get("run", ""))
+        step["env"]["BASE_REF"] = "${{ github.event.before }}"
+        with self.assertRaises(AssertionError):
+            self.assert_contract(workflow)
 
     def test_noop_skipped_or_suppressed_report_is_rejected(self):
         for mutation in ["noop", "skip", "suppress"]:

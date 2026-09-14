@@ -1146,7 +1146,7 @@ jobs:
 
       - name: Report Phase 3 required-test changes
         env:
-          BASE_REF: ${{ github.event.before }}
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
 
@@ -1160,7 +1160,7 @@ jobs:
 
       - name: Report Phase 4B contract changes
         env:
-          BASE_REF: ${{ github.event.before }}
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
 
