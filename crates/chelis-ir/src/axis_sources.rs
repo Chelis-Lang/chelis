@@ -2140,7 +2140,8 @@ pub fn witness_entry_obligations(
     let operation = match site {
         crate::dag::ExtentWitnessSite::Caller => "load",
         crate::dag::ExtentWitnessSite::LocalExpand => "expand",
-        crate::dag::ExtentWitnessSite::ResultClaim { .. } => return None,
+        crate::dag::ExtentWitnessSite::ResultClaim { .. }
+        | crate::dag::ExtentWitnessSite::LiteralResultClaim => return None,
     };
     let read_for = |id: NodeId| -> Option<ExtentRecord> {
         let observed = dag.get(id)?;
@@ -2774,6 +2775,20 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
         .collect()
 }
 
+pub(crate) fn has_literal_result_claim(dag: &Dag, producer: NodeId) -> bool {
+    dag.get(producer).is_some_and(|node| {
+        node.shape_deps.iter().any(|dependency| {
+            matches!(
+                dag.get(*dependency).map(|node| &node.op),
+                Some(RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                })
+            )
+        })
+    })
+}
+
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
 /// site guards against.
 ///
@@ -2794,6 +2809,43 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // the observation and their dependency owns the canonical value.
     for node in dag.nodes() {
         for required in &node.shape_deps {
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: RtAxis::Lit(axis),
+                        requirements,
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                let axis = usize::try_from(*axis).expect("verified literal result axis");
+                let site = result_extent_sites(dag, node.id)
+                    .into_iter()
+                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
+                    .expect("verified literal result producer");
+                // A claim captured after an existing value's production belongs
+                // to this invocation's carrier; never add a backward dependency.
+                let (producer, observed) = if required.0 < site.producer.0 {
+                    (site.producer, site.observation)
+                } else {
+                    (node.id, LocalGuardObservation::RealizedExtent)
+                };
+                let literal = requirements[0]
+                    .as_i64_exact()
+                    .expect("verified literal requirement");
+                sites.push((
+                    (producer.0, axis),
+                    LocalGuardClaim {
+                        claim: literal.to_string(),
+                        canonical: CanonicalExtent::Witness(*required),
+                        op: site.operation,
+                        observed,
+                    },
+                ));
+                continue;
+            }
             let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {

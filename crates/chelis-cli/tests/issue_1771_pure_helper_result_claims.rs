@@ -59,64 +59,69 @@ fn pure_helper_claims(native: bool) {
     }
 }
 fn helper_owned_claims(native: bool) {
-    for (producer, body) in [
-        (
-            "shrink",
-            "shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])",
-        ),
-        (
-            "add",
-            "{\n shortened = shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])\n add(shortened, shortened)\n}",
-        ),
-    ] {
-        for (rows, cols, expected) in [
-            (3, 4, None),
-            (3, 3, Some((3, 1, 2))),
-            (4, 4, Some((2, 0, 3))),
-            (4, 3, Some((2, 0, 3))),
+    for forwarded in [false, true] {
+        let invoked = if forwarded { "forward" } else { "cut" };
+        for (producer, body) in [
+            (
+                "shrink",
+                "shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])",
+            ),
+            (
+                "add",
+                "{\n shortened = shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])\n add(shortened, shortened)\n}",
+            ),
         ] {
-            let values = (0..rows)
-                .map(|row| {
-                    let values = (0..cols)
-                        .map(|col| format!("{}.0f32", row * cols + col + 1))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[{values}]")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let source = format!(
-                "def cut(x: tensor[n, m, f32]) -> tensor[2, *, f32] = {body}\n\
-                 def erased(x: tensor[n, m, f32]) -> tensor[*, *, f32] ! {{ IO }} = {{\n _ = print(\"owned-before\")\n value = cut(x)\n _ = print(\"owned-after\")\n value\n}}\n\
+            for (rows, cols, expected) in [
+                (3, 4, None),
+                (3, 3, Some((3, 1, 2))),
+                (4, 4, Some((2, 0, 3))),
+                (4, 3, Some((2, 0, 3))),
+            ] {
+                let values = (0..rows)
+                    .map(|row| {
+                        let values = (0..cols)
+                            .map(|col| format!("{}.0f32", row * cols + col + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("[{values}]")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let source = format!(
+                    "def cut(x: tensor[n, m, f32]) -> tensor[2, *, f32] = {body}\n\
+                 def forward(x: tensor[n, m, f32]) -> tensor[*, *, f32] = cut(x)\n\
+                 def erased(x: tensor[n, m, f32]) -> tensor[*, *, f32] ! {{ IO }} = {{\n _ = print(\"owned-before\")\n value = {invoked}(x)\n _ = print(\"owned-after\")\n value\n}}\n\
                  def caller(x: tensor[n, m, f32]) -> tensor[*, 3, f32] ! {{ IO }} = erased(x)\n\
                  out = caller(to_tensor([{values}]))\n"
-            );
-            let (ok, output) = run(&source, native);
-            assert_eq!(ok, expected.is_none(), "{source}\n{output}");
-            assert_eq!(output.matches("owned-before").count(), 1, "{output}");
-            assert_eq!(
-                output.matches("owned-after").count(),
-                usize::from(ok),
-                "{output}"
-            );
-            if let Some((required, axis, observed)) = expected {
-                assert!(output.contains(&format!("extent `{required}`: claimed = {required}, {producer} axis {axis} = {observed}")), "{output}");
-                assert!(
-                    output
-                        .lines()
-                        .any(|line| line == format!("numeric trap: domain in {producer} at int64")),
+                );
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, expected.is_none(), "{source}\n{output}");
+                assert_eq!(output.matches("owned-before").count(), 1, "{output}");
+                assert_eq!(
+                    output.matches("owned-after").count(),
+                    usize::from(ok),
                     "{output}"
                 );
-            } else {
-                let expected = if producer == "add" {
-                    "[12.0, 14.0, 16.0, 20.0, 22.0, 24.0]"
+                if let Some((required, axis, observed)) = expected {
+                    assert!(output.contains(&format!("extent `{required}`: claimed = {required}, {producer} axis {axis} = {observed}")), "{output}");
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line
+                                == format!("numeric trap: domain in {producer} at int64")),
+                        "{output}"
+                    );
                 } else {
-                    "[6.0, 7.0, 8.0, 10.0, 11.0, 12.0]"
-                };
-                assert!(
-                    output.contains(&format!("out = tensor(shape=[2, 3], data={expected})")),
-                    "{output}"
-                );
+                    let expected = if producer == "add" {
+                        "[12.0, 14.0, 16.0, 20.0, 22.0, 24.0]"
+                    } else {
+                        "[6.0, 7.0, 8.0, 10.0, 11.0, 12.0]"
+                    };
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[2, 3], data={expected})")),
+                        "{output}"
+                    );
+                }
             }
         }
     }

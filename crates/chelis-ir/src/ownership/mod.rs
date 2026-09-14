@@ -1098,6 +1098,10 @@ impl<'a> VerifiedHostFunctionView<'a> {
         &self.function().name
     }
 
+    pub fn helper_result_claim_axes(self) -> &'a [crate::dag::RtAxis] {
+        &self.function().helper_result_claim_axes
+    }
+
     pub fn params(self) -> &'a [ConcreteHostParam] {
         &self.function().params
     }

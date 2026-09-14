@@ -909,9 +909,10 @@
         "mode": "exact"
       },
       "expected": [
+        "literal_result_role_roundtrips_without_an_observing_input_and_rejects_malformed_roles",
         "result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport"
       ],
-      "note": "Exact ResultClaim site identity round-trips through versioned wire transport; malformed fields and relationships cannot enter a graph."
+      "note": "Named and literal result-claim sites round-trip through versioned wire transport; malformed fields and relationships cannot enter a graph."
     },
     {
       "phase": "b",
@@ -927,6 +928,21 @@
         "eval_inherited_result_claim_enters_pure_helpers"
       ],
       "note": "Inherited literal claims cross pure helpers with exact producing primitives, helper-local claims and source effect order. Native receipts require a compiler and execute the generated binary. Callback and selected-alias continuations are separately enrolled when implemented."
+    },
+    {
+      "phase": "b",
+      "id": "ir_literal_result_claim",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1771_literal_result_tokens.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds",
+        "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
+      ],
+      "note": "Literal declarations retain distinct token identities, inner-before-outer guard order and primitive attribution through rebuilds; malformed role payloads and observing inputs are refused."
     }
   ]
 }

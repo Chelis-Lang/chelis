@@ -87,7 +87,7 @@ fn assert_contract_rejects_encode_and_decode(dag: &WireDag, expected: &str) {
 
 #[test]
 fn current_wire_dag_count_round_trips_canonical_axes() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 12);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 13);
     let dag = count_dag(vec![2, 0]);
     let json = serde_json::to_string(&dag).expect("canonical Count must encode");
     assert!(json.contains(r#""schema_version":12"#));

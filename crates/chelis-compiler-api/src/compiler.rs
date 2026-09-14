@@ -6970,6 +6970,9 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             claims,
         } => WireRiscOp::ExtentWitness {
             site: match site {
+                chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    WireExtentWitnessSite::LiteralResultClaim
+                }
                 chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
                 chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
                     WireExtentWitnessSite::LocalExpand

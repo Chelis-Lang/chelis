@@ -158,7 +158,9 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node) {
+        if !is_fusible_elementwise(node)
+            || crate::axis_sources::has_literal_result_claim(dag, node.id)
+        {
             continue;
         }
 
@@ -179,7 +181,10 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c) if is_fusible_elementwise(c) => {
+                Some(c)
+                    if is_fusible_elementwise(c)
+                        && !crate::axis_sources::has_literal_result_claim(dag, c.id) =>
+                {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)

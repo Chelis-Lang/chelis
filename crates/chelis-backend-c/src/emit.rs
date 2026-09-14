@@ -113,7 +113,7 @@ pub struct CEmitter {
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
     inherited_result_sites: Vec<chelis_ir::axis_sources::ResultExtentSite>,
-    inherited_result_rank: usize,
+    inherited_result_rank: Option<usize>,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -557,7 +557,7 @@ impl CEmitter {
                 .roots()
                 .first()
                 .and_then(|id| dag.get(*id))
-                .map_or(0, |node| node.output_type.dims.len()),
+                .map(|node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
         };
 
@@ -934,7 +934,7 @@ impl CEmitter {
                     e.emit_node(node, dag)?;
                 }
             }
-            let realized = e
+            let mut realized = e
                 .inherited_result_sites
                 .iter()
                 .filter(|site| {
@@ -952,7 +952,21 @@ impl CEmitter {
                     )
                 })
                 .collect::<Vec<_>>();
-            e.emit_inherited_result_guards(node.id.0, &realized);
+            if let Some(sites) = e.local_dim_guard_sites.get(&node.id.0) {
+                for (axis, claim) in sites {
+                    if matches!(
+                        claim.observed,
+                        chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+                    ) && !realized.iter().any(|(existing, _)| existing == axis)
+                    {
+                        realized.push((
+                            *axis,
+                            format!("chelis_tensor_shape(t{}, {axis})", node.id.0),
+                        ));
+                    }
+                }
+            }
+            e.emit_runtime_dim_sites(node.id.0, &realized);
         }
 
         // Every generated allocation is canonical contiguous storage.  Keep
@@ -1511,6 +1525,11 @@ impl CEmitter {
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::ExtentWitness {
+                site: chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim,
+                requirements,
+                ..
+            } => self.emit_const(id, &requirements[0], &node.output_type)?,
+            RiscOp::ExtentWitness {
                 site,
                 parameter,
                 axis: RtAxis::Lit(axis),
@@ -1521,6 +1540,9 @@ impl CEmitter {
                     chelis_ir::dag::ExtentWitnessSite::Caller => "load",
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
                     chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
                 };
                 let input = node.inputs[0].0;
                 let parameter = match site {
@@ -1529,6 +1551,9 @@ impl CEmitter {
                     }
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
                     chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
+                    chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
                 };
                 for required in requirements {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
@@ -6802,8 +6827,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let sites = self
             .local_dim_guard_sites
             .get(&id)
+            .into_iter()
+            .flatten()
             .cloned()
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
         // Consume claims, not axes: multiple claims on one axis can be
         // interleaved with claims on another axis in declaration order.
         for (axis, site) in sites {
@@ -6859,9 +6886,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         if observations.is_empty() {
             return;
         }
+        let rank = self
+            .inherited_result_rank
+            .expect("inherited result sites require an existing result root");
         let op = sites[0].operation();
         self.line(&format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at int64\");",
-            self.inherited_result_rank, observations.join(", "), observations.len()));
+            rank, observations.join(", "), observations.len()));
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim

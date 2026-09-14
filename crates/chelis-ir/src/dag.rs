@@ -454,6 +454,9 @@ pub enum FusedInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtentWitnessSite {
+    /// One authored literal result obligation, stored as a tagged scalar.
+    /// The producing node retains this token through an ordered shape dependency.
+    LiteralResultClaim,
     Caller,
     LocalExpand,
     /// A declaring extent retained for a result obligation. The witness's

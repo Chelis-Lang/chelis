@@ -86,6 +86,20 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
         }
         for dependency in &node.shape_deps {
             let required = &dag.nodes[*dependency as usize];
+            if let WireRiscOp::ExtentWitness {
+                site: WireExtentWitnessSite::LiteralResultClaim,
+                axis: WireRtAxis::Lit { value },
+                ..
+            } = &required.op
+            {
+                if usize::try_from(*value).map_or(true, |axis| axis >= node.output_type.dims.len())
+                {
+                    return Err(reject(
+                        "literal result dependency requires a valid producing axis",
+                    ));
+                }
+                continue;
+            }
             let WireRiscOp::ExtentWitness {
                 site:
                     WireExtentWitnessSite::ResultClaim {
@@ -142,6 +156,39 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             | WireRiscOp::ScatterAdd { axis: a }
             | WireRiscOp::Scatter { axis: a }
             | WireRiscOp::ScatterElements { axis: a } => axis(dag, node, *a)?,
+            WireRiscOp::ExtentWitness {
+                site: WireExtentWitnessSite::LiteralResultClaim,
+                parameter,
+                axis: WireRtAxis::Lit { value },
+                requirements,
+                claims,
+            } => {
+                if *value < 0
+                    || !parameter.is_empty()
+                    || !node.inputs.is_empty()
+                    || !node.shape_deps.is_empty()
+                    || !claims.is_empty()
+                    || requirements.len() != 1
+                    || !node.output_type.dims.is_empty()
+                    || node.output_type.precision != "int64"
+                {
+                    return Err(reject(
+                        "literal result claim requires one nonnegative int64 literal, normalized axis, scalar output, and no observing or entry dependencies",
+                    ));
+                }
+                extent(requirements[0].get())?;
+                if dag
+                    .nodes
+                    .iter()
+                    .filter(|owner| owner.shape_deps.contains(&node.id))
+                    .count()
+                    != 1
+                {
+                    return Err(reject(
+                        "literal result claim requires exactly one producing owner",
+                    ));
+                }
+            }
             WireRiscOp::ExtentWitness {
                 site,
                 axis: WireRtAxis::Lit { value },
@@ -207,7 +254,7 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                         .ok_or_else(|| {
                             reject("an extent witness named claim requires an earlier node")
                         })?;
-                    let witness = matches!(required.op, WireRiscOp::ExtentWitness { .. })
+                    let witness = matches!(required.op, WireRiscOp::ExtentWitness { ref site, .. } if !matches!(site, WireExtentWitnessSite::LiteralResultClaim))
                         && required.output_type.dims.is_empty()
                         && required.output_type.precision == "int64";
                     if *edge >= node.id || !witness {

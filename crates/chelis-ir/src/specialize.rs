@@ -93,6 +93,9 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
 }
 
 fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
+    if crate::axis_sources::has_literal_result_claim(dag, node.id) {
+        return None;
+    }
     if node.inputs.len() != 1 {
         return None;
     }

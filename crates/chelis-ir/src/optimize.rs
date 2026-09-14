@@ -43,6 +43,9 @@ pub fn constant_fold(dag: &mut Dag) {
     };
 
     for node in dag.nodes() {
+        if crate::axis_sources::has_literal_result_claim(dag, node.id) {
+            continue;
+        }
         if node.inputs.len() == 2 {
             let lhs = dag.get(node.inputs[0]);
             let rhs = dag.get(node.inputs[1]);

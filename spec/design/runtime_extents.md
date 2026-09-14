@@ -315,6 +315,21 @@ result metadata with that label. Existing literal and checked-reshape carriers
 retain their own obligations. Checked helper-label views remain a separate
 concern; adding a view is not evidence that a claim survived.
 
+Literal declared results use a distinct `LiteralResultClaim` witness role.
+Lowering allocates one token containing the exact tagged requirement before
+lowering that declaration's body, then attaches it to the returned producing
+operation. Nested declarations attach their obligations before enclosing
+ones; guard order follows those ordered attachments, not token allocation
+order. The shared producer-site derivation places casts at their source while
+retaining cast attribution. An already-produced result gets an invocation
+boundary carrier rather than a backward dependency to its old producer.
+Only the declaration whose token was installed stops using the legacy literal
+stamp; physical extent metadata is not a substitute for a declaration token.
+DAG rebuilding preserves token identity and order, and operation rewrites must
+retain or transfer the guard's primitive provenance. Literal tokens have no
+input tensor and no element derivative; zero cotangents still retain the
+forward operation carrying their guard.
+
 The additive site role requires exact wire transport and admission, including
 its axis and dependency validation; predecessor artifacts must reject. AD,
 DCE, graph splicing and vectorization must preserve or correctly remap both
@@ -431,6 +446,13 @@ obligations; no public ABI parameter or per-literal specialization is needed.
 The evaluator carries the same invocation-local information. Argument
 evaluation does not inherit a claim on the call's result, and one invocation's
 claims must not leak into a later invocation.
+
+The lowering result records whether that exact authored declaration transferred
+its literal obligations into its tensor helper. The host emitter consumes this
+ownership record when deciding whether to construct the declaration's frame;
+a whole `TensorCall` body or equal literal dimensions do not establish ownership.
+Nested and standalone lowering retain the same structural declaration tokens,
+while inherited caller claims remain invocation-local plans.
 
 The selected producer consumes the applicable obligations before effects that
 follow it in source order. Distinct declarations remain distinct obligations;

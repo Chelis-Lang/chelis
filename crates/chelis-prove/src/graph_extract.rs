@@ -559,7 +559,9 @@ const _: () = {
     // Version 12 adds a discrete result-claim site to ExtentWitness. Witnesses
     // remain outside float-envelope extraction, and its dependency edges are
     // refused by the existing shape-dependency boundary above.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 12);
+    // Version 13 adds a literal-result witness role. It remains a discrete
+    // obligation outside this float-envelope extraction boundary.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 13);
 };
 
 #[cfg(test)]

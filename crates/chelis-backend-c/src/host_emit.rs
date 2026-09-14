@@ -1933,7 +1933,13 @@ impl HostResultClaim {
             .iter()
             .enumerate()
             .filter_map(|(axis, dim)| match dim {
-                DimInfo::Lit(required) => Some((axis, *required)),
+                DimInfo::Lit(required)
+                    if !function.helper_result_claim_axes.contains(
+                        &chelis_ir::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                    ) =>
+                {
+                    Some((axis, *required))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -2210,9 +2216,8 @@ fn emit_function(
     // The expression spine forwards the frame; branch arms share its immutable
     // contents and arguments/sibling bindings never inherit it.
     match HostResultClaim::of(function) {
-        Some(claim) if !matches!(function.body.kind, HostExprKind::TensorCall { .. }) =>
-            emitter.lines.extend(claim.frame_lines(&emitter.indent)),
-        Some(_) | None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
+        Some(claim) => emitter.lines.extend(claim.frame_lines(&emitter.indent)),
+        None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
     emitter.result_claims = Some("__chelis_result_claims".to_string());
     emitter.claim_on_spine = true;

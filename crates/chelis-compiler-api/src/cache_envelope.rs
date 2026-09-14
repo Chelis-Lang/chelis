@@ -88,7 +88,8 @@ impl CachePayload for crate::StdLibContext {
     // V19: the V15 dimension-label transport above, for the standard library.
     // V20: the V16 operation-contract transport above, for the standard library.
     // V21 carries exact result-claim witness roles in the lowered library.
-    const FORMAT_VERSION: u32 = 21;
+    // V22 retains distinct literal-result declaration tokens and producer ownership.
+    const FORMAT_VERSION: u32 = 22;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

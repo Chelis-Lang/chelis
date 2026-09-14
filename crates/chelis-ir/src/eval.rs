@@ -2596,6 +2596,20 @@ where
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
             RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                requirements,
+                ..
+            } => finalize_wide_int(
+                "shape",
+                out_prim,
+                vec![],
+                vec![
+                    requirements[0]
+                        .as_i64_exact()
+                        .expect("verified literal result requirement"),
+                ],
+            )?,
+            RiscOp::ExtentWitness {
                 site,
                 parameter,
                 axis,
@@ -2606,10 +2620,16 @@ where
                     crate::dag::ExtentWitnessSite::Caller => "load",
                     crate::dag::ExtentWitnessSite::LocalExpand => "expand",
                     crate::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
                 };
                 let parameter = match site {
                     crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
                     crate::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
                     crate::dag::ExtentWitnessSite::LocalExpand => {
                         format!("node {}", node.inputs[0].0)
                     }

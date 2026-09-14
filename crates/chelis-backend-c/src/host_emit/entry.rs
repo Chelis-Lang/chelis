@@ -382,6 +382,7 @@ mod tests {
         let sum = dag.add_node(RiscOp::Add, vec![a, b], ty.clone(), None);
         dag.add_root(sum);
         HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "entry".into(),
             params: ["a", "b"]
                 .into_iter()

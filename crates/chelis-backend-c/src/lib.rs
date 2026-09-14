@@ -816,6 +816,7 @@ mod tests {
         };
 
         let func = HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "my_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -921,6 +922,7 @@ mod tests {
             summary_rejection: None,
         };
         let func = HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "my_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -3850,6 +3852,7 @@ int main(void) {{
         };
 
         let func = HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "my_func".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -3927,6 +3930,7 @@ int main(void) {{
         };
 
         let func = HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "exported_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),

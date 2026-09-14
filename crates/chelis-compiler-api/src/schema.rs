@@ -2069,7 +2069,7 @@ pub struct WireRecordPatternField {
 /// - `12`: result-claim witnesses carry a mandatory diagnostic label and
 ///   output axis. A producer's shape dependency names its exact declaring
 ///   extent; these obligations cannot be reconstructed from dimension names.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 12;
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 13;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2941,6 +2941,7 @@ pub enum WireRtAxis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireExtentWitnessSite {
+    LiteralResultClaim,
     Caller,
     LocalExpand,
     ResultClaim { claim: String, axis: WireRtAxis },

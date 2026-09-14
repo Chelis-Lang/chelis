@@ -1896,6 +1896,10 @@ fn compute_adjoints(
         }
 
         // --- Shape query ---
+        RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+            ..
+        } => Some(Vec::new()),
         RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
             // `shape(x, axis)` reads only the input's shape metadata, not
             // its element values, so its output is constant w.r.t. those

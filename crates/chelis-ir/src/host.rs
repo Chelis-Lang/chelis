@@ -751,6 +751,7 @@ impl HostExecutionPlan {
 
 #[derive(Debug)]
 struct TensorHelperSink {
+    transferred_result_claim_axes: Vec<crate::dag::RtAxis>,
     helpers: Vec<HostTensorHelper>,
     products: Vec<HelperExecutionProduct>,
     collect_execution: bool,
@@ -766,6 +767,7 @@ struct LoweredHostFunction {
 impl TensorHelperSink {
     fn new(collect_execution: bool, collect_trace: bool) -> Self {
         Self {
+            transferred_result_claim_axes: Vec::new(),
             helpers: Vec::new(),
             products: Vec::new(),
             collect_execution,
@@ -868,6 +870,9 @@ pub enum HostFunctionOrigin {
 
 #[derive(Debug, Clone)]
 pub struct HostFunction<T = HostTypeTerm> {
+    /// Exact authored literal axes whose obligations lowering installed in
+    /// this body's tensor helpers. Empty means the host owns those claims.
+    pub helper_result_claim_axes: Vec<crate::dag::RtAxis>,
     pub name: String,
     pub params: Vec<HostParam<T>>,
     pub ret_ty: T,
@@ -1753,6 +1758,7 @@ fn resolve_host_function(
     function: HostFunction,
 ) -> Result<ConcreteHostFunction, crate::HostTypeResolutionError> {
     Ok(ConcreteHostFunction {
+        helper_result_claim_axes: function.helper_result_claim_axes,
         name: function.name,
         params: function
             .params
@@ -4931,7 +4937,10 @@ fn lower_def_body_kernel(
                 &signature.scope,
                 tensor_helpers,
             )
-            .map(Some);
+            .map(|body| {
+                record_literal_result_transfer(signature, tensor_helpers);
+                Some(body)
+            });
         }
         staged::StagingAttempt::HostControlBoundary => return Ok(None),
         staged::StagingAttempt::NotApplicable => {}
@@ -5005,6 +5014,7 @@ fn lower_def_body_kernel(
                 trace.record_dimension_rebinding(plan.dag_for_inspection());
             }
             let (dag, execution) = plan.into_parts();
+            record_literal_result_transfer(signature, tensor_helpers);
             return Ok(Some(finish_tensor_helper_product(
                 dag,
                 Some(execution),
@@ -5081,6 +5091,7 @@ fn lower_def_body_kernel(
         return Ok(None);
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
+    record_literal_result_transfer(signature, tensor_helpers);
     Ok(Some(finish_tensor_helper_product(
         dag,
         None,
@@ -5090,6 +5101,18 @@ fn lower_def_body_kernel(
         tensor_helpers,
         expected,
     )))
+}
+
+fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
+        .into_iter()
+        .flat_map(|ty| ty.dims.into_iter().enumerate())
+        .filter_map(|(axis, dim)| {
+            matches!(dim, crate::dag::DimInfo::Lit(_)).then(|| {
+                crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits int32"))
+            })
+        })
+        .collect();
 }
 
 /// A `Load` named after a builtin means the lowerer treated a host-lane
@@ -5343,9 +5366,11 @@ fn lower_host_function(
     } else {
         ret_ty
     };
+    let helper_result_claim_axes = tensor_helpers.transferred_result_claim_axes.clone();
     let (tensor_helpers, products) = tensor_helpers.into_parts();
     Ok(Some(LoweredHostFunction {
         function: HostFunction {
+            helper_result_claim_axes,
             name: name.to_string(),
             params,
             ret_ty,
@@ -12482,6 +12507,7 @@ fn lower_mono_specialized_function(
     let (tensor_helpers, products) = fn_tensor_helpers.into_parts();
     Ok(LoweredHostFunction {
         function: HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: symbol.to_string(),
             params,
             ret_ty,
@@ -13583,6 +13609,41 @@ fn remap_tensor_helper_dim_symbols(
         })
     }
 
+    let mut expected_output = expected_output.clone();
+    if let Some(mut returned) = dag.roots().first().copied() {
+        loop {
+            let node = dag.get(returned).expect("helper root belongs to DAG");
+            for dependency in &node.shape_deps {
+                if let Some(crate::dag::DagNode {
+                    op:
+                        crate::dag::RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            axis: crate::dag::RtAxis::Lit(axis),
+                            ..
+                        },
+                    ..
+                }) = dag.get(*dependency)
+                    && let Some(dim) = expected_output.dims.get_mut(*axis as usize)
+                    && matches!(dim, crate::dag::DimInfo::Lit(_))
+                {
+                    *dim = crate::dag::DimInfo::Named("*".into(), None);
+                }
+            }
+            if !matches!(
+                node.op,
+                crate::dag::RiscOp::Copy
+                    | crate::dag::RiscOp::Cast { .. }
+                    | crate::dag::RiscOp::CastTrunc { .. }
+            ) {
+                break;
+            }
+            let Some(input) = node.inputs.first() else {
+                break;
+            };
+            returned = *input;
+        }
+    }
+    let expected_output = &expected_output;
     let formal_inputs = tensor_helper_inputs(dag);
     let mut actual_inputs = formal_inputs
         .iter()
@@ -18565,6 +18626,7 @@ def bad[b](box: Box[b]) -> bool =
             symbol_keys: UnordMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
             functions: vec![LoweredHostFunction {
                 function: HostFunction {
+                    helper_result_claim_axes: Vec::new(),
                     name: "seeded__mono_0123456789abcdef".to_string(),
                     params: Vec::new(),
                     ret_ty: HostTypeTerm::Unit,
@@ -18790,6 +18852,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             })
         };
         HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: name.to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),

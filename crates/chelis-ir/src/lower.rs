@@ -7489,16 +7489,54 @@ impl<'program> LowerCtx<'program> {
                 let required = if matches!(dim, DimInfo::Named(_, _)) {
                     self.capture_result_claim(required, label.clone(), axis)
                 } else {
+                    let value = match &self.dag.get(required).expect("literal requirement").op {
+                        RiscOp::Const { value } => *value,
+                        _ => unreachable!("literal requirements are freshly allocated constants"),
+                    };
+                    self.dag.node_mut(required).expect("literal requirement").op =
+                        RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            parameter: String::new(),
+                            axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                            requirements: vec![value],
+                            claims: Vec::new(),
+                        };
                     required
                 };
                 Some((axis, label, required))
             })
             .collect::<Vec<_>>();
-        let result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
+        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
         let start = self.invocation_witnesses.len();
         for (axis, label, required) in requirements {
-            if let Some(id) = result.as_single_node() {
-                self.preserve_computed_result_axis(id, axis, label, required);
+            if let Some(mut id) = result.as_single_node() {
+                if matches!(
+                    self.dag.get(required).expect("claim token").op,
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    }
+                ) {
+                    if id.0 <= required.0 {
+                        let ty = self
+                            .dag
+                            .get(id)
+                            .expect("returned value")
+                            .output_type
+                            .clone();
+                        id = self.dag.add_node(
+                            RiscOp::Copy,
+                            vec![id],
+                            ty,
+                            self.current_span_id.clone(),
+                        );
+                        result = LoweredValue::Node(id);
+                    }
+                    self.dag.add_shape_dep(id, required);
+                    self.invocation_witnesses.push(id);
+                } else {
+                    self.preserve_computed_result_axis(id, axis, label, required);
+                }
             }
         }
         self.retain_invocation_witnesses(result, start)
@@ -14598,13 +14636,11 @@ impl<'program> LowerCtx<'program> {
             // Literal result metadata retains its existing guard path.
             // Named requirements retain graph identity independently of shape.
             let resolved = match dim {
-                DimInfo::Lit(required) => {
-                    if self.preserve_literal_result_axis(id, axis, *required) {
-                        Some(dim.clone())
-                    } else {
-                        self.preserve_op_computed_result_axis(id, axis, *required)
-                    }
-                }
+                // Every caller lowers this exact declaration through
+                // lower_expr_with_claim before refining its checked result view.
+                // Its fresh literal tokens already own the guards; re-stamping
+                // the axis here would install another, provenance-losing check.
+                DimInfo::Lit(_) => None,
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     // The equality is carried by exact entry witnesses or by
                     // lower_expr_with_claim's captured producer requirement.
@@ -14652,8 +14688,7 @@ impl<'program> LowerCtx<'program> {
     ///
     /// Two arms, gated differently, and the asymmetry is deliberate.
     /// A LITERAL claim is the user's number wherever the declaration came
-    /// from, matching [`Self::preserve_literal_result_axis`], which is
-    /// likewise ungated. A NAMED claim is refutable only once chelis#1800
+    /// from; literal result capture is likewise ungated. A NAMED claim is refutable only once chelis#1800
     /// has RESOLVED its declaring witness to a number, and it carries
     /// [`Self::required_extent_for_claim`]'s gate with it: a
     /// synthesized multi-root kernel's signature is not an author's claim, so
@@ -14814,28 +14849,6 @@ impl<'program> LowerCtx<'program> {
             DimInfo::Named(name.clone(), known_extent);
     }
 
-    /// Retain a literal result obligation on the operation introducing its
-    /// extent, including an origin reached through shape-preserving wrappers.
-    /// Named claims use captured ResultClaim witnesses; they cannot enter this
-    /// physical-metadata path.
-    fn preserve_op_computed_result_axis(
-        &mut self,
-        id: NodeId,
-        axis: usize,
-        required: usize,
-    ) -> Option<DimInfo> {
-        let (origin, computed) = crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
-        let node = self.dag.get(origin)?;
-        // A stamp is meaningful only when the shared derivation admits a
-        // local guard for the original producing operation.
-        crate::axis_sources::op_computed_axis_extent(&node.op, computed)?;
-        let declared = DimInfo::Lit(required);
-        if origin != id && !self.stamp_op_computed_origin(origin, computed, &declared) {
-            return None;
-        }
-        Some(declared)
-    }
-
     /// The graph-fixed extent a named claim's declaring witness observes.
     ///
     /// `None` when the binder has no signature witness, or when that witness
@@ -14847,198 +14860,6 @@ impl<'program> LowerCtx<'program> {
     /// nothing else in the class can supply one.
     fn signature_witness_extent(&self, binder: Option<&str>) -> Option<usize> {
         self.graph_fixed_witness_extent(self.signature_witness(binder?)?)
-    }
-
-    /// Write a declared result dimension onto the op-computed ORIGIN axis a
-    /// pass-through result resolved to, reporting whether the origin can carry
-    /// it.
-    ///
-    /// What the origin axis already states is the extent the OPERATION
-    /// computes, in whichever of three spellings the lowerer had for it: an
-    /// anonymous or synthesized name (`spec/04-type-system.md` §4.7.2's fresh
-    /// extent, the ordinary case), or the literal the lowerer recorded when it
-    /// could compute the value. `tensor_concat_from_nodes` is the literal
-    /// case, and it is the one chelis#1837 needs: over concrete element
-    /// extents the cascade writes `Lit(total)` on each `Pad`, so the pad that
-    /// origins a declared `tensor[100, 3, f32]` states `Lit(8)`. A declaration
-    /// replaces that record, because §4.7.2 makes the declared dimension the
-    /// claim and the guard the comparison; the record is what the guard then
-    /// compares against, read from the operation's own carriers rather than
-    /// from this dim.
-    ///
-    /// The one state it must NOT replace is a USER-SPELLED name, which is
-    /// another signature's claim with its own declaring witness. Overwriting
-    /// that would move the first declaration's guard onto the second's claim:
-    /// one origin would carry two claims and lowering order would decide which
-    /// survived. This declines instead, leaving the second claim exactly as
-    /// unstamped as it is today rather than silently redirecting the first.
-    /// An axis already carrying exactly this claim is already stamped and the
-    /// stamp succeeds having written nothing.
-    ///
-    /// Two declarations claiming different LITERALS over one shared origin are
-    /// not told apart from the operation's own record, so the later one wins.
-    /// That is the residual the design records: no maintainer writes it, and
-    /// the repair for it is a per-declaration claim carrier rather than a
-    /// tighter test here.
-    ///
-    /// A claim the operation's own rule statically REFUTES never reaches
-    /// this stamp. [`Self::reject_refuted_result_axis`] runs first and
-    /// rejects the program, so the case this used to decline silently - and
-    /// that `verify`'s per-owner size check would otherwise refuse on the C
-    /// lane while the DAG evaluator, which does not run the verifier, trapped
-    /// at run time - no longer exists. `preserve_op_computed_result_axis`'s
-    /// direct-owner path (`origin == id`) skips this function entirely and is
-    /// covered by that same rejection rather than by a second test here,
-    /// which is why declining here was never enough on its own.
-    ///
-    /// A second residual sits in the predicate rather than here.
-    /// `is_synthesized_dim_name` reads `d<N>` as compiler-minted because that
-    /// is the checker's display spelling for an unresolved dimension variable,
-    /// so a signature that spells a binder `d0` has its claim relabeled by this
-    /// stamp rather than declined. Nothing at this layer distinguishes the two,
-    /// and the repair is to stop sharing the spelling rather than to guess
-    /// here; it is stated so a reader does not mistake it for coverage.
-    fn stamp_op_computed_origin(
-        &mut self,
-        origin: NodeId,
-        axis: usize,
-        declared: &DimInfo,
-    ) -> bool {
-        let Some(existing) = self
-            .dag
-            .get(origin)
-            .and_then(|node| node.output_type.dims.get(axis))
-        else {
-            return false;
-        };
-        if existing == declared {
-            return true;
-        }
-        match existing {
-            DimInfo::Lit(_) => {}
-            DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
-            DimInfo::Named(_, _) => return false,
-        }
-        self.dag
-            .node_mut(origin)
-            .expect("op-computed origin")
-            .output_type
-            .dims[axis] = declared.clone();
-        true
-    }
-
-    /// chelis#1377's half: a literal claim becomes a tagged requirement on the
-    /// witness that observed the produced extent. Returns whether that witness
-    /// resolved, which is also when the declared dim is stamped on the result.
-    fn preserve_literal_result_axis(&mut self, id: NodeId, axis: usize, required: usize) -> bool {
-        let Some(witness) = self.axis_literal_witness(id, axis) else {
-            return false;
-        };
-        // chelis#1782: the declared dimension is still stamped on the result,
-        // but a literal whose comparison a named claim already makes records
-        // no second requirement.
-        if self.literal_result_claim_is_entailed(witness, required) {
-            return true;
-        }
-        let required = chelis_types::scalar_from_i64(
-            "load",
-            Prim::Int64,
-            i64::try_from(required).expect("checked extent fits int64"),
-        )
-        .expect("int64 extent literal");
-        if let RiscOp::ExtentWitness { requirements, .. } =
-            &mut self.dag.node_mut(witness).expect("witness").op
-            && !requirements.contains(&required)
-        {
-            requirements.push(required);
-        }
-        true
-    }
-
-    /// Does a named claim already in the graph make this literal's comparison?
-    ///
-    /// A named claim (chelis#1374/#1376) asserts that two witnesses of one
-    /// activation observe the SAME extent. When the other witness of such a
-    /// claim observes an axis whose extent the lowered graph itself fixes, and
-    /// that fixed extent is the literal this result claims, the two
-    /// obligations are one comparison: `produced == declaring` together with a
-    /// graph-fixed `declaring == required` gives `produced == required`, and a
-    /// produced extent that disagrees with the literal must disagree with the
-    /// declaring witness too. The named guard therefore fires on exactly the
-    /// inputs the literal guard would have, and `spec/04-type-system.md` §4.7
-    /// evaluates each guard once.
-    ///
-    /// chelis#1782 is why that matters. At `def main() = f(...)` the checker
-    /// infers the root's result dimension by instantiating the callee's
-    /// binder against the argument it was bound from, so the root RESTATES the
-    /// callee's named obligation as a literal. Recorded as well, it rendered
-    /// ``extent `2`: claimed = 2, y axis 0 = 3`` ahead of the named guard, and
-    /// the user saw one source and a number where §4.7's [04-NUM-9] asks for
-    /// the two disagreeing sources. Suppressing the restatement keeps the
-    /// check and hands the user the informative half.
-    ///
-    /// The retained guard is not a REORDERING of the two. Section 4.7 does not
-    /// rank independent obligations on one witness, so a blind reorder would
-    /// also move a literal claim nothing else covers; this declines a claim
-    /// only where another guard provably makes the same comparison, which is
-    /// the rule [`Self::entry_covered_witness_claims`] already applies to a
-    /// witness claim `entry_extent_guards` derives.
-    ///
-    /// The extent has to be one the GRAPH fixes rather than one an external
-    /// input promises. An ABI parameter's axis is an interface obligation the
-    /// entry guard checks, not a fact of this graph, so a witness observing
-    /// one is never an entailing partner. An inlined root's arguments are
-    /// constructed in the graph, which is the form chelis#1782 reports; the
-    /// exported-kernel and value-binding forms read parameters and keep every
-    /// literal claim they had.
-    fn literal_result_claim_is_entailed(&self, witness: NodeId, required: usize) -> bool {
-        self.named_claim_partners(witness)
-            .into_iter()
-            .any(|partner| self.graph_fixed_witness_extent(partner) == Some(required))
-    }
-
-    /// Every witness a named claim relates `witness` to, in either direction.
-    ///
-    /// The obligation is attached to the LATER of the two witnesses with a
-    /// backward requirement edge to the earlier, so `witness` can be either
-    /// end; [`Self::add_named_extent_claim`] pushes one claim and one edge
-    /// together, which is the pairing read back here. `witness`'s own claim
-    /// list answers the common case, so the scan for the other direction runs
-    /// only when that list does not.
-    fn named_claim_partners(&self, witness: NodeId) -> Vec<NodeId> {
-        let own: Vec<NodeId> = self
-            .dag
-            .get(witness)
-            .into_iter()
-            .filter_map(|node| match &node.op {
-                RiscOp::ExtentWitness { claims, .. } => Some(
-                    claims
-                        .iter()
-                        .zip(node.inputs.iter().skip(1))
-                        .map(|(_, requirement)| *requirement)
-                        .collect::<Vec<_>>(),
-                ),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        if !own.is_empty() {
-            return own;
-        }
-        self.dag
-            .nodes()
-            .iter()
-            .filter_map(|node| {
-                let RiscOp::ExtentWitness { claims, .. } = &node.op else {
-                    return None;
-                };
-                claims
-                    .iter()
-                    .zip(node.inputs.iter().skip(1))
-                    .any(|(_, requirement)| *requirement == witness)
-                    .then_some(node.id)
-            })
-            .collect()
     }
 
     /// The extent this witness observes, when the lowered graph fixes it.
@@ -15183,6 +15004,7 @@ impl<'program> LowerCtx<'program> {
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, claims, .. }
                     if !requirements.is_empty() || !claims.is_empty())
+                    || crate::axis_sources::has_literal_result_claim(&self.dag, *witness)
             })
             .collect::<Vec<_>>();
         if required.is_empty() {
