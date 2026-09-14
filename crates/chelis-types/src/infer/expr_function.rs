@@ -28,6 +28,7 @@ pub(super) fn infer_fn(
 
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
+        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a parameter is a fresh runtime binding with no
         // size provenance. Clear any entry inherited (through the derived
@@ -136,6 +137,7 @@ pub(super) fn infer_def_body_with_sig(
         // the declared sig type. The post-body unify still validates each
         // path in the standard way.
         let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
+        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
@@ -292,6 +294,7 @@ pub(super) fn infer_let(
                 let rhs_expr = &bind_children[i + 1];
                 let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
+                let contract_checkpoint = product.admission_contract_checkpoint();
                 let mut rhs_type_metadata_resolution = None;
                 let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
@@ -371,7 +374,9 @@ pub(super) fn infer_let(
 
                 subst.leave_level(rhs_level, vg);
 
-                let scheme = if product.has_pending_shape_check_since(shape_checkpoint) {
+                let scheme = if product.has_pending_shape_check_since(shape_checkpoint)
+                    || product.has_pending_admission_contract_since(contract_checkpoint, subst)
+                {
                     // Bind-on-first-use (PP1): semantic shape obligations
                     // retain the exact inference variables captured by this
                     // lambda until its first application supplies types.

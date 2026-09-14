@@ -167,7 +167,7 @@ fn linear_forward_accepts_all_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -221,7 +221,7 @@ fn attention_sdpa_accepts_all_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("attn.ch");
         let src = format!(
-            r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+            r#"sig sdpa[p: Float]: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {{
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -282,7 +282,7 @@ fn optim_tensor_ops_accept_all_arithmetic_dtypes() {
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("optim_op.ch");
             let src = format!(
-                "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = {op}(lhs, rhs)\n\
+                "def tensor_op[n, p: Numeric](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = {op}(lhs, rhs)\n\
                  def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
             );
             write_file(&path, &src);
@@ -300,7 +300,7 @@ fn optim_tensor_div_accepts_float_rejects_integer_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("optim_div.ch");
         let src = format!(
-            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)\n\
+            "def tensor_op[n, p: Float](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)\n\
              def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
         );
         write_file(&path, &src);
@@ -321,7 +321,7 @@ fn optim_tensor_trunc_div_accepts_integer_rejects_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("optim_trunc_div.ch");
         let src = format!(
-            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = trunc_div(lhs, rhs)\n\
+            "def tensor_op[n, p: Int](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = trunc_div(lhs, rhs)\n\
              def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
         );
         write_file(&path, &src);
@@ -342,7 +342,7 @@ fn test_assert_close_tensor_accepts_exactly_active_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
-            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
+            r#"sig assert_close_tensor[p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, {dtype}), "label")
 "#
@@ -446,7 +446,7 @@ fn linear_forward_rejects_mismatched_input_weight_precision() {
     let path = dir.path().join("linear_mix.ch");
     write_file(
         &path,
-        r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+        r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {
   bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -487,7 +487,7 @@ fn attention_sdpa_rejects_mismatched_qk_precision() {
     let path = dir.path().join("attn_neg.ch");
     write_file(
         &path,
-        r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+        r#"sig sdpa[p: Float]: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -515,7 +515,7 @@ fn optim_tensor_add_rejects_mismatched_lhs_rhs_precision() {
     let path = dir.path().join("optim_add_neg.ch");
     write_file(
         &path,
-        r#"def tensor_add[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
+        r#"def tensor_add[n, p: Numeric](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
 def bad(xs: &tensor[3, f32], ys: &tensor[3, bf16]) -> tensor[3, f32] = tensor_add(xs, ys)
 "#,
     );
@@ -531,7 +531,7 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     let path = dir.path().join("assert_close_neg.ch");
     write_file(
         &path,
-        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
+        r#"sig assert_close_tensor[p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,

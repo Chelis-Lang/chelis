@@ -60,6 +60,37 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
 #[test]
 fn insufficient_authored_contracts_cannot_be_published_as_checked_libraries() {
     let empty = build_stdlib_context(&[]).unwrap();
+    for (source, accepted) in [
+        ("def g(x) = sin(x)\n", false),
+        ("def g(x) = sin(x)\nout = g(0.0f32)\n", false),
+        ("def make() = fn (x) -> sin(x)\n", false),
+        ("def g(x: f32) -> f32 = sin(x)\n", true),
+        ("def make() = fn (x: f32) -> sin(x)\n", true),
+        ("primitive = sin\n", true),
+        (
+            "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() = source()\n",
+            false,
+        ),
+        (
+            "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() -> f32 = source()\n",
+            true,
+        ),
+        ("def source() = sin\ndef make() = source()\n", true),
+    ] {
+        let declarations = parse_str(source).unwrap();
+        assert_eq!(
+            build_stdlib_context(&declarations).is_ok(),
+            accepted,
+            "{source}"
+        );
+        assert_eq!(
+            build_library_context(&empty, &declarations)
+                .unwrap()
+                .is_some(),
+            accepted,
+            "{source}"
+        );
+    }
     for binder in ["p", "p: Numeric", "p: Float"] {
         let declarations = parse_str(&format!(
             "def average[{binder}](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n"

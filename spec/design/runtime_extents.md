@@ -963,15 +963,26 @@ gradient whose forward carries no obligation retains and emits it anyway: 891
 to 931 emitted C lines for an obligation-free `grad`, measured against a
 revert. chelis#1935 owns conditioning the edge.
 
-The late-precision remediation (#1805/#1942) implements spec/04 §3.1's
+The late-precision remediation (#1805/#1942) implements spec/04 §3.1.5's
 authored generic contract rule through ordinary checking. Operation family
 requirements constrain checked precision variables. The declaration check
 compares the resulting requirements with the bounds the signature supplied,
 including requirements obtained by calling another bounded function; it
 rejects an absent or broader authored bound rather than publishing a
-silently narrowed signature. Inference variables retain [04-INF-1]'s local
-binding rules. Existing scheme restrictions carry admitted families through
-instantiation, unification, generalization and imported checked contexts.
+silently narrowed signature. Omitted signatures and parameter holes do not
+authorize new inferred generic admission contracts either. The checker keeps
+new parameter holes and call-operand/result requirements monomorphic while
+the enclosing declaration is checked, then rejects an unresolved family requirement unless
+an authored enclosing bound supplies it. Concrete local binding retains
+[04-INF-1]'s inference rules; aliasing an already-checked function value is
+contract transport, not a newly authored wrapper. Existing scheme restrictions
+carry admitted families through instantiation, unification, generalization
+and imported checked contexts.
+
+This is the dtype implementation of the general policy in
+[PR #2074](https://github.com/Chelis-Lang/chelis/pull/2074), not an implementation
+of collection relations or the checker-wide protocol investigated by
+[#2073](https://github.com/Chelis-Lang/chelis/issues/2073).
 
 The call-site body walker is retired with this integration, not extended to
 follow more syntax. The acceptance matrix covers each family route,

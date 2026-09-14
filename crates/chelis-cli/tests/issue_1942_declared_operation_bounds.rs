@@ -134,6 +134,11 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
     for source in [
         "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n",
         "sig g[p: Numeric]: tensor[3, p] -> tensor[p]\ndef g(x) = mean(x, 0i32)\n",
+        "def g(x) = sin(x)\n",
+        "def g(x) = sin(x)\nout = g(0.0f32)\n",
+        "def make() = fn (x) -> sin(x)\n",
+        "def source[p: Float]() -> p = cast(0.0f32, p)\ndef make() = source()\n",
+        "def g[p: Float](x: p) -> p = sin(x)\ndef wrap(x) = g(x)\n",
     ] {
         let path = dir.path().join("contract.ch");
         fs::write(&path, source).unwrap();
@@ -148,5 +153,33 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
                 .any(|error| error["kind"] == "PrecisionMismatch"),
             "{report}"
         );
+        assert!(report["score"].as_f64().unwrap() < 1.0, "{report}");
+        for command in ["eval", "build"] {
+            let rejected = cli(command, &path, &dir.path().join("out"));
+            assert!(!rejected.status.success(), "{command}: {source}");
+            let rendered = format!(
+                "{}{}",
+                String::from_utf8_lossy(&rejected.stdout),
+                String::from_utf8_lossy(&rejected.stderr)
+            );
+            assert!(rendered.contains("Float"), "{command}: {rendered}");
+        }
+    }
+    for source in [
+        "def g(x: f32) -> f32 = sin(x)\n",
+        "def make() = fn (x: f32) -> sin(x)\n",
+        "primitive = sin\n",
+    ] {
+        let path = dir.path().join("accepted.ch");
+        fs::write(&path, source).unwrap();
+        let checked = cli("check", &path, &dir.path().join("out"));
+        assert!(
+            checked.status.success(),
+            "{source}: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(report["score"].as_f64(), Some(1.0));
+        assert!(report["errors"].as_array().unwrap().is_empty());
     }
 }

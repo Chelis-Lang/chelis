@@ -431,9 +431,26 @@ fn infer_app_inner(
         }
     }
 
+    product.record_call_operand_contracts(&func_ty, func_name.as_deref(), &arg_tys, env, subst);
+
     // Preserve the direct operation's diagnostic before its scheme enforces
     // the same family through unification. Indirect calls need no name lookup:
     // their checked function value carries the restriction itself.
+    // Matmul's concrete integer refusal belongs to its signature checker.
+    // Run that existing refusal before the scheme's family error can hide it.
+    if func_name.as_deref() == Some("matmul") && arg_tys.len() == 2 {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        if let (
+            Type::Tensor(_, TensorPrec::Concrete(left)),
+            Type::Tensor(_, TensorPrec::Concrete(right)),
+        ) = (&lhs, &rhs)
+            && left == right
+            && left.is_integer()
+        {
+            return check_matmul_signature(&arg_tys, &Type::Unit, subst, errors);
+        }
+    }
     let mixed_division_precisions =
         matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
             let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
@@ -455,7 +472,17 @@ fn infer_app_inner(
         for operand in operands {
             let resolved = type_for_readonly_check(operand, subst);
             if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
-                return report(errors, CheckError::new(kind, message, hints));
+                return report(
+                    errors,
+                    CheckError::new(
+                        kind,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            message,
+                        ),
+                        hints,
+                    ),
+                );
             }
             if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
                 && let Some(rejected) =
@@ -705,6 +732,7 @@ fn infer_app_inner(
             // already failed has nothing left to decide, so its suspension is
             // cancelled here.
             let checkpoint = errors.checkpoint();
+            let contract_name = func_name.clone();
             let applied = finish_unified_app(
                 list,
                 kids,
@@ -721,13 +749,18 @@ fn infer_app_inner(
             );
             if errors.iter_since(checkpoint).next().is_some() {
                 product.cancel_post_app_check_for(list);
+            } else {
+                product.record_call_result_contracts(
+                    &func_ty,
+                    contract_name.as_deref(),
+                    env,
+                    subst,
+                );
             }
             applied
         }
         Err(te) => {
-            if matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch) {
-                product.cancel_shape_checks_for_failed_family_call(&func_ty, subst);
-            }
+            let family_mismatch = matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch);
             let mut e: CheckError = te.into();
             if let Some(id) = list_span_id(list) {
                 e.span_offset = parse_span_offset(id);
@@ -738,7 +771,11 @@ fn infer_app_inner(
                     e.span_offset = Some(off);
                 }
             }
-            report(errors, e)
+            let rejected = report(errors, e);
+            if family_mismatch && let Type::Error(witness) = rejected {
+                product.cancel_shape_checks_for_failed_family_call(&func_ty, subst, witness);
+            }
+            rejected
         }
     }
 }

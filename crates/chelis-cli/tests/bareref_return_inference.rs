@@ -9,7 +9,7 @@
 //! Reproducer:
 //!
 //! ```chelis
-//! sig tadd: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
+//! sig tadd[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
 //! def tadd(lhs, rhs) = add(lhs, rhs)
 //! ```
 //!
@@ -81,7 +81,7 @@ fn bare_arg_add_with_borrow_sig_polymorphic_precision_type_checks() {
     let path = dir.path().join("wsa7_repro_poly.ch");
     write_file(
         &path,
-        "sig tadd: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
+        "sig tadd[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
          def tadd(lhs, rhs) = add(lhs, rhs)\n",
     );
     let json = run_json_check(&path);
@@ -119,7 +119,7 @@ fn bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("wsa7_dtype_matrix.ch");
         let src = format!(
-            "sig add_bare: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
+            "sig add_bare[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]\n\
              def add_bare(lhs, rhs) = add(lhs, rhs)\n\
              def use_at_dtype(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = add_bare(xs, xs)\n"
         );
@@ -139,7 +139,7 @@ fn baseline_bare_arg_matmul_with_borrow_sig_still_type_checks() {
     let path = dir.path().join("wsa7_baseline_matmul.ch");
     write_file(
         &path,
-        "sig tmatmul: &tensor[m, k, p] -> &tensor[k, n, p] -> tensor[m, n, p]\n\
+        "sig tmatmul[p: Float]: &tensor[m, k, p] -> &tensor[k, n, p] -> tensor[m, n, p]\n\
          def tmatmul(lhs, rhs) = matmul(lhs, rhs)\n",
     );
     let json = run_json_check(&path);

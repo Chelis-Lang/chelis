@@ -673,19 +673,26 @@
         "mode": "all"
       },
       "expected": [
+        "a_deferred_cast_preserves_its_consumers_family_rejection",
         "a_failed_family_application_does_not_also_claim_its_operand_was_never_bound",
         "a_primitive_function_value_carries_its_admission_requirement",
         "a_wrapper_cannot_silently_narrow_its_authored_contract",
         "arithmetic_and_matmul_require_their_operand_families",
         "bounded_function_values_keep_their_restriction",
+        "contract_transport_and_unconstrained_inference_remain_polymorphic",
         "each_family_operation_requires_a_sufficient_authored_bound",
         "empty_literal_precision_cannot_evade_the_operation_contract",
+        "escaping_lambdas_need_sufficient_authored_admission",
         "every_family_primitive_alias_preserves_its_requirement",
+        "inferred_family_lambdas_bind_monomorphically_within_the_declaration",
         "inferred_family_requirements_intersect_without_narrowing_authored_contracts",
         "inferred_local_operands_still_bind_before_the_declaration_boundary",
+        "later_callers_do_not_supply_an_omitted_generic_contract",
         "local_lambda_and_aggregate_projection_check_the_declared_precision",
+        "omitted_signatures_do_not_publish_inferred_dtype_contracts",
         "primitive_scalar_contracts_require_bounds_too",
-        "standalone_signatures_express_the_same_contract"
+        "standalone_signatures_express_the_same_contract",
+        "unannotated_wrappers_do_not_acquire_their_callees_bounds"
       ],
       "note": "Requires declared-family admission and restriction transport, with positive and negative cases for authored and inferred variables."
     },

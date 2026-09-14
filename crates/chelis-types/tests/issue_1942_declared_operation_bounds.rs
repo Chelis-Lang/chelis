@@ -22,6 +22,16 @@ fn check(source: &str, accepted: bool) {
 }
 
 #[test]
+fn a_deferred_cast_preserves_its_consumers_family_rejection() {
+    for dtype in ["int32", "f32"] {
+        check(
+            &format!("out = 2.0f32 |> recip |> fn (v) -> cast(floor(v), {dtype}) |> recip\n"),
+            dtype == "f32",
+        );
+    }
+}
+
+#[test]
 fn each_family_operation_requires_a_sufficient_authored_bound() {
     for (operation, expression, bound) in [
         ("mean", "mean(x, 0i32)", "Float"),
@@ -140,6 +150,107 @@ fn primitive_scalar_contracts_require_bounds_too() {
     check("def g[p](x: p) -> p = sin(x)\n", false);
     check("def g[p: Numeric](x: p) -> p = sin(x)\n", false);
     check("def g[p: Float](x: p) -> p = sin(x)\n", true);
+}
+
+// [04-INF-9], proposed in #2074: missing annotations are inference holes,
+// not permission to publish a newly inferred constrained generic contract.
+#[test]
+fn omitted_signatures_do_not_publish_inferred_dtype_contracts() {
+    let factory = "def source[p: Float]() -> p = cast(0.0f32, p)\n";
+    check(&format!("{factory}def make() -> f32 = source()\n"), true);
+    check(
+        &format!("{factory}def make[q: Float]() -> q = source()\n"),
+        true,
+    );
+    check(&format!("{factory}def make() = source()\n"), false);
+    check(&format!("{factory}def make() = (source(), 1i32)\n"), false);
+    check("def source() = sin\ndef make() = source()\n", true);
+    check(
+        "type Box[a] =\n | Box { value: a }\ndef source() = Box { value: sin }\ndef make() = source()\n",
+        true,
+    );
+    check("def g() -> tensor[0, f32] = sin(to_tensor([]))\n", true);
+    check("def g() = sin(to_tensor([]))\n", false);
+    for (expression, concrete) in [
+        ("sin(x)", "f32"),
+        ("add(x, x)", "int32"),
+        ("trunc_div(x, x)", "int32"),
+    ] {
+        check(
+            &format!("def g(x: {concrete}) -> {concrete} = {expression}\n"),
+            true,
+        );
+        check(&format!("def g(x) = {expression}\n"), false);
+    }
+}
+
+#[test]
+fn later_callers_do_not_supply_an_omitted_generic_contract() {
+    check("def g(x: f32) -> f32 = sin(x)\nout = g(1.0f32)\n", true);
+    check("def g(x) = sin(x)\nout = g(1.0f32)\n", false);
+}
+
+#[test]
+fn unannotated_wrappers_do_not_acquire_their_callees_bounds() {
+    let helper = "def g[p: Float](x: p) -> p = sin(x)\n";
+    check(
+        &format!("{helper}def wrap[q: Float](x: q) -> q = g(x)\n"),
+        true,
+    );
+    check(&format!("{helper}def wrap(x) = g(x)\n"), false);
+}
+
+#[test]
+fn escaping_lambdas_need_sufficient_authored_admission() {
+    for body in [
+        "fn (x) -> sin(x)",
+        "{\n h = fn (x) -> sin(x)\n h\n}",
+        "(fn (x) -> sin(x), 1i32)",
+    ] {
+        check(
+            &format!("def make() = {}\n", body.replace("fn (x)", "fn (x: f32)")),
+            true,
+        );
+        check(&format!("def make() = {body}\n"), false);
+    }
+}
+
+#[test]
+fn inferred_family_lambdas_bind_monomorphically_within_the_declaration() {
+    check(
+        "def use() -> f32 = {\n h = fn (x) -> sin(x)\n h(1.0f32)\n}\n",
+        true,
+    );
+    check(
+        "def use() -> int32 = {\n h = fn (x) -> sin(x)\n h(1i32)\n}\n",
+        false,
+    );
+    check(
+        "def use() -> f64 = {\n h = fn (x) -> sin(x)\n _ = h(1.0f32)\n h(1.0f64)\n}\n",
+        false,
+    );
+}
+
+#[test]
+fn contract_transport_and_unconstrained_inference_remain_polymorphic() {
+    check("def make() = sin\n", true);
+    check(
+        "def apply[p: Float](x: p) -> p = {\n h = fn (t) -> sin(t)\n h(x)\n}\n",
+        true,
+    );
+    check(
+        "def g[p: Float](x: p) -> p = sin(x)\ndef use() -> f32 = {\n h = fn (t) -> g(t)\n h(1.0f32)\n}\n",
+        true,
+    );
+    check(
+        "def identity(x) = x\na = identity(1i32)\nb = identity(true)\n",
+        true,
+    );
+    check(
+        "def use() -> f64 = {\n op = sin\n _ = op(1.0f32)\n op(1.0f64)\n}\n",
+        true,
+    );
+    check("def use() -> int32 = {\n op = sin\n op(1i32)\n}\n", false);
 }
 
 #[test]

@@ -782,7 +782,13 @@ fn fn_two_params() {
 
 #[test]
 fn fn_with_body_app() {
-    check_ok("(def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))");
+    check_ok(
+        "(def {} f (fn {} (params {} (x {type: (t-prim {} int32)}) (y {type: (t-prim {} int32)})) (app {} (var {} add) (var {} x) (var {} y))))",
+    );
+    check_err(
+        "(def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))",
+        CheckErrorKind::PrecisionMismatch,
+    );
 }
 
 // ── Let tests ────────────────────────────────────────────────

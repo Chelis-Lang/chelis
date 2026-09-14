@@ -1112,11 +1112,11 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 /// The validation is not lost: it runs at each binding instead, which is the
 /// cell the table above asserts.
 ///
-/// DISPOSITION LOCK: every program here was accepted on `6dbbbf2bc` and must
-/// stay accepted. It is the cell that took the standard library out when a
-/// first attempt at this repair rejected an operand that never binds.
+/// The explicit generic contract policy changes the unconstrained `sqrt`
+/// case. Concrete body inference and operations without a family restriction
+/// retain their previous disposition; do not reject all unused lambdas.
 #[test]
-fn a_never_bound_dtype_operand_is_accepted() {
+fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
     for (route, program) in [
         (
             "sqrt",
@@ -1135,6 +1135,22 @@ fn a_never_bound_dtype_operand_is_accepted() {
             "def f() -> int32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
+        if route == "sqrt" {
+            let errors = check(program).expect_err("a new Float requirement cannot escape");
+            assert!(
+                errors.iter().any(|error| {
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                    ) && error.message.contains("Float")
+                }),
+                "{}",
+                summary(&errors)
+            );
+            check(&program.replace("fn (t)", "fn (t: f32)"))
+                .expect("the explicit concrete contract admits sqrt");
+            continue;
+        }
         check(program).unwrap_or_else(|e| {
             panic!(
                 "{route}: a dtype operand that never binds must be accepted, not reported:\n{}",

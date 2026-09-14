@@ -36,7 +36,13 @@ fn empty_program() {
 
 #[test]
 fn def_with_fn_body() {
-    check_ok("(def {} double (fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x))))");
+    check_ok(
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)})) (app {} (var {} add) (var {} x) (var {} x))))",
+    );
+    check_err(
+        "(def {} double (fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x))))",
+        CheckErrorKind::PrecisionMismatch,
+    );
 }
 
 #[test]

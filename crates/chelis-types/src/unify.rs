@@ -479,6 +479,26 @@ impl DeferredOperandGate {
         }
     }
 
+    // A consumer may have constrained the provisional result's dtype before
+    // this producer settles. Preserve that family's error; the producer did
+    // not violate its own operand contract (a valid cast can produce an int).
+    fn reconcile_result(&self, result: &Type, settled: Type, subst: &mut Subst) {
+        if let Err(error) = unify(result, &settled, subst) {
+            if matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch) {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: error.into(),
+                });
+            } else {
+                let expected = subst.apply(result);
+                subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                    gate: self.clone(),
+                    expected,
+                    settled,
+                });
+            }
+        }
+    }
+
     /// Settle this constraint against the type its operand was just bound to
     /// (chelis#1489).
     ///
@@ -496,14 +516,7 @@ impl DeferredOperandGate {
             Self::Copy { ref result } => {
                 match crate::infer::expr::copy_result_from_source(resolved) {
                     Some(settled) => {
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     None => subst.record_operand_gate_failure(OperandGateFailure::Rejected {
                         gate: self.clone(),
@@ -522,14 +535,7 @@ impl DeferredOperandGate {
                     mode,
                 ) {
                     Ok(settled) => {
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
                         error: *error,
@@ -571,14 +577,7 @@ impl DeferredOperandGate {
                             });
                             return;
                         }
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     Err(message) => {
                         subst.record_operand_gate_failure(OperandGateFailure::Decision {

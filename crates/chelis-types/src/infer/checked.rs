@@ -309,6 +309,10 @@ pub(super) struct InferenceProduct {
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    /// Newly authored parameter holes and call operand/result requirements,
+    /// not contracts transported by function values. These retain their
+    /// original variables until the declaration boundary.
+    inferred_admission_contracts: Vec<InferredAdmissionContract>,
     pub(super) builtin_selections: Vec<crate::builtin_discovery::BuiltinCaseSelection>,
     pending_builtin_selections: Vec<usize>,
     /// chelis#1801: the fresh dimension variables scheme instantiation minted
@@ -337,6 +341,34 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+}
+
+struct InferredAdmissionContract {
+    subject: String,
+    variable: TypeVar,
+    /// Declared capabilities in the enclosing function. A local hole may
+    /// resolve to one of these without requiring a concrete instantiation.
+    givens: Vec<(TypeVar, TypeVarRestriction)>,
+    failed_application: Option<ErrorWitness>,
+}
+
+impl InferredAdmissionContract {
+    fn unmet_families(&self, subst: &Subst) -> Vec<(TypeVar, TypeVarRestriction)> {
+        if self.failed_application.is_some() {
+            return Vec::new();
+        }
+        crate::env::free_tvars(&subst.apply(&Type::Var(self.variable)))
+            .into_iter()
+            .filter_map(|variable| {
+                let required = subst.tvar_restriction(variable)?;
+                let provided = self.givens.iter().any(|(given, bound)| {
+                    subst.apply(&Type::Var(*given)) == Type::Var(variable)
+                        && bound.intersect(required) == Some(*bound)
+                });
+                (!provided).then_some((variable, required))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -517,6 +549,183 @@ impl InferenceProduct {
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
         self.next_deferred_shape_id
+    }
+
+    /// Snapshot before body inference: operation and callee constraints may
+    /// narrow these holes, but cannot turn them into implicit generic bounds.
+    pub(super) fn record_inferred_contract(
+        &mut self,
+        subject: &str,
+        ty: &Type,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let variables = crate::env::free_tvars(&subst.apply(ty))
+            .into_iter()
+            .filter(|variable| {
+                // Explicit binders have their own rigidity/entailment check.
+                subst.tvar_restriction(*variable).is_none()
+                    && !env.active_declared_type_names().contains_key(variable)
+            });
+        self.record_admission_variables(subject, variables, env, subst);
+    }
+
+    fn record_admission_variables(
+        &mut self,
+        subject: &str,
+        variables: impl IntoIterator<Item = TypeVar>,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let givens: Vec<_> = env
+            .active_declared_type_names()
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(variable, _)| {
+                // Unification can move a declared variable's restriction to
+                // its representative before a call result is registered.
+                let Type::Var(resolved) = subst.apply(&Type::Var(*variable)) else {
+                    return None;
+                };
+                subst
+                    .tvar_restriction(resolved)
+                    .map(|bound| (*variable, bound))
+            })
+            .collect();
+        for variable in variables {
+            self.inferred_admission_contracts
+                .push(InferredAdmissionContract {
+                    subject: subject.to_string(),
+                    variable,
+                    givens: givens.clone(),
+                    failed_application: None,
+                });
+        }
+    }
+
+    /// Operand requirements can originate in a temporary value, not only in
+    /// a function parameter (for example `sin(to_tensor([]))`). Record them
+    /// before the checked callee's requirements enter ordinary unification.
+    /// Merely transporting a function value never passes through this edge.
+    pub(super) fn record_call_operand_contracts(
+        &mut self,
+        callee: &Type,
+        name: Option<&str>,
+        arguments: &[Type],
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let Type::Fn(parameters, _) = subst.apply(callee) else {
+            return;
+        };
+        for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
+            if crate::env::free_tvars(parameter)
+                .iter()
+                .any(|variable| subst.tvar_restriction(*variable).is_some())
+            {
+                self.record_inferred_contract(
+                    &format!(
+                        "operand {} of `{}`",
+                        index + 1,
+                        name.unwrap_or("<function value>")
+                    ),
+                    argument,
+                    env,
+                    subst,
+                );
+            }
+        }
+    }
+
+    pub(super) fn record_call_result_contracts(
+        &mut self,
+        callee: &Type,
+        name: Option<&str>,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let Type::Fn(_, result) = subst.apply(callee) else {
+            return;
+        };
+        // Calling a result-polymorphic factory must satisfy its requirement
+        // too, even when it has no operands. Inspect only data positions:
+        // a returned function (including one nested in an aggregate) carries
+        // its already-checked contract, rather than invoking that contract.
+        let mut pending = vec![result.as_ref()];
+        let mut variables = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            match ty {
+                Type::Var(variable) | Type::Tensor(_, TensorPrec::Var(variable)) => {
+                    if subst.tvar_restriction(*variable).is_some() {
+                        variables.insert(*variable);
+                    }
+                }
+                Type::Ref(inner) => pending.push(inner),
+                Type::Adt(_, fields) | Type::Tuple(fields) => pending.extend(fields),
+                Type::KindedAdt(_, arguments) => {
+                    pending.extend(arguments.iter().filter_map(NominalArg::as_type));
+                }
+                Type::Fn(..)
+                | Type::Prim(_)
+                | Type::Tensor(_, TensorPrec::Concrete(_))
+                | Type::Unit
+                | Type::Error(_) => {}
+            }
+        }
+        self.record_admission_variables(
+            &format!("result of `{}`", name.unwrap_or("<function value>")),
+            variables,
+            env,
+            subst,
+        );
+    }
+
+    pub(super) fn admission_contract_checkpoint(&self) -> usize {
+        self.inferred_admission_contracts.len()
+    }
+
+    pub(super) fn has_pending_admission_contract_since(
+        &self,
+        checkpoint: usize,
+        subst: &Subst,
+    ) -> bool {
+        self.inferred_admission_contracts[checkpoint..]
+            .iter()
+            .any(|contract| !contract.unmet_families(subst).is_empty())
+    }
+
+    fn finish_admission_contracts(
+        &mut self,
+        declaration: Option<&str>,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let mut reported = BTreeSet::new();
+        for contract in self.inferred_admission_contracts.drain(..) {
+            for (variable, required) in contract.unmet_families(subst) {
+                if !reported.insert(variable) {
+                    continue;
+                }
+                errors.push(CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "{} in `{}` requires `{}` \
+                         admission, but its unresolved type `{}` has no sufficient declared \
+                         contract at the declaration boundary (spec/04-type-system.md §3.1)",
+                        contract.subject,
+                        declaration.unwrap_or("<anonymous>"),
+                        required.family_name(),
+                        subst.apply(&Type::Var(contract.variable)),
+                    ),
+                    vec![
+                        "Declare the required dtype-family bound or a concrete parameter type; \
+                        a local inference hole must bind within its enclosing declaration, \
+                        not acquire an implicit generic bound."
+                            .to_string(),
+                    ],
+                ));
+            }
+        }
     }
 
     pub(super) fn defer_tuple_projection(&mut self, source: Type, index: usize, projected: Type) {
@@ -813,11 +1022,22 @@ impl InferenceProduct {
         &mut self,
         callee: &Type,
         subst: &Subst,
+        failure: ErrorWitness,
     ) {
         let Type::Fn(params, _) = subst.apply(callee) else {
             return;
         };
         let failed_parameters: Vec<_> = params.iter().flat_map(crate::env::free_tvars).collect();
+        for contract in &mut self.inferred_admission_contracts {
+            if crate::env::free_tvars(&subst.apply(&Type::Var(contract.variable)))
+                .iter()
+                .any(|variable| failed_parameters.contains(variable))
+            {
+                // Retain the slot so lexical checkpoints remain stable.
+                // Only an already-reported application can discharge it.
+                contract.failed_application = Some(failure);
+            }
+        }
         self.deferred_shape_checks.retain(|check| {
             !check.arg_tys.iter().any(|argument| {
                 crate::env::free_tvars(&subst.apply(argument))
@@ -1027,12 +1247,14 @@ impl InferenceProduct {
     /// source must state the intended parameter/result shape explicitly.
     pub(super) fn finish_deferred_shape_checks(
         &mut self,
+        declaration: Option<&str>,
         vg: &mut VarGen,
         subst: &mut Subst,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        self.finish_admission_contracts(declaration, subst, errors);
         for check in self.deferred_shape_checks.drain(..) {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
@@ -1375,7 +1597,11 @@ pub(super) fn reconcile_replayed_result(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if unify(published, &produced, subst).is_err() {
+    if let Err(error) = unify(published, &produced, subst) {
+        if matches!(error.kind, crate::unify::TypeErrorKind::DtypeFamilyMismatch) {
+            errors.push(error.into());
+            return produced;
+        }
         let expected = subst.apply(published);
         errors.push(CheckError::new(
             CheckErrorKind::TypeMismatch,
@@ -1534,6 +1760,10 @@ pub(crate) enum ReconcileMutationCase {
     Disagrees,
     /// The rule produces the type a fresh published variable can take.
     Agrees,
+    /// A consumer requires float values but the producer settles to integers.
+    FamilyDisagrees,
+    /// The same consumer accepts a float result.
+    FamilyAgrees,
 }
 
 /// Returns the rendered produced type and whether the published type ended up
@@ -1549,10 +1779,21 @@ pub(crate) fn run_reconcile_mutation_case(
     let published = match case {
         ReconcileMutationCase::Disagrees => tensor(3),
         ReconcileMutationCase::Agrees => Type::Var(vg.fresh_tvar()),
+        ReconcileMutationCase::FamilyDisagrees | ReconcileMutationCase::FamilyAgrees => {
+            let var = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(var, TypeVarRestriction::FloatValue)
+                .unwrap();
+            Type::Var(var)
+        }
     };
     let produce = match case {
         ReconcileMutationCase::Disagrees => tensor(4),
         ReconcileMutationCase::Agrees => tensor(3),
+        ReconcileMutationCase::FamilyDisagrees => {
+            Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::Int32))
+        }
+        ReconcileMutationCase::FamilyAgrees => tensor(3),
     };
     let produced = reconcile_replayed_result("permute", &published, produce, &mut subst, errors);
     let bound = subst.apply(&published) == produced;
