@@ -11256,7 +11256,9 @@ fn lower_guarded_host_invocation(
         return Ok(None);
     };
     let call_children = children(call);
-    let args = call_children.get(1..).unwrap_or_default();
+    let Some((_, args)) = call_children.split_first() else {
+        return Ok(None);
+    };
     if args.len() != signature.params.len() {
         return Ok(None);
     }
