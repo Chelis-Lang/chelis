@@ -25,6 +25,12 @@ The regular PR planner compares Cargo metadata at the change base and candidate.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 
+An exact `manual_only_target` row keeps an all-ignored integration target in
+required change-owned coverage. Its plan-bound execution mode lists ignored
+tests, rejects the row if any default-enabled test appears, and runs the complete
+ignored suite with the same target and per-test receipts. It is not an exclusion
+and zero active tests do not count as success.
+
 The Linux workspace worker executes as four shards of one
 `--partition hash:${{ matrix.shard }}/4` selection rather than as a single run.
 The selection is unchanged and still unfiltered. A hash partition hides nothing:

@@ -65,6 +65,12 @@ broader package execution is currently informational. Run your focused behavior
 checks. Feature-specific, ignored or hardware-dependent coverage needs its
 explicit owner; do not hide a failing target with an exclusion.
 
+If a directly modified target contains only ignored tests, it still fails closed
+unless `.config/ci-test-targets.toml` gives that exact target a reviewed
+`manual_only_target` execution mode. That mode executes the complete ignored
+suite and records exact per-test results. It becomes stale if an active test is
+added and cannot be combined with a target or test exclusion.
+
 If planning reports an unknown shared path, add a reviewed mapping to its real
 packages or existing automated owner in `.config/ci-test-targets.toml`. Do not
 add an unrelated mapping just to satisfy the planner. The standing test list is

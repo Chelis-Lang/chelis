@@ -145,6 +145,7 @@ class PathRule:
 class Config:
     version: int
     standing_targets: tuple[Identity, ...]
+    manual_only_targets: Mapping[Identity, Owner]
     target_exclusions: Mapping[Identity, Owner]
     test_exclusions: Mapping[TestIdentity, Owner]
     path_rules: tuple[PathRule, ...]
@@ -224,11 +225,12 @@ def _rules_overlap(left: str, right: str) -> bool:
 
 
 def read_config(path: Path) -> Config:
-    """Read the strict version-2 four-row-kind configuration."""
+    """Read the strict version-2 five-row-kind configuration."""
     data = tomllib.loads(path.read_text())
     allowed = {
         "version",
         "standing_target",
+        "manual_only_target",
         "target_exclusion",
         "test_exclusion",
         "path_rule",
@@ -247,6 +249,17 @@ def read_config(path: Path) -> Config:
         raise ValueError("configuration requires at least one standing_target")
     if len(set(standing)) != len(standing):
         raise ValueError("duplicate standing_target identity")
+
+    manual_only_targets: dict[Identity, Owner] = {}
+    for row in _rows(data, "manual_only_target"):
+        if set(row) != {"package", "name"} | OWNER_FIELDS:
+            raise ValueError(
+                "manual_only_target requires package, name, and exact owner fields"
+            )
+        identity = Identity(_identifier(row, "package"), _identifier(row, "name"))
+        if identity in manual_only_targets:
+            raise ValueError(f"duplicate manual_only_target: {identity.canonical}")
+        manual_only_targets[identity] = _owner(row)
 
     target_exclusions: dict[Identity, Owner] = {}
     for row in _rows(data, "target_exclusion"):
@@ -277,6 +290,16 @@ def read_config(path: Path) -> Config:
     if set(standing) & set(target_exclusions):
         overlap = sorted(item.canonical for item in set(standing) & set(target_exclusions))
         raise ValueError(f"standing targets cannot be target exclusions: {overlap}")
+    manual_conflicts = sorted(
+        item.canonical
+        for item in set(manual_only_targets)
+        & (set(standing) | set(target_exclusions))
+    )
+    if manual_conflicts:
+        raise ValueError(
+            "manual-only targets cannot be standing targets or target exclusions: "
+            f"{manual_conflicts}"
+        )
     contradictory_tests = sorted(
         identity.canonical
         for identity in test_exclusions
@@ -285,6 +308,16 @@ def read_config(path: Path) -> Config:
     if contradictory_tests:
         raise ValueError(
             f"test exclusions cannot sit under target exclusions: {contradictory_tests}"
+        )
+    manual_test_exclusions = sorted(
+        identity.canonical
+        for identity in test_exclusions
+        if identity.target_identity in manual_only_targets
+    )
+    if manual_test_exclusions:
+        raise ValueError(
+            "manual-only targets must execute their complete ignored suite; "
+            f"test exclusions are forbidden: {manual_test_exclusions}"
         )
 
     path_rules: list[PathRule] = []
@@ -333,6 +366,7 @@ def read_config(path: Path) -> Config:
     return Config(
         SCHEMA_VERSION,
         tuple(standing),
+        manual_only_targets,
         target_exclusions,
         test_exclusions,
         tuple(path_rules),
@@ -450,6 +484,16 @@ def validate_config(
         if identity not in eligible:
             raise ValueError(
                 f"standing target is not default-feature eligible: {identity.canonical}"
+            )
+    for identity in config.manual_only_targets:
+        if identity.package not in packages:
+            raise ValueError(f"stale manual-only package: {identity.package}")
+        if identity not in all_targets:
+            raise ValueError(f"stale manual-only target: {identity.canonical}")
+        if identity not in eligible:
+            raise ValueError(
+                "manual-only target is not default-feature eligible: "
+                f"{identity.canonical}"
             )
     for identity in config.target_exclusions:
         if identity.package not in packages:
@@ -577,6 +621,15 @@ def _owner_dict(owner: Owner) -> dict[str, str]:
     return owner.as_dict()
 
 
+def _owned_target_rows(
+    owners: Mapping[Identity, Owner],
+) -> list[dict[str, Any]]:
+    return [
+        {"identity": identity.canonical, "owner": _owner_dict(owner)}
+        for identity, owner in sorted(owners.items())
+    ]
+
+
 def _exclusion_rows(config: Config) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     target_rows = [
         {"identity": identity.canonical, "owner": _owner_dict(owner)}
@@ -641,6 +694,8 @@ def make_plan(
         else:
             change_owned.add(identity)
             selected_packages.add(identity.package)
+            if identity in config.manual_only_targets:
+                row["execution_mode"] = "ignored-only"
         target_dispositions.append(row)
     for identity in sorted(set(base_all) - set(candidate_all)):
         target_dispositions.append(
@@ -721,6 +776,11 @@ def make_plan(
                         else "integration_target_directly_modified"
                     ),
                     "identity": identity.canonical,
+                    **(
+                        {"execution_mode": "ignored-only"}
+                        if identity in config.manual_only_targets
+                        else {}
+                    ),
                 }
             )
             continue
@@ -807,6 +867,7 @@ def make_plan(
         "standing_targets": sorted(
             identity.canonical for identity in config.standing_targets
         ),
+        "manual_only_targets": _owned_target_rows(config.manual_only_targets),
         "target_exclusions": target_exclusions,
         "test_exclusions": test_exclusions,
         "shards": {
@@ -879,6 +940,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "change_owned",
         "package_expansion",
         "standing_targets",
+        "manual_only_targets",
         "target_exclusions",
         "test_exclusions",
         "shards",
@@ -925,6 +987,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     if not (change_owned | expansion) <= eligible:
         raise ValueError("plan lane contains an ineligible target")
     for key, parser in (
+        ("manual_only_targets", Identity.parse),
         ("target_exclusions", Identity.parse),
         ("test_exclusions", TestIdentity.parse),
     ):
@@ -940,6 +1003,25 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
                 raise ValueError(f"plan {key} contains duplicate identities")
             seen.add(row["identity"])
             _validate_owner_mapping(row["owner"])
+    manual_only = {
+        row["identity"] for row in plan["manual_only_targets"]
+    }
+    if not manual_only <= eligible:
+        raise ValueError("plan manual-only targets must be eligible")
+    standing = set(_identity_list(plan, "standing_targets"))
+    target_exclusions = {
+        row["identity"] for row in plan["target_exclusions"]
+    }
+    if manual_only & (standing | target_exclusions):
+        raise ValueError(
+            "plan manual-only targets conflict with standing or excluded targets"
+        )
+    test_exclusion_targets = {
+        TestIdentity.parse(row["identity"]).target_identity.canonical
+        for row in plan["test_exclusions"]
+    }
+    if manual_only & test_exclusion_targets:
+        raise ValueError("plan manual-only targets cannot contain test exclusions")
     shards = plan.get("shards")
     if not isinstance(shards, dict) or set(shards) != set(LANE_KEYS.values()):
         raise ValueError("plan shards must name both lanes")
@@ -1270,6 +1352,7 @@ def target_command(
     exclusions: Mapping[TestIdentity, Any],
     *,
     list_only: bool,
+    manual_only: bool = False,
 ) -> list[str]:
     action = "list" if list_only else "run"
     command = [
@@ -1285,6 +1368,8 @@ def target_command(
         "ci-full",
         "--ignore-default-filter",
     ]
+    if manual_only:
+        command.extend(["--run-ignored", "all"])
     relevant = sorted(
         exclusion.test
         for exclusion in exclusions
@@ -1306,6 +1391,8 @@ def _listing_tests(
     data: Mapping[str, Any],
     identity: Identity,
     exclusions: Mapping[TestIdentity, Any],
+    *,
+    manual_only: bool = False,
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -1320,10 +1407,18 @@ def _listing_tests(
         raise ValueError(f"nextest listing has no testcases for {expected}")
     selected = []
     nonmatching: set[str] = set()
+    active: set[str] = set()
     for name, info in tests.items():
         if not isinstance(info, dict):
             raise ValueError(f"malformed testcase listing for {expected}::{name}")
-        if info.get("ignored"):
+        ignored = info.get("ignored")
+        if type(ignored) is not bool:
+            raise ValueError(
+                f"malformed ignored flag for {expected}::{name}: {ignored!r}"
+            )
+        if manual_only and not ignored:
+            active.add(name)
+        if ignored and not manual_only:
             continue
         filter_match = info.get("filter-match", {})
         if not isinstance(filter_match, dict):
@@ -1340,6 +1435,10 @@ def _listing_tests(
             raise ValueError(
                 f"malformed filter status for {expected}::{name}: {status!r}"
             )
+    if manual_only and active:
+        raise ValueError(
+            f"manual-only target {expected} has active tests: {sorted(active)}"
+        )
     configured_nonmatching = {
         exclusion.test
         for exclusion in exclusions
@@ -1491,6 +1590,9 @@ def execute_shard(
 
     suite_documents: list[Path] = []
     exclusions = _test_exclusions_from_plan(plan)
+    manual_only_targets = {
+        row["identity"] for row in plan["manual_only_targets"]
+    }
     cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
     if not cargo_target.is_absolute():
         cargo_target = repo / cargo_target
@@ -1558,7 +1660,13 @@ def execute_shard(
             if deadline_exhausted:
                 break
             identity = Identity.parse(canonical)
-            list_command = target_command(identity, exclusions, list_only=True)
+            manual_only = canonical in manual_only_targets
+            list_command = target_command(
+                identity,
+                exclusions,
+                list_only=True,
+                manual_only=manual_only,
+            )
             list_started_at = _utc_timestamp()
             started = time.monotonic()
             try:
@@ -1571,7 +1679,10 @@ def execute_shard(
                     stderr=subprocess.PIPE,
                 )
                 listed_tests = _listing_tests(
-                    json.loads(listed.stdout), identity, exclusions
+                    json.loads(listed.stdout),
+                    identity,
+                    exclusions,
+                    manual_only=manual_only,
                 )
                 selected_tests.extend(listed_tests)
                 commands.append(
@@ -1616,7 +1727,12 @@ def execute_shard(
                 continue
             list_seconds = round(time.monotonic() - started, 3)
 
-            run_command = target_command(identity, exclusions, list_only=False)
+            run_command = target_command(
+                identity,
+                exclusions,
+                list_only=False,
+                manual_only=manual_only,
+            )
             produced_junit.unlink(missing_ok=True)
             run_started_at = _utc_timestamp()
             started = time.monotonic()
