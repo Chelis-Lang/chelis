@@ -3872,11 +3872,10 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, call_ty, "call expression")?;
                 self.assign_call(
-                    target,
+                    (target, call_ty),
                     function,
                     args,
                     arg_tys,
-                    call_ty,
                     site,
                     result_claims.as_deref(),
                 )?;
@@ -4069,11 +4068,10 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT match")?;
                 self.assign_match_adt(
-                    target,
+                    (target, ty),
                     scrutinee,
                     arms,
                     default_expr.as_deref(),
-                    ty,
                     site,
                     on_result_spine,
                 )?;
@@ -6829,14 +6827,14 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_call(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         function: &str,
         args: &[HostExpr],
         arg_tys: &[HostType],
-        ty: &HostType,
         site: &ProjectedHostSite<'a>,
         result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        let (target, ty) = destination;
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
                 HostFunctionSpecialization::BlasMatmul(summary) => {
@@ -7006,14 +7004,14 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_match_adt(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         scrutinee: &HostExpr,
         arms: &[HostMatchArm],
         default_expr: Option<&HostExpr>,
-        expr_ty: &HostType,
         site: &ProjectedHostSite<'a>,
         on_result_spine: bool,
     ) -> Result<(), Unsupported> {
+        let (target, expr_ty) = destination;
         let (scrutinee_owner, arm_edges) = site
             .directives
             .iter()
