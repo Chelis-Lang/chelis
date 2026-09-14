@@ -7,6 +7,7 @@ semantic registrations, or the authoritative Phase 4B oracle.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ast
 import json
 from pathlib import Path, PurePosixPath
@@ -17,7 +18,7 @@ from typing import Callable
 
 from builtin_atom_registry import parse_registry, ROW
 from ci_change_owned import resolve_pr_commits
-from dtype_phase4b_oracle import ATOM_START, OracleError, frozen_region, normalize_frozen_block, strict_atom_block
+from phase4b_contract_text import ATOM_START, OracleError, frozen_region, normalize_frozen_block, strict_atom_block
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,6 +217,32 @@ def resolve_comparison(repo: Path, candidate: str, base: str, pr_head: str) -> t
     return commit(repo, base), candidate
 
 
+def acknowledgement_line(kind: str, identity: str) -> str:
+    if kind == "atom":
+        value = f"atom:{identity}"
+    elif kind == "region":
+        value = "region:" + json.dumps(identity, ensure_ascii=False)
+    elif kind == "file":
+        value = identity
+    else:
+        raise ValueError(f"unknown acknowledgement kind {kind!r}")
+    return f"Frozen-contract-change: {value}"
+
+
+def identity_acknowledgement_violations(result: dict, named: list[tuple[str, str]]) -> list[str]:
+    required = {(row["kind"], row["identity"]) for row in result["changes"]}
+    counts = Counter(named)
+    violations = []
+    for key, count in sorted(counts.items()):
+        if count > 1:
+            violations.append(f"duplicate contract identity acknowledgement: {acknowledgement_line(*key)}")
+        if key not in required:
+            violations.append(f"stale or unknown contract identity acknowledgement: {acknowledgement_line(*key)}")
+    for key in sorted(required - counts.keys()):
+        violations.append(f"unacknowledged contract identity: add {acknowledgement_line(*key)}; {DOCTRINE}")
+    return violations
+
+
 def changed_contracts(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dict:
     comparison, candidate = commit(repo, base_ref), commit(repo, candidate_ref)
     bases = git(repo, "merge-base", "--all", comparison, candidate).splitlines()
@@ -224,10 +251,14 @@ def changed_contracts(repo: Path, base_ref: str, candidate_ref: str = "HEAD") ->
     base = bases[0]
     before, after = (snapshot(lambda path, revision=revision: git(repo, "show", f"{revision}:{path}")) for revision in (base, candidate))
     files = sorted(before["documents"].keys() | after["documents"].keys())
+    changes = compare_snapshots(before, after)
+    changed_files = [path for path in files if before["documents"].get(path) != after["documents"].get(path)]
     return {
         "version": 1, "comparison_ref": comparison, "base": base, "candidate": candidate,
-        "changes": compare_snapshots(before, after),
-        "changed_contract_files": [path for path in files if before["documents"].get(path) != after["documents"].get(path)],
+        "changes": changes,
+        "changed_contract_files": changed_files,
+        "required_acknowledgements": [acknowledgement_line("file", path) for path in changed_files]
+            + [acknowledgement_line(row["kind"], row["identity"]) for row in changes],
         "doctrine": DOCTRINE,
     }
 

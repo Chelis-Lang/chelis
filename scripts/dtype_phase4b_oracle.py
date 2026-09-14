@@ -25,12 +25,27 @@ line in the pull request body::
 
     Frozen-contract-change: spec/04-type-system.md
 
-one line per changed file. The grammar is exact and case-sensitive: no leading
-whitespace, exactly one space after the colon, a repo-relative POSIX path with
-no glob metacharacter and no ``.``/``..`` segment, and nothing after the path.
-An unacknowledged change and an acknowledgement naming a file that did not
-change are both failures: a stale acknowledgement is how a reviewer stops
-reading them.
+one line per changed file. The committed change report additionally requires
+one line for each changed atom and region::
+
+    Frozen-contract-change: atom:05-OP-33
+    Frozen-contract-change: region:"agent numeric-surface discipline"
+
+Region labels are JSON strings; atoms use their exact unbracketed identity.
+File lines remain required even when the same edit changes an atom or region,
+or removes its file from the contract inventory.
+Registry-only edits require each owning atom, and removed identities or changed
+protection/region declarations remain visible through both inventories. A file
+line never substitutes for an identity line. Missing, duplicate, stale, unknown
+or malformed addresses fail the enforcing mode. JSON escape spellings decode
+to one region identity, so alternate spellings cannot evade duplicate checks.
+
+The grammar is case-sensitive: no leading whitespace, exactly one space after
+the colon, and no trailing content. File addresses are repo-relative POSIX
+paths without glob metacharacters or `.`/`..` segments. The file leg compares
+working-tree bytes; the identity leg compares committed snapshots. PR execution
+validates the synthetic merge against `--pr-head` and uses its first parent,
+the same comparison that produced the report artifact.
 
 Lines inside fenced code blocks are ignored so a body can quote the grammar.
 That exemption is pragmatic, not a CommonMark implementation: it tracks the
@@ -63,11 +78,21 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+
+from phase4b_contract_text import (
+    ATOM_START, OracleError, frozen_region, normalize_frozen_block, strict_atom_block,
+)
+from phase4b_change_report import (
+    acknowledgement_line, changed_contracts, identity_acknowledgement_violations,
+    resolve_comparison,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -106,9 +131,6 @@ CONTRACT_FILES = (
     "spec/registry/python_tensor_metadata.md",
 )
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
-ATOM_START = re.compile(
-    r"^> \*\*\[(\d{2}-[A-Z]+-\d+)\]\*\*", re.MULTILINE
-)
 EXPECTED_PHASE4B_OP_HEADINGS = {
     1: "`round_to(x, places) -> r`",
     2: "Ingestion preserves",
@@ -645,10 +667,6 @@ FROZEN_REGION_DIGESTS = {
 }
 
 
-class OracleError(RuntimeError):
-    """The frozen Phase 4B contract is incomplete or internally inconsistent."""
-
-
 def read(root: Path, relative: str) -> str:
     path = root / relative
     try:
@@ -764,50 +782,10 @@ def validate_op_manifests(
         )
 
 
-def strict_atom_block(text: str, atom: str) -> str:
-    starts = [match for match in ATOM_START.finditer(text) if match.group(1) == atom]
-    if len(starts) != 1:
-        raise OracleError(
-            f"frozen normative atom {atom} must occur exactly once, got {len(starts)}"
-        )
-    start = starts[0].start()
-    end = start
-    for line in text[start:].splitlines(keepends=True):
-        if end > start and ATOM_START.match(line):
-            break
-        if not line.startswith(">"):
-            break
-        end += len(line)
-    return text[start:end]
-
-
-def normalize_frozen_block(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in normalized.split("\n")]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines) + "\n"
-
-
 def frozen_digest(text: str) -> str:
     return hashlib.sha256(normalize_frozen_block(text).encode("utf-8")).hexdigest()
 
 
-def frozen_region(text: str, start: str, end: str, label: str) -> str:
-    start_count = text.count(start)
-    end_count = text.count(end)
-    if start_count != 1 or end_count != 1:
-        raise OracleError(
-            f"frozen {label} markers must occur exactly once "
-            f"(start={start_count}, end={end_count})"
-        )
-    start_index = text.index(start)
-    end_index = text.index(end)
-    if end_index <= start_index:
-        raise OracleError(f"frozen {label} end marker precedes its start")
-    return text[start_index:end_index]
 
 
 # --------------------------------------------------------------------------
@@ -818,9 +796,9 @@ ACKNOWLEDGEMENT_KEY = "Frozen-contract-change:"
 DEFAULT_BASE_REF = "origin/main"
 
 # The exact accepted line. No leading whitespace, exactly one space after the
-# colon, and nothing after the path.
+# colon, and one closed file/atom/region address.
 ACKNOWLEDGEMENT_LINE = re.compile(
-    r"^Frozen-contract-change: (?P<path>[^\s]+)$"
+    r"^Frozen-contract-change: (?P<path>\S.*)$"
 )
 # A line that is trying to be an acknowledgement and failing. Leading
 # whitespace, a Markdown list bullet, a blockquote marker, or any casing of the
@@ -839,6 +817,31 @@ FENCE_LINE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
 # metacharacter, the backslash, and whitespace; the segment rule excludes an
 # absolute path, an empty segment, and `.`/`..`.
 ACKNOWLEDGEMENT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+
+def acknowledgement_identity(value: str) -> tuple[str, str]:
+    """Parse the closed file/atom/region address grammar."""
+    if value.startswith("atom:"):
+        identity = value[5:]
+        if re.fullmatch(r"(?:04|05)-[A-Z]+-[1-9][0-9]*", identity):
+            return "atom", identity
+    elif value.startswith("region:"):
+        try:
+            identity = json.loads(value[7:])
+        except (ValueError, TypeError):
+            identity = None
+        if (isinstance(identity, str) and identity.strip()
+                and all(ord(char) >= 32 and ord(char) != 127 for char in identity)):
+            return "region", identity
+    elif ACKNOWLEDGEMENT_PATH.fullmatch(value) and all(
+        segment not in {".", ".."} for segment in value.split("/")
+    ):
+        return "file", value
+    label = "identity" if value.startswith(("atom:", "region:")) else "path"
+    raise OracleError(
+        f"malformed frozen contract acknowledgement {label} {value!r}: expected a "
+        "repo-relative POSIX path, atom:04/05-ID-N, or region:<JSON string>"
+    )
 
 
 def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
@@ -871,19 +874,15 @@ def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
             if ACKNOWLEDGEMENT_NEAR_MISS.match(line):
                 errors.append(
                     f"malformed frozen contract acknowledgement {line!r}: the "
-                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <repo-relative "
-                    "path>' at the start of a line, outside a code fence"
+                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <address>' "
+                    "at the start of a line, outside a code fence"
                 )
             continue
         candidate = match.group("path")
-        if not ACKNOWLEDGEMENT_PATH.match(candidate) or any(
-            segment in {".", ".."} for segment in candidate.split("/")
-        ):
-            errors.append(
-                f"malformed frozen contract acknowledgement path {candidate!r}: "
-                "expected a repo-relative POSIX path with no glob, no absolute "
-                "root, and no '.' or '..' segment"
-            )
+        try:
+            acknowledgement_identity(candidate)
+        except OracleError as error:
+            errors.append(str(error))
             continue
         paths.append(candidate)
     if open_fence is not None:
@@ -990,9 +989,12 @@ def validate_frozen_contract_changes(
     body: str | None = None,
     require_acknowledgement: bool = False,
     contract_files: tuple[str, ...] = CONTRACT_FILES,
+    committed_contract_changes: tuple[str, ...] = (),
 ) -> list[str]:
     """Check that every changed contract file is acknowledged by name.
 
+    ``committed_contract_changes`` retains file additions/removals named by both
+    committed inventories, including a removed declaration whose file remains.
     Returns the report lines. In ``require_acknowledgement`` mode any violation
     raises ``OracleError``; otherwise the report is advisory and the caller
     continues.
@@ -1016,7 +1018,8 @@ def validate_frozen_contract_changes(
 
     try:
         merge_base = resolve_merge_base(root, base)
-        changed = changed_contract_files(root, merge_base, contract_files)
+        changed = sorted(set(changed_contract_files(root, merge_base, contract_files))
+                         | set(committed_contract_changes))
     except OracleError as error:
         # Advisory mode reports and continues so the atom and region digests
         # still run on a checkout whose git state this leg cannot read. The
@@ -1031,7 +1034,7 @@ def validate_frozen_contract_changes(
         ]
 
     changed_set = set(changed)
-    known = set(contract_files)
+    known = set(contract_files) | set(committed_contract_changes)
 
     for path in sorted(set(acknowledged)):
         if path not in known:
@@ -3867,7 +3870,8 @@ def build_parser() -> argparse.ArgumentParser:
             "acknowledged by name."
         )
     )
-    parser.add_argument(
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument(
         "--base",
         default=DEFAULT_BASE_REF,
         help=(
@@ -3877,13 +3881,17 @@ def build_parser() -> argparse.ArgumentParser:
             "never reported as this branch's."
         ),
     )
+    comparison.add_argument(
+        "--pr-head", default=None,
+        help="exact PR event head; validate the synthetic merge and use its first parent",
+    )
     parser.add_argument(
         "--acknowledge",
         action="append",
         default=[],
         metavar="PATH",
         help=(
-            "acknowledge one changed contract file by repo-relative path; "
+            "acknowledge one changed file path, atom:<ID>, or region:<JSON string>; "
             "repeatable. The local equivalent of a pull request body line."
         ),
     )
@@ -3892,7 +3900,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "read acknowledgement lines from FILE (a saved pull request body). "
-            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <path>'."
+            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <address>'."
         ),
     )
     parser.add_argument(
@@ -3951,14 +3959,48 @@ def main(argv: list[str] | None = None, root: Path = REPO_ROOT) -> None:
     args = build_parser().parse_args(argv)
     body = acknowledgement_body(args)
     try:
+        values, errors = parse_acknowledgements(body or "")
+        identities = []
+        for value in [*values, *args.acknowledge]:
+            try:
+                identities.append(acknowledgement_identity(value))
+            except OracleError as error:
+                errors.append(str(error))
+        if errors and args.require_acknowledgement:
+            raise OracleError("; ".join(errors))
+        base = args.base
+        if args.pr_head is not None:
+            base, _ = resolve_comparison(root, "HEAD", "", args.pr_head)
+        changes = None
+        comparison_error = None
+        try:
+            changes = changed_contracts(root, base)
+        except (ValueError, OSError) as error:
+            comparison_error = str(error)
         report = validate_frozen_contract_changes(
             root=root,
-            base=args.base,
-            acknowledgements=tuple(args.acknowledge),
-            body=body,
+            base=base,
+            acknowledgements=tuple(identity for kind, identity in identities if kind == "file"),
             require_acknowledgement=args.require_acknowledgement,
+            contract_files=CONTRACT_FILES,
+            committed_contract_changes=tuple(changes["changed_contract_files"]) if changes is not None else (),
         )
-    except OracleError as error:
+        report.extend(f"  ISSUE {error}" for error in errors)
+        if comparison_error is not None:
+            if args.require_acknowledgement:
+                raise OracleError(comparison_error)
+            report.append(f"identity acknowledgement: comparison unavailable (advisory): {comparison_error}")
+        if changes is not None:
+            named = [(kind, identity) for kind, identity in identities if kind != "file"]
+            violations = identity_acknowledgement_violations(changes, named)
+            if violations and args.require_acknowledgement:
+                raise OracleError("; ".join(violations))
+            for row in changes["changes"]:
+                key = (row["kind"], row["identity"])
+                marker = "ok " if key in named else "NEEDS"
+                report.append(f"  {marker} {acknowledgement_line(*key)}")
+            report.extend(f"  ISSUE {violation}" for violation in violations)
+    except (OracleError, ValueError) as error:
         raise SystemExit(f"DTYPE PHASE 4B ORACLE: FAIL: {error}") from error
     for line in report:
         print(line)
