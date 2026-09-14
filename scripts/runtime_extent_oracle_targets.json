@@ -668,6 +668,25 @@
         "the_census_reader_finds_an_entry_guard_that_is_there"
       ],
       "note": "The entry-guard census positive control runs beside the split-kernel tuple and one-kernel runtime receipts. The existing example census covers the shipped corpus."
+    },
+    {
+      "phase": "b",
+      "id": "api_grad_extent_claims",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_1821_gradient_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "aggregate_gradient_preserves_the_named_claim_for_every_leaf_layout",
+        "agreeing_multi_target_gradient_keeps_unused_zero_cotangent_slots",
+        "fixed_control_gradients_keep_the_same_authored_activation_claim",
+        "multi_target_gradient_rejects_the_same_activation_as_the_forward_call",
+        "primitive_scalar_gradient_preserves_the_named_claim_for_single_and_multiple_targets",
+        "subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling"
+      ],
+      "note": "#1920/#1924 and #1934 evaluator half: authored signatures remain separate from inferred checked types in ordinary and fixed-control transform lowering. Negative controls require original entry witnesses and the load Domain trap; agreeing controls retain exact zero cotangent shapes and target order."
     }
   ]
 }

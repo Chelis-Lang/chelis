@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "772e5e44b249e460819ef3de69f3ed24faeb8930185d6fcbdb40a1f87912e16b",
+  "corpus_sha256": "efd06758409e877ee0a67ff44ed004983c998527d508710813f5712d53907697",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -443,7 +443,7 @@
     {
       "id": "grad.wrt_aggregate.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -455,7 +455,7 @@
     {
       "id": "grad.wrt_aggregate.single.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -467,7 +467,7 @@
     {
       "id": "grad.wrt_prim_scalar.multi.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -479,7 +479,7 @@
     {
       "id": "grad.wrt_prim_scalar.single.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -491,7 +491,7 @@
     {
       "id": "grad.wrt_tensor.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
     },
     {
