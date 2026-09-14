@@ -903,7 +903,8 @@ is not a repair. The definition digests, comparator checks, receipts, mutation
 controls, and authoritative Phase 3 acceptance command above remain in force.
 The report also derives exact `Protected-test-change: <path>::<test name>`
 lines. The required Docs job checks each changed identity exactly once in the
-PR description, outside fenced/HTML examples; removed requirements remain
+contiguous opening block of the PR description, before all prose and a
+separating blank line; later example lines do not count. Removed requirements remain
 acknowledgement obligations. Missing, duplicate, stale, unknown or malformed
 lines fail, as do missing required definitions even when acknowledged. This
 records review responsibility without certifying behavior or replacing the

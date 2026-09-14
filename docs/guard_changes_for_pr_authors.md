@@ -112,8 +112,9 @@ For protected Rust tests, generate the required review lines after committing:
 .venv/bin/python scripts/phase3_test_change_report.py --base origin/main --output target/phase3-test-changes.json
 ```
 
-Copy each `required_acknowledgements` line exactly once into the PR description,
-outside quoted, fenced or HTML examples. For example:
+Begin the PR description with each `required_acknowledgements` line exactly
+once, in one contiguous block. Put a blank line between that block and your
+problem description. Lines later in the body do not count. For example:
 `Protected-test-change: crates/chelis-cli/tests/parity.rs::parity_corpus_is_complete`.
 CI requires the exact changed set, including removed requirements, and rejects
 missing, duplicate, stale, unknown or malformed lines. Editing the PR description

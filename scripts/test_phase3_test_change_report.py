@@ -284,6 +284,10 @@ class AcknowledgementTests(unittest.TestCase):
             "````\n```\n" + line + "\n````",
             "```\n~~~\n" + line + "\n```",
             "```\n```still code\n" + line + "\n```",
+            "> Example only:\n" + line,
+            "<details>\n\n" + line + "\n\n</details>",
+            "`Example only\n" + line + "\n`",
+            "Prose before the acknowledgement.\n\n" + line,
             "<!--\n" + line + "\n-->",
             "<!-- closed --><!--\n" + line + "\n-->",
             "<!--\n--><!--\n" + line + "\n-->",
@@ -300,18 +304,23 @@ class AcknowledgementTests(unittest.TestCase):
         self.assertTrue(report.acknowledgement_violations(unchanged, line))
         self.assertTrue(report.acknowledgement_violations(result, line + "\nProtected_test_change: invalid"))
 
-    def test_unrelated_prose_and_closed_examples_allow_the_real_line(self):
+    def test_opening_block_is_the_only_acknowledgement_authority(self):
         _, result = self.changed()
         line = result["required_acknowledgements"][0]
-        for prefix in [
-            "Review evidence follows.\n\n",
-            "```example\n" + line + "\n```\n\n",
-            "<!-- example -->\n\n",
-            "<details>\n<summary>Evidence</summary>\n</details>\n\n",
-            "<pre>ignored example</pre>\n\n",
+        for example in [
+            "Review evidence follows.",
+            "```example\n" + line + "\n```",
+            "<!-- example -->",
+            "<details>\n\n" + line + "\n\n</details>",
+            "> Example only:\n" + line,
+            "`Example\n" + line + "\n`",
+            line.replace("parity_example", "not_an_acknowledgement_here"),
         ]:
-            with self.subTest(prefix=prefix):
-                self.assertEqual(report.acknowledgement_violations(result, prefix + line), [])
+            with self.subTest(example=example):
+                self.assertEqual(report.acknowledgement_violations(result, line + "\n\n" + example), [])
+                self.assertTrue(report.acknowledgement_violations(result, example + "\n\n" + line))
+        self.assertEqual(report.acknowledgement_violations(result, "\n  \n" + line), [])
+        self.assertTrue(report.acknowledgement_violations(result, line + "\nProse needs a separating blank line."))
 
     def run_cli(self, base, body, *, enforce=True, env=False):
         output = self.root / "ack-report.json"

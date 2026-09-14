@@ -284,7 +284,7 @@ the review cue beside the existing digests; it does not retire them or replace
 the comparator, receipt, example-derivation, or mutation obligations above.
 
 The durable review cue requires each changed required-test identity to appear
-exactly once in the PR description as
+exactly once in a contiguous opening block of the PR description as
 `Protected-test-change: <repository-relative Rust path>::<test name>`.
 The report derives the expected lines from the union of both inventories,
 including removed requirements, and publishes them with the comparison.
@@ -294,9 +294,13 @@ result. It retains the complete job graph on that event: an edited description
 must not replace pending implementation checks with skipped successes. This
 incurs a full CI rerun for an edited description; no cheaper partial gate is
 claimed here. The enforcement rejects
-missing, duplicate, stale, unknown or malformed acknowledgements. Lines
-inside fenced code or HTML blocks and quoted examples do not acknowledge a
-change. Missing required definitions still fail even when acknowledged.
+missing, duplicate, stale, unknown or malformed acknowledgements in that
+opening block. The block precedes all prose and is separated from it by a
+blank line; initial blank lines are harmless. Later lines are examples or
+prose and cannot acknowledge a change. This closed prologue grammar has no
+preceding Markdown context to interpret, so a quoted, fenced, inline-code or
+collapsed example cannot establish acknowledgement. Missing required
+definitions still fail even when acknowledged.
 Push/local report generation remains available without a PR body. This makes
 the review cue explicit and durable; definition hashes and all comparator,
 receipt and mutation controls remain until the other retirement conditions

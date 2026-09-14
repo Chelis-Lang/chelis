@@ -210,78 +210,31 @@ def changed_tests(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dic
 
 
 def acknowledgement_violations(result: dict, body: str) -> list[str]:
-    """Require exact top-level lines; fenced/HTML examples cannot acknowledge."""
+    """Read only the plain opening block, before any Markdown context exists."""
     expected = set(result["required_acknowledgements"])
     seen: Counter[str] = Counter()
     problems = []
-    fence: str | None = None
-    html_end: str | None = None
-    html_block = False
     near_miss = re.compile(r"^[\s>]*(?:[-*+]\s+)?protected[-_ ]?test[-_ ]?change\s*:", re.I)
     for raw in body.splitlines():
         line = raw.rstrip()
-        if fence is not None:
-            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
-                fence = None
-            continue
-        continued_html = html_end is not None
-        if html_end is not None:
-            position = line.lower().find(html_end)
-            if position < 0:
-                continue
-            line = line[position + len(html_end):]
-            html_end = None
-            # A closing line may open another block. Inspect its remainder,
-            # but it cannot supply a top-level acknowledgement itself.
-        if html_block:
-            if not line.strip():
-                html_block = False
-            continue
-        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
-            fence = opening[1]
-            continue
-        if "<!--" in line:
-            remaining = line
-            while "<!--" in remaining:
-                remaining = remaining.split("<!--", 1)[1]
-                if "-->" not in remaining:
-                    html_end = "-->"
-                    break
-                remaining = remaining.split("-->", 1)[1]
-            continue
-        special_html = next((ending for opening, ending in
-                             (("<?", "?>"), ("<![CDATA[", "]]>"))
-                             if line.lstrip(" ").startswith(opening)), None)
-        if special_html is None and re.match(r"^ {0,3}<![A-Z]", line):
-            special_html = ">"
-        if special_html is not None:
-            if special_html not in line:
-                html_end = special_html
-            continue
-        raw_html = re.match(r"^ {0,3}<(script|pre|style|textarea)(?:\s|>|$)", line, re.I)
-        if raw_html:
-            ending = f"</{raw_html[1].lower()}>"
-            if ending not in line.lower():
-                html_end = ending
-            continue
-        if re.match(r"^ {0,3}(?:</?[a-zA-Z][a-zA-Z0-9-]*(?:\s|/?>)|<!|<\?)", line):
-            # Other block HTML ends at the next blank line. Conservatively
-            # exclude custom tags too; acknowledgements belong in plain prose.
-            html_block = True
-            continue
-        if continued_html:
+        if not line:
+            if seen:
+                break
             continue
         if line.startswith(ACKNOWLEDGEMENT_KEY):
             seen[line] += 1
-        elif near_miss.match(line):
+            continue
+        if near_miss.match(line):
             problems.append(f"malformed protected-test acknowledgement: {line!r}")
-    if fence is not None or html_end is not None:
-        problems.append("unclosed fenced or HTML example in acknowledgement body")
+        elif seen:
+            problems.append("separate the opening acknowledgement block from prose with a blank line")
+        # Prose or an example ends the prologue. Later lines never acquire
+        # authority, so no Markdown or HTML parser is part of admission.
+        break
     for line in sorted(expected - seen.keys()):
-        problems.append(f"missing acknowledgement: {line}")
+        problems.append(f"missing opening acknowledgement: {line}")
     for line in sorted(seen.keys() - expected):
-        problems.append(f"stale or unknown acknowledgement: {line}")
+        problems.append(f"stale or unknown opening acknowledgement: {line}")
     for line, count in sorted(seen.items()):
         if count != 1:
             problems.append(f"duplicate acknowledgement ({count}): {line}")
