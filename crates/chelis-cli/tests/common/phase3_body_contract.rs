@@ -125,27 +125,29 @@ impl<'ast> Visit<'ast> for BodyAudit<'_> {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if self.collect {
-            if let syn::Expr::Path(path) = ungroup(&call.func) {
-                if path.qself.is_none() && path.path.leading_colon.is_none() {
-                    let identity = path
-                        .path
-                        .segments
-                        .iter()
-                        .map(|segment| segment.ident.to_string())
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    if self.row.calls.contains(&identity) {
-                        self.found.insert(identity.clone());
-                        if identity == "drive_parity" {
-                            if let Some(expected) = self.row.run_parity {
-                                let matches = call.args.len() == 2
-                                    && matches!(ungroup(&call.args[1]), syn::Expr::Lit(value) if matches!(&value.lit, syn::Lit::Bool(value) if value.value == expected));
-                                if !matches {
-                                    self.errors.push(format!("drive_parity must use reviewed literal execution mode {expected}"));
-                                }
-                            }
-                        }
+        if self.collect
+            && let syn::Expr::Path(path) = ungroup(&call.func)
+            && path.qself.is_none()
+            && path.path.leading_colon.is_none()
+        {
+            let identity = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            if self.row.calls.contains(&identity) {
+                self.found.insert(identity.clone());
+                if identity == "drive_parity"
+                    && let Some(expected) = self.row.run_parity
+                {
+                    let matches = call.args.len() == 2
+                        && matches!(ungroup(&call.args[1]), syn::Expr::Lit(value) if matches!(&value.lit, syn::Lit::Bool(value) if value.value == expected));
+                    if !matches {
+                        self.errors.push(format!(
+                            "drive_parity must use reviewed literal execution mode {expected}"
+                        ));
                     }
                 }
             }
