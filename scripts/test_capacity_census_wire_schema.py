@@ -19,7 +19,238 @@ VOCABULARY = [
 ORDER = tuple(d["name"] for d in VOCABULARY)
 
 
+def diagnostic_artifacts():
+    """Compiler-shaped producer/consumer declarations with a non-serde sidecar."""
+    from test_capacity_census_graph import Artifact, primitive, reference
+
+    api = Artifact("chelis_compiler_api")
+    types = Artifact("chelis_types")
+    source = "crates/chelis-compiler-api/src/schema.rs"
+    span = {"filename": source, "begin": [1, 1], "end": [2, 1]}
+    api.external(40, "core::option::Option")
+    api.external(41, "alloc::boxed::Box")
+    api.external(42, "chelis_types::unsupported::Unsupported")
+    api.external(43, "schemars::JsonSchema")
+    types.external(40, "core::num::nonzero::NonZeroU32")
+    hidden = types.struct(
+        1,
+        "Unsupported",
+        [types.field("issue", reference(40))],
+        path=["chelis_types", "unsupported", "Unsupported"],
+    )
+    types.doc["index"][str(hidden)]["inner"]["struct"]["impls"] = []
+    sidecar = api.field(
+        "unsupported",
+        reference(40, reference(41, reference(42))),
+        attrs=("#[serde(skip)]", "#[schemars(skip)]"),
+    )
+    api.doc["index"][str(sidecar)]["visibility"] = "crate"
+    api.doc["index"][str(sidecar)]["span"] = dict(span)
+    producer_field = api.field("severity", primitive("f64"))
+    consumer_field = api.field("severity", primitive("f64"))
+    for item_id, name, fields, direction in (
+        (1, "Diagnostic", [producer_field, sidecar], "Serialize"),
+        (2, "WireDiagnostic", [consumer_field], "Deserialize"),
+    ):
+        api.struct(item_id, name, fields, path=["chelis_compiler_api", "schema", name])
+        item = api.doc["index"][str(item_id)]
+        item["span"] = dict(span)
+        body = item["inner"]["struct"]
+        impl_id = body["impls"][0 if direction == "Serialize" else 1]
+        body["impls"] = [impl_id]
+        implementation = api.doc["index"][str(impl_id)]
+        implementation["span"] = dict(span)
+        implementation["inner"]["impl"]["for"] = reference(item_id)
+        api.next_id += 1
+        method = api.add(api.next_id, direction.lower(), {"function": {}})
+        api.doc["index"][str(method)]["span"] = dict(span)
+        implementation["inner"]["impl"]["items"] = [method]
+        methods = []
+        for method_name in ("schema_name", "schema_id", "json_schema"):
+            api.next_id += 1
+            method = api.add(api.next_id, method_name, {"function": {}})
+            api.doc["index"][str(method)]["span"] = dict(span)
+            methods.append(method)
+        api.next_id += 1
+        schema_impl = api.add(
+            api.next_id,
+            None,
+            {
+                "impl": {
+                    "trait": {"path": "JsonSchema", "id": 43},
+                    "items": methods,
+                    "for": reference(item_id),
+                }
+            },
+            attrs=("automatically_derived",),
+        )
+        api.doc["index"][str(schema_impl)]["span"] = dict(span)
+        body["impls"].append(schema_impl)
+    return [api.doc, types.doc], sidecar, producer_field, consumer_field
+
+
 class SchemaCases(unittest.TestCase):
+    def test_diagnostic_codec_selection_pairs_producer_omission_and_consumer_domains(
+        self,
+    ):
+        from capacity_census_wire_schema import diagnostic_cases
+
+        cases = diagnostic_cases()
+        self.assertEqual(len(cases), len({case.identity for case in cases}))
+        self.assertEqual(
+            {case.identity for case in cases},
+            {
+                "Diagnostic/construct/0.5",
+                "Diagnostic/construct/-0.0",
+                "Diagnostic/json/0.5",
+                "Diagnostic/json/-0.0",
+                "Diagnostic/construct/reject--0.1",
+                "Diagnostic/construct/reject-1.1",
+                "Diagnostic/json/reject--0.1",
+                "Diagnostic/json/reject-1.1",
+                "Diagnostic/json/missing-severity",
+            },
+        )
+        for codec in ("construct", "json"):
+            selected = [case for case in cases if case.codec == codec]
+            self.assertTrue(any(case.expected is not None for case in selected))
+            self.assertTrue(any(case.expected is None for case in selected))
+        zero = next(
+            case for case in cases if case.identity == "Diagnostic/construct/-0.0"
+        )
+        self.assertEqual(zero.expected["severity_bits"], "8000000000000000")
+        self.assertTrue(zero.expected["internal_identity"])
+        self.assertNotIn("unsupported", zero.expected["wire"])
+        self.assertNotIn("unsupported", zero.expected["producer_schema_fields"])
+        self.assertNotIn("unsupported", zero.expected["consumer_schema_fields"])
+
+    def test_diagnostic_projection_omits_only_the_verified_nonserialized_sidecar(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+
+        documents, _, _, _ = diagnostic_artifacts()
+        graph = _SchemaShapeGraph(documents, VOCABULARY).discover_exports(
+            "chelis_compiler_api"
+        )
+        self.assertEqual(
+            {leaf.path for leaf in graph.numeric_leaves},
+            {
+                "chelis_compiler_api::schema::Diagnostic.severity",
+                "chelis_compiler_api::schema::WireDiagnostic.severity",
+            },
+        )
+        self.assertFalse(
+            any(d.identity.endswith("::Unsupported") for d in graph.definitions)
+        )
+        producer = next(
+            d for d in graph.definitions if d.identity.endswith("::Diagnostic")
+        )
+        self.assertIn("off-wire-derived-field", repr(producer.layout))
+        self.assertIn("chelis_types::unsupported::Unsupported", repr(producer.layout))
+
+    def test_diagnostic_projection_rejects_changed_omission_type_codec_and_decoder(
+        self,
+    ):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import primitive
+
+        for mutation in (
+            "serde-skip",
+            "schema-skip",
+            "visibility",
+            "payload",
+            "missing-definition",
+            "missing-field",
+            "extra-field",
+            "decoder-type",
+            "decoder-name",
+            "custom-serde",
+            "serde-source",
+            "serde-method",
+            "serde-receiver",
+            "custom-schema",
+            "schema-source",
+            "schema-method",
+            "schema-receiver",
+            "missing-schema-span",
+            "missing-field-span",
+            "schema-method-source",
+            "serde-method-source",
+        ):
+            with self.subTest(mutation=mutation):
+                documents, sidecar_id, producer_id, consumer_id = diagnostic_artifacts()
+                api = documents[0]
+                sidecar = api["index"][str(sidecar_id)]
+                producer = api["index"]["1"]["inner"]["struct"]
+                if mutation == "serde-skip":
+                    sidecar["attrs"] = [{"other": "#[schemars(skip)]"}]
+                elif mutation == "schema-skip":
+                    sidecar["attrs"] = [{"other": "#[serde(skip)]"}]
+                elif mutation == "visibility":
+                    sidecar["visibility"] = "public"
+                elif mutation == "missing-field-span":
+                    sidecar["span"] = None
+                elif mutation == "payload":
+                    sidecar["inner"]["struct_field"] = primitive("u64")
+                elif mutation == "missing-definition":
+                    documents.pop()
+                elif mutation == "missing-field":
+                    producer["kind"]["plain"]["fields"].remove(sidecar_id)
+                elif mutation == "extra-field":
+                    field = copy.deepcopy(api["index"][str(producer_id)])
+                    field["id"], field["name"] = 800, "extra"
+                    api["index"]["800"] = field
+                    producer["kind"]["plain"]["fields"].append(800)
+                elif mutation.startswith("decoder-"):
+                    field = api["index"][str(consumer_id)]
+                    if mutation == "decoder-type":
+                        field["inner"]["struct_field"] = primitive("u64")
+                    else:
+                        field["name"] = "other"
+                else:
+                    schema = "schema" in mutation
+                    implementation = api["index"][str(producer["impls"][int(schema)])]
+                    if mutation.startswith("custom-"):
+                        implementation["attrs"] = []
+                    elif mutation == "missing-schema-span":
+                        implementation["span"] = None
+                    elif mutation.endswith("method-source"):
+                        method = api["index"][
+                            str(implementation["inner"]["impl"]["items"][0])
+                        ]
+                        method["span"]["filename"] = "unrelated.rs"
+                    elif mutation.endswith("source"):
+                        implementation["span"]["filename"] = "unrelated.rs"
+                    elif mutation.endswith("receiver"):
+                        implementation["inner"]["impl"]["for"]["resolved_path"][
+                            "id"
+                        ] = 2
+                    else:
+                        implementation["inner"]["impl"]["items"] = []
+                with self.assertRaises(GraphError):
+                    _SchemaShapeGraph(documents, VOCABULARY).discover_exports(
+                        "chelis_compiler_api"
+                    )
+
+    def test_diagnostic_projection_preserves_generic_skip_and_import_rejections(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive, reference
+
+        for skipped in (False, True):
+            artifact = Artifact()
+            artifact.external(40, "core::num::nonzero::NonZeroU32")
+            field = artifact.field(
+                "value",
+                primitive("u64") if skipped else reference(40),
+                attrs=("#[serde(skip)]",) if skipped else (),
+            )
+            artifact.struct(1, "Other", [field])
+            with self.assertRaisesRegex(
+                GraphError, "only the supported nonnumeric|missing defining"
+            ):
+                _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports(
+                    "fixture"
+                )
+
     def test_required_span_decoder_is_confined_to_its_exact_optional_text_field(self):
         from capacity_census_wire_schema import _SchemaShapeGraph
         from test_capacity_census_graph import Artifact, primitive, reference
@@ -310,6 +541,42 @@ class ActualSchemaCodec(unittest.TestCase):
             json.loads(cls.receipt.document),
             *(json.loads(d) for d in cls.receipt.imported_documents),
         ]
+
+    def test_actual_diagnostic_projection_binds_omission_and_codec_execution(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph, diagnostic_cases
+
+        required = {case.identity for case in diagnostic_cases()}
+        self.assertLessEqual(
+            required, {case.identity for case in self.receipt.outcomes}
+        )
+        vocabulary = json.loads(self.receipt.canonical.vocabulary)
+        graph = _SchemaShapeGraph(self.documents, vocabulary)
+        owner, item_id = graph.locations["chelis_compiler_api::schema::Diagnostic"]
+        found = graph.discover(owner, {"graph_export": (owner, item_id)})
+        self.assertFalse(
+            any(d.identity.endswith("::Unsupported") for d in found.definitions)
+        )
+        api = copy.deepcopy(self.documents[1])
+        diagnostic = next(
+            i
+            for i in api["index"].values()
+            if i.get("name") == "Diagnostic" and "struct" in i["inner"]
+        )
+        sidecar = next(
+            api["index"][str(i)]
+            for i in diagnostic["inner"]["struct"]["kind"]["plain"]["fields"]
+            if api["index"][str(i)]["name"] == "unsupported"
+        )
+        for attributes in (
+            [{"other": "#[serde(skip)]"}],
+            [{"other": "#[schemars(skip)]"}],
+        ):
+            sidecar["attrs"] = attributes
+            changed = [self.documents[0], api, *self.documents[2:]]
+            with self.assertRaisesRegex(GraphError, "omission changed"):
+                _SchemaShapeGraph(changed, vocabulary).discover(
+                    owner, {"graph_export": (owner, item_id)}
+                )
 
     def test_structural_roles_require_current_shape_and_actual_admission_observations(
         self,
