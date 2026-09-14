@@ -817,11 +817,8 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // Primitive type names
 // ---------------------------------------------------------------------------
 
-// `f8e4m3` is intentionally absent: spec/04-type-system.md §1.1.1
-// rejects it as a deferred precision. Keeping the name out of the
-// primitives list prevents the implicit-quantifier collector from
-// treating `f8e4m3` as a fresh tvar candidate, so the type-checker's
-// §1.1.1 rejection path fires with the correct diagnostic.
+// `f8e4m3` is reserved, not active. DEFERRED_DTYPE_NAMES below keeps it
+// out of implicit quantification so the checker reports [04-DTYPE-1].
 const PRIMITIVES: &[&str] = &[
     "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
@@ -875,15 +872,10 @@ const UNSIGNED_DTYPE_NAMES: &[&str] = &[
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
 
-/// The remaining reserved-but-deferred dtype names of
-/// `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because it is a
-/// real `Prim` variant and takes the `Prim::parse_name` path). Same
-/// treatment as the unsigned family above: these must reach the
-/// type-checker's §1.1.1 rejection path as `(t-prim {} <name>)`, not be
-/// quietly absorbed as candidate quantified type variables.
-///
-/// Mirrors `chelis_types::deep_type::is_deferred_dtype_name`.
+/// Reserved dtype names must reach the checker as `t-prim`, not `t-var`.
+/// The internal `Prim::F8e4m3` variant does not authorize a Surf binder.
 const DEFERRED_DTYPE_NAMES: &[&str] = &[
+    "f8e4m3",
     "f8e5m2",
     "int4",
     "uint4",

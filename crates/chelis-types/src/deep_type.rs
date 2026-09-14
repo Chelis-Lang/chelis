@@ -483,7 +483,18 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
                 if let Some(prim) = Prim::parse_name(name) {
-                    return Ok(Type::Prim(prim));
+                    if prim.is_admissible_active() {
+                        return Ok(Type::Prim(prim));
+                    }
+                    // chelis#1606: an internal Prim variant does not imply
+                    // an admitted source type. Resolve every type position
+                    // through the same [04-DTYPE-1] rejection.
+                    let tensor = self.resolving_tensor_precision;
+                    let diagnostic = f8e4m3_diagnostic(tensor);
+                    let diagnostic = self
+                        .diagnostic_location()
+                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+                    return Err(report_witness(self.errors, diagnostic));
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -1038,6 +1049,25 @@ pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<Che
              {active_set} until it activates"
         )],
     ))
+}
+
+/// Preserve the existing FP8 diagnostic phrase at the shared type boundary.
+fn f8e4m3_diagnostic(tensor: bool) -> CheckError {
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `f8e4m3` as a {surface} dtype: f8e4m3 is deferred per \
+             spec/04-type-system.md §1.1.1 and is not part of the active \
+             numeric primitive set ({active_set})"
+        ),
+        vec![format!(
+            "f8e4m3 has no active backend in this cycle; pick one of \
+             {active_set}, or see spec/04-type-system.md §1.1.1 for the \
+             deferral rationale"
+        )],
+    )
 }
 
 fn symbol_name(expr: &deep::Expr) -> Option<&str> {
