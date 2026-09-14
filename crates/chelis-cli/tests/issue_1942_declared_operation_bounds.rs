@@ -217,3 +217,85 @@ fn insufficient_authored_contracts_are_rejected_without_a_call_site() {
         }
     }
 }
+
+#[test]
+fn window_reduction_contracts_reject_invalid_public_calls() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("window-contract.ch");
+    for (operation, bad_binder, good_binder, bad_dtype, good_dtype) in [
+        (
+            "reduce_window_mean",
+            "p: Numeric",
+            "p: Float",
+            "int32",
+            "f32",
+        ),
+        ("reduce_window_sum", "p", "p: Numeric", "bool", "int32"),
+        ("reduce_window_max", "p", "p: Numeric", "bool", "int32"),
+        ("reduce_window_min", "p", "p: Numeric", "bool", "int32"),
+    ] {
+        for alias in [false, true] {
+            let prefix = if alias {
+                format!("window_op = {operation}\n")
+            } else {
+                String::new()
+            };
+            let callee = if alias { "window_op" } else { operation };
+            for (source, accepted) in [
+                (
+                    format!(
+                        "{prefix}def g[{bad_binder}](x: tensor[3, p]) -> tensor[2, p] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    false,
+                ),
+                (
+                    format!(
+                        "{prefix}def g[{good_binder}](x: tensor[3, p]) -> tensor[2, p] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    true,
+                ),
+                (
+                    format!(
+                        "{prefix}def g(x: tensor[3, {bad_dtype}]) -> tensor[2, {bad_dtype}] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    false,
+                ),
+                (
+                    format!(
+                        "{prefix}def g(x: tensor[3, {good_dtype}]) -> tensor[2, {good_dtype}] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    true,
+                ),
+            ] {
+                fs::write(&path, &source).unwrap();
+                let checked = cli("check", &path, &dir.path().join("window-out"));
+                assert_eq!(
+                    checked.status.success(),
+                    accepted,
+                    "{source}: {}{}",
+                    String::from_utf8_lossy(&checked.stdout),
+                    String::from_utf8_lossy(&checked.stderr)
+                );
+                let report: serde_json::Value =
+                    serde_json::from_slice(&checked.stdout).expect("check JSON");
+                if accepted {
+                    assert_eq!(report["score"].as_f64(), Some(1.0), "{source}: {report}");
+                    assert!(report["errors"].as_array().unwrap().is_empty());
+                } else {
+                    assert!(
+                        report["errors"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|error| error["kind"] == "PrecisionMismatch"),
+                        "{source}: {report}"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -675,6 +675,7 @@
       "expected": [
         "a_deferred_cast_preserves_its_consumers_family_rejection",
         "a_failed_family_application_does_not_also_claim_its_operand_was_never_bound",
+        "a_lexically_shadowed_window_builtin_keeps_its_function_contract",
         "a_primitive_function_value_carries_its_admission_requirement",
         "a_wrapper_cannot_silently_narrow_its_authored_contract",
         "arithmetic_and_matmul_require_their_operand_families",
@@ -693,9 +694,11 @@
         "omitted_signatures_do_not_publish_inferred_dtype_contracts",
         "primitive_scalar_contracts_require_bounds_too",
         "standalone_signatures_express_the_same_contract",
-        "unannotated_wrappers_do_not_acquire_their_callees_bounds"
+        "unannotated_wrappers_do_not_acquire_their_callees_bounds",
+        "window_reduction_contracts_cover_each_spec_family_on_both_ingresses",
+        "window_shape_diagnostics_precede_family_admission_on_both_ingresses"
       ],
-      "note": "Requires declared-family admission and restriction transport, with positive and negative cases for authored and inferred variables."
+      "note": "Requires declared-family admission and restriction transport, with positive and negative cases for authored and inferred variables. [05-OP-39] window reductions cover specialized and ordinary alias paths on both checker ingresses while retaining shape-diagnostic precedence."
     },
     {
       "phase": "b",
@@ -709,9 +712,10 @@
       "expected": [
         "bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c",
         "insufficient_authored_contracts_are_rejected_without_a_call_site",
-        "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution"
+        "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
+        "window_reduction_contracts_reject_invalid_public_calls"
       ],
-      "note": "Requires the original invalid witnesses to stop at checking and five Float-bounded controls to execute with exact results on eval and compiled C."
+      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, and all four window reductions to enforce their checked contracts through direct and aliased CLI calls."
     },
     {
       "phase": "b",
@@ -724,9 +728,10 @@
       },
       "expected": [
         "checked_library_round_trips_preserve_generic_and_primitive_function_values",
+        "checked_library_round_trips_preserve_window_reduction_contracts",
         "insufficient_authored_contracts_cannot_be_published_as_checked_libraries"
       ],
-      "note": "Checked stdlib and dependency contexts preserve authored and primitive-operation family restrictions through serialization, and refuse to publish insufficient authored contracts."
+      "note": "Checked stdlib and dependency contexts preserve authored, primitive-operation and window-reduction family restrictions through serialization, and refuse to publish insufficient authored contracts."
     }
   ]
 }

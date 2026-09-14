@@ -992,9 +992,12 @@ also does not certify evaluator resolution through every aggregate
 
 The call-site body walker is retired with this integration, not extended to
 follow more syntax. The acceptance matrix covers each family route,
-standalone and inline signatures, wrappers, higher-order values, local
-lambdas and aggregate projections, with sufficient-bound controls and
-invalid concrete instantiations on both ingresses. The #1940/#1941
+including [05-OP-39]'s specialized window-shape path and its ordinary
+function-value alias path, standalone and inline signatures, wrappers,
+higher-order values, local lambdas and aggregate projections, with
+sufficient-bound controls and invalid concrete instantiations on both
+ingresses. Window-shape failures retain diagnostic precedence over dtype
+admission. The #1940/#1941
 reproductions become definition errors; the corresponding bounded functions
 must still execute with exact eval/C values. Existing lexical-shadowing
 controls remain. The original empty-literal precision witness must also

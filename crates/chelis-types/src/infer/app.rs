@@ -731,67 +731,40 @@ fn infer_app_inner(
         }
     }
 
-    let ret_tv = vg.fresh_type();
-
-    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, arg_tys.clone(), subst);
-    let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
-
-    match unify(&func_ty, &expected_fn, subst) {
-        Ok(()) => {
-            absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
-            // chelis#1512: watch whether the eager pass rejects this call. A
-            // route can suspend on one operand and then reject on another in
-            // the same pass, and the replay re-enters the whole route, so the
-            // rejection would be reported a second time. A call that has
-            // already failed has nothing left to decide, so its suspension is
-            // cancelled here.
-            let checkpoint = errors.checkpoint();
-            let contract_name = func_name.clone();
-            let applied = finish_unified_app(
-                list,
-                kids,
-                func_name,
-                arg_tys,
-                ret_tv,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-                expected_result,
-            );
-            if errors.iter_since(checkpoint).next().is_some() {
-                product.cancel_post_app_check_for(list);
-            } else {
-                product.record_call_result_contracts(
-                    &func_ty,
-                    contract_name.as_deref(),
-                    env,
-                    subst,
-                );
-            }
-            applied
-        }
-        Err(te) => {
-            let family_mismatch = matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch);
-            let mut e: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
-                e.span_offset = parse_span_offset(id);
-                e.span_id = Some(id.to_string());
-            } else {
-                let off = span_of_list(list).offset;
-                if off > 0 {
-                    e.span_offset = Some(off);
-                }
-            }
-            let rejected = report(errors, e);
-            if family_mismatch && let Type::Error(witness) = rejected {
-                product.cancel_shape_checks_for_failed_family_call(&func_ty, subst, witness);
-            }
-            rejected
-        }
+    let ret_tv =
+        match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
+            Ok(ret_ty) => ret_ty,
+            Err(rejected) => return rejected,
+        };
+    absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
+    // chelis#1512: watch whether the eager pass rejects this call. A
+    // route can suspend on one operand and then reject on another in
+    // the same pass, and the replay re-enters the whole route, so the
+    // rejection would be reported a second time. A call that has
+    // already failed has nothing left to decide, so its suspension is
+    // cancelled here.
+    let checkpoint = errors.checkpoint();
+    let contract_name = func_name.clone();
+    let applied = finish_unified_app(
+        list,
+        kids,
+        func_name,
+        arg_tys,
+        ret_tv,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+    );
+    if errors.iter_since(checkpoint).next().is_some() {
+        product.cancel_post_app_check_for(list);
+    } else {
+        product.record_call_result_contracts(&func_ty, contract_name.as_deref(), env, subst);
     }
+    applied
 }
 
 /// Bind every alias class this application's instantiation minted a member of

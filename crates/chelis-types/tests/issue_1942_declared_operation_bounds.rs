@@ -1,6 +1,11 @@
 //! Authored generic contracts must entail every operation's dtype requirements.
+use chelis_deep::Expr;
+use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
-use chelis_types::{check_typed_program, errors::CheckErrorKind};
+use chelis_types::{
+    check_ir_program, check_typed_program,
+    errors::{CheckError, CheckErrorKind},
+};
 
 fn check(source: &str, accepted: bool) {
     let program = desugar_program(&parse_str(source).expect("valid source"));
@@ -17,6 +22,52 @@ fn check(source: &str, accepted: bool) {
                 .iter()
                 .any(|e| matches!(e.kind, CheckErrorKind::PrecisionMismatch)),
             "{source}\n{report:?}"
+        );
+    }
+}
+
+fn rendered(errors: &[CheckError]) -> Vec<String> {
+    let mut messages: Vec<_> = errors
+        .iter()
+        .map(|error| format!("[{:?}] {}", error.kind, error.message))
+        .collect();
+    messages.sort();
+    messages
+}
+
+fn both_ingress_diagnostics(source: &str) -> Vec<String> {
+    let parsed = parse_str(source).expect("valid source");
+    let desugared = desugar_program(&parsed);
+    let expanded: Vec<Expr> = expand_program(&desugared, &ExpansionOptions::default())
+        .expect("macro expansion")
+        .into_exprs();
+    let typed = check_typed_program(&desugared)
+        .err()
+        .map_or_else(Vec::new, |report| rendered(&report.errors));
+    let ir = check_ir_program(&expanded)
+        .err()
+        .map_or_else(Vec::new, |report| rendered(&report.errors));
+    assert_eq!(
+        typed, ir,
+        "the stamped and normalized checker ingresses disagree:\n{source}\n\
+         typed={typed:?}\nir={ir:?}"
+    );
+    typed
+}
+
+fn check_both_ingresses(source: &str, accepted: bool) {
+    let diagnostics = both_ingress_diagnostics(source);
+    if accepted {
+        assert!(
+            diagnostics.is_empty(),
+            "both ingresses must accept:\n{source}\n{diagnostics:?}"
+        );
+    } else {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.starts_with("[PrecisionMismatch] ")),
+            "both ingresses must reject with PrecisionMismatch:\n{source}\n{diagnostics:?}"
         );
     }
 }
@@ -210,6 +261,119 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
     );
     check(
         "def less[p: Numeric](x: p, y: p) -> bool = lt(x, y)\nout = less(1i32, 2i32)\n",
+        true,
+    );
+}
+
+#[test]
+fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
+    // [05-OP-39]: mean is Float; sum/max/min are Numeric. Direct calls use
+    // the specialized shape path, while aliases use ordinary checked
+    // function-value application. Both must consume the same scheme contract.
+    for (operation, binders, invalid_dtype, valid_dtype) in [
+        (
+            "reduce_window_mean",
+            &[("p", false), ("p: Numeric", false), ("p: Float", true)][..],
+            "int32",
+            "f32",
+        ),
+        (
+            "reduce_window_sum",
+            &[("p", false), ("p: Numeric", true)][..],
+            "bool",
+            "int32",
+        ),
+        (
+            "reduce_window_max",
+            &[("p", false), ("p: Numeric", true)][..],
+            "bool",
+            "int32",
+        ),
+        (
+            "reduce_window_min",
+            &[("p", false), ("p: Numeric", true)][..],
+            "bool",
+            "int32",
+        ),
+    ] {
+        for &(binder, accepted) in binders {
+            for alias in [false, true] {
+                let prefix = if alias {
+                    format!("window_op = {operation}\n")
+                } else {
+                    String::new()
+                };
+                let callee = if alias { "window_op" } else { operation };
+                check_both_ingresses(
+                    &format!(
+                        "{prefix}def g[{binder}](x: tensor[3, p]) -> tensor[2, p] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    accepted,
+                );
+            }
+        }
+        for (dtype, accepted) in [(invalid_dtype, false), (valid_dtype, true)] {
+            for alias in [false, true] {
+                let prefix = if alias {
+                    format!("window_op = {operation}\n")
+                } else {
+                    String::new()
+                };
+                let callee = if alias { "window_op" } else { operation };
+                check_both_ingresses(
+                    &format!(
+                        "{prefix}def g(x: tensor[3, {dtype}]) -> tensor[2, {dtype}] = \
+                         {callee}(x, [2i64], [1i64])\n"
+                    ),
+                    accepted,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn window_shape_diagnostics_precede_family_admission_on_both_ingresses() {
+    for (source, needle) in [
+        (
+            "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
+             reduce_window_sum(x, [0i64], [1i64])\n",
+            "window_shape[0] = 0 must be >= 1",
+        ),
+        (
+            "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
+             reduce_window_sum(x, [2i64], [0i64])\n",
+            "strides[0] = 0 must be >= 1",
+        ),
+        (
+            "def g(x: tensor[3, bool]) -> tensor[2, bool] = \
+             reduce_window_sum(x, [1i64, 1i64], [1i64, 1i64])\n",
+            "window arity 2 exceeds tensor rank 1",
+        ),
+    ] {
+        let diagnostics = both_ingress_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(|message| message.contains(needle)),
+            "the specialized window diagnostic must remain authoritative:\n\
+             {source}\n{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|message| !message.starts_with("[PrecisionMismatch] ")),
+            "family admission must not hide a prior window error:\n{source}\n{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn a_lexically_shadowed_window_builtin_keeps_its_function_contract() {
+    check_both_ingresses(
+        "def apply(\
+           reduce_window_sum: &tensor[3, bool] -> List[int64] -> List[int64] -> tensor[2, bool], \
+           x: tensor[3, bool]) -> tensor[2, bool] = \
+           reduce_window_sum(x, [2i64], [1i64])\n",
         true,
     );
 }
