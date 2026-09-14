@@ -694,6 +694,20 @@
       "note": "#1920/#1924 and #1934 evaluator half: authored signatures remain separate from inferred checked types in ordinary and fixed-control transform lowering. Negative controls require original entry witnesses and the load Domain trap; agreeing controls retain exact zero cotangent shapes and target order."
     },
     {
+      "phase": "b",
+      "id": "cli_mixed_callable_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1915_caller_actual_scope.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "existing_mixed_callable_parameters_keep_their_native_values"
+      ],
+      "note": "Retained #1947 interaction control: tensor and primitive-scalar callables in one signature preserve exact eval/native-C values [6,10]. Signature-entry failure and ordering counterparts remain in cli_signature_entry."
+    },
+    {
       "id": "cli_signature_entry",
       "package": "chelis-cli",
       "kind": "test",
