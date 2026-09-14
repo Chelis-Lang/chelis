@@ -1,0 +1,1 @@
+Phase 4B pull-request validation now requires exact atom and region acknowledgements alongside changed-file acknowledgements, including registry ownership and removed protection boundaries. Existing digests and semantic controls remain active.
