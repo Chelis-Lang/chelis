@@ -25,6 +25,13 @@ not drift.
 - After green CI, check what active requirements still lack tests.
 - Audit silent fallbacks, default values, empty error vectors, and `unwrap_or` paths.
 
+### Guard Inventories
+
+A guard list carries a reviewed disposition per row or is regenerated from the
+source tree. Do not hand-maintain a second copy of tree membership. Regeneration
+may discover rows; it must never assign reviewed semantic authority or erase a
+required coverage floor.
+
 ### Phase Completion Criteria
 
 - Do not claim a phase is done based on crate-local green or narrative progress.

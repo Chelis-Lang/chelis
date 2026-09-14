@@ -382,6 +382,10 @@ a machine cannot invent: nonnumeric, tagged transport, exact numeric operation,
 normative atom, accepted debt owner, or another reviewed authority class.
 Regeneration must never bless an unclassified numeric surface.
 
+`AGENTS.md` records this distinction under Guard Inventories, including the
+required-coverage-floor obligation. The assessed inventory changes below are
+implemented. Broader package-expansion cost trials remain chelis#1824 work.
+
 chelis#1927 is a current example. A capacity-census fixture became illegal
 after module-export enforcement changed. The repair corrected the fixture and
 its owning explanation while preserving the classifier, baseline, inventory,
