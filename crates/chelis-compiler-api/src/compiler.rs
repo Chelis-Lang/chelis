@@ -3518,21 +3518,20 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
 fn lower_diagnostic_to_compiler_error(
     diagnostic: chelis_ir::lower::LowerDiagnostic,
 ) -> CompilerError {
-    let unsupported = diagnostic.unsupported().cloned();
-    let mut error = stage_error_with_span(
+    if let Some(unsupported) = diagnostic.unsupported() {
+        let mut error = unsupported_stage_error(unsupported.clone());
+        error.stage = "lower".to_owned();
+        // LowerDiagnostic's renderer also carries the producer's source label.
+        // Kind and structured location come from the typed Unsupported value.
+        error.errors[0].message = diagnostic.to_string();
+        return error;
+    }
+    stage_error_with_span(
         "lower",
         diagnostic.to_string(),
         GeneralKind::LowerError,
         deep_span_to_diagnostic(diagnostic.span),
-    );
-    if let Some(unsupported) = unsupported {
-        error
-            .errors
-            .first_mut()
-            .expect("a stage error contains one diagnostic")
-            .retain_unsupported(unsupported);
-    }
-    error
+    )
 }
 
 pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
@@ -7088,6 +7087,27 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn ordinary_lowering_prose_cannot_create_unsupported_identity() {
+        for message in [
+            "ordinary lowering failure",
+            "unsupported: ordinary lowering failure",
+        ] {
+            let diagnostic = chelis_ir::lower::LowerDiagnostic::new(message, None, None);
+            let error = lower_diagnostic_to_compiler_error(diagnostic);
+            assert_eq!(error.stage, "lower");
+            assert_eq!(error.errors.len(), 1);
+            let diagnostic = &error.errors[0];
+            assert_eq!(diagnostic.kind(), chelis_vocab::DiagnosticKind::LowerError);
+            assert_eq!(diagnostic.message, message);
+            assert!(diagnostic.unsupported_identity().is_none());
+            assert_eq!(
+                serde_json::to_value(diagnostic).unwrap()["kind"],
+                "lower_error"
+            );
+        }
+    }
 
     #[test]
     fn selected_host_failed_demand_query_preserves_wire_and_entered_error_boundaries() {
