@@ -55,11 +55,13 @@ from a reader). The disagreement costs reviewer visibility, never soundness: no
 shape of it admits an unacknowledged change, because a line the parser does not
 read is a file that goes unacknowledged and fails.
 
-``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
-pull request. Without it the oracle reports the changed contract files and the
-exact lines the body must carry, then exits 0, so a local run is a checklist
-rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
-it can never be read as "nothing changed".
+``--require-acknowledgement`` is this oracle's local enforcing mode. The
+dedicated ``PR Contract Acknowledgements`` check applies the same grammar and
+change report through ``phase4b_change_report.py``; the Docs job runs this full
+oracle independently. Without the flag the oracle reports the changed contract
+files and the exact lines the body must carry, then exits 0, so a local run is a
+checklist rather than a gate. An unresolvable merge base fails the enforcing
+mode loudly; it can never be read as "nothing changed".
 
 The acknowledgement gate first replaced whole-file SHA-256 digests. That table made two pull
 requests that edited *different* contract files conflict on adjacent lines of
@@ -908,7 +910,7 @@ def validate_frozen_contract_changes(
         return [
             f"frozen contract acknowledgement: {error}",
             "frozen contract acknowledgement: change detection skipped "
-            "(advisory mode); CI runs --require-acknowledgement and will fail "
+            "(advisory mode); the dedicated PR acknowledgement check fails "
             "on an unreadable base",
         ]
 
@@ -3269,7 +3271,9 @@ def validate_schema_and_consumers(
             (
                 "An unacknowledged\nchange and an acknowledgement naming an "
                 "unchanged file both fail\n`--require-acknowledgement`, which "
-                "is the mode CI runs on a pull request.",
+                "the dedicated `PR Contract Acknowledgements`\ncheck applies "
+                "through `phase4b_change_report.py`. The full Phase 4B oracle "
+                "runs\nindependently in Docs.",
                 "Phase 4B acknowledgement enforcing mode",
             ),
             (
@@ -3785,9 +3789,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "fail on an unacknowledged contract change, a stale or malformed "
-            "acknowledgement, or an unresolvable merge base. CI passes this on "
-            "pull request events; without it the acknowledgement leg reports "
-            "and exits 0."
+            "acknowledgement, or an unresolvable merge base. This is the local "
+            "full-oracle equivalent of the dedicated PR acknowledgement "
+            "check; without it the acknowledgement leg reports and exits 0."
         ),
     )
     return parser
