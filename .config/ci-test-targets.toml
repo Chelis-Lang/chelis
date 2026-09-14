@@ -704,6 +704,24 @@ tracking_issue = "chelis#1870"
 
 # Stable root controls with direct standing owners.
 [[path_rule]]
+prefix = "scripts/phase4b_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job executes and publishes the committed atom and region report"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_phase4b_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "Git, workflow, and retained-freeze mutation controls for the Phase 4B report run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
 prefix = "scripts/faithful_observation_phase3_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"

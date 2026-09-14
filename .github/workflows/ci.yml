@@ -1141,7 +1141,7 @@ jobs:
       - name: Install uv for focused documentation contracts
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Create uv-managed venv for the Phase 3 report
+      - name: Create uv-managed venv for contract reports
         run: uv venv --python 3.11
 
       - name: Report Phase 3 required-test changes
@@ -1156,6 +1156,20 @@ jobs:
         with:
           name: phase3-test-changes
           path: target/phase3-test-changes.json
+          if-no-files-found: error
+
+      - name: Report Phase 4B contract changes
+        env:
+          BASE_REF: ${{ github.event.before }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
+
+      - name: Publish Phase 4B contract changes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase4b-contract-changes
+          path: target/phase4b-contract-changes.json
           if-no-files-found: error
 
       - name: Validate CI topology documentation
@@ -1175,8 +1189,9 @@ jobs:
       # chelis#729 Phase 4B froze the numeric atoms and the capability schema
       # behind atom and region digests over spec/ and spec/design/, plus a
       # per-file acknowledgement gate over every frozen contract file. The
-      # oracle validates documents and runs no cargo command, and a docs-only
-      # pull request skips every heavy job, so this always-run job is the only
+      # oracle validates documents and regenerated rejection membership, including
+      # its fresh source/compiler closure. A docs-only pull request skips the
+      # other heavy jobs, so this always-run job is the
       # placement that actually defends the freeze against the edits most
       # likely to break it. This step is unconditional: on a push or a
       # workflow_dispatch it runs the atom and region digests and reports the
@@ -1208,10 +1223,8 @@ jobs:
         with:
           tool: mdbook@0.5.2
 
-      # No project venv setup here — `cargo test -p chelis-e2e` does not
-      # transitively pull pyo3 (verified by `cargo tree -p chelis-e2e`), so
-      # pyo3-build-config never runs in this job. The focused documentation
-      # contract above uses uv's managed no-project interpreter directly.
+      # This example suite does not transitively pull pyo3. The contract reports
+      # above use the checkout venv; the freeze oracle uses managed uv directly.
       - name: Validate package SKILL and mdBook examples
         run: cargo test -p chelis-e2e --test skill_suite
 
