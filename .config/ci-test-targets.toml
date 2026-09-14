@@ -1017,6 +1017,33 @@ cadence = "pull_request and push"
 reason = "the required Docs job validates the protected dtype contract and exact change acknowledgements"
 tracking_issue = "chelis#1868"
 
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_schema.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the current wire graph, schema codecs and diagnostic projection receipts through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_acceptance.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the exact wire mutation and consumer selections through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_schema.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily and workflow_dispatch"
+reason = "the compiler-backed ActualSchemaCodec class executes in script-nightly; lightweight paired controls also execute in PR script-unit and the wire census"
+tracking_issue = "chelis#2048"
+
 # Shared nextest configuration can affect every workspace package.
 [[path_rule]]
 prefix = ".config/nextest.toml"

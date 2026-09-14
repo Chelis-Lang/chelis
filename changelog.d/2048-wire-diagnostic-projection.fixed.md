@@ -1,0 +1,1 @@
+The wire census validates diagnostics with internal rejection metadata without treating that metadata as serialized numeric data, fixing the missing `NonZeroU32` artifact failure tracked in [#2048](https://github.com/Chelis-Lang/chelis/issues/2048).
