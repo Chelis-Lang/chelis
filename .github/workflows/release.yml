@@ -10,8 +10,49 @@ permissions:
   contents: write
 
 jobs:
+  # Run the release-notes extraction BEFORE any platform build starts.
+  # publish-release runs the same `changelog.py extract` on the tagged
+  # commit, but only after the three builds and the canary (~35m). The
+  # v0.18.8 tag (run 34782623299) reached that step with two fragments
+  # that had merged to main between the release-branch cut and the
+  # release squash merge, so extract refused, nothing was published, and
+  # the builds had been wasted. Failing the same check here bounds a bad
+  # tag to about a minute. On workflow_dispatch there is no tag to
+  # extract, so the job runs the read-only `changelog.py check` instead:
+  # the job must still succeed on dispatch because every build job
+  # `needs` it, and a skipped job would skip its dependents too.
+  preflight:
+    name: Release notes preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tagged release notes
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Extract committed release notes (tag push)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: .venv/bin/python scripts/changelog.py extract --version "$RELEASE_VERSION" --output /tmp/release-notes.md
+
+      - name: Validate pending fragments (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: .venv/bin/python scripts/changelog.py check
+
   build-linux-x86_64:
     name: Build chelis (linux-x86_64)
+    needs: [preflight]
     runs-on: ubuntu-latest
     # chelis#1004: a cold cvc5 build measures ~30m here, and the retry
     # wrapper can add a couple of fast-failing fetch attempts on top. This
@@ -121,6 +162,7 @@ jobs:
 
   build-linux-x86_64-glibc231:
     name: Build chelis (linux-x86_64, glibc 2.31)
+    needs: [preflight]
     runs-on: ubuntu-latest
     # Debian 11 ships glibc 2.31. Building inside it caps the binary's glibc
     # verneed records at 2.31, so the tarball loads on Debian 11/12 and
@@ -280,6 +322,7 @@ jobs:
 
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
+    needs: [preflight]
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
@@ -405,7 +448,7 @@ jobs:
 
   installed-artifact-canary:
     name: Installed C callable (${{ matrix.slug }})
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [preflight, build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
     strategy:
       fail-fast: false
       matrix:
