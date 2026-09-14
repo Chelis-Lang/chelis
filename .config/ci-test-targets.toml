@@ -628,6 +628,44 @@ cadence = "pull_request and push"
 reason = "gate-owned workflow and cache invariants run in script-unit"
 tracking_issue = "chelis#1824"
 
+# These exact paths use the existing chelis#1824 ownership mechanism.
+# Script-unit owns the portable contracts, not live cache acceptance.
+[[path_rule]]
+prefix = ".github/actionlint.yaml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the custom label in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/shared-runner-canary.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the manual workflow and its credential restrictions in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests exercise the portable cache probe contracts in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner contract suite executes in script-unit."
+tracking_issue = "chelis#1824"
+
 [[path_rule]]
 prefix = "scripts/test_nextest_profile_partition.py"
 disposition = "owner"

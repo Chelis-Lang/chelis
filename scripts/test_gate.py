@@ -749,6 +749,9 @@ NON_GATE_WORKFLOWS = {
     "changelog.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
+    # The manual shared-runner cache probe requires the admitted EC2 host.
+    # Its commands do not belong to the per-PR developer gate.
+    "shared-runner-canary.yml",
     # First separable loud-unsupported C7.5 slice: daily/manual standing
     # rejection-issue liveness on main plus tracking-issue reporting. It runs
     # no command owned by the per-PR developer gate. The broader Phase 4
