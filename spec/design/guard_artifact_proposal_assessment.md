@@ -20,6 +20,10 @@ for the current integration inventory. The companion
 [`guard_artifact_proposal_evidence.md`](guard_artifact_proposal_evidence.md)
 records coverage, measurements, and known limits.
 
+The delivery status below is refreshed through chelis#2053 at merged `main`
+`929b2c483`. Earlier inventory sizes and extended-run failures remain explicitly
+dated evidence, not measurements of that later tree.
+
 The refresh also corrects an execution-reach error in the local report and the
 first repository draft. The heavy-E2E workspace shards exclude
 `capacity_census_wire` and `capacity_census_bindings` because the dedicated
@@ -30,11 +34,11 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 
 | Proposal | Recommendation | Required correction or condition |
 |---|---|---|
-| chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports have landed; Phase 4B now requires granular acknowledgements. Corpus/per-body controls and durable acknowledgements now replace Phase 3 definition hashes; Phase 4B atom/region hashes are retired. Conditional Nix retirement remains. |
+| chelis#1868, frozen digests | Selected replacements implemented | chelis#1959 landed selection-superset semantics; chelis#1969 split the Phase 0 freeze and chelis#2017 completed its mutation-rejection binding. Corpus/body checks and mandatory review acknowledgements replace definition hashes through chelis#2040, chelis#2050, chelis#2051 and chelis#2053. Atom/region hashes were retired in chelis#2045. The selected Nix decision is retention with an explicit retirement condition, delivered in chelis#2033. |
 | chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
 | chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
-| chelis#1824, pull-request execution reach | Adopt the change-owned lane and package expansion below | Keep local `--fast` unchanged. Add the two small replacement expand controls to the standing `ci-fast` selection, require every added or directly modified integration target to execute, and trial broader package-qualified expansion informationally until exact-head cost receipts justify requiring it. |
-| chelis#1882, scheduled census reach | Refresh or close its stale premise | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's broader demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. |
+| chelis#1824, pull-request execution reach | Required lane implemented; expansion remains informational | chelis#2019 delivered package-qualified planning/execution and standing ownership of both replacement expand controls. Hosted receipts expose expansion timeouts and test/prerequisite failures; they do not justify promotion. Local `--fast` remains unchanged. |
+| chelis#1882, scheduled census reach | Closed with executed evidence | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. A recorded failing census proves reach, not correctness. |
 
 The governing distinction is:
 
@@ -806,30 +810,42 @@ chelis#1973 trial.
 
 ## Remaining delivery order
 
-The candidate implements chelis#1824 delivery step 2: versioned ownership,
-required planning and four change-owned shards, isolated informational
-expansion, and package-qualified standing execution. Exact-head review and
-hosted execution must validate it before landing; merged-main acceptance and
-representative expansion receipts remain outstanding. The required acceptance
-surface is the hosted `Integration Tests (Linux)` context, backed by `ci-fast`
-and the receipt-validating change-owned report.
+The required change-owned lane landed in chelis#2019, changed-row rejection
+liveness in chelis#2025, and the assessed growing-artifact replacements through
+chelis#2053. Their pull-request reviews and merged-main evidence are recorded
+in the owning pull requests and the companion evidence appendix. Agents must
+read [the PR-author guide](../../docs/guard_changes_for_pr_authors.md) before
+starting work and again before merging, as required by `AGENTS.md`.
 
-1. Land the chelis#1824 design and change-owned execution guarantee with
-   informational package expansion, collect exact-head cost/completeness
-   receipts, then decide whether to require the broader expansion.
-2. Narrow rejection-issue validation on pull requests to changed rows while
-   retaining the delivered standing nightly over the complete source-derived
-   manifest.
-3. Trial Phase 3 changed-test and Phase 4B changed-atom/region reports beside
-   their existing digests. Require every replacement to fail on the planted
-   mutation that justified the old guard.
-4. Retire a remaining old artifact only after parallel evidence records
-   equivalent detection, review prompts, and executable ownership.
+The remaining work has separate owners and acceptance conditions:
 
-Record the three proposal implementations as one coordinated decision even if
-delivery is split into separate pull requests. The interactions are semantic:
-one slice decides what is derived, another what is reviewed, and the third what
-is blocking identity versus rendered evidence.
+1. **Broader PR execution, chelis#1824.** Keep the required change-owned
+   guarantee. The chelis#2040 merged-main trial had three expansion timeouts
+   and one failing receipt. Narrow or
+   repartition it under the delivery sequence above, then collect complete
+   receipts before promotion. A successful informational summary does not
+   mean its tests passed. Standing-admission decisions and provisional-row
+   disposition also remain with this issue.
+2. **Complete unsupported identity, chelis#1870.** Retain the exact-text locks
+   until the typed payload carries every obligation listed above through the
+   machine channel. The capability tables and their derived consumers belong
+   to chelis#729; its chelis#1296 composite acceptance is required before
+   table construction. The completed chelis#1294 atom closure alone does not
+   satisfy that entry condition. Preserve the diagnostic-channel convention
+   and producer/transport split owned by chelis#883 instead of adding a prose
+   parser or parallel payload. The wider scheduled/change-gated authority
+   matrix remains chelis#990; chelis#2052 only repairs its current binding
+   inventory reader.
+3. **A future Nix policy change.** The decision in chelis#1868 is to keep this
+   freeze while the temporary event policy stands. Changing that policy must
+   satisfy the replacement controls and both native-platform checks described
+   above before retiring the digest. That conditional future change is not
+   part of the completed growing-artifact replacements.
+
+These are coordinated decisions about derivation, reviewed authority and
+diagnostic identity. Completion of the assessed chelis#1868/chelis#1869
+replacements does not certify a compiler phase, all package tests, or the
+broader chelis#1870 migration.
 
 ## Non-claims and open evidence
 
