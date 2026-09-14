@@ -565,6 +565,19 @@ cadence = "pull_request and push"
 reason = "the change-owned workflow graph and command spellings are locked by script-unit"
 tracking_issue = "chelis#1824"
 
+# The release workflow is text-parsed by the script-unit suites that lock its
+# job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
+# installed-artifact canary wiring, and release-notes extraction. Sibling
+# workflow files and .github/scripts stay unclassified.
+[[path_rule]]
+prefix = ".github/workflows/release.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the release workflow's job graph, build targets, header manifests, glibc lane, canary wiring, and release-notes extraction are locked by script-unit"
+tracking_issue = "chelis#2027"
+
 [[path_rule]]
 prefix = "scripts/ci_change_owned.py"
 disposition = "owner"

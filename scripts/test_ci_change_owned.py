@@ -307,6 +307,37 @@ class SchemaTests(unittest.TestCase):
             self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
             self.assertFalse(owned.is_docs_only([path]))
 
+    def test_release_workflow_has_a_required_script_unit_owner(self) -> None:
+        # chelis#2027 precedent: a canonical release input outside every Cargo
+        # package root needs an exact owner rule, or the planner fails closed on
+        # every release-workflow edit. The owner claim is evidence-backed: each
+        # named script-unit suite text-parses release.yml on every pull request.
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        release = ".github/workflows/release.yml"
+        rules = [rule for rule in config.path_rules if rule.matches(release)]
+        self.assertEqual(len(rules), 1, release)
+        rule = rules[0]
+        self.assertEqual(rule.prefix, release)
+        self.assertEqual(rule.disposition, "owner")
+        self.assertEqual((rule.owner.workflow, rule.owner.job), ("ci.yml", "script-unit"))
+        self.assertFalse(owned.is_docs_only([release]))
+        for suite in ("test_changelog.py",
+                      "test_release_workflow_pyo3_isolation.py",
+                      "test_release_runtime_header_manifest.py",
+                      "test_ci_cvc5_build.py",
+                      "test_glibc231_workflows.py",
+                      "test_installed_artifact_canary.py"):
+            with self.subTest(suite=suite):
+                self.assertIn("release.yml", (root / "scripts" / suite).read_text(encoding="utf-8"))
+        # Sibling workflow files and release helper scripts must not inherit
+        # the exact rule; an unreviewed lane still needs its own mapping.
+        for path in (".github/workflows/new-release-lane.yml",
+                     ".github/workflows/heavy-e2e.yml",
+                     ".github/scripts/verify_release_smt.py"):
+            self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
+            self.assertFalse(owned.is_docs_only([path]))
+
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
             text = config_text() + (
