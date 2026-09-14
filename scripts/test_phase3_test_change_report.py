@@ -243,8 +243,15 @@ class CommittedChanges(unittest.TestCase):
                 self.assertTrue(any(name in failure for failure in retained_failures))
                 (self.root / path).write_text(sources[path])
                 self.commit(oracle=(oracle.REPO_ROOT / ORACLE).read_text())
-                rows = self.compare(baseline)["changes"]
+                result = self.compare(baseline)
+                rows = result["changes"]
                 self.assertEqual([(r["path"], r["test"]) for r in rows], [(str(path), name)])
+                line = f"Protected-test-change: {path}::{name}"
+                self.assertEqual(result["required_acknowledgements"], [line])
+                self.assertTrue(report.acknowledgement_violations(result, ""))
+                self.assertEqual(report.acknowledgement_violations(result, line), [])
+                # Acknowledgement does not alter the independently rejected mutation.
+                self.assertTrue(any(name in failure for failure in retained_failures))
 
 
 class AcknowledgementTests(unittest.TestCase):
