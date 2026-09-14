@@ -294,6 +294,34 @@ examples, missing inputs, and removed or hidden declarations before the copied
 filename array is removed. Its fixed completeness-test body remains frozen;
 the other definition freezes and the retirement obligations above stay active.
 
+The per-body trial adds a Rust AST check beside the definition hashes. The
+current Python oracle exports each required identity and its reviewed call role
+as transient JSON; there is no second stored identity inventory. Each body must
+name its designated harness, comparison or canary entrypoint, and evaluator
+canaries must also name their receipt entrypoint. Ordinary evaluator agreement
+rows require both agreement and expected-value checks. Executable parity rows
+must pass literal `true` to the harness, while declared library rows pass
+literal `false`. The Metal rejection uses the shared exact comparator to check
+that no artifact was emitted, retaining its status and diagnostic assertions.
+
+The audit visits parsed eager expressions and the condition operands of the
+standard assertion macros. Comments, strings, unknown macro payloads, local
+item definitions, closures, async blocks and const bodies cannot supply calls.
+Local items, conditional configuration attributes and pattern bindings that
+shadow a required owner are rejected. Ordinary blocks, branches and loops are
+visited, so this is a structural call-adoption check, not proof that arbitrary
+control flow reaches the call or that its arguments and result handling are
+correct. The existing receipt and shared-helper behavior checks retain those
+separate roles. The new target runs in standing CI and the complete oracle.
+
+This trial preserves every definition hash. In particular, the existing
+ignored-comparison-result and library-only mutations must remain blocking;
+simple call presence cannot replace their obligations. Tests compare the new
+check with the retained hashes for emptied and removed bodies, forged receipts
+and disabled executable parity. Retirement requires subsequent evidence for
+all named replacement conditions, including result handling and the durable
+changed-test acknowledgement, before removing any hash.
+
 The first trial runs `scripts/phase3_test_change_report.py` in the required
 Docs job and publishes its committed merge-base comparison as an artifact.
 It reads both literal required-test inventories, so removing a requirement

@@ -372,7 +372,8 @@ fn metal_rank2_gap_rejects_without_an_artifact() {
     assert!(!ok, "rank-2 metal must reject instead of writing a stub");
     assert!(stderr.contains("unsupported:"), "{stderr}");
     assert!(stderr.contains("codegen:metal"), "{stderr}");
-    assert!(emitted.is_empty(), "rejected Metal build wrote: {emitted}");
+    compare_exact_observations("rejected Metal build artifact", "", &emitted)
+        .unwrap_or_else(|error| panic!("rejected Metal build wrote an artifact: {error}"));
 }
 
 // ===========================================================================

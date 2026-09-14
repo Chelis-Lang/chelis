@@ -228,6 +228,10 @@ package = "chelis-cli"
 name = "parity_corpus_contract"
 
 [[standing_target]]
+package = "chelis-cli"
+name = "phase3_body_contract"
+
+[[standing_target]]
 package = "chelis-e2e"
 name = "pipeline"
 
