@@ -392,10 +392,10 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
         `workflow_dispatch`, so several required contexts COULD be produced
         without a pull request; on `origin/main` it does not, and none of
         them can. Either way `conformance.yml` has only `push: [main]` and
-        `pull_request`, and `changelog.yml` on the default branch has only
-        `pull_request`. One unreachable context is enough -- protection
-        requires all nine -- so a `GITHUB_TOKEN`-opened pull request can
-        never go green here.
+        `pull_request`, while `changelog.yml` and the dedicated
+        acknowledgement workflow have only `pull_request`. One unreachable
+        context is enough -- protection requires all nine -- so a
+        `GITHUB_TOKEN`-opened pull request can never go green here.
         """
         jobs = self.workflow_triggers()
         unreachable = []
@@ -417,7 +417,7 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
                 unreachable.append(context)
         self.assertGreaterEqual(
             found,
-            4,
+            3,
             "too few required-context producers were found to measure anything; "
             "the workflow set changed and this evidence test needs revisiting",
         )
@@ -425,6 +425,12 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
             "Hull Conformance Gate (Linux)",
             unreachable,
             "the conformance gate became reachable without a pull request; "
+            "re-measure the prerequisite before relaxing the documentation",
+        )
+        self.assertIn(
+            "PR Contract Acknowledgements",
+            unreachable,
+            "the acknowledgement check became reachable without a pull request; "
             "re-measure the prerequisite before relaxing the documentation",
         )
 

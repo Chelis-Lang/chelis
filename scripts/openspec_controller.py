@@ -137,13 +137,13 @@ MISSING_TOKEN_ADVICE = f"""no submission credential reached this step, so no pul
 REQUIRED_CONTEXTS_FOR_EVIDENCE = (
     "Lint and Unit Tests (Linux)",
     "Integration Tests (Linux)",
-    "macOS Smoke",
     "Backend Sanitizers",
     "SMT Feature Build (Linux)",
     "Docs",
     "No AI authorship markers",
     "Hull Conformance Gate (Linux)",
     "Changelog",
+    "PR Contract Acknowledgements",
 )
 
 PULL_BODY = """Automated OpenSpec document submission.
