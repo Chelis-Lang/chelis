@@ -38,6 +38,15 @@ packages = ["chelis-cli"]
 
 # The runtime-representation gate executes the frozen inventory and mutations.
 [[path_rule]]
+prefix = "scripts/test_runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "unit contracts check the reviewed representation source universe and foundation"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
 prefix = "scripts/runtime_representation_oracle.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
