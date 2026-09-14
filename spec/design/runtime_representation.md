@@ -1453,6 +1453,14 @@ checks that the admitted frames execute at the producer with the required
 primitive attribution and effect order. No dtype, width or numbered semantic
 contract changes.
 
+
+Complete signature-entry planning registers two typed modules in the source
+universe: `chelis-ir/src/host/signature_entry.rs` and
+`chelis-backend-c/src/host_emit/entry.rs`. They compose existing DAG witnesses
+and project already discharged helper guards. The structural scan finds no new
+representation seam; the universe contains 86 sources (75 Rust and eleven
+C/C++/Objective-C), with no foundation or mutation change.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
