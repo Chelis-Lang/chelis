@@ -31,7 +31,7 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 | Proposal | Recommendation | Required correction or condition |
 |---|---|---|
 | chelis#1868, frozen digests | Partially implemented | chelis#1959 landed selection-superset semantics and chelis#1969 landed the Phase 0 split with mutation implementation binding. Phase 3 and Phase 4B derived reports remain. |
-| chelis#1869, inventories | Assessed inventory changes implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable; the general guard-inventory rule is now recorded in `AGENTS.md`. CI expansion-cost trials remain chelis#1824 work. |
+| chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
 | chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
 | chelis#1824, pull-request execution reach | Adopt the change-owned lane and package expansion below | Keep local `--fast` unchanged. Add the two small replacement expand controls to the standing `ci-fast` selection, require every added or directly modified integration target to execute, and trial broader package-qualified expansion informationally until exact-head cost receipts justify requiring it. |
 | chelis#1882, scheduled census reach | Refresh or close its stale premise | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's broader demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. |
@@ -363,6 +363,10 @@ Keep censuses, registries, and manifests where each row carries a disposition
 a machine cannot invent: nonnumeric, tagged transport, exact numeric operation,
 normative atom, accepted debt owner, or another reviewed authority class.
 Regeneration must never bless an unclassified numeric surface.
+
+`AGENTS.md` records this distinction under Guard Inventories, including the
+required-coverage-floor obligation. The assessed inventory changes below are
+implemented. Broader package-expansion cost trials remain chelis#1824 work.
 
 chelis#1927 is a current example. A capacity-census fixture became illegal
 after module-export enforcement changed. The repair corrected the fixture and
