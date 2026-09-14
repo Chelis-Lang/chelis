@@ -2973,6 +2973,11 @@ fn cmd_check_one_on_grown_stack(
                 &prepared.stdlib_decls,
                 prepared.stdlib_source_digest,
                 &prepared.non_stdlib_decls,
+                if show_inferred {
+                    chelis_compiler_api::EffectRowReporting::Requested
+                } else {
+                    chelis_compiler_api::EffectRowReporting::Skipped
+                },
             ) {
                 Ok(layered) => layered,
                 Err(error) => {
@@ -3000,10 +3005,11 @@ fn cmd_check_one_on_grown_stack(
                 chelis_compiler_api::LayeredCheck::Clean {
                     fitness,
                     typed_program,
+                    effect_rows,
                 } => {
                     let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
+                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
                     } else {
                         None
                     };
@@ -3013,10 +3019,11 @@ fn cmd_check_one_on_grown_stack(
                     fitness,
                     effect_errors,
                     typed_program,
+                    effect_rows,
                 } => {
                     let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
+                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
                     } else {
                         None
                     };
@@ -3026,10 +3033,11 @@ fn cmd_check_one_on_grown_stack(
                     fitness,
                     linearity_errors,
                     typed_program,
+                    effect_rows,
                 } => {
                     let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
+                        layered_inferred_signatures(&typed_program, effect_rows, &mut fitness)
                     } else {
                         None
                     };
@@ -3131,7 +3139,12 @@ fn check_prepared_for_cli(
 
     let mut fitness = analysis.fitness().clone();
     let inferred = if show_inferred {
-        inferred_signatures_or_diagnostic(analysis.program(), &mut fitness)
+        // The monolithic path checks one whole program -- chelis-std and
+        // the user's decls are merged before inference -- so there is no
+        // outer library context to resolve imported callees against, and
+        // the context-free rows are the same rows this path enforces.
+        let effect_rows = chelis_effects::def_effect_rows(analysis.program());
+        inferred_signatures_or_diagnostic(analysis.program(), &effect_rows, &mut fitness)
     } else {
         None
     };
@@ -3495,6 +3508,32 @@ mod advisory_lint_scope_tests {
     }
 }
 
+/// The layered path's inferred-signature rows.
+///
+/// `effect_rows` are the rows `check_layered` inferred against the
+/// chelis-std context this program was checked against. They cannot be
+/// recomputed here: `checked` is the chelis-std EXTENSION, so re-inferring
+/// over it alone drops every effect that originates in an imported package
+/// and publishes a pure row for a function that touches the host
+/// (chelis#606). A missing row map means the caller asked for signatures
+/// without asking for rows, which is a defect in this file rather than in
+/// the checked program, so it takes the same report-carried-diagnostic
+/// path as any other reporting failure instead of silently emitting empty
+/// rows.
+fn layered_inferred_signatures(
+    checked: &chelis_types::CheckedProgram,
+    effect_rows: Option<chelis_effects::DefEffectRows>,
+    fitness: &mut chelis_types::FitnessReport,
+) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
+    let Some(effect_rows) = effect_rows else {
+        return report_inferred_signature_failure(
+            fitness,
+            "layered check did not report effect rows",
+        );
+    };
+    inferred_signatures_or_diagnostic(checked, &effect_rows, fitness)
+}
+
 /// The inferred-signature rows, with a failure transported as a diagnostic
 /// on the report instead of propagated (chelis#886 [04-FIT-12]).
 ///
@@ -3503,39 +3542,53 @@ mod advisory_lint_scope_tests {
 /// report over an optional member the caller merely asked to see -- and
 /// would emit nothing at all, which is the shape the atom forbids. The
 /// member is omitted and the reason is carried where a consumer can read it.
+///
+/// `effect_rows` are the authoritative rows of whichever check produced
+/// `checked`; this function does not infer them, because only the caller
+/// knows whether `checked` is a whole program or a package extension
+/// (chelis#606).
 fn inferred_signatures_or_diagnostic(
     checked: &chelis_types::CheckedProgram,
+    effect_rows: &chelis_effects::DefEffectRows,
     fitness: &mut chelis_types::FitnessReport,
 ) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
-    match inferred_signatures_value(checked) {
+    match inferred_signatures_value(checked, effect_rows) {
         Ok(rows) => Some(rows),
-        Err(error) => {
-            let message = format!("inferred signatures unavailable: {error}");
-            // stderr keeps a line, as on every other path this series
-            // transports: the atom asks for the failure to REACH the report,
-            // not for the terminal line to be taken away. When this failure
-            // propagated, `main`'s error arm printed it; now nothing would.
-            eprintln!("error: {message}");
-            fitness.errors.push(chelis_types::errors::CheckError {
-                kind: chelis_types::errors::CheckErrorKind::Other,
-                message,
-                severity: 0.5,
-                expected: None,
-                got: None,
-                span_offset: None,
-                span_id: None,
-                suggestions: Vec::new(),
-            });
-            None
-        }
+        Err(error) => report_inferred_signature_failure(fitness, &error.to_string()),
     }
+}
+
+/// Carry an inferred-signature reporting failure on the report and omit
+/// the member, rather than propagating and emitting no document at all
+/// (chelis#886 [04-FIT-12]).
+fn report_inferred_signature_failure(
+    fitness: &mut chelis_types::FitnessReport,
+    reason: &str,
+) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
+    let message = format!("inferred signatures unavailable: {reason}");
+    // stderr keeps a line, as on every other path this series
+    // transports: the atom asks for the failure to REACH the report,
+    // not for the terminal line to be taken away. When this failure
+    // propagated, `main`'s error arm printed it; now nothing would.
+    eprintln!("error: {message}");
+    fitness.errors.push(chelis_types::errors::CheckError {
+        kind: chelis_types::errors::CheckErrorKind::Other,
+        message,
+        severity: 0.5,
+        expected: None,
+        got: None,
+        span_offset: None,
+        span_id: None,
+        suggestions: Vec::new(),
+    });
+    None
 }
 
 fn inferred_signatures_value(
     checked: &chelis_types::CheckedProgram,
+    effect_rows: &chelis_effects::DefEffectRows,
 ) -> Result<Vec<chelis_compiler_api::schema::WireInferredSignature>, Box<dyn std::error::Error>> {
     use chelis_compiler_api::schema::{WireInferredParameter, WireInferredSignature};
-    let effect_rows = chelis_effects::def_effect_rows(checked);
     let entries = checked
         .signature_inference()
         .functions

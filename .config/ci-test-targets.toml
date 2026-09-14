@@ -463,6 +463,12 @@ prefix = "examples/grad_runtime_basis.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# chelis#606: exercise imported IO and pure controls through a real Reef
+# package. This target does not compile or link generated C.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_606_imported_effect_rows"
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"

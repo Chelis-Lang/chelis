@@ -59,7 +59,10 @@ pub use fragment::{
     DeepErrorPath, EditValidationError, ReplacementError, ReplacementReport, ValidatedModule,
     check_body_replacement, check_whole_module_edit,
 };
-pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
+pub use layered::{
+    EffectRowReporting, LayeredCheck, check_layered, check_layered_for_build,
+    stdlib_structural_stats,
+};
 pub use library_cache::{
     LibraryContext, build_library_context, library_cache_key, library_cache_key_input_bytes,
     load_or_build_library_context,
