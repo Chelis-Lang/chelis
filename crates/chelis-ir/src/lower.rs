@@ -4813,6 +4813,19 @@ pub fn evaluation_profile(
     )
 }
 
+/// Like [`evaluation_profile`] but over a caller-owned, already-sorted def
+/// map. A program-scoped caller (the interpreter) builds the sorted snapshot
+/// once and reuses it across the many classifications one evaluation performs,
+/// instead of re-cloning every definition on every ask (chelis#2059). The
+/// classification is identical to [`evaluation_profile`]; only the redundant
+/// per-ask sort-and-clone is lifted out.
+pub fn evaluation_profile_sorted(
+    expr: &Expr,
+    program_defs: &BTreeMap<String, Expr>,
+) -> crate::evaluation::EvaluationProfile {
+    evaluation_profile_from_defs(expr, program_defs)
+}
+
 fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,

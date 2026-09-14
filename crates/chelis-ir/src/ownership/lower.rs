@@ -20,7 +20,7 @@ use crate::host::{
 };
 use crate::host_type_state::ConcreteHostType;
 
-use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
+use super::classify::{ClassifyError, NonHeapKind, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, EdgeId, HostSiteAction,
@@ -833,8 +833,20 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 let depth = self.owner_depth.get(&owner).copied().ok_or_else(|| {
                     self.invariant(format!("owner %{} has no scope depth", owner.0))
                 })?;
-                let movable =
-                    info.origin == OwnerOrigin::Owned && tail.is_some_and(|scope| depth >= scope);
+                // A by-value Copy scalar owns no resource, so a use duplicates
+                // it rather than transferring it. Moving the original owner
+                // would consume it, wrongly leaving a second occurrence of the
+                // same named scalar in one call (`f3(x, x)` in tail position)
+                // reading a dead owner (chelis#2068). Duplicating instead keeps
+                // the original live for every slot. This is scoped strictly to
+                // Copy scalars: a heap value (tensor, string, container, ...)
+                // still moves on its proven last use, so a genuine
+                // use-after-move of an owned resource stays rejected.
+                let is_copy_scalar =
+                    matches!(info.class, ValueClass::NonHeap(NonHeapKind::Scalar(_)));
+                let movable = info.origin == OwnerOrigin::Owned
+                    && !is_copy_scalar
+                    && tail.is_some_and(|scope| depth >= scope);
                 if movable {
                     self.moved.insert(owner);
                     Ok(Operand::move_(owner))

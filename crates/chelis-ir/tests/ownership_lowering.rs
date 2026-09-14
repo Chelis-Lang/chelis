@@ -397,6 +397,55 @@ fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
     assert!(tail.contains("return move"), "{tail}");
 }
 
+/// chelis#2068: a by-value Copy scalar named once but used in several argument
+/// slots of a tail-position user call (`f3(x, x)`) must duplicate per slot, not
+/// move the single owner on the first slot and then read a dead owner on the
+/// second. Regressed in 0.18.7; before the fix this failed with
+/// `owner %1 in `g` b1 is not live`.
+#[test]
+fn scalar_reused_in_tail_call_slots_duplicates_and_verifies() {
+    let source = "def f3(a: f32, b: f32) -> f32 = add(a, b)\n\
+                  def g(x: f32) -> f32 = f3(x, x)\n\
+                  def main() -> f32 = g(cast(0.5, f32))\n";
+    // The core oracle: the whole program lowers AND verifies. Before the fix
+    // the verifier rejected `g` because the first slot moved `x` and the second
+    // read it dead.
+    let program = verified_source(source);
+    let g = unit_text(&program, "g");
+    // Each occurrence of the Copy scalar is served by its own minted copy
+    // rather than moving the single owner, so both call slots see a live owner.
+    // The original scalar owner is then discarded, never moved into a slot.
+    assert_eq!(
+        count(&g, "= copy clone %"),
+        2,
+        "both reused scalar slots must duplicate the owner so neither reads it dead:\n{g}"
+    );
+    assert!(
+        g.contains("discard %1"),
+        "the original scalar owner must be discarded, not moved into a call slot:\n{g}"
+    );
+}
+
+/// chelis#2068 soundness guard: the scalar carve-out is scoped strictly to Copy
+/// scalars. A heap value (here a `string`, whose owned parameter mode moves it)
+/// used in two tail-call slots is a genuine use-after-move and MUST still be
+/// rejected, since moving one owned string into two owned slots would need an
+/// explicit copy the user did not write.
+#[test]
+fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
+    let source = "def joins(a: string, b: string) -> string = string_concat(a, b)\n\
+                  def dupstr(s: string) -> string = joins(s, s)\n\
+                  def run_main() -> string = dupstr(\"hi\")\n";
+    let error = match lower_source(source) {
+        Ok(lowered) => verify_ownership(lowered).expect_err("heap double-move must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, OwnershipError::OwnerNotLive { .. }),
+        "a genuine use-after-move of an owned heap value must stay rejected, got: {error}"
+    );
+}
+
 #[test]
 fn debug_observes_the_existing_owner_and_is_not_source_copy() {
     let roots = unit_text(

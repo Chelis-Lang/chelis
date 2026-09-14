@@ -185,6 +185,82 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
     );
 }
 
+/// chelis#2059 (residual chelis#1921): the interpreter's execution-profile
+/// admission runs on every closure application. Before this fix it re-cloned
+/// every top-level definition twice per call to classify the applied body, so
+/// a `chelis test` run over a package with many defs was O(defs x
+/// applications) and the dependency-free Monte-Carlo repro that took 1.2s at
+/// 0.18.6 took tens of seconds at 0.18.9.
+///
+/// The def set is fixed for an `EvalContext`'s lifetime, so the sort-and-clone
+/// is now a program-scoped snapshot built once and reused. This is a counted
+/// receipt in the shape of chelis#1835's `host_summary_probe_builds`: however
+/// many times a closure is applied over however many definitions, the snapshot
+/// is built exactly once per evaluation context.
+///
+/// Evidentiary status: REGRESSION TEST. The fixture folds one closure over a
+/// list of `APPLICATIONS` elements in a program carrying `HELPERS` unused
+/// definitions. Before the fix the admission cloned all definitions on each of
+/// the `APPLICATIONS` applications; the per-call clone is what this receipt
+/// pins out. The `snapshots >= 1` guard keeps the receipt from passing while
+/// measuring nothing, mirroring the #1829 tensor row's own guard.
+#[test]
+fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
+    const HELPERS: usize = 40;
+    const APPLICATIONS: usize = 200;
+
+    let mut source = String::new();
+    // Unused helpers: they inflate the per-application clone cost the fix
+    // removes, without being reached by the fold body's classification.
+    for level in 0..HELPERS {
+        source.push_str(&format!(
+            "def helper{level}(x: int64) -> int64 = add(x, x)\n"
+        ));
+    }
+    // One closure, applied once per list element by `fold`. Each application
+    // routes through `admit_execution_profile`. `result` is a top-level value
+    // binding so the interpreter evaluates it rather than binding the fold's
+    // callable as a thunk.
+    source.push_str(&format!(
+        "result = fold(fn (acc: int64, x: int64) -> add(acc, x), \
+         cast(0, int64), range(cast(0, int64), cast({APPLICATIONS}, int64)))\n"
+    ));
+
+    let checked = checked_surf(&source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    super::eval::reset_execution_profile_defs_snapshots();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2059 fixture evaluates");
+    let snapshots = super::eval::execution_profile_defs_snapshots();
+
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2059 fixture binds `result`");
+    // sum(0..200) = 199 * 200 / 2 = 19900.
+    assert_eq!(
+        result, "19900",
+        "#2059 fixture must still compute the right answer"
+    );
+    assert!(
+        snapshots >= 1,
+        "#2059: the fixture must actually reach the execution-profile admission, or this \
+         receipt would pass without measuring anything"
+    );
+    assert_eq!(
+        snapshots, 1,
+        "#2059: the program-def snapshot must be built once per evaluation context and reused \
+         across all {APPLICATIONS} closure applications; {snapshots} builds means the per-call \
+         clone regressed"
+    );
+}
+
 #[test]
 fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
     let checked = checked_surf(
@@ -210,6 +286,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs: definitions,
+        sorted_defs_snapshot: None,
         declared_signatures: signatures,
         type_env: checked
             .type_env()
@@ -1106,6 +1183,7 @@ fn eval_deep_with_bindings(
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs: UnordMap::new(),
+        sorted_defs_snapshot: None,
         declared_signatures: UnordMap::new(),
         type_env: UnordMap::new(),
         adt_fields: UnordMap::new(),

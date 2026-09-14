@@ -13,6 +13,8 @@ use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
 };
 use chelis_vocab::EffectKind;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::host_ops::*;
@@ -25,6 +27,32 @@ use super::*;
 /// walk forever. A body that needs a deeper walk names no producing primitive,
 /// so it emits no guard and stays a residual.
 const RESULT_PRODUCER_DEPTH: usize = 32;
+
+thread_local! {
+    /// Counts how many times an [`EvalContext`] cloned the whole program's
+    /// top-level defs to classify an execution profile (chelis#2059). The
+    /// admission ran on every closure application and re-cloned every
+    /// definition twice per call, so a `chelis test` run over a package with
+    /// many defs was O(defs x applications). The snapshot is now program-scoped
+    /// and this counter, a counted receipt in the shape of chelis#1835's
+    /// `host_summary_probe_builds`, stays at one build per context however many
+    /// times the classification is asked.
+    static EXECUTION_PROFILE_DEFS_SNAPSHOTS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Program-def snapshot builds on this thread since the last reset. Bounded by
+/// the number of `EvalContext`s created, never by the number of host asks.
+#[cfg(test)]
+pub(crate) fn execution_profile_defs_snapshots() -> u64 {
+    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(std::cell::Cell::get)
+}
+
+/// Reset [`execution_profile_defs_snapshots`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_execution_profile_defs_snapshots() {
+    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(0));
+}
 
 /// Resolve a returned alias to the name it reads outside its local let chain.
 /// Bindings are consumed backwards so every initializer sees only earlier
@@ -410,14 +438,8 @@ impl<'a> EvalContext<'a> {
         if self.execution_exclusion.is_some() {
             return;
         }
-        let defs = self
-            .top_level_defs
-            .to_sorted()
-            .into_iter()
-            .filter(|(name, _)| !bound.contains(name))
-            .map(|(name, expr)| (name.clone(), expr.clone()))
-            .collect();
-        if let EvaluationProfile::Legacy(reason) = self.execution_profile(expr, &defs)
+        if let EvaluationProfile::Legacy(reason) =
+            self.classify_execution_profile_over_program(expr, bound)
             && !matches!(
                 reason,
                 LegacyEvaluationReason::NoDropout | LegacyEvaluationReason::LegacyApi
@@ -425,6 +447,53 @@ impl<'a> EvalContext<'a> {
         {
             self.execution_exclusion = Some(reason);
         }
+    }
+
+    /// Classify `expr`'s execution profile against every top-level def, minus
+    /// the caller's own `bound` parameters (which shadow same-named defs).
+    /// Callers must have already handled `execution_exclusion`; this is the
+    /// classification itself, taken over the program-scoped sorted-def snapshot
+    /// so it does not re-clone every definition on each ask (chelis#2059).
+    fn classify_execution_profile_over_program(
+        &mut self,
+        expr: &Expr,
+        bound: &[String],
+    ) -> chelis_ir::evaluation::EvaluationProfile {
+        let snapshot = self.sorted_defs_snapshot();
+        // A bound parameter shadows a same-named top-level def, so it must not
+        // reach the classifier. Collisions are rare (parameters are named
+        // `acc`, `x`, ...), so the common path classifies against the shared
+        // snapshot with no per-ask clone; only a genuine collision pays for a
+        // filtered copy, preserving the original shadowing semantics exactly.
+        if bound.iter().any(|name| snapshot.contains_key(name)) {
+            let mut filtered = (*snapshot).clone();
+            for name in bound {
+                filtered.remove(name);
+            }
+            chelis_ir::lower::evaluation_profile_sorted(expr, &filtered)
+        } else {
+            chelis_ir::lower::evaluation_profile_sorted(expr, &snapshot)
+        }
+    }
+
+    /// The program-scoped sorted snapshot of `top_level_defs`, built on first
+    /// use and reused for the context's lifetime (chelis#2059). The def set is
+    /// fixed after construction, so the sort-and-clone is paid once rather than
+    /// on every closure application.
+    fn sorted_defs_snapshot(&mut self) -> Rc<BTreeMap<String, Expr>> {
+        if let Some(snapshot) = &self.sorted_defs_snapshot {
+            return snapshot.clone();
+        }
+        EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(builds.get() + 1));
+        let snapshot = Rc::new(
+            self.top_level_defs
+                .to_sorted()
+                .into_iter()
+                .map(|(name, expr)| (name.clone(), expr.clone()))
+                .collect::<BTreeMap<String, Expr>>(),
+        );
+        self.sorted_defs_snapshot = Some(snapshot.clone());
+        snapshot
     }
     /// Resolve a builtin only when ordinary lexical lookup did not select a
     /// runtime binding of the same name (spec/04-type-system.md §8.6,
@@ -4044,6 +4113,7 @@ mod legacy_capture_order_tests {
             named_axis_route_cache: UnordMap::new(),
             named_axis_route_visiting: UnordSet::new(),
             top_level_defs: definitions,
+            sorted_defs_snapshot: None,
             declared_signatures: signatures,
             type_env: checked
                 .type_env()

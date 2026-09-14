@@ -572,6 +572,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs,
+        sorted_defs_snapshot: None,
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
         type_env,
@@ -994,6 +995,15 @@ struct EvalContext<'a> {
     /// Cycle guard for the recursive routing detection walk.
     named_axis_route_visiting: UnordSet<String>,
     top_level_defs: UnordMap<String, Expr>,
+    /// Program-scoped, lazily built sorted snapshot of `top_level_defs`
+    /// (chelis#2059). `admit_execution_profile` runs on every closure
+    /// application; before this it re-cloned every top-level definition twice
+    /// per call to classify the body's execution profile, making a `chelis
+    /// test` run over a package with many defs O(defs x applications). The set
+    /// of defs is fixed for the context's lifetime (`register_top_level_defs`
+    /// runs once at construction), so the sort-and-clone is lifted here and
+    /// reused. `None` until the first classification asks for it.
+    sorted_defs_snapshot: Option<std::rc::Rc<std::collections::BTreeMap<String, Expr>>>,
     /// Authored `defsig` function types, including source binder spellings.
     /// The inferred `type_env` intentionally freshens those binders, so the
     /// evaluator keeps this separate map for generic cast targets in bodies.
