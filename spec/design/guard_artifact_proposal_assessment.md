@@ -533,6 +533,12 @@ the existing substring and exact-text identity locks and their mutations until
 that channel covers every obligation above. Do not ship a second hand-written
 parser for the rendered sentence.
 
+The compiler-API lowering adapter must classify the retained typed value,
+not its rendered sentence: typed lowering rejections use `unsupported_feature`
+under [05-UNS-6], while ordinary lowering diagnostics keep `lower_error`.
+This correction does not supply missing capability-cell authority or authorize
+retiring the existing exact-text guards.
+
 This is not a rule against every exact diagnostic assertion. Post-review
 changes chelis#1873, chelis#1926, and chelis#1943 deliberately lock exact public
 runtime-error transport and cross-lane rendering. Their owning contracts make

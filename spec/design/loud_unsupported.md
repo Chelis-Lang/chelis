@@ -288,9 +288,11 @@ lowering producers, and `unsupported_identity()` projects the exact
 `unsupported:` brand/prefix, diagnostic
 kind, subject, context, stage, span association, disposition, atom or tracking
 issue, and supported alternative without parsing prose. The
-three compiler-API adapters that flatten `LowerDiagnostic` retain their prior
-public stage, diagnostic kind, and rendered message while attaching that
-off-wire sidecar. The
+three compiler-API entry paths share one `LowerDiagnostic` adapter. A typed
+unsupported rejection uses `DiagnosticKind::UnsupportedFeature` as [05-UNS-6]
+requires; an ordinary lowering diagnostic retains `LowerError`, irrespective
+of its message text. The adapter preserves the lower envelope stage and
+producer rendering while retaining the typed payload and source association. The
 `c_nonliteral_window` witness proves identical production stderr through the
 C, HIP, and Metal CLI build entry paths; it is lowering and host-process
 evidence, not device execution.
