@@ -133,6 +133,11 @@ pub(super) fn infer_tuple_get(
         Ok(index) => index,
         Err(witness) => return propagate(&witness),
     };
+    // chelis#1603: the selector twin of `vmap`'s axis. The index child is
+    // read by `tuple_get_index` and otherwise never visited, so `infer_lit`
+    // -- the boundary that owns [04-LIT-1] -- never saw a `lit` index and a
+    // bool-stamped `0` projected element 0 with no diagnostic. Visit it.
+    infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     match resolved {
         Type::Tuple(ref elems) => {
             if index < elems.len() {
