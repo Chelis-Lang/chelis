@@ -1461,6 +1461,15 @@ and project already discharged helper guards. The structural scan finds no new
 representation seam; the universe contains 86 sources (75 Rust and eleven
 C/C++/Objective-C), with no foundation or mutation change.
 
+The captured activation-claim comparison adds one private
+`load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
+`chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the
+producer guard and retains the existing tagged tensor storage contract. The
+Phase 0 foundation extends from 365 to 366 rows and active debt from 251 to
+252. Every previous identity, deletion phase and frozen mutation remains;
+this registration adds no public ABI or numeric carrier exception. The
+load-store-template mutations continue to reject any unregistered owner.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
