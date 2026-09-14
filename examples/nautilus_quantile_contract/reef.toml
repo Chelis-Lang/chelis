@@ -1,7 +1,7 @@
 [package]
 name = "nautilus-quantile-contract"
 version = "0.1.0"
-compiler = "=0.18.8"
+compiler = "=0.18.9"
 module_prefix = "QuantileContract"
 
 [dependencies]
