@@ -1114,10 +1114,25 @@ impl DesugarCtx {
                 value,
                 ..
             } => {
-                vec![node(
-                    DeepTag::Def,
-                    vec![sym(name), self.desugar_expr(value)],
-                )]
+                // chelis#1625: a lambda-valued top-level binding whose type
+                // comes from a standalone `sig` must desugar `cast` targets
+                // naming that sig's binders the same way `desugar_fun_def`
+                // does for the `def f(...) = ...` spelling — as `(t-var {}
+                // <name>)`, not `(t-prim {} <name>)`. Without installing this
+                // scope, `current_type_binder` never sees the sig's binders
+                // here, so `cast(v, p)` under `sig f: p -> p` silently kept
+                // the `t-prim` default and slipped past the [04-DTYPE-1]
+                // classifier in `chelis_deep::literal_source`, which only
+                // recognizes a `t-var` cast target.
+                let restore_binders = self.current_type_binders.replace(
+                    self.declared_type_binders
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                let body = self.desugar_expr(value);
+                self.current_type_binders.replace(restore_binders);
+                vec![node(DeepTag::Def, vec![sym(name), body])]
             }
 
             Decl::MacroDef {
