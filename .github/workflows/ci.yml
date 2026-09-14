@@ -683,12 +683,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download integration change plan
-        uses: actions/download-artifact@v7
-        with:
-          name: integration-change-plan
-          path: target/integration-change
-
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
@@ -715,6 +709,13 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+
+      # Cache restoration can replace target/; install the current plan last.
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
 
       - name: Execute the exact change-owned shard
         env:
@@ -829,12 +830,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download integration change plan
-        uses: actions/download-artifact@v7
-        with:
-          name: integration-change-plan
-          path: target/integration-change
-
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
@@ -861,6 +856,13 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+
+      # Cache restoration can replace target/; install the current plan last.
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
 
       - name: Execute the informational package-expansion shard
         env:
