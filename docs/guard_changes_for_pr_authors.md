@@ -15,6 +15,35 @@ CI selects additional checks automatically. A passing fast gate does not certify
 all compiler behavior or replace a named acceptance command required by the
 owning design.
 
+## Final package-expansion dispatch
+
+After review findings are resolved and required implementation checks pass on
+the final candidate, dispatch `PR Package Expansion` with the pull request
+number and exact head SHA:
+
+```sh
+pr=1234
+head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid)
+gh workflow run pr-package-expansion.yml --ref main \
+  -f pr_number="$pr" \
+  -f expected_head_sha="$head"
+```
+
+The workflow rejects a closed pull request, a malformed SHA, or a head that no
+longer equals `expected_head_sha`. Inspect the `Manual Package Expansion
+Summary`, then record the reviewed SHA and run link in the pull request. Resolve
+failures introduced by the candidate. Record inherited failures and missing,
+timed-out or otherwise incomplete coverage explicitly; a summary without
+complete successful receipts is not evidence that the selected tests passed.
+Any candidate change requires fresh required implementation validation and a
+fresh package-expansion dispatch.
+
+`PR Contract Acknowledgements` separately owns acknowledgement enforcement.
+Editing the title or description reruns that required check without cancelling
+or replacing implementation results for the unchanged commit. A base-branch
+retarget is not metadata-only and requires fresh implementation validation
+against the new synthetic merge.
+
 ## Adding, moving or removing tests
 
 For an existing command whose selected tests are protected, adding another test
@@ -117,16 +146,15 @@ stale and unknown acknowledgements fail. Registry edits can require an owning
 atom's line even when the chapter itself was not edited. Removed declarations
 remain review obligations.
 
-The enforcing local check accepts the saved PR body:
+The lightweight enforcing check accepts the saved PR body:
 
 ```sh
-.venv/bin/python scripts/dtype_phase4b_oracle.py --base origin/main --require-acknowledgement --acknowledgements-file target/pr-body.md
+.venv/bin/python scripts/phase4b_change_report.py --base origin/main --output target/phase4b-contract-changes.json --require-acknowledgement --acknowledgements-file target/pr-body.md
 ```
 
-This command also checks compiler-produced metadata and can compile project
-code; follow the build-concurrency instructions in AGENTS.md. CI supplies its
-own validated PR comparison. Do not use its `--pr-head` mode on an ordinary
-local branch.
+The full Phase 4B oracle remains an independent compiler-contract check; an
+acknowledgement cannot replace it. CI supplies its own validated PR comparison.
+Do not use `--pr-head` on an ordinary local branch.
 
 For protected Rust tests, generate the required review lines after committing:
 
@@ -140,10 +168,11 @@ problem description. Lines later in the body do not count. For example:
 `Protected-test-change: crates/chelis-cli/tests/parity.rs::parity_corpus_is_complete`.
 CI requires the exact changed set, including removed requirements, and rejects
 missing, duplicate, stale, unknown or malformed lines. Editing the PR description
-reruns CI; keep the lines in the final description and wait for that run before
-merging. To check a saved body,
+reruns `PR Contract Acknowledgements`; keep the lines in the final description
+and wait for that check before merging. To check a saved body,
 add `--require-acknowledgement --acknowledgements-file target/pr-body.md` to the
-command above. The Docs job publishes the comparison and its enforcement result.
+command above. The dedicated acknowledgement check publishes its enforcement
+result, while Docs retains the independent non-enforcing comparison report.
 
 Review those changes and retain the required body/result checks, comparator
 calls, receipt checks and negative controls. An acknowledgement

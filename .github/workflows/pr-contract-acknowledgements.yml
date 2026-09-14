@@ -1,0 +1,61 @@
+name: PR Contract Acknowledgements
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: pr-contract-acknowledgements-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  acknowledgements:
+    name: PR Contract Acknowledgements
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Require protected-test acknowledgements
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .venv/bin/python scripts/phase3_test_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase3-test-changes.json
+
+      - name: Require frozen contract acknowledgements
+        if: always()
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .venv/bin/python scripts/phase4b_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase4b-contract-changes.json
+
+      - name: Publish Phase 3 required-test changes
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase3-test-changes
+          path: target/phase3-test-changes.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish Phase 4B contract changes
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase4b-contract-changes
+          path: target/phase4b-contract-changes.json
+          if-no-files-found: error
+          retention-days: 14

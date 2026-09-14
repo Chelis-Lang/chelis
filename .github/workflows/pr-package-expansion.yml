@@ -1,0 +1,260 @@
+name: PR Package Expansion
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact reviewed pull request head SHA
+        required: true
+        type: string
+
+concurrency:
+  group: pr-package-expansion-${{ inputs.pr_number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  integration-plan:
+    name: Plan Manual Package Expansion
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate the requested pull request head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          if ! [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_head_sha must be a lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+          state=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .state)
+          head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if [ "$state" != "open" ]; then
+            echo "pull request #$PR_NUMBER is not open" >&2
+            exit 1
+          fi
+          if [ "$head" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "stale candidate: expected $EXPECTED_HEAD_SHA, current head is $head" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/merge
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Derive the exact package-expansion plan
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py plan
+          --event-name pull_request
+          --pr-head "$EXPECTED_HEAD_SHA"
+          --output target/integration-change/plan.json
+
+      - name: Upload integration change plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package-expansion-shard:
+    name: Manual Package Expansion (bucket ${{ matrix.shard }})
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [integration-plan]
+    if: ${{ !cancelled() && needs.integration-plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/merge
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Restore cargo registry and build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Execute the informational package-expansion shard
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: >-
+          .venv/bin/python scripts/ci_change_owned.py run-shard
+          --plan target/integration-change/plan.json
+          --lane package-expansion
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/package-expansion-${{ matrix.shard }}
+
+      - name: Upload package-expansion shard receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-package-expansion-${{ matrix.shard }}
+          path: target/integration-change/package-expansion-${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-expansion-summary:
+    name: Manual Package Expansion Summary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    needs: [integration-plan, package-expansion-shard]
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Download integration change plan
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Download available package-expansion receipts
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: integration-package-expansion-*
+          path: target/integration-change/receipts/package-expansion
+
+      - name: Summarize the informational package expansion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PLANNER_RESULT: ${{ needs.integration-plan.result }}
+          EXPANSION_RESULT: ${{ needs.package-expansion-shard.result }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          mkdir -p target/integration-change/package-expansion-summary
+          if [ -f target/integration-change/plan.json ]; then
+            state=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .state)
+            head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+            base=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .base.sha)
+            plan_base=$(
+              .venv/bin/python -c \
+                'import json; print(json.load(open("target/integration-change/plan.json"))["base_sha"])'
+            )
+            candidate_problem=
+            if [ "$state" != "open" ]; then
+              candidate_problem="pull request #$PR_NUMBER is no longer open"
+            elif [ "$head" != "$EXPECTED_HEAD_SHA" ]; then
+              candidate_problem="stale head: expected $EXPECTED_HEAD_SHA, current head is $head"
+            elif [ "$base" != "$plan_base" ]; then
+              candidate_problem="stale base: planned $plan_base, current base is $base"
+            fi
+            report_status=0
+            .venv/bin/python scripts/ci_change_owned.py report \
+              --plan target/integration-change/plan.json \
+              --lane package-expansion \
+              --receipts-root target/integration-change/receipts/package-expansion \
+              --output target/integration-change/package-expansion-summary ||
+              report_status=$?
+            {
+              echo
+              echo "## Final candidate validation"
+              echo
+              if [ -n "$candidate_problem" ]; then
+                echo "FAIL: $candidate_problem"
+              else
+                echo "PASS: PR #$PR_NUMBER still names head \`$EXPECTED_HEAD_SHA\` and base \`$plan_base\`."
+              fi
+            } >> target/integration-change/package-expansion-summary/summary.md
+            if [ "$report_status" -ne 0 ] || [ -n "$candidate_problem" ]; then
+              exit 1
+            fi
+          else
+            {
+              echo "# Manual package expansion"
+              echo
+              echo "Expected PR head: \`${EXPECTED_HEAD_SHA}\`"
+              echo "Planner: ${PLANNER_RESULT}"
+              echo "Expansion workers: ${EXPANSION_RESULT}"
+              echo
+              echo "No validated plan artifact was available."
+            } > target/integration-change/package-expansion-summary/summary.md
+          fi
+
+      - name: Publish informational package-expansion summary
+        if: always()
+        run: |
+          if [ -f target/integration-change/package-expansion-summary/summary.md ]; then
+            cat target/integration-change/package-expansion-summary/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload informational package-expansion summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-package-expansion-summary
+          path: target/integration-change/package-expansion-summary
+          if-no-files-found: error
+          retention-days: 14

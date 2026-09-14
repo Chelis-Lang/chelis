@@ -612,6 +612,24 @@ cadence = "pull_request and push"
 reason = "the change-owned workflow graph and command spellings are locked by script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = ".github/workflows/pr-contract-acknowledgements.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only acknowledgement routing and its dedicated required job are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-package-expansion.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the stale-head-rejecting manual expansion interface and worker topology are locked by script-unit"
+tracking_issue = "chelis#1824"
+
 # The release workflow is text-parsed by the script-unit suites that lock its
 # job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
 # installed-artifact canary wiring, and release-notes extraction. Sibling
@@ -650,6 +668,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the required and informational workflow topology is locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_pr_workflow_routing.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only CI routing, acknowledgement isolation and manual dispatch inputs are locked by script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
@@ -825,6 +852,15 @@ job = "docs"
 cadence = "pull_request and push"
 reason = "shared atom and region extraction executes in the required Phase 4B report and oracle"
 tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/phase4b_acknowledgements.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the shared frozen-contract acknowledgement grammar and negative controls run in script-unit"
+tracking_issue = "chelis#1824"
 
 # Stable root controls with direct standing owners.
 [[path_rule]]

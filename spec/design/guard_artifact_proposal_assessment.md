@@ -37,7 +37,7 @@ dtype Phase 0-3 oracle executes them. They remain absent from pull-request
 | chelis#1868, frozen digests | Selected replacements implemented | chelis#1959 landed selection-superset semantics; chelis#1969 split the Phase 0 freeze and chelis#2017 completed its mutation-rejection binding. Corpus/body checks and mandatory review acknowledgements replace definition hashes through chelis#2040, chelis#2050, chelis#2051 and chelis#2053. Atom/region hashes were retired in chelis#2045. The selected Nix decision is retention with an explicit retirement condition, delivered in chelis#2033. |
 | chelis#1869, inventories | Core assessed slices implemented | chelis#1960 kept crate-granular positive vocabulary evidence, chelis#1963 closed backend-header discovery, and chelis#1968 retired both redundant expand inventories; chelis#1998 removed their stale CI row. Reviewed semantic classifications remain non-regenerable. |
 | chelis#1870, diagnostic pins | Assessed trial implemented; broader migration remains | chelis#1961 derives issue membership, chelis#1971 supplies the scheduled standing-liveness canary, chelis#1972 shares narrow-float capability identity, and chelis#1973 landed the structured unsupported-identity trial while retaining rendered compatibility. |
-| chelis#1824, pull-request execution reach | Required lane implemented; expansion remains informational | chelis#2019 delivered package-qualified planning/execution and standing ownership of both replacement expand controls. Hosted receipts expose expansion timeouts and test/prerequisite failures; they do not justify promotion. Local `--fast` remains unchanged. |
+| chelis#1824, pull-request execution reach | Required lane implemented; expansion selected as an explicit final-candidate dispatch | chelis#2019 delivered package-qualified planning/execution and standing ownership of both replacement expand controls. Automatic PR/main expansion did not fit its cost envelope. The selected follow-up keeps nightly coverage, moves expansion to a stale-head-rejecting manual workflow, and separates acknowledgement enforcement from compiler CI. Execution batching and receipt deduplication remain a separate delivery slice. Local `--fast` remains unchanged. |
 | chelis#1882, scheduled census reach | Closed with executed evidence | The daily/manual dtype Phase 0-3 job executes both censuses. The issue's demand for a citable automated verdict is implemented; per-pull-request reach belongs to chelis#1824. A recorded failing census proves reach, not correctness. |
 
 The governing distinction is:
@@ -66,7 +66,7 @@ standing lane.
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
 | Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
 | New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
-| New hosted package expansion | In separate non-required workers, informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
+| Explicit hosted package expansion | After reviews, repairs and required implementation checks complete, agents dispatch separate workers for the final PR head. They run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale candidates. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
 | macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
 
@@ -159,8 +159,8 @@ target/test exclusions, exclusion owners, and a plan digest. Planning is
 required: malformed or incomplete classification blocks both execution
 surfaces.
 
-Required change-owned execution and informational package expansion must not
-share worker budgets or aggregate status. Exact `package::target` identities in
+Required change-owned execution and manually dispatched package expansion must
+not share worker budgets or aggregate status. Exact `package::target` identities in
 each subset are independently assigned to four deterministic shards by
 `sha256(package + "::" + target) mod 4`. Runners execute package-scoped Cargo
 selectors so equal target names in different packages cannot create a cross
@@ -173,13 +173,15 @@ uncovered selected target, executed exclusion, or non-success result. The
 stable `Integration Tests (Linux)` context eventually depends on the standing
 `ci-fast` worker and this change-owned report only.
 
-Package expansion runs in a separate four-shard worker pool with its own
-20-minute hard timeout and 15-minute soft telemetry budget. Its summary records
-missing shards, timeouts, test failures, exclusions, timings, and receipts but
-does not fail a required context. A package-expansion timeout or failure cannot
-cancel, starve, or change the verdict of required change-owned execution. Step
-4 may make that summary required only after exact-head receipts justify the
-promotion.
+Package expansion runs only through a separate four-shard manual workflow with
+its own 20-minute hard timeout and 15-minute soft telemetry budget. Agents
+dispatch it after required implementation checks on the final candidate and
+record the exact reviewed SHA and run link. Its summary records missing shards,
+timeouts, test failures, exclusions, timings, and receipts but does not replace
+a branch-protection context. A candidate change invalidates the run. Introduced
+failures are repaired; inherited failures and incomplete coverage are named
+explicitly. A package-expansion timeout or failure cannot cancel, starve, or
+change the verdict of required change-owned execution.
 
 The expansion executor has a separate 16-minute deadline, measured from its
 start and shared by the product build, target listings and test commands. On
@@ -197,27 +199,26 @@ termination, and successful completion without changing required execution.
 
 ### Delivery sequence
 
-1. Land this design amendment.
-2. Add the planner, versioned configuration, structural/mutation tests,
-   separate four-shard change-owned and package-expansion workers, required
-   change-owned report, non-blocking expansion summary, and telemetry. Add the
-   two exact replacement-expand standing rows named above. Enforce plan
-   correctness and execution of the exact change-owned subset; keep broader
-   package expansion informational and isolated from the required worker
-   budget. Do not alter local `--fast`, any other standing-target ownership, or
-   nightly ownership in that slice.
-3. Collect exact-head receipts from representative small, multi-package,
-   shared-path, new-target, duplicate-name, and heavy-exclusion pull requests.
-4. Make package expansion required only after those receipts show that its four
-   independent shards finish within budget and that every changed path receives
-   one reviewable disposition. Promotion changes the required dependency;
-   before promotion, an expansion failure remains telemetry. If the
-   package-wide heuristic does not fit, retain the required change-owned
-   guarantee and narrow or repartition the heuristic rather than weakening that
-   guarantee.
-5. Remove `PROVISIONAL pending chelis#1824` comments and close the issue only
-   after required hosted execution proves the selected contract on merged
-   `main`.
+1. The planner, versioned configuration, required change-owned report,
+   separate package-expansion workers, telemetry, and the two exact
+   replacement-expand standing rows landed in chelis#2019.
+2. Exact-head trials established that automatic package expansion does not fit
+   the regular PR/main cost envelope.
+3. Land the schedule and acknowledgement slice: retain nightly coverage, remove
+   automatic package expansion from PR/main CI, add the explicit PR-number plus
+   expected-head dispatch, make final-candidate dispatch an agent requirement,
+   and move PR-body acknowledgement enforcement into its own required check.
+   Description edits rerun only that enforcement surface; base retargets still
+   require fresh implementation validation.
+4. Land execution optimization separately. Skip setup for plan-proven empty
+   groups, reuse only complete exact-candidate/configuration coverage receipts,
+   and batch expansion by package while preserving exact target and per-test
+   evidence, honest timeouts, and partial results.
+5. Collect comparable small, multi-package, script-only, and documentation PR
+   measurements, including required latency, runner minutes, dollars per run,
+   final expansion and post-merge spending. Remove `PROVISIONAL pending
+   chelis#1824` comments and close the issue only after the selected contract
+   has hosted evidence on merged `main`.
 
 ## chelis#1868: frozen digests and freeze constants
 
@@ -369,12 +370,12 @@ exactly once in a contiguous opening block of the PR description as
 `Protected-test-change: <repository-relative Rust path>::<test name>`.
 The report derives the expected lines from the union of both inventories,
 including removed requirements, and publishes them with the comparison.
-The required Docs job enforces those lines against the validated PR merge.
-CI also runs on PR-description edits so removing a line invalidates the old
-result. It retains the complete job graph on that event: an edited description
-must not replace pending implementation checks with skipped successes. This
-incurs a full CI rerun for an edited description; no cheaper partial gate is
-claimed here. The enforcement rejects
+The dedicated required `PR Contract Acknowledgements` job enforces those lines
+against the validated PR merge. A PR-description edit reruns that job so
+removing a line invalidates the old result, but it neither cancels nor
+recreates compiler validation for the unchanged commit. A base retarget is an
+implementation event and requires fresh validation against the new synthetic
+merge. The enforcement rejects
 missing, duplicate, stale, unknown or malformed acknowledgements in that
 opening block. The block precedes all prose and is separated from it by a
 blank line; initial blank lines are harmless. Later lines are examples or
@@ -500,7 +501,8 @@ Regeneration must never bless an unclassified numeric surface.
 
 `AGENTS.md` records this distinction under Guard Inventories, including the
 required-coverage-floor obligation. The assessed inventory changes below are
-implemented. Broader package-expansion cost trials remain chelis#1824 work.
+implemented. The final-candidate package-expansion workflow and its execution
+optimization remain chelis#1824 work.
 
 chelis#1927 is a current example. A capacity-census fixture became illegal
 after module-export enforcement changed. The repair corrected the fixture and
@@ -834,11 +836,12 @@ starting work and again before merging, as required by `AGENTS.md`.
 The remaining work has separate owners and acceptance conditions:
 
 1. **Broader PR execution, chelis#1824.** Keep the required change-owned
-   guarantee. The chelis#2040 merged-main trial had three expansion timeouts
-   and one failing receipt. Narrow or
-   repartition it under the delivery sequence above, then collect complete
-   receipts before promotion. A successful informational summary does not
-   mean its tests passed. Standing-admission decisions and provisional-row
+   guarantee and nightly backstop. The chelis#2040 merged-main trial had three
+   expansion timeouts and one failing receipt, so regular PR/main expansion is
+   replaced by exact final-candidate dispatch. Complete the separate empty-plan,
+   verified-overlap and package-batching slice, then collect comparable hosted
+   cost receipts. A successful summary with missing or partial receipts does
+   not mean its tests passed. Standing-admission decisions and provisional-row
    disposition also remain with this issue.
 2. **Complete unsupported identity, chelis#1870.** Retain the exact-text locks
    until the typed payload carries every obligation listed above through the
@@ -871,8 +874,8 @@ This assessment does not establish:
   digest round trip;
 - steady-state standing-liveness cost beyond the first successful
   10-minute-45-second default-branch receipt;
-- whether the chelis#1824 package-expansion heuristic fits its four 20-minute
-  shard budgets on representative exact-head pull requests;
+- the optimized manual package-expansion cost distribution across
+  representative exact-head pull requests;
 - whether shared-path rules need additional package mappings after the
   informational trial; or
 - the evidence threshold for adding a target permanently to the standing

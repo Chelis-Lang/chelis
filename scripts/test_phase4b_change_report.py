@@ -389,6 +389,43 @@ class GitChanges(unittest.TestCase):
             self.assertEqual(report.main(["--base", "missing", "--output", str(output)]), 1)
             self.assertFalse(output.exists())
 
+    def test_lightweight_cli_enforces_complete_acknowledgements(self):
+        base = self.commit()
+        self.commit({DESIGN: REGION.replace("The", "New")})
+        output = self.root / "report.json"
+        valid = (
+            f"Frozen-contract-change: {DESIGN}\n"
+            'Frozen-contract-change: region:"example"\n'
+        )
+        cases = [
+            (valid, 0),
+            ('Frozen-contract-change: region:"example"\n', 1),
+            (valid + f"Frozen-contract-change: {DESIGN}\n", 1),
+            (valid + f"Frozen-contract-change: {OP}\n", 1),
+        ]
+        for body, expected in cases:
+            with (
+                self.subTest(body=body),
+                mock.patch.object(report, "ROOT", self.root),
+                mock.patch.dict("os.environ", {"PHASE4B_TEST_BODY": body}),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                status = report.main(
+                    [
+                        "--base",
+                        base,
+                        "--output",
+                        str(output),
+                        "--require-acknowledgement",
+                        "--acknowledgements-env",
+                        "PHASE4B_TEST_BODY",
+                    ]
+                )
+                self.assertEqual(status, expected)
+                result = json.loads(output.read_text())
+                self.assertEqual(bool(result["acknowledgement_problems"]), bool(expected))
+
 
 class RetainedMutationTests(unittest.TestCase):
     def test_every_required_atom_and_region_edit_keeps_enforcing_review(self):
@@ -454,6 +491,14 @@ class WorkflowTests(unittest.TestCase):
     def workflow(self):
         return yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text())
 
+    def acknowledgement_workflow(self):
+        return yaml.safe_load(
+            (
+                Path(__file__).resolve().parents[1]
+                / ".github/workflows/pr-contract-acknowledgements.yml"
+            ).read_text()
+        )
+
     def check(self, workflow):
         job = workflow["jobs"]["docs"]
         self.assertNotIn("continue-on-error", job)
@@ -473,13 +518,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(artifact["with"]["if-no-files-found"], "error")
 
     def test_acknowledgement_step_requires_the_same_event_evidence(self):
-        workflow = self.workflow()
-        step = next(s for s in workflow["jobs"]["docs"]["steps"]
-                    if s.get("name") == "Require frozen contract acknowledgements")
-        self.assertEqual(step["if"], "github.event_name == 'pull_request'")
+        workflow = self.acknowledgement_workflow()
+        step = next(
+            s
+            for s in workflow["jobs"]["acknowledgements"]["steps"]
+            if s.get("name") == "Require frozen contract acknowledgements"
+        )
         self.assertEqual(step["env"], {"PR_BODY": "${{ github.event.pull_request.body }}",
                                       "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
-        self.assertEqual(step["run"], 'uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY')
+        self.assertEqual(step["run"], '.venv/bin/python scripts/phase4b_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase4b-contract-changes.json')
         self.assertNotIn("continue-on-error", step)
 
     def test_report_has_required_execution_and_publication(self):

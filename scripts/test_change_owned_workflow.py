@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+EXPANSION_WORKFLOW = ROOT / ".github/workflows/pr-package-expansion.yml"
 SHARDS = [0, 1, 2, 3]
 
 
@@ -18,16 +19,18 @@ def _run_steps(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
 
 
-def assert_change_owned_topology(test: unittest.TestCase, workflow: dict) -> None:
+def assert_change_owned_topology(
+    test: unittest.TestCase, workflow: dict, expansion_workflow: dict
+) -> None:
     jobs = workflow["jobs"]
     expected = {
         "integration-plan",
         "change-owned-shard",
         "change-owned-report",
-        "package-expansion-shard",
-        "package-expansion-summary",
     }
     test.assertLessEqual(expected, set(jobs))
+    test.assertNotIn("package-expansion-shard", jobs)
+    test.assertNotIn("package-expansion-summary", jobs)
     for name in expected:
         steps = jobs[name]["steps"]
         invoke = next(index for index, step in enumerate(steps)
@@ -106,18 +109,15 @@ def assert_change_owned_topology(test: unittest.TestCase, workflow: dict) -> Non
     )
     test.assertNotIn("package-expansion", str(stable))
 
-    expansion = jobs["package-expansion-shard"]
+    expansion_jobs = expansion_workflow["jobs"]
+    expansion = expansion_jobs["package-expansion-shard"]
     test.assertEqual(
-        expansion["needs"],
-        ["changes", "integration-plan", "change-owned-report"],
+        expansion["needs"], ["integration-plan"]
     )
     test.assertEqual(expansion["timeout-minutes"], 20)
     test.assertFalse(expansion.get("continue-on-error", False))
     test.assertFalse(expansion["strategy"]["fail-fast"])
     test.assertEqual(expansion["strategy"]["matrix"]["shard"], SHARDS)
-    test.assertIn(
-        "needs.change-owned-report.result == 'success'", expansion["if"]
-    )
     expansion_commands = _run_steps(expansion)
     test.assertIn("scripts/ci_change_owned.py run-shard", expansion_commands)
     test.assertIn("--lane package-expansion", expansion_commands)
@@ -125,15 +125,9 @@ def assert_change_owned_topology(test: unittest.TestCase, workflow: dict) -> Non
         "integration-package-expansion-${{ matrix.shard }}", str(expansion)
     )
 
-    summary = jobs["package-expansion-summary"]
+    summary = expansion_jobs["package-expansion-summary"]
     test.assertEqual(
-        summary["needs"],
-        [
-            "changes",
-            "integration-plan",
-            "change-owned-report",
-            "package-expansion-shard",
-        ],
+        summary["needs"], ["integration-plan", "package-expansion-shard"]
     )
     test.assertIn("always()", summary["if"])
     test.assertFalse(summary.get("continue-on-error", False))
@@ -146,9 +140,12 @@ def assert_change_owned_topology(test: unittest.TestCase, workflow: dict) -> Non
 class ChangeOwnedWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = yaml.safe_load(WORKFLOW.read_text())
+        self.expansion_workflow = yaml.safe_load(EXPANSION_WORKFLOW.read_text())
 
     def test_required_lane_and_informational_trial_are_isolated(self) -> None:
-        assert_change_owned_topology(self, self.workflow)
+        assert_change_owned_topology(
+            self, self.workflow, self.expansion_workflow
+        )
 
     def test_missing_managed_python_setup_or_system_invocation_is_rejected(self) -> None:
         for mutation in ("missing-setup", "system-python"):
@@ -162,23 +159,27 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                     if "scripts/ci_change_owned.py" in step.get("run", ""):
                         step["run"] = step["run"].replace(".venv/bin/python", "python3")
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
-                assert_change_owned_topology(self, workflow)
+                assert_change_owned_topology(
+                    self, workflow, self.expansion_workflow
+                )
 
     def test_expansion_cannot_feed_or_run_ahead_of_the_required_verdict(self) -> None:
-        for mutation in ("feeds-stable", "runs-concurrently"):
+        for mutation in ("feeds-stable", "moves-into-required-workflow"):
             workflow = copy.deepcopy(self.workflow)
             if mutation == "feeds-stable":
                 workflow["jobs"]["integration"]["needs"].append(
                     "package-expansion-summary"
                 )
             else:
-                workflow["jobs"]["package-expansion-shard"]["needs"].remove(
-                    "change-owned-report"
+                workflow["jobs"]["package-expansion-shard"] = copy.deepcopy(
+                    self.expansion_workflow["jobs"]["package-expansion-shard"]
                 )
             with self.subTest(mutation=mutation), self.assertRaises(
                 AssertionError
             ):
-                assert_change_owned_topology(self, workflow)
+                assert_change_owned_topology(
+                    self, workflow, self.expansion_workflow
+                )
 
     def test_required_report_cannot_be_downgraded(self) -> None:
         for mutation in ("skip-cancellation", "ignore-failure", "drop-worker"):
@@ -193,7 +194,9 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(
                 AssertionError
             ):
-                assert_change_owned_topology(self, workflow)
+                assert_change_owned_topology(
+                    self, workflow, self.expansion_workflow
+                )
 
 
 if __name__ == "__main__":

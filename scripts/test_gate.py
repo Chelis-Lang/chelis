@@ -66,6 +66,12 @@ def _load_oracle_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PR_CONTRACT_ACK_YML = (
+    REPO_ROOT / ".github" / "workflows" / "pr-contract-acknowledgements.yml"
+)
+PR_PACKAGE_EXPANSION_YML = (
+    REPO_ROOT / ".github" / "workflows" / "pr-package-expansion.yml"
+)
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
@@ -627,8 +633,6 @@ NON_GATE_JOBS = {
     "integration-plan",
     "change-owned-shard",
     "change-owned-report",
-    "package-expansion-shard",
-    "package-expansion-summary",
     # Stable branch-protection aggregates, not command-producing workers.
     "lint-and-unit",
     "integration",
@@ -745,6 +749,11 @@ NON_GATE_WORKFLOWS = {
     # Mac workspace, Clippy and SMT coverage is daily/manual, outside PR CI.
     "macos-nightly.yml",
     "ci.yml",
+    # PR metadata acknowledgement enforcement is intentionally isolated from
+    # compiler CI, and final package expansion is an explicit exact-head
+    # dispatch. Neither is a developer gate.py stage.
+    "pr-contract-acknowledgements.yml",
+    "pr-package-expansion.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
     "smt-full-prove.yml",
@@ -1799,6 +1808,10 @@ def _extract_ci_bash_array(name: str) -> list[str]:
 
 def _ci_job_block(job: str) -> str:
     """Read a job from its explicitly registered workflow owner."""
+    if job == "acknowledgements":
+        return _workflow_job_block(PR_CONTRACT_ACK_YML, job)
+    if job in {"package-expansion-shard", "package-expansion-summary"}:
+        return _workflow_job_block(PR_PACKAGE_EXPANSION_YML, job)
     if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
     if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle'}:
@@ -2166,7 +2179,11 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(oracle_block.count("    needs:"), 0)
         self.assertNotIn("needs.integration", oracle_block)
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
-        self.assertIn("name: Integration Tests (Linux)", aggregate_block)
+        self.assertIn("'Integration Tests (Linux)'", aggregate_block)
+        self.assertIn(
+            "'Integration Tests (Linux) (metadata-only edit)'",
+            aggregate_block,
+        )
         self.assertIn(
             "needs: [changes, ci-fast, change-owned-report]",
             aggregate_block,
@@ -2514,25 +2531,27 @@ class CiParityTests(unittest.TestCase):
         # request body, so the enforcing run is a separate step gated on the
         # event -- never on `docs_only`, which is the evasion the unconditional
         # step above exists to prevent.
-        docs_block = _ci_job_block("docs")
+        acknowledgement_block = _ci_job_block("acknowledgements")
         command = (
-            "uv run --managed-python --python 3.11 --no-project python "
-            'scripts/dtype_phase4b_oracle.py --pr-head "$PR_HEAD" --require-acknowledgement '
-            "--acknowledgements-env PR_BODY"
+            '.venv/bin/python scripts/phase4b_change_report.py --pr-head "$PR_HEAD" '
+            "--require-acknowledgement --acknowledgements-env PR_BODY "
+            "--output target/phase4b-contract-changes.json"
         )
-        _assert_executable_run_once(docs_block, command)
-        step = _ci_step_block(docs_block, "Require frozen contract acknowledgements")
+        _assert_executable_run_once(acknowledgement_block, command)
+        step = _ci_step_block(
+            acknowledgement_block, "Require frozen contract acknowledgements"
+        )
         conditions = [
             line.split("if:", 1)[1].strip()
             for line in step.splitlines()
             if re.match(r"^\s+if:", line)
         ]
-        self.assertEqual(conditions, ["github.event_name == 'pull_request'"])
+        self.assertEqual(conditions, ["always()"])
         # The body is attacker-controlled text. It reaches the oracle through
         # the environment, so it is never interpolated into a shell command.
         self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", step)
-        # The actual synthetic merge is validated against the event head,
-        # then its first parent supplies both acknowledgement comparisons.
+        # The actual synthetic merge is validated against the event head, then
+        # its first parent supplies both acknowledgement comparisons.
         self.assertIn("PR_HEAD: ${{ github.event.pull_request.head.sha }}", step)
         self.assertNotIn("base.sha", step)
         self.assertNotIn("--base", step)
@@ -3544,7 +3563,11 @@ class SmtCiSplitTests(unittest.TestCase):
 
     def test_required_smt_job_stays_fast_smoke(self):
         block = _ci_job_block("smt-build")
-        self.assertIn("name: SMT Feature Build (Linux)", block)
+        self.assertIn("'SMT Feature Build (Linux)'", block)
+        self.assertIn(
+            "'SMT Feature Build (Linux) (metadata-only edit)'",
+            block,
+        )
         self.assertIn("verify_release_smt.py ./target/debug/chelis", block)
         self.assertIn(
             "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
@@ -3970,10 +3993,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     }
     # These workers inherit the docs-only disposition through a required
     # upstream job rather than reading `docs_only` directly.
-    DEPENDENCY_GATED_JOBS = {
-        "change-owned-shard",
-        "package-expansion-shard",
-    }
+    DEPENDENCY_GATED_JOBS = {"change-owned-shard"}
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {
@@ -3984,21 +4004,18 @@ class DocsOnlySkipTests(unittest.TestCase):
     # Best-effort reporting aggregates run after failed dependencies but may
     # skip on cancellation because they are not required status contexts.
     HEAVY_REPORT_JOBS = {"test-telemetry"}
-    # The package-expansion summary must run after cancelled/missing workers
-    # so those states become telemetry, but it never feeds a required status.
-    ALWAYS_REPORT_JOBS = {"package-expansion-summary"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
         "rejection-authority-liveness",
         "diagnostic-kind-oracle",
     }
-    # Jobs that must ALWAYS run (never gated on docs_only).
-    ALWAYS_RUN_JOBS = {
-        "no-ai-authorship",
-        "docs",
-        "changes",
-    }
+    # Jobs that run for every implementation event, including docs-only PRs,
+    # but do not recreate their required contexts for metadata-only edits.
+    IMPLEMENTATION_ALWAYS_RUN_JOBS = {"no-ai-authorship", "docs"}
+    # The classifier itself is the only ci.yml job that runs on metadata-only
+    # edits; it performs no checkout or compiler work in that mode.
+    ALWAYS_RUN_JOBS = {"changes"}
 
     def test_changes_job_exists_and_is_ungated(self):
         attrs = _parse_job_attrs()
@@ -4056,22 +4073,13 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
 
-    def test_change_owned_workers_inherit_the_docs_disposition(self):
+    def test_change_owned_worker_inherits_the_docs_disposition(self):
         attrs = _parse_job_attrs()
         required = attrs["change-owned-shard"]
         self.assertEqual(required.get("needs"), "[changes, integration-plan]")
         self.assertIn(
             "needs.integration-plan.result == 'success'",
             required.get("if", ""),
-        )
-        expansion = attrs["package-expansion-shard"]
-        self.assertEqual(
-            expansion.get("needs"),
-            "[changes, integration-plan, change-owned-report]",
-        )
-        self.assertIn(
-            "needs.change-owned-report.result == 'success'",
-            expansion.get("if", ""),
         )
         for job in self.DEPENDENCY_GATED_JOBS:
             self.assertIn("!cancelled()", attrs[job].get("if", ""))
@@ -4122,21 +4130,6 @@ class DocsOnlySkipTests(unittest.TestCase):
                 cond = attrs[job].get("if", "")
                 self.assertIn("!cancelled()", cond)
                 self.assertNotIn("always()", cond)
-
-    def test_informational_expansion_summary_records_cancelled_workers(self):
-        attrs = _parse_job_attrs()
-        summary = attrs["package-expansion-summary"]
-        self.assertEqual(
-            summary.get("needs"),
-            (
-                "[changes, integration-plan, change-owned-report, "
-                "package-expansion-shard]"
-            ),
-        )
-        cond = summary.get("if", "")
-        self.assertIn("always()", cond)
-        self.assertNotIn("!cancelled()", cond)
-        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
 
     def test_telemetry_skips_unless_every_junit_producer_succeeded(self):
         _assert_telemetry_skips_without_every_junit(_parse_job_attrs())
@@ -4196,6 +4189,19 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"always-run job '{job}' must not carry a docs_only `if`",
             )
 
+    def test_implementation_always_run_jobs_skip_only_metadata_edits(self):
+        attrs = _parse_job_attrs()
+        metadata_only = (
+            "github.event_name == 'pull_request' && "
+            "github.event.action == 'edited' && "
+            "github.event.changes.base == null"
+        )
+        for job in self.IMPLEMENTATION_ALWAYS_RUN_JOBS:
+            self.assertEqual(attrs[job].get("needs"), "[changes]")
+            condition = attrs[job].get("if", "")
+            self.assertIn(metadata_only, condition)
+            self.assertNotIn("docs_only", condition)
+
     def test_every_job_is_classified(self):
         # Every ci.yml job is either heavy-gated or always-run; a new job
         # forces a deliberate classification (mirrors the workflow-file
@@ -4206,8 +4212,8 @@ class DocsOnlySkipTests(unittest.TestCase):
             | self.DEPENDENCY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
             | self.HEAVY_REPORT_JOBS
-            | self.ALWAYS_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
+            | self.IMPLEMENTATION_ALWAYS_RUN_JOBS
             | self.ALWAYS_RUN_JOBS
         )
         unclassified = set(attrs) - classified
