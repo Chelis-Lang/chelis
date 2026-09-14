@@ -753,7 +753,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "Phase 3 source, digest, comparator, receipt and runner mutation controls run in script-unit"
+reason = "Phase 3 source, call-role, comparator, receipt and runner mutation controls run in script-unit"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]

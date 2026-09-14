@@ -2,7 +2,7 @@
 """Report and acknowledge committed Phase 3 required-test changes.
 
 The report is a review cue, not a behavioral acceptance oracle. Definition
-digests, comparator checks, receipts, and mutation controls remain in force.
+body checks, comparator checks, receipts, and mutation controls remain in force.
 """
 from __future__ import annotations
 

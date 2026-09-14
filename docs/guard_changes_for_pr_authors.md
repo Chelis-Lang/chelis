@@ -55,9 +55,14 @@ Each protected test must also retain its designated comparison or harness call
 and the reviewed executable/library mode. CI checks parsed calls in each body;
 comments, strings, unused closures and macro examples cannot replace them.
 Keep helpers at module scope and avoid shadowing their names inside a protected
-test. This additional check runs alongside the existing body hashes. It does
-not prove the comparison runs or that its result is checked, so retain the
-behavioral assertions and the full owning acceptance checks.
+test. Result-returning comparisons must use the reviewed direct check: unwrap
+success (or panic directly on error), assert the expected success/failure,
+expect an error for a rejection canary, or compare the operation mapping with
+`assert_eq!`. Discarding the result or swallowing its error fails. Keep these
+checks directly on the call; routing through a local/helper needs a reviewed
+extension to the accepted syntax. The check does not prove arbitrary execution
+or complete test semantics, so retain the behavioral assertions and full owning
+acceptance checks. Ordinary body edits no longer require checksum updates.
 
 ## Updating an inventory
 
@@ -85,8 +90,8 @@ Protected rules and contract regions no longer need checksum updates. Review
 the underlying change, its consumers, and its positive and negative behavior
 evidence, then supply the exact acknowledgements below. Required identities,
 region boundaries, literal clauses and semantic checks remain blocking; an
-acknowledgement cannot waive them. Other frozen artifacts, including protected
-test definitions and the temporary Nix workflow, keep their existing digests.
+acknowledgement cannot waive them. The temporary Nix workflow and the completed-contract freezes keep their
+existing digests.
 
 After committing a contract change, obtain the exact required PR-description
 lines with:
@@ -140,8 +145,8 @@ merging. To check a saved body,
 add `--require-acknowledgement --acknowledgements-file target/pr-body.md` to the
 command above. The Docs job publishes the comparison and its enforcement result.
 
-Review those changes and retain the existing test-definition freezes,
-comparator calls, receipt checks and negative controls. An acknowledgement
+Review those changes and retain the required body/result checks, comparator
+calls, receipt checks and negative controls. An acknowledgement
 cannot waive a missing definition or another guard's rejection. A changed
 mutation witness still owes review of its implementation, command and expected
 rejection; producing the same error alone does not prove the witness stayed

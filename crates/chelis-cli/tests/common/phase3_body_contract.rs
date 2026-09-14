@@ -11,6 +11,24 @@ pub struct RequiredTest {
     pub name: String,
     pub calls: Vec<String>,
     pub run_parity: Option<bool>,
+    pub result: Option<RequiredResult>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredResult {
+    pub call: String,
+    pub kind: ResultUse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultUse {
+    Success,
+    AssertOk,
+    AssertErr,
+    ExpectErr,
+    AssertEq,
 }
 
 pub fn validate(source: &str, required: &[RequiredTest]) -> Result<(), String> {
@@ -27,6 +45,14 @@ pub fn validate_file(file: &syn::File, required: &[RequiredTest]) -> Result<(), 
                 "{}: empty or duplicate required call contract",
                 row.name
             ));
+            continue;
+        }
+        if row
+            .result
+            .as_ref()
+            .is_some_and(|result| !row.calls.contains(&result.call))
+        {
+            errors.push(format!("{}: checked result has no required call", row.name));
             continue;
         }
         let definitions: Vec<_> = file
@@ -60,6 +86,7 @@ pub fn validate_file(file: &syn::File, required: &[RequiredTest]) -> Result<(), 
                 .map(|call| call.split("::").next().unwrap())
                 .collect(),
             found: BTreeSet::new(),
+            checked_result: false,
             errors: Vec::new(),
             collect: true,
         };
@@ -68,6 +95,14 @@ pub fn validate_file(file: &syn::File, required: &[RequiredTest]) -> Result<(), 
             if !audit.found.contains(call) {
                 audit.errors.push(format!("missing required call {call}"));
             }
+        }
+        if let Some(result) = &row.result
+            && !audit.checked_result
+        {
+            audit.errors.push(format!(
+                "missing checked {:?} result for {}",
+                result.kind, result.call
+            ));
         }
         errors.extend(
             audit
@@ -91,12 +126,57 @@ fn ungroup(expression: &syn::Expr) -> &syn::Expr {
     }
 }
 
+fn call_identity(expression: &syn::Expr) -> Option<String> {
+    let syn::Expr::Call(call) = ungroup(expression) else {
+        return None;
+    };
+    let syn::Expr::Path(path) = ungroup(&call.func) else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.leading_colon.is_some() {
+        return None;
+    }
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
+}
+
+fn direct_panic(expression: &syn::Expr) -> bool {
+    match ungroup(expression) {
+        syn::Expr::Macro(value) => value.mac.path.is_ident("panic"),
+        syn::Expr::Block(value) if value.block.stmts.len() == 1 => match &value.block.stmts[0] {
+            syn::Stmt::Expr(value, _) => direct_panic(value),
+            syn::Stmt::Macro(value) => value.mac.path.is_ident("panic"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 struct BodyAudit<'a> {
     row: &'a RequiredTest,
     owners: BTreeSet<&'a str>,
     found: BTreeSet<String>,
+    checked_result: bool,
     errors: Vec<String>,
     collect: bool,
+}
+
+impl BodyAudit<'_> {
+    fn checked(&mut self, expression: &syn::Expr, kind: ResultUse) {
+        if self.collect
+            && let Some(required) = &self.row.result
+            && required.kind == kind
+            && call_identity(expression).as_ref() == Some(&required.call)
+        {
+            self.checked_result = true;
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for BodyAudit<'_> {
@@ -155,6 +235,24 @@ impl<'ast> Visit<'ast> for BodyAudit<'_> {
         visit::visit_expr_call(self, call);
     }
 
+    fn visit_expr_method_call(&mut self, method: &'ast syn::ExprMethodCall) {
+        let name = method.method.to_string();
+        if (name == "unwrap" && method.args.is_empty())
+            || (name == "expect" && method.args.len() == 1)
+            || (name == "unwrap_or_else"
+                && method.args.len() == 1
+                && matches!(ungroup(&method.args[0]), syn::Expr::Closure(closure) if direct_panic(&closure.body)))
+        {
+            self.checked(&method.receiver, ResultUse::Success);
+        }
+        if (name == "unwrap_err" && method.args.is_empty())
+            || (name == "expect_err" && method.args.len() == 1)
+        {
+            self.checked(&method.receiver, ResultUse::ExpectErr);
+        }
+        visit::visit_expr_method_call(self, method);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         // Only assertion conditions are adopted. Formatting arguments execute
         // on failure; arbitrary macro tokens and debug-only assertions do not
@@ -169,7 +267,21 @@ impl<'ast> Visit<'ast> for BodyAudit<'_> {
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         match parser.parse2(mac.tokens.clone()) {
             Ok(arguments) if arguments.len() >= count => {
+                if mac.path.is_ident("assert")
+                    && let syn::Expr::MethodCall(method) = ungroup(&arguments[0])
+                    && method.args.is_empty()
+                {
+                    if method.method == "is_ok" {
+                        self.checked(&method.receiver, ResultUse::AssertOk);
+                    }
+                    if method.method == "is_err" {
+                        self.checked(&method.receiver, ResultUse::AssertErr);
+                    }
+                }
                 for argument in arguments.iter().take(count) {
+                    if mac.path.is_ident("assert_eq") {
+                        self.checked(argument, ResultUse::AssertEq);
+                    }
                     self.visit_expr(argument);
                 }
             }
