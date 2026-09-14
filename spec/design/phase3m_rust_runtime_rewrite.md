@@ -175,6 +175,146 @@ Required failure text shape:
 - it must mention `CHELIS_RUNTIME_DIR`
 - it must tell the user to install Chelis correctly or set the environment variable
 
+### Proposed Runtime Artifact Identity (chelis#1354)
+
+This draft describes the compatibility choices for review. It changes no selector
+and does not resolve chelis#1354. The implementation must use an explicit rule
+rather than infer compatibility from file modification time.
+
+#### What the discovery order above does not say
+
+The order above answers *which directories to search*. It does not answer
+*which archive to take when a directory holds several*, and it assumes the
+exact name `libchelis_runtime.a`. Both shipped selectors added an undocumented
+rule for the multiple-candidate case:
+
+- `find_runtime_library` / `find_in_dir` in `crates/chelis-cli/src/main.rs`
+- `find_runtime_library_inner` / `find_in_dir` in `crates/chelis-python/src/lib.rs`
+
+Both collect every `libchelis_runtime*.a` other than the exact name, take the
+maximum modification time, and fall back to the exact name only when no hashed
+candidate exists. `newest_runtime_archive` in `crates/chelis-backend-c/src/lib.rs`
+(`cfg(test)`) applies the same policy with the opposite tie-break.
+
+Modification time is not identity. It names the archive written most recently,
+not the archive built from the source the compiler was built from. Cargo keeps
+hashed archives in `target/<profile>/deps`, where archives from earlier builds
+can remain beside the current archive.
+
+chelis#1354 records wrong output from a stale archive. The same selection rule
+can also hide a broken runtime behind a stale correct archive. That second
+case requires its own mutation test. Preferring any hashed
+candidate over the exact name makes the uplifted current-configuration archive
+the last choice rather than the first.
+
+A lexicographic tie-break does not fix this. It makes the wrong winner stable.
+Reporting the selected path does not fix it either. It makes the guess visible
+without validating it. Both remain useful, and neither closes the defect.
+
+#### What identity machinery already exists
+
+Three mechanisms exist. None can be lifted into the shipped selectors as it
+stands, and the reasons constrain the decision.
+
+1. `scripts/runtime_representation_phase1.py` (`runtime_artifact`, `runtime_pin`)
+   is the only authored select-by-identity rule in the repository. It takes the
+   artifact path from `cargo build --message-format=json`, requires the record's
+   `manifest_path`, `src_path`, crate kind, and features to match, requires
+   exactly one archive inside the current target directory, then copies it to an
+   exclusive directory and checks its digest after execution. Identity comes
+   from Cargo, which knows the configuration it just built.
+
+   This cannot move into `chelis build`. An installed toolchain has no Cargo,
+   no workspace, and no `Cargo.toml` to compare against, and `chelis build` must
+   not start a build. `spec/design/runtime_representation.md` states this
+   directly: the pin "does not resolve the broader production archive discovery
+   work in #1354; other consumers retain that issue's obligations."
+
+2. `crates/chelis-image-id` derives a build identity for a *loaded object image*
+   from the linker's `LC_UUID` or `NT_GNU_BUILD_ID`, with a SHA-256 fallback. It
+   answers "which build is this running code from" for the compiler process and
+   is deliberately content-derived rather than mtime-derived.
+
+   It does not apply to a static archive. A `.a` is an `ar` container of object
+   files with no image-level content id, and the crate excludes `object`'s
+   archive support on purpose. Reusing it for chelis#1354 means extending it,
+   not calling it.
+
+3. `CHELIS_RUNTIME_LIB` names one exact archive file. It is honored only by
+   `scripts/runtime_representation_phase1.py` and two `chelis-backend-hip`
+   tests. No shipped selector reads it and no document defines it. It is the
+   most precise existing convention and it is still an assertion by the caller,
+   not a verified identity.
+
+The runtime crate itself carries no identity. `crates/chelis-runtime` has no
+`build.rs` and exports no version, ABI, or build-stamp symbol, so an archive on
+disk cannot currently be asked what it was built from.
+
+#### Decisions needed
+
+**D1. Compatibility dimensions.** Which dimensions make an archive usable by
+this compiler? Candidates: runtime source revision, target triple, profile,
+and Cargo features. `ownership-ledger` is the live case — `crates/chelis-runtime/Cargo.toml`
+states it is test-only and "retains the published ABI", so it may be an identity
+difference that is not an incompatibility. Decide each dimension explicitly.
+Do not infer any of them from file recency.
+
+**D2. Identity carrier.** Where does an archive's identity live? Options: a
+stamp symbol or section emitted by a new `chelis-runtime` `build.rs`; a sidecar
+receipt written beside the archive by whatever produces it; or a digest the
+compiler is built knowing. An embedded stamp travels with the archive.
+A sidecar must bind the archive digest and travel with the package.
+The selected carrier must support both development and installed toolchains.
+
+**D3. Installed-package obligation.** `openspec/specs/nix-package-outputs/spec.md`
+requires `packages.chelis` to contain `bin/chelis` and `lib/libchelis_runtime.a`,
+and `packages.chelis-runtime` to ship the archive and headers for external C
+consumers. Those archives come from separate derivations. Any rule the CLI
+enforces must be satisfiable there, or the shipped toolchain stops working. If
+the answer is that packaged archives must carry the D2 carrier, that is a
+packaging obligation and belongs in that spec as a coordinated change. If the
+answer is that a single unhashed archive in an install layout is trusted
+without proof, say so and bound it.
+
+**D4. Override semantics.** `CHELIS_RUNTIME_DIR` is the documented escape. Does
+it waive the identity check or only redirect the search? chelis#1354 states that
+a directory override is not proof that a unique compatible archive is present.
+Decide whether an exact-file pin (`CHELIS_RUNTIME_LIB`, today undocumented)
+becomes the supported way to bypass the check, and whether bypass is permitted
+at all.
+
+**D5. Enforcement.** The issue already requires a hard failure before a usable
+compiled result is reported when identity cannot be resolved. The implementation
+must name the candidates and record the selected identity in execution receipts.
+A warning alone does not meet this requirement.
+
+**D6. Scope.** Which consumers the rule binds. One owned selector shared by the
+CLI and the Python bindings is preferred over the current duplicates. The
+harness selectors in `crates/chelis-backend-c/src/lib.rs`, `crates/chelis-e2e/src/bench.rs`,
+`crates/chelis-e2e/tests/eval_agreement.rs`, `crates/chelis-e2e/tests/spec_suite.rs`,
+and the HIP and Metal helpers must be dispositioned explicitly. Fifty Rust files
+reference `libchelis_runtime`; a converted subset is not class closure.
+
+#### Consequences to weigh
+
+- Requiring proof everywhere is the safest rule and the one most likely to
+  break installed toolchains and external C consumers. D3 decides this.
+- Rejecting on ambiguity without a carrier turns every ordinary
+  `target/debug/deps` into a hard error, because several valid candidates
+  coexist there by design.
+- Preferring the uplifted `target/<profile>/libchelis_runtime.a` over hashed
+  candidates would fix the common development case, because Cargo uplifts the
+  configuration it just built. It is still an unverified guess about which
+  build wrote that file, and it changes selection silently. It is not a
+  substitute for D1 and D2, and it must not land as one.
+
+#### Blocked until decided
+
+Once D1 through D6 are answered, this section becomes the rule, the acceptance
+list below gains the chelis#1354 cases, and the selectors are replaced with one
+shared typed selector. Until then the mtime policy stays in place and is
+documented as a known defect rather than a contract.
+
 ## Execution Plan
 
 1. land this spec and sync active planning docs
