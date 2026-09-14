@@ -519,6 +519,13 @@ fn project_expr(
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
+        ConcreteHostExprKind::SignatureEntry { plan, args } => HostAbiExprKind::SignatureEntry {
+            plan,
+            args: args
+                .into_iter()
+                .map(|expr| project_expr(expr, allowed_callbacks))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
         ConcreteHostExprKind::Builtin { name, args, ty } => {
             if chelis_ir::host::is_host_unresolved_marker(&name) {
                 return Err(unsupported_callable_use(&name));

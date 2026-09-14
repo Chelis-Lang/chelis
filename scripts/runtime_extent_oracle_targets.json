@@ -662,6 +662,92 @@
         "the_census_reader_finds_an_entry_guard_that_is_there"
       ],
       "note": "The entry-guard census positive control runs beside the split-kernel tuple and one-kernel runtime receipts. The existing example census covers the shipped corpus."
+    },
+    {
+      "id": "cli_signature_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1788_entry_obligations.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "every_unused_repeated_witness_is_checked",
+        "higher_order_entry_does_not_depend_on_shared_result_labels",
+        "higher_order_entry_is_after_arguments_and_before_following_effects",
+        "higher_order_invocation_accepts_agreeing_claim",
+        "higher_order_invocation_keeps_authored_entry_claim",
+        "inline_callback_entry_precedes_body_effects_on_every_invocation",
+        "mixed_helpers_accept_independent_binders",
+        "mixed_helpers_fail_in_signature_order",
+        "mixed_helpers_keep_unused_signature_witnesses",
+        "mixed_literal_and_binder_failures_follow_parameter_order",
+        "mixed_literal_checks_survive_when_the_repeated_binder_agrees",
+        "successive_higher_order_invocations_have_independent_signature_instances"
+      ],
+      "note": "Complete signature obligations across mixed helpers and higher-order/callback entry, with exact precedence, argument/body effects, unused witnesses and agreeing controls.",
+      "phase": "b"
+    },
+    {
+      "id": "ir_signature_entry_plan",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host/signature_entry.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "host::signature_entry::tests::"
+      },
+      "expected": [
+        "host::signature_entry::tests::independent_signatures_and_wildcards_create_no_equality",
+        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order"
+      ],
+      "phase": "b"
+    },
+    {
+      "id": "c_signature_entry_projection",
+      "package": "chelis-backend-c",
+      "kind": "lib",
+      "file": "crates/chelis-backend-c/src/host_emit/entry.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "host_emit::entry::tests::"
+      },
+      "expected": [
+        "host_emit::entry::tests::cloned_payload_keeps_each_calls_structural_identity",
+        "host_emit::entry::tests::dominating_signature_discharges_the_exact_helper_comparison",
+        "host_emit::entry::tests::every_helper_call_must_be_dominated_before_a_check_is_removed",
+        "host_emit::entry::tests::helper_projection_removes_only_discharged_checks_and_keeps_standalone_entry",
+        "host_emit::entry::tests::shadowing_a_witness_keeps_the_helper_check",
+        "host_emit::entry::tests::unused_canonical_witness_discharges_other_pairs_transitively"
+      ],
+      "phase": "b"
+    },
+    {
+      "id": "ir_signature_entry_ownership",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/ownership_lowering.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "signature_entry_requires_tensor_observations_and_preserves_borrows"
+      ],
+      "phase": "b"
+    },
+    {
+      "phase": "b",
+      "id": "cli_higher_order_existing_control",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1801_wildcard_absorption.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently"
+      ],
+      "note": "Retain the original apply4 witness identity while requiring the authored p/load entry failure; the original false-k/shrink disposition is no longer accepted."
     }
   ]
 }
