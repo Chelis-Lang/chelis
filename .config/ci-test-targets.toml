@@ -31,6 +31,25 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the completion oracle compares the reviewed phase-B baseline and required exit states"
 tracking_issue = "chelis#1277"
 
+# The runtime-representation gate executes the frozen inventory and mutations.
+[[path_rule]]
+prefix = "scripts/runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate checks the reviewed foundation and executes its frozen mutations"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase0_inventory.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate compares the live inventory with this reviewed foundation"
+tracking_issue = "chelis#893"
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"
