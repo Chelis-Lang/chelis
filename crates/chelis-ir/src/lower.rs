@@ -14525,15 +14525,14 @@ impl<'program> LowerCtx<'program> {
                     self.invocation_witnesses.push(checked);
                 }
             }
-            AxisSource::OpComputed { axis: computed, .. } => {
+            AxisSource::OpComputed { axis: computed, .. }
                 if crate::axis_sources::op_computed_axis_extent(
                     &self.dag.get(id).expect("producer").op,
                     computed,
                 )
-                .is_some()
-                {
-                    self.attach_result_claim(id, computed, required);
-                }
+                .is_some() =>
+            {
+                self.attach_result_claim(id, computed, required);
             }
             _ => {}
         }
