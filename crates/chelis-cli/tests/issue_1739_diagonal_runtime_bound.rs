@@ -53,6 +53,8 @@
 //! `executes` row is a DISPOSITION LOCK: green before and after, proving the
 //! guard fires only on disagreement.
 
+#[path = "../src/c_source_name.rs"]
+mod c_source_name;
 mod common;
 #[path = "common/unsupported_wording.rs"]
 mod unsupported_wording;
@@ -887,7 +889,41 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
 /// count. Requiring the load trap and entry diagnostic distinguishes these
 /// comparisons from declared-result claims, even when both compare literals.
 fn emitted_entry_guards(c_source: &str) -> Vec<(String, String)> {
-    let mut found = Vec::new();
+    emitted_entry_inventory(c_source)
+        .into_iter()
+        .flat_map(|(function, guards)| {
+            guards
+                .into_iter()
+                .map(move |guard| (function.clone(), guard.label.unwrap_or(guard.context)))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryGuardReceipt {
+    comparison: String,
+    context: String,
+    // Dim::Var preserves equality identity but the public checker record may
+    // lack its authored spelling. Never recover expected authority from C.
+    label: Option<String>,
+}
+
+type EntryInventory = std::collections::BTreeMap<String, Vec<EntryGuardReceipt>>;
+
+fn entry_inventories_match(expected: &[EntryGuardReceipt], actual: &[EntryGuardReceipt]) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            expected.comparison == actual.comparison
+                && expected.context == actual.context
+                && expected
+                    .label
+                    .as_ref()
+                    .is_none_or(|label| actual.label.as_ref() == Some(label))
+        })
+}
+
+fn emitted_entry_inventory(c_source: &str) -> EntryInventory {
+    let mut found = EntryInventory::new();
     for guard in emitted_shape_guard_blocks(c_source) {
         if guard.trap != "chelis_numeric_trap(\"numeric trap: domain in load at int64\");" {
             continue;
@@ -897,15 +933,181 @@ fn emitted_entry_guards(c_source: &str) -> Vec<(String, String)> {
             && claim.contains(" axis ")
             && claim.contains(" expected ")
         {
-            found.push((guard.function, format!("input {claim}")));
+            found
+                .entry(guard.function)
+                .or_default()
+                .push(EntryGuardReceipt {
+                    comparison: guard.condition.into(),
+                    context: format!("input {claim}"),
+                    label: None,
+                });
         } else if let Some(rest) = guard.diagnostic.strip_prefix("fprintf(stderr, \"extent `")
             && let Some((claim, detail)) = rest.split_once('`')
             && !detail.starts_with(": claimed = ")
+            && let Some(detail) = detail.strip_prefix(": ")
+            && let Some((context, _)) = detail.split_once("\\n")
         {
-            found.push((guard.function, claim.to_string()));
+            found
+                .entry(guard.function)
+                .or_default()
+                .push(EntryGuardReceipt {
+                    comparison: guard.condition.into(),
+                    context: context.to_string(),
+                    label: Some(claim.to_string()),
+                });
         }
     }
     found
+}
+
+fn census_checked_program(source: &str) -> chelis_types::CheckedProgram {
+    use chelis_compiler_api::pipeline::{
+        PipelineGoal, PipelineOutcome, PipelineRequest, run_source,
+    };
+    let outcome = run_source(PipelineRequest {
+        source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+        source,
+        entry: None,
+        goal: PipelineGoal::FullCheck,
+    })
+    .expect("the emitted example must pass the independent front-end check");
+    let PipelineOutcome::Checked(checked) = outcome else {
+        unreachable!("requested FullCheck")
+    };
+    checked.into_parts().2
+}
+
+/// Independent traversal of the checker contract, not the production entry
+/// plan or host IR. Inference supplies a contract only when none was authored.
+fn signature_entry_inventory(
+    checked: &chelis_types::CheckedProgram,
+    signature: &chelis_types::infer::FunctionSignatureInference,
+    c_parameters: &[String],
+) -> Vec<EntryGuardReceipt> {
+    use chelis_types::types::{Dim, Type};
+    let ty = signature
+        .authored_signature_type
+        .as_ref()
+        .unwrap_or(&signature.checked_signature);
+    let ty = checked.adt_registry().expand_aliases(ty);
+    let mut parameters = Vec::new();
+    let mut remainder = &ty;
+    while parameters.len() < signature.params.len() {
+        let Type::Fn(args, result) = remainder else {
+            panic!("missing function parameters for {}", signature.name)
+        };
+        parameters.extend(args);
+        remainder = result;
+    }
+    assert_eq!(parameters.len(), signature.params.len());
+    assert_eq!(parameters.len(), c_parameters.len());
+    let mut first = std::collections::HashMap::<Dim, (String, String)>::new();
+    let mut guards = Vec::new();
+    for ((parameter, ty), c_name) in signature.params.iter().zip(parameters).zip(c_parameters) {
+        let ty = match ty {
+            Type::Ref(inner) => inner.as_ref(),
+            ty => ty,
+        };
+        let Type::Tensor(dimensions, _) = ty else {
+            continue;
+        };
+        for (axis, dimension) in dimensions.iter().enumerate() {
+            let observed = format!("chelis_tensor_shape({c_name}, {axis})");
+            let witness = format!("{} axis {axis} = %lld", parameter.name);
+            match dimension {
+                Dim::Lit(required) => guards.push(EntryGuardReceipt {
+                    comparison: format!("if ({observed} != {required}) {{"),
+                    context: format!("input `{}` axis {axis} expected {required}", parameter.name),
+                    label: None,
+                }),
+                Dim::Name(name) if name == "*" => {}
+                Dim::Name(_) | Dim::Var(_) => {
+                    if let Some((canonical, canonical_witness)) = first.get(dimension) {
+                        guards.push(EntryGuardReceipt {
+                            comparison: format!("if ({observed} != {canonical}) {{"),
+                            context: format!("{canonical_witness}, {witness}"),
+                            label: match dimension {
+                                Dim::Name(name) => Some(name.clone()),
+                                _ => None,
+                            },
+                        });
+                    } else {
+                        first.insert(dimension.clone(), (observed, witness));
+                    }
+                }
+                Dim::Wildcard | Dim::Rank(_) => {}
+            }
+        }
+    }
+    guards
+}
+
+/// Enumerate owned definitions independently of whether a guard was found.
+/// This makes deleting every guard from one function a comparison failure.
+fn assert_signature_entry_inventory(stem: &str, source: &str, emitted: &str) {
+    let checked = census_checked_program(source);
+    let mut actual = emitted_entry_inventory(emitted);
+    let c_name = c_source_name::CSourceName::from_path(std::path::Path::new(&format!("{stem}.ch")));
+    for line in emitted
+        .lines()
+        .filter(|line| line.trim_end().ends_with('{'))
+    {
+        let Some((head, parameters)) = line.split_once("__chelis_owned_body(") else {
+            continue;
+        };
+        let function = head
+            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .expect("function name");
+        let source_name = if function == format!("{}__main", c_name.symbol()) {
+            "main"
+        } else {
+            function
+        };
+        let signatures = &checked.signature_inference().functions;
+        let signature = signatures
+            .get(source_name)
+            .or_else(|| {
+                source_name
+                    .strip_prefix("chelis_user__")
+                    .and_then(|name| signatures.get(name))
+            })
+            .unwrap_or_else(|| {
+                panic!("{stem}: emitted owned function {function} has no checked signature")
+            });
+        // Only C binding spelling comes from the header. Types, dimensions,
+        // declaration order and source labels come from the checked program.
+        let tokens: Vec<_> = parameters
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .collect();
+        let c_parameters = signature
+            .params
+            .iter()
+            .map(|param| {
+                let escaped = format!("chelis_user__{}", param.name);
+                if tokens.contains(&escaped.as_str()) {
+                    escaped
+                } else {
+                    assert!(
+                        tokens.contains(&param.name.as_str()),
+                        "{stem}: missing C parameter {}",
+                        param.name
+                    );
+                    param.name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = signature_entry_inventory(&checked, signature, &c_parameters);
+        let actual = actual.remove(function).unwrap_or_default();
+        assert!(
+            entry_inventories_match(&expected, &actual),
+            "{stem}: ordered signature entry for {function}: expected {expected:?}, actual {actual:?}"
+        );
+    }
+    assert!(
+        actual.is_empty(),
+        "{stem}: entry guards outside checked owned functions: {actual:?}"
+    );
 }
 
 /// POSITIVE CONTROL for the entry-guard reader. Without it, "no example gains
@@ -990,6 +1192,99 @@ chelis_tensor *d__chelis_owned_body(chelis_tensor *x, chelis_tensor *y) {
 "#;
     assert!(emitted_guards(source).is_empty());
     assert!(emitted_entry_guards(source).is_empty());
+}
+
+#[test]
+fn the_census_signature_oracle_preserves_aliases_and_independent_scopes() {
+    let source = "type Row = tensor[2, f32]\n\
+        def d(x: Row, y: tensor[seq, f32], z: tensor[seq, f32]) -> (Row, tensor[seq, f32], tensor[seq, f32]) = (x, y, z)\n\
+        def partial(x: Row, y: tensor[n, f32], z: tensor[n, f32]) = (x, y, z)\n\
+        def independent(x: tensor[n, f32], y: tensor[k, f32]) = (x, y)\n\
+        def inferred(x) = x\n";
+    let checked = census_checked_program(source);
+    let functions = &checked.signature_inference().functions;
+    let d = &functions["d"];
+    assert!(d.authored_signature_type.is_some());
+    assert_eq!(
+        signature_entry_inventory(&checked, d, &["x".into(), "y".into(), "z".into()]),
+        vec![
+            EntryGuardReceipt {
+                comparison: "if (chelis_tensor_shape(x, 0) != 2) {".into(),
+                context: "input `x` axis 0 expected 2".into(),
+                label: None,
+            },
+            EntryGuardReceipt {
+                comparison: "if (chelis_tensor_shape(z, 0) != chelis_tensor_shape(y, 0)) {".into(),
+                context: "y axis 0 = %lld, z axis 0 = %lld".into(),
+                label: Some("seq".into()),
+            },
+        ]
+    );
+    let partial = signature_entry_inventory(
+        &checked,
+        &functions["partial"],
+        &["x".into(), "y".into(), "z".into()],
+    );
+    let complete = signature_entry_inventory(&checked, d, &["x".into(), "y".into(), "z".into()]);
+    assert_eq!(partial.len(), 2);
+    assert!(partial[1].label.is_none());
+    assert!(entry_inventories_match(&partial, &complete));
+    let mut wrong_witness = complete.clone();
+    wrong_witness[1].context = "x axis 0 = %lld, z axis 0 = %lld".into();
+    assert!(!entry_inventories_match(&partial, &wrong_witness));
+    let mut wrong_label = complete.clone();
+    wrong_label[1].label = Some("wrong".into());
+    assert!(!entry_inventories_match(&complete, &wrong_label));
+    assert!(
+        signature_entry_inventory(
+            &checked,
+            &functions["independent"],
+            &["x".into(), "y".into()]
+        )
+        .is_empty()
+    );
+    assert!(functions["inferred"].authored_signature_type.is_none());
+    assert!(signature_entry_inventory(&checked, &functions["inferred"], &["x".into()]).is_empty());
+}
+
+#[test]
+fn the_census_signature_oracle_rejects_missing_duplicate_reordered_and_wrong_axis_guards() {
+    let source = "def d(x: tensor[2, n, f32], y: tensor[n, f32]) = (x, y)\n";
+    let checked = census_checked_program(source);
+    let expected = signature_entry_inventory(
+        &checked,
+        &checked.signature_inference().functions["d"],
+        &["x".into(), "y".into()],
+    );
+    let literal = r#"    if (chelis_tensor_shape(x, 0) != 2) {
+        fprintf(stderr, "input `x` axis 0 expected 2, got %lld\n", (long long)chelis_tensor_shape(x, 0));
+        chelis_numeric_trap("numeric trap: domain in load at int64");
+    }
+"#;
+    let named = r#"    if (chelis_tensor_shape(y, 0) != chelis_tensor_shape(x, 1)) {
+        fprintf(stderr, "extent `n`: x axis 1 = %lld, y axis 0 = %lld\n", (long long)chelis_tensor_shape(x, 1), (long long)chelis_tensor_shape(y, 0));
+        chelis_numeric_trap("numeric trap: domain in load at int64");
+    }
+"#;
+    let read = |body: String| {
+        let c =
+            format!("void d__chelis_owned_body(chelis_tensor *x, chelis_tensor *y) {{\n{body}}}\n");
+        emitted_entry_inventory(&c).remove("d").unwrap_or_default()
+    };
+    assert!(entry_inventories_match(
+        &expected,
+        &read(format!("{literal}{named}"))
+    ));
+    for mutated in [
+        named.to_string(),
+        format!("{literal}{literal}{named}"),
+        format!("{named}{literal}"),
+        format!("{literal}{named}")
+            .replace("chelis_tensor_shape(x, 1)", "chelis_tensor_shape(x, 0)"),
+        format!("{literal}{named}").replace("x axis 1 = %lld", "x axis 0 = %lld"),
+    ] {
+        assert!(!entry_inventories_match(&expected, &read(mutated)));
+    }
 }
 
 /// Every executable Phase 0 example, sorted: the `.ch` files directly under
@@ -1097,7 +1392,7 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 /// declared-result guard is collected. The guard fires only where a host-lane
 /// function's returned value resolves to a named primitive AND its declared
 /// tensor result carries a literal extent, which no shipped example does today,
-/// so this change adds no guard to the corpus and surfaces no pre-existing
+/// so this change adds no result guard to the corpus and surfaces no pre-existing
 /// declaration divergence. chelis#1771 widened the resolution through block
 /// tails, bindings and callees and this census stayed empty, which is the
 /// measured blast radius of that widening on the shipped corpus.
@@ -1111,9 +1406,14 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 /// `examples/illustrative/` is excluded by the repository's example-corpus
 /// policy: it is deliberately not on the executable Phase 0 path.
 ///
-/// If a future example gains a guard this test goes red with its name, which is
+/// If a future example gains a result guard this test goes red with its name, which is
 /// the point. Add the row here after checking, on both lanes, that the
 /// declaration the guard now enforces is the one the body really produces.
+/// Entry guards have a different contract: compare their emitted conditions
+/// and labels with an independent parameter-axis traversal of checked source
+/// signatures, including functions where the reader finds no guards. Existing
+/// example parity supplies execution receipts; the signature oracle's mutation
+/// controls make missing, duplicate, reordered and wrong-axis guards fail.
 ///
 /// # Coverage
 ///
@@ -1170,16 +1470,11 @@ fn no_shipped_example_gains_a_host_lane_guard() {
                 "{stem}: {function} guards {target} axis {axis} claiming {required}"
             ));
         }
-        // chelis#1788's entry guard is the OTHER thing this change can add to
-        // a shipped example, and it is counted here rather than in a second
-        // enumeration of the same directory: a roster compared against the
-        // directory it was read from measures nothing, so both readers run
-        // over the one traversal that the refusal witness below validates.
-        for (function, claim) in emitted_entry_guards(&source) {
-            census.push(format!(
-                "{stem}: {function} checks the binder {claim} at entry"
-            ));
-        }
+        assert_signature_entry_inventory(
+            stem,
+            &fs::read_to_string(example).expect("read example"),
+            &source,
+        );
     }
 
     // THE ENUMERATION WITNESS. Both sides are sorted, so this asks whether
@@ -1200,7 +1495,7 @@ fn no_shipped_example_gains_a_host_lane_guard() {
     assert_eq!(
         census,
         Vec::<String>::new(),
-        "these shipped defs gained a host-lane guard and each one needs a \
+        "these shipped defs gained a host-lane result guard and each one needs a \
          both-lane check before it lands"
     );
 }
