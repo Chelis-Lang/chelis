@@ -1023,6 +1023,84 @@ rigidity exception does not satisfy it.
   wrappers are wrapper constructs in the canary's sense, so each adds its
   positive and negative row in the same change set.
 
+#### General operation-admission contracts
+
+The language decision is owned by
+[`spec/04-type-system.md` §3.1.5, [04-INF-9]](../04-type-system.md#315-explicit-generic-operation-contracts),
+with dtype-family syntax and transport in §5.9. It is a general checking
+contract, not a runtime-extents exception. PP1's local monomorphic replay
+remains useful for inference holes; it does not authorize publishing inferred
+generic admission requirements.
+
+The choice favors a contract whose admitted inputs can be read independently
+of its implementation. Inferring requirements for an omitted signature would
+accept more concise generic wrappers, but would make editing a body change
+its callable contract and give annotated and unannotated definitions different
+admission policies. The selected rule keeps ordinary local inference,
+unconstrained polymorphism, and transport of already-checked values without
+that second policy.
+
+This decision revised the inferred-collection exception proposed in
+[PR #2038](https://github.com/Chelis-Lang/chelis/pull/2038) for
+[#1654](https://github.com/Chelis-Lang/chelis/issues/1654). Its dtype-family
+half was implemented by
+[PR #2071](https://github.com/Chelis-Lang/chelis/pull/2071) for
+[#1942](https://github.com/Chelis-Lang/chelis/issues/1942), including omitted
+signatures and escaping anonymous functions rather than only authored named
+dtype binders. An explicit `List[a]` parameter already supplies a collection
+contract for a generic list wrapper. Syntax for one authored generic
+abstraction spanning several collection constructors is not decided here:
+that needs a separate normative decision, not an inferred-contract exception
+or an invented bound spelling.
+
+Implementation follows the declaration contract:
+
+1. Preserve authored binders and their declared restrictions as givens before
+   checking the body. Each operation checks its requirements against those
+   givens during ordinary checking; failure reports at the declaration.
+2. Keep genuinely local inference obligations monomorphic and replay the
+   ordinary operation checker when their operands bind. At the enclosing
+   declaration boundary, reject unresolved admission obligations rather than
+   generalizing them into new qualified schemes. Apply this check to escaping
+   anonymous functions as well as named definitions.
+3. Transport checked restrictions through the shared scheme-instantiation,
+   unification, generalization, function-value and checked-context paths.
+   Distinguish transporting a builtin or alias from synthesizing a new
+   contract for a wrapper. Unary dtype-family membership and collection
+   operand/result relations need not use identical payload representations.
+4. Retire call-site callee-body walking as an admission validator. Direct,
+   indirect, and transitive calls consume the same checked function contract;
+   none depends on the callee body being inspectable.
+
+Serialized checked contexts preserve every checked restriction they support.
+#2071 coordinated the `TypeEnv` and CHB format identities, payloads and
+regenerated artifacts for its delivered dtype-family layout. #2038 owns the
+collection-constraint payload and corresponding round trips. Any later layout
+change must allocate its own coordinated format identities and regenerate the
+artifacts; reusing one version for different layouts is not integration.
+
+The acceptance matrix below is the combined permanent coverage obligation.
+#2071 delivered the dtype-family and shared declaration-boundary rows through
+the ordinary checker and public checking entry points. The collection-specific
+rows remain with #2038/#1654. None establishes a runtime-extent execution
+claim.
+
+| Contract boundary | Accepted control | Required rejection |
+|---|---|---|
+| Authored dtype binder | Float-bound wrapper around a float-only operation | Unbounded or Numeric-bound wrapper, even with only float callers |
+| Omitted signature | Unconstrained identity | Newly inferred constrained generic `def size(x) = len(x)` |
+| Collection constructor | `List[a]` length wrapper at independent element types | Arbitrary `a -> int64` length signature, or scalar argument to the list wrapper |
+| Local inference | Unannotated lambda bound to a valid concrete operand within its enclosing declaration | Invalid first binding, or unresolved obligation at that boundary |
+| Function values | Alias or aggregate field retains an existing checked contract | Newly authored generic wrapper or escaping lambda needs undeclared requirements |
+| Higher-order and transitive calls | Valid instantiation through a checked function parameter or wrapper chain | Inadmissible instantiation on each same route without a callee-body lookup |
+| Recursion | Declared requirements preserved under permitted recursive instantiation | Missing requirements in a recursive member; incompatible family intersection |
+| Checked contexts | Both restriction kinds survive supported round trips | Unsupported format rejected; restored function cannot admit an invalid operand |
+
+Runtime-extents delivery retains its exact eval/C witnesses and class oracle;
+those receipts supplement, rather than replace, declaration and contract-
+transport tests. The delivered policy completes no runtime-extents phase or
+implementation issue by itself.
+
 ### PP2. The registered-builtin arm tripwire ([#1147])
 
 **Opened 2026-08-04.** `scatter_elements` shipped as a registered builtin -

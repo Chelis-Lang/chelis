@@ -374,7 +374,7 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
 | specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
 | grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar selections use the existing DAG cotangent reconstruction route under the same contract (#1934). The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
-| vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, the same edge the grad row records and under the same tensor-typed single-`wrt` bound (chelis#1821) |
+| vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, remaps the complete ordered entry-witness set and every rendered dimension origin through the batched node map, and fails before publishing an artifact when any mapped root, witness or dimension declaration is unresolved (#1932) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
 
 This table is an implementation acceptance obligation. The preparation
@@ -382,6 +382,36 @@ fixtures below cover public call/root witnesses; they do not already prove
 all rebuild/import rows. The existing B2b-0 receipt proves seven named IR
 passes on transforming fixtures, not lowering-side `splice_dag`, imports or
 the new contract carrier. B2b-1 extends those tests before changing the carrier.
+
+##### Mapped gradient entry witnesses and artifact closure (#1932)
+
+Ordinary `grad` closure does not discharge the mapped path. Before
+differentiation, `vmap(grad(f))` lowers the authored activation signature and
+forms its complete ordered entry-witness set exactly as the corresponding
+unmapped call does. Vectorization remaps each witness input, claim,
+requirement, shape dependency and rendered dimension origin through the
+`vectorize_axis0_with_node_map` result. Cotangent packing and the final
+`splice_dag` retain those remapped dependencies even when the cotangent is
+zero or is the only result root.
+
+Root correspondence is necessary but not sufficient. After the splice, the
+shared verifier checks that every live claim has its witnesses and that every
+dimension name a lane can render has one live declaration or producer.
+Failure is a fatal typed lowering result before Eval starts or C artifacts are
+reported successful. The host fallback may not absorb that failure, Eval may
+not translate it into an unstructured "no roots" message, and
+`build --target c` may not exit zero after writing a source file that refers
+to an undeclared temporary.
+
+The #1932 exit matrix contains the exact named-entry-witness reproducer and an
+agreeing control, each on Eval and compiled C. It also covers a zero cotangent,
+a nonzero cotangent, a non-identity node map, and a reordered or aliased
+callable path. Success means exact gradients or the activation's exact
+[04-NUM-9] trap; a supported-fragment refusal must be the same typed nonzero
+lowering failure on both lanes and produce no purportedly successful C
+artifact. The C receipt compiles, links and runs every successful build.
+Deleting any witness remap, mapped shape dependency, root correspondence or
+dimension-origin declaration must make a named negative control fail.
 
 #### C2.5 Guards consume the observed quantity
 
@@ -407,9 +437,10 @@ carrier and the realized extent: the extent the operation is about to compute,
 expressed from that operation's own bounds and evaluated before it runs. The
 derivation owns which owners supply one, and that one answer also gates
 lowering's declared-result stamp, so a claim cannot be written onto an axis
-with no site to check it. `shrink` and `pad` with non-zero padding supply one;
-`stride` with a non-unit step does not, and is unguarded rather than newly
-silent.
+with no site to check it. `shrink` and `pad` with non-zero padding supply one.
+A non-unit `stride` supplies `ComputedAxisExtent::StrideSpan` after the
+independent stride-step precondition below has established a positive step
+(#1907/#1931).
 
 Two further rules bound what the stamp may write, and both are about one
 origin carrying one claim. A resolved op-computed claim is its own canonical
@@ -438,6 +469,76 @@ source is `size`. #1619's symbolic-size and folded-shape-size rows must prove
 that these cannot be swapped. `insert` has no unit-operand precondition.
 Multiple obligations on one axis survive independently; coalesce a duplicate
 representation of the same obligation, not distinct trapping operations.
+
+##### Stride preconditions and result extents (#1907 and #1931)
+
+A stride step is read as its signed `int64` carrier and validated before any
+conversion to an index type, ceil-division, allocation or element access. A
+runtime step less than or equal to zero executes one stride
+operation-precondition guard and raises `Domain` with the exact
+`numeric trap: domain in stride at int64` line and its stride-step context.
+Eval and C consume the same observation and neither substitutes step one,
+returns the input extent, or reaches a result-claim or generic movement-target
+check first.
+
+Only a validated positive step reaches
+`ComputedAxisExtent::StrideSpan`. That site reads the realized operand axis and
+the same step carrier, computes `ceil(operand_extent / step)` without an
+overflowing `extent + step - 1` intermediate, and is available before the
+stride executes. Step one remains the identity-only pass-through form; every
+other positive literal or runtime step introduces a fresh extent whose
+declared literal or named claims are preserved and checked at the stride.
+This ordering is the semantic interlock between #1907's operation
+precondition and #1931's result claim: an invalid step wins, while a valid step
+whose span disagrees with its claim reports the claim rather than the
+allocation backstop.
+
+The combined matrix crosses literal and runtime step carriers with step one,
+positive non-unit, zero and negative values; agreeing, disagreeing and free
+result extents; and one- and multi-axis tensors. Each legal row executes exact
+values on Eval and compiled C. Each invalid row checks the exact first failure,
+source/axis/value context and exit status. The final runtime-extent corpus
+keeps independent #1907 and #1931 closure rows even when one implementation
+change delivers both.
+
+##### Non-canonical sources and local ascriptions (#1948)
+
+A same-shape operation cannot make a result claim depend on whichever
+rank-matching operand `shape_preserving` happens to encounter first.
+`op_computed_axis_origin` enumerates all positive-rank, rank-matching operands
+in source order, follows each pass-through chain, and selects the first
+claim-capable introducing origin. A non-canonical operand may supply that
+origin only when the same-shape operation retains its runtime
+operand-agreement obligation, which proves the selected origin and canonical
+output extent coincide before the result is consumed. Rank-0 scalar operands
+remain outside this relation. If no admissible origin exists, lowering retains
+an unresolved claim and fails loudly; it never drops the claim.
+
+A local tensor ascription is an extent claim under C2.3 even though it is not a
+function result. Lowering records a `LocalAscriptionClaim` at the annotated
+binding, attaches it to the initializer's producing operation before aliases
+or inlining can erase that relationship, and retains it through the same
+rebuild and liveness paths as result claims. A graph-fixed disagreement is the
+spec/04 §4.7 pre-execution rejection. A runtime-dependent disagreement is a
+guard at the initializer's introducing operation. Physical result metadata,
+the C verifier's target-shape assertion and a later result declaration are not
+substitutes for that obligation.
+
+`LocalAscriptionClaim` is an additive exact site role under C2.3. Any checked
+artifact or WireDag that carries it must allocate a versioned field, preserve
+it exactly and reject a missing or unknown representation; a default-empty
+decode is forbidden. An internal-only representation must reject publication
+at a boundary that cannot encode the role rather than silently erase it.
+
+The #1948 matrix includes the exact operand-1 witness with equal runtime
+operand shapes, its reversed-operand twin, agreeing controls, and an
+operand-shape disagreement proving the elementwise guard remains live. Local
+ascription rows cover direct, aliased and inlined bindings with agreeing,
+runtime-disagreeing and statically refuted extents. Check disposition, Eval
+and compiled C must agree with the numbered-spec verdict; no row may exit zero
+with an undeclared extent or terminate through an internal assertion. The two
+subclasses keep separate receipt identities so repairing one cannot close the
+other.
 
 ##### Host declared-result guards (#1771)
 
@@ -1440,11 +1541,14 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` and for `pad` at the OUTERMOST activation (exported def, value binding, inlined root), and for a declared axis that passes an op-computed extent through; `stride` remains an unadmitted owner. A helper whose NAMED result is consumed inside another def's body is guarded through its resolved binder; the spellings that bind the enclosing result to a rigid dim parameter are checker rejections under section 4.4.1. A claim the owner's own rule statically REFUTES is not stamped and is not executed either: B2c REJECTS it when the activation is lowered, with one fatal diagnostic both host lanes render byte-identically at exit 1, which is section 4.7's "A violation proven from literals is a type error" reaching the case the checker cannot see. The checker keeps that verdict wherever the extent IS visible to it, which a literal parameter extent makes it (`claim.literal.kernel_entry.checker`); what it cannot see is an extent that becomes literal only because a call supplied concrete arguments, and `tensor_concat_result_type`'s `Dim::Wildcard` under section 4.5.4 rule 3 is why `concat`'s DAG path is the sharpest instance. #526's `n + n` checker-tier repair is unchanged by this and remains the right fix for the type it would give. Three classes stay outside the rule and are residual rather than repaired: a local `let` annotation, an op-computed origin reachable only through operand 1 (the IR verifier remains the C lane's backstop there and eval has none), and `chelis check` still scoring these programs 1.0, which is section 3.2's application typing and belongs to #526. An out-of-domain span on the only claim-failing axis of a `shrink` is not reported as a claim failure: the local guard declines a span whose end runs past its operand, so both lanes report spec/05 §2.4.1's overshoot as the runtime's `Domain: shrink bounds outside input extent` line followed by [04-NUM-9]'s trap line, under a disagreeing literal claim, an agreeing one and a free dim alike, wherever the evaluator raises that diagnostic directly (#1797). Two pre-existing divergence classes remain outside that statement and are not closed by it: a SECOND axis whose in-domain span disagrees with its own claim is still reported as that claim on eval while C reports the overshoot, and a host transform such as `grad` prefixes its own wrapper to the eval text. A span that is empty as well as out of domain is still refused first by #616's operation-level admission rule and renders per lane under #1795 |
+| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` and for `pad` at the OUTERMOST activation (exported def, value binding, inlined root), and for a declared axis that passes an op-computed extent through. A helper whose NAMED result is consumed inside another def's body is guarded through its resolved binder; the spellings that bind the enclosing result to a rigid dim parameter are checker rejections under section 4.4.1. A claim the owner's own rule statically REFUTES is not stamped and is not executed either: B2c REJECTS it when the activation is lowered, with one fatal diagnostic both host lanes render byte-identically at exit 1, which is section 4.7's "A violation proven from literals is a type error" reaching the case the checker cannot see. The checker keeps that verdict wherever the extent IS visible to it, which a literal parameter extent makes it (`claim.literal.kernel_entry.checker`); what it cannot see is an extent that becomes literal only because a call supplied concrete arguments, and `tensor_concat_result_type`'s `Dim::Wildcard` under section 4.5.4 rule 3 is why `concat`'s DAG path is the sharpest instance. #526's `n + n` checker-tier repair is unchanged by this and remains the right fix for the type it would give. Non-unit stride delivery is separated into #1907/#1931, and the local-ascription and non-canonical operand-source classes are separated into #1948 below; none is evidence that B2b-0b already closed them. An out-of-domain span on the only claim-failing axis of a `shrink` is not reported as a claim failure: the local guard declines a span whose end runs past its operand, so both lanes report spec/05 §2.4.1's overshoot as the runtime's `Domain: shrink bounds outside input extent` line followed by [04-NUM-9]'s trap line, under a disagreeing literal claim, an agreeing one and a free dim alike, wherever the evaluator raises that diagnostic directly (#1797). Two pre-existing divergence classes remain outside that statement and are not closed by it: a SECOND axis whose in-domain span disagrees with its own claim is still reported as that claim on eval while C reports the overshoot, and a host transform such as `grad` prefixes its own wrapper to the eval text. A span that is empty as well as out of domain is still refused first by #616's operation-level admission rule and renders per lane under #1795 |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered, and a root's restated literal claim defers to them when a graph-fixed extent entails it, never when an ABI parameter's axis does, decided by `resolve_axis_extent`'s origin rather than by the neighbouring operation (#1782) |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is sized from the extent its callee's instantiation absorbed (#1801) |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source. No provenance restriction remains: #1266/#569's field and pipe spellings and #1379's arithmetic sizes are all admitted, so what is left of this row's acceptance half is deleting the walk itself. `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | DELIVERED. Every recorded phase-A and phase-B row has a registered receipt that executes and passes; `--phase b` demands PASS with no `--allow-shortfall`; the withdrawn phase `c` is out of `SLICE_PHASES`, so `--phase final` reaches its row report, passes on the host lanes, and is the nightly `runtime-extent-oracle` job's one step; and `claimed_extent_contract` runs as an ordinary test over all 55 cells with its preparation baseline retired. It moved no row, met no cell, and closes none of the issues listed below |
+| #1907/#1931 stride closure | typed `Stride.strides[*]` carriers and C2.5's operation/result ordering | validate every runtime step before span computation; add `ComputedAxisExtent::StrideSpan` for positive non-unit steps; preserve independent operation-precondition and result-claim failures; replace the old disposition lock with exact positive/negative Eval/C compile-run receipts and final-corpus rows |
+| #1948 non-canonical/local claims | C2.3's independent claim contract and C2.5's introducing-site rule | derive a claim-capable origin across every same-shape operand rather than only operand 0; represent local tensor ascriptions as explicit obligations; retain both through inlining/rebuilds; prove the two subclass matrices independently on check, Eval and compiled C |
+| #1932 mapped-gradient artifact closure | C2.4's authored witnesses, batched node map and fail-loud artifact boundary | remap and retain the complete entry-witness/dimension-origin set through `vmap(grad(...))`, cotangent packing and splice; reject unresolved roots or rendered identifiers before success; execute the exact witness and controls on Eval and compiled C, including compile/link/run and mutation negatives |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 
 B2b-0b and B2b-1 can be developed as separate changes, but their shared local
