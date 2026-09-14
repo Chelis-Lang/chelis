@@ -301,6 +301,29 @@ to the oracle, while the other five edited the covered region itself. The
 derived report must retain the trigger that puts those obligations in front of
 the author and reviewer.
 
+The first Phase 4B trial runs `scripts/phase4b_change_report.py` in the required
+Docs job and publishes `phase4b-contract-changes.json`. It compares committed
+snapshots at a unique merge base. On a pull request, it validates the synthetic
+merge against the event head and uses the merge's first parent; a push supplies
+its before commit. Invalid or missing comparison evidence fails closed.
+
+The report discovers numbered atom definitions in chapters 04 and 05, reads
+both revisions' literal region/protection declarations, and names additions,
+removals, changed text, changed protection, and moved region boundaries. Atom
+content includes its declared normative registry and the builtin identity rows
+that name it. Registry prose shared by those rows contributes to each affected
+owner. A changed contract file is also named when its edit lies outside an atom
+or region. Source locations and comparison commits make each cue reviewable.
+The existing freeze normalization applies to atom/region text; file cues retain
+byte-level changes. Missing declared files, required atoms, registry owners, or
+unambiguous region markers are errors. Historical oracle code is never executed.
+
+This trial retains all digests, literal anchors, file acknowledgements, semantic
+registrations, and the authoritative Phase 4B oracle. It does not yet introduce
+atom/region acknowledgements or authorize retirement. Every current frozen atom
+and region has a parallel mutation control that checks both the retained guard's
+rejection and the report's named identity.
+
 ### Closed-corpus and count ratchets
 
 - Keep `FROZEN_PHASE_A_DIGEST` while Phase A remains closed. Its rare moves
