@@ -1676,11 +1676,15 @@ def execute_shard(
                     + ".xml"
                 )
                 shutil.copyfile(produced_junit, target_junit)
-                suite_documents.append(target_junit)
                 try:
                     executed_tests.extend(_junit_tests(target_junit, identity))
                 except (ValueError, ET.ParseError) as error:
                     failures.append(f"{canonical}: malformed JUnit: {error}")
+                else:
+                    # A deadline may interrupt nextest's XML write. Keep that
+                    # failure, but merge only validated suites so receipt
+                    # finalization still preserves earlier completed evidence.
+                    suite_documents.append(target_junit)
             else:
                 failures.append(f"{canonical}: test run produced no JUnit")
 

@@ -636,8 +636,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
             owned.Identity("p", f"z{n}") for n in range(100)
             if owned.shard_for(owned.Identity("p", f"z{n}")) == shard
         )
-        for expired_call in (0, 1, 2, 3, None):
-            with self.subTest(expired_call=expired_call), tempfile.TemporaryDirectory() as tmp:
+        for expired_call, truncated_junit in (
+            (0, False), (1, False), (2, False), (3, False),
+            (4, False), (4, True), (None, False),
+        ):
+            with self.subTest(expired_call=expired_call, truncated_junit=truncated_junit), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "target"
                 plan = self._plan(lane="package-expansion")
@@ -651,6 +654,10 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     index = len(calls)
                     calls.append((command, kwargs))
                     if index == expired_call:
+                        if truncated_junit:
+                            junit = target / "nextest/ci-full/junit.xml"
+                            junit.parent.mkdir(parents=True, exist_ok=True)
+                            junit.write_text('<testsuite><testcase name="fast_case"/>')
                         raise subprocess.TimeoutExpired(
                             command, kwargs.get("timeout", 0),
                             output=b"partial stdout", stderr=b"partial stderr",
@@ -691,9 +698,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     self.assertEqual(commands[-1]["stderr"], "partial stderr")
                     summary = owned.summarize_package_expansion(plan, [receipt])
                     self.assertFalse(summary["observed_success"])
-                if expired_call == 3:
-                    self.assertEqual(receipt["executed_targets"], [identity.canonical])
+                if expired_call in (3, 4):
                     self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
+                if truncated_junit:
+                    self.assertIn("malformed JUnit", " ".join(receipt["failures"]))
+                    self.assertEqual(owned._junit_tests(root / "receipt/junit.xml", identity), ["p::smoke::fast_case"])
 
     def test_budget_is_shared_and_no_command_starts_after_it_expires(self) -> None:
         plan = self._plan(lane="package-expansion")
