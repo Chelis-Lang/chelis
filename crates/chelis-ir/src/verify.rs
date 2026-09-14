@@ -614,12 +614,39 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         if let RiscOp::ExtentWitness {
+            site,
             axis: crate::dag::RtAxis::Lit(axis),
             requirements,
             claims,
             ..
         } = &node.op
         {
+            if let crate::dag::ExtentWitnessSite::ResultClaim {
+                claim,
+                axis: crate::dag::RtAxis::Lit(result_axis),
+            } = site
+                && (claim.is_empty()
+                    || *result_axis < 0
+                    || !requirements.is_empty()
+                    || !claims.is_empty())
+            {
+                errors.push(format!("result claim witness at node {} requires a nonempty label, normalized axis, and no entry obligations", node.id.0));
+            }
+            if matches!(site, crate::dag::ExtentWitnessSite::ResultClaim { .. }) {
+                let declared = node
+                    .shape_deps
+                    .as_slice()
+                    .first()
+                    .and_then(|required| dag.get(*required));
+                let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
+                    matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
+                        && declared.inputs.first() == node.inputs.first()
+                        && declared.id.0 < node.id.0
+                });
+                if !same_observation {
+                    errors.push(format!("result claim witness at node {} requires its exact earlier declaring observation", node.id.0));
+                }
+            }
             // chelis#1374: a named claim's diagnostic reads the DECLARING
             // parameter and axis off the requirement's own node, so the edge
             // must be a witness and not merely an int64 scalar. The edge is
@@ -670,6 +697,32 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     "extent witness at node {} requires nonnegative int64 literals",
                     node.id.0
                 ));
+            }
+        }
+
+        for required in &node.shape_deps {
+            let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::ResultClaim {
+                                axis: crate::dag::RtAxis::Lit(axis),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            else {
+                continue;
+            };
+            let supported = usize::try_from(*axis).ok().is_some_and(|axis| {
+                axis < node.output_type.dims.len()
+                    && (crate::axis_sources::expand_or_reshape_carrier(&node.op, axis).is_some()
+                        || crate::axis_sources::op_computed_axis_extent(&node.op, axis).is_some())
+            });
+            if required.0 >= node.id.0 || !supported {
+                errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
             }
         }
 

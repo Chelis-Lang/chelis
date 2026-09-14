@@ -2490,7 +2490,7 @@ where
                     // by the loop at the foot of the body.
                     crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,
                 };
-                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
 
@@ -2556,9 +2556,11 @@ where
                 let operation = match site {
                     crate::dag::ExtentWitnessSite::Caller => "load",
                     crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
                 };
                 let parameter = match site {
                     crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
                     crate::dag::ExtentWitnessSite::LocalExpand => {
                         format!("node {}", node.inputs[0].0)
                     }
@@ -3218,7 +3220,7 @@ where
                 let Some(&observed) = value.shape.get(*axis) else {
                     continue;
                 };
-                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
         values.insert(node.id, value);
@@ -3260,9 +3262,16 @@ fn local_guard_verdict(
     claim: &crate::axis_sources::LocalGuardClaim,
     observed: usize,
     runtime_dims: &mut UnordMap<String, usize>,
+    values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<(), String> {
     let claimed = match &claim.canonical {
         crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
+        crate::axis_sources::CanonicalExtent::Witness(witness) => values
+            .get(witness)
+            .filter(|value| value.shape.is_empty() && value.len() == 1)
+            .and_then(|value| value.storage().scalar_at(0).as_i64_exact())
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("missing or invalid declaring extent witness {}", witness.0))?,
         crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
             Some(value) => *value,
             None => {

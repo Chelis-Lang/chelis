@@ -451,11 +451,19 @@ pub enum FusedInput {
 
 /// The semantic diagnostic owner of an extent observation. This is separate
 /// from the parameter's display name and from the witness's node identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtentWitnessSite {
     Caller,
     LocalExpand,
+    /// A declaring extent retained for a result obligation. The witness's
+    /// value is the required extent; its node identity distinguishes calls.
+    /// A producer's shape dependency on this witness owns the comparison at
+    /// this output axis. The label is diagnostic, never a dimension binding.
+    ResultClaim {
+        claim: String,
+        axis: RtAxis,
+    },
 }
 
 /// One dimension-binder equality a witness owes against ANOTHER witness.

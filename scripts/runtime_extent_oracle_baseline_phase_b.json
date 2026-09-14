@@ -591,6 +591,42 @@
       "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
     },
     {
+      "id": "grad.independent_calls.agree.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.agree.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
       "id": "grad.wrt_aggregate.multi.dead_forward.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",

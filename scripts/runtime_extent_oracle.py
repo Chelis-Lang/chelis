@@ -1664,6 +1664,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
+        # Main ecf213c18's exact tensor-target witnesses: agreeing independent
+        # calls passed eval but falsely joined `n` on C; ordered entry failure
+        # already named load on C but reached elementwise work on eval; the
+        # computed-only claim reached later elementwise failure on both lanes.
+        # The pre-v12 authored-signature draft also regressed the agreeing
+        # evaluator case. These rows retain main's states, not that draft's.
+        _row(
+            "grad.independent_calls.agree.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.agree.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.entry_order.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.entry_order.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.computed_claim.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.computed_claim.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        ),
         # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
         # rank-0 placeholder whose contract is to be refused so the definition
         # routes to the host lane. chelis#1693's staged host-source partition

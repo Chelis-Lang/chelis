@@ -9047,6 +9047,177 @@ fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
     }
 }
 
+fn independent_grad_claim_source(
+    distinct: bool,
+    renamed: bool,
+    width: usize,
+    sizes: (usize, usize),
+    zero: bool,
+    computed: bool,
+) -> String {
+    let (n, m) = if renamed { ("p", "q") } else { ("n", "m") };
+    let size = if computed {
+        "add(shape(y, 0i32), 0i64)"
+    } else {
+        "shape(y, 0i32)"
+    };
+    let declaration = if distinct {
+        format!(
+            "def g(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> tensor[{n}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, {size})\n"
+        )
+    } else {
+        String::new()
+    };
+    let callee = if distinct { "g" } else { "f" };
+    let left = format!("f(copy(a), {})", vector_literal(sizes.0));
+    let right = format!("{callee}(copy(b), {})", vector_literal(sizes.1));
+    let (left, right) = if zero {
+        (left, right)
+    } else {
+        (format!("mul({left}, a)"), format!("mul({right}, b)"))
+    };
+    format!(
+        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, {size})\n{declaration}def h(a: tensor[2, f32], b: tensor[{width}, f32]) -> tensor[f32] = add(sum({left}, 0i32), sum({right}, 0i32))\ndef main() = grad(h, wrt=(b, a))({}, {})\n",
+        vector_literal(2),
+        vector_literal(width)
+    )
+}
+
+fn independent_grad_claim_outputs(dir: &TempDir, source: &str) -> [(bool, String); 2] {
+    [
+        eval_result(dir, "independent_grad.ch", source),
+        c_run_result(dir, "independent_grad_c", source),
+    ]
+}
+
+#[test]
+fn independent_grad_entry_claims_agree_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for width in [2, 3] {
+            for zero in [false, true] {
+                let source = independent_grad_claim_source(
+                    distinct,
+                    renamed,
+                    width,
+                    (2, width),
+                    zero,
+                    false,
+                );
+                let first = if zero {
+                    0.0
+                } else if distinct {
+                    11.0
+                } else {
+                    7.0
+                };
+                let second = if zero { 0.0 } else { 7.0 };
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert!(ok, "{source}\n{out}");
+                    assert!(
+                        out.contains(&format!(
+                            "main.0 = tensor(shape=[{width}], data={:?})",
+                            vec![first; width]
+                        )),
+                        "{out}"
+                    );
+                    assert!(
+                        out.contains(&format!(
+                            "main.1 = tensor(shape=[2], data={:?})",
+                            vec![second; 2]
+                        )),
+                        "{out}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_grad_entry_failures_are_ordered_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for zero in [false, true] {
+            for (sizes, label, required, actual) in [
+                ((4, 5), "n", 2, 4),
+                ((2, 5), if renamed { "p" } else { "n" }, 3, 5),
+            ] {
+                let source =
+                    independent_grad_claim_source(distinct, renamed, 3, sizes, zero, false);
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert!(!ok, "{source}\n{out}");
+                    assert!(
+                        out.contains(&format!(
+                            "extent `{label}`: x axis 0 = {required}, y axis 0 = {actual}"
+                        )),
+                        "{source}\n{out}"
+                    );
+                    assert!(out.contains(&domain_trap_line("load")), "{out}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_grad_computed_claims_keep_producer_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for zero in [false, true] {
+            for mismatch in [false, true] {
+                let source = independent_grad_claim_source(
+                    distinct,
+                    renamed,
+                    3,
+                    (2, if mismatch { 5 } else { 3 }),
+                    zero,
+                    true,
+                );
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert_eq!(ok, !mismatch, "{source}\n{out}");
+                    if mismatch {
+                        let label = if renamed { "p" } else { "n" };
+                        assert!(
+                            out.contains(&format!(
+                                "extent `{label}`: claimed = 3, insert axis 0 = 5"
+                            )),
+                            "{source}\n{out}"
+                        );
+                        assert!(out.contains(&domain_trap_line("insert")), "{out}");
+                    } else {
+                        let first = if zero {
+                            0.0
+                        } else if distinct {
+                            11.0
+                        } else {
+                            7.0
+                        };
+                        let second = if zero { 0.0 } else { 7.0 };
+                        assert!(
+                            out.contains(&format!(
+                                "main.0 = tensor(shape=[3], data={:?})",
+                                vec![first; 3]
+                            )),
+                            "{out}"
+                        );
+                        assert!(
+                            out.contains(&format!(
+                                "main.1 = tensor(shape=[2], data={:?})",
+                                vec![second; 2]
+                            )),
+                            "{out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Aggregate single/multiple targets preserve the same activation claim.
 /// Both the refuted call and an agreeing exact-zero control execute on eval
 /// and compiled C; the historical name remains the corpus receipt identity.

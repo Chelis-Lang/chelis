@@ -102,7 +102,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 11,
+        WIRE_DAG_SCHEMA_VERSION, 12,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 63);

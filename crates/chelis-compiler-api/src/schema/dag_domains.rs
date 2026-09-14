@@ -1,7 +1,7 @@
 //! Numeric field domains and reference scopes, before a WireDag is admitted.
 use super::{
-    WireDag, WireDagContractError, WireDagNode, WireDimExpr, WireDimInfo, WireFusedInput,
-    WireRiscOp, WireRtAxis, WireRtDim, host_index, wire_dim_info_equal,
+    WireDag, WireDagContractError, WireDagNode, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
+    WireFusedInput, WireRiscOp, WireRtAxis, WireRtDim, host_index, wire_dim_info_equal,
 };
 use chelis_types::{ScalarValue, types::Prim};
 
@@ -84,6 +84,39 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 "shape dependencies must resolve to earlier nodes in the owning DAG",
             ));
         }
+        for dependency in &node.shape_deps {
+            let required = &dag.nodes[*dependency as usize];
+            let WireRiscOp::ExtentWitness {
+                site:
+                    WireExtentWitnessSite::ResultClaim {
+                        axis: WireRtAxis::Lit { value },
+                        ..
+                    },
+                ..
+            } = &required.op
+            else {
+                continue;
+            };
+            let result_axis = usize::try_from(*value)
+                .map_err(|_| reject("result claim axis must be normalized int32"))?;
+            let supported = match &node.op {
+                WireRiscOp::Expand { axis, size } => {
+                    usize::try_from(*axis).ok() == Some(result_axis)
+                        && matches!(size, WireRtDim::Node { .. } | WireRtDim::InputAxis { .. })
+                }
+                WireRiscOp::Reshape { new_shape } => matches!(
+                    new_shape.get(result_axis),
+                    Some(WireRtDim::Node { .. } | WireRtDim::InputAxis { .. })
+                ),
+                WireRiscOp::Shrink { .. } | WireRiscOp::Pad { .. } => true,
+                _ => false,
+            };
+            if !supported || result_axis >= node.output_type.dims.len() {
+                return Err(reject(
+                    "result claim dependency requires a supported producing axis",
+                ));
+            }
+        }
         i32::try_from(node.output_type.dims.len())
             .map_err(|_| reject("tensor rank exceeds int32"))?;
         for dim in &node.output_type.dims {
@@ -110,11 +143,41 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             | WireRiscOp::Scatter { axis: a }
             | WireRiscOp::ScatterElements { axis: a } => axis(dag, node, *a)?,
             WireRiscOp::ExtentWitness {
+                site,
                 axis: WireRtAxis::Lit { value },
                 requirements,
                 claims,
                 ..
             } => {
+                if let WireExtentWitnessSite::ResultClaim {
+                    claim,
+                    axis: WireRtAxis::Lit { value },
+                } = site
+                    && (claim.is_empty()
+                        || *value < 0
+                        || !requirements.is_empty()
+                        || !claims.is_empty())
+                {
+                    return Err(reject(
+                        "result claim witness requires a nonempty label, normalized axis, and no entry obligations",
+                    ));
+                }
+                if matches!(site, WireExtentWitnessSite::ResultClaim { .. }) {
+                    let declared = node
+                        .shape_deps
+                        .first()
+                        .and_then(|required| dag.nodes.get(*required as usize));
+                    let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
+                        matches!(declared.op, WireRiscOp::ExtentWitness { site: WireExtentWitnessSite::Caller, axis: WireRtAxis::Lit { value: observed }, .. } if observed == *value)
+                            && declared.inputs.first() == node.inputs.first()
+                            && declared.id < node.id
+                    });
+                    if !same_observation {
+                        return Err(reject(
+                            "result claim witness requires its exact earlier declaring observation",
+                        ));
+                    }
+                }
                 // wire v11: `inputs[0]` is the observed tensor; each named
                 // claim adds one requirement edge naming an earlier witness.
                 if node.inputs.len() != claims.len() + 1 {

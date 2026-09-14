@@ -549,36 +549,41 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 19);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 21);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 19);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 21);
     }
 
     #[test]
     fn different_format_key_is_a_clean_cache_miss() {
         let decls = sample_decls("different_key");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 15);
-        assert_ne!(current_key, preceding_key);
-
         let dir = tempfile::tempdir().expect("tempdir");
         let context = build_stdlib_context(&decls).expect("sample context must build");
-        let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
-        cache_envelope::save(&preceding_path, preceding_key, &context)
-            .expect("different-key fixture must save");
-
         let current_path = stdlib_cache_path(dir.path(), current_key);
-        let loaded: Option<StdLibContext> = cache_envelope::load(&current_path, current_key)
-            .expect("a different-key fixture must be a clean miss");
-        assert!(loaded.is_none());
-        assert!(
-            preceding_path.exists(),
-            "negative-control fixture must exist"
-        );
-        assert_ne!(current_path, preceding_path);
+        for version in [19, 20] {
+            let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, version);
+            assert_ne!(current_key, preceding_key);
+            let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
+            cache_envelope::save(&preceding_path, preceding_key, &context)
+                .expect("different-key fixture must save");
+            // Corrupt the final encoded payload byte. The obsolete key must
+            // miss before the integrity check or inner payload decoder runs.
+            let mut bytes = std::fs::read(&preceding_path).expect("read old-key fixture");
+            *bytes.last_mut().expect("nonempty encoded payload") ^= 0x01;
+            std::fs::write(&preceding_path, bytes).expect("corrupt old-key payload");
+            let loaded: Option<StdLibContext> = cache_envelope::load(&preceding_path, current_key)
+                .expect("obsolete key is rejected before its payload is decoded");
+            assert!(loaded.is_none(), "obsolete version {version}");
+            assert!(
+                preceding_path.exists(),
+                "negative-control fixture must exist"
+            );
+            assert_ne!(current_path, preceding_path);
+        }
         cache_envelope::save(&current_path, current_key, &context).expect("current fixture saves");
         let current: Option<StdLibContext> =
             cache_envelope::load(&current_path, current_key).expect("current fixture loads");
