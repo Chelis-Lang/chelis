@@ -115,14 +115,14 @@ class LoadCensusRows(unittest.TestCase):
 
     def test_final_native_contracts_and_shape_operation_match_the_rust_format(self) -> None:
         cases = (
-            ("CompiledModel::__call__", "TaggedTransport", "native/compiled-tensor-call"),
-            ("NativeTensor::__dlpack__", "TaggedTransport", "native/dlpack-capsule"),
-            ("NativeTensor::__dlpack_device__", "TaggedTransport", "native/dlpack-device"),
-            ("NativeTensor::shape", "NumericOperation", "[05-OP-45]"),
+            ("CompiledModel::__call__", "TaggedTransport", "native/compiled-tensor-call", ["float-carrier", "numeric-param", "numeric-return"]),
+            ("NativeTensor::__dlpack__", "TaggedTransport", "native/dlpack-capsule", ["float-carrier", "numeric-param", "numeric-return"]),
+            ("NativeTensor::__dlpack_device__", "TaggedTransport", "native/dlpack-device", ["numeric-return"]),
+            ("NativeTensor::shape", "NumericOperation", "[05-OP-45]", ["numeric-return"]),
         )
-        for owner, authority, contract in cases:
+        for owner, authority, contract, flags in cases:
             source = {"kind": "binding-pymethod", "id": f"chelis_python::{owner}(typed)",
-                      "flags": ["numeric-return"], "authority": authority, "contract": contract}
+                      "flags": flags, "authority": authority, "contract": contract}
             with self.subTest(owner=owner):
                 capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [source]})
                 self.assertEqual(adjudicate([{**source, "_census_family": "bindings"}], {}), [])
@@ -133,6 +133,39 @@ class LoadCensusRows(unittest.TestCase):
                                {"authority": "legacy"}, {"evidence": "passed"}):
                     with self.subTest(change=change), self.assertRaises(ValueError):
                         capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**source, **change}]})
+
+    def test_native_roles_reject_every_wrong_valid_vocabulary_capacity(self) -> None:
+        from itertools import combinations
+
+        root = Path(__file__).resolve().parents[1]
+        baseline = json.loads((root / "spec/design/capacity_census_bindings.json").read_text())
+        native_rows = [row for row in baseline["rows"]
+                       if row.get("contract", "").startswith("native/")]
+        vocabulary = ("float-carrier", "numeric-param", "numeric-return")
+        for source in native_rows:
+            for size in range(4):
+                for subset in combinations(vocabulary, size):
+                    if list(subset) == source["flags"]:
+                        continue
+                    changed = {**source, "flags": list(subset)}
+                    with self.subTest(owner=source["id"], flags=subset):
+                        with self.assertRaises(ValueError):
+                            capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [changed]})
+                        self.assertTrue(adjudicate([{**changed, "_census_family": "bindings"}], {}))
+                        with TemporaryDirectory() as temporary:
+                            path = Path(temporary) / "capacity_census_bindings.json"
+                            path.write_text(json.dumps({"version": 2, "rows": [changed]}))
+                            with self.assertRaises(ValueError):
+                                load_census_rows(Path(temporary), (Path(path.name),))
+
+    def test_direct_binding_adjudication_retains_cross_row_duplicate_check(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        rows = load_census_rows(root, (Path("spec/design/capacity_census_bindings.json"),))
+        self.assertEqual(adjudicate(rows, {}), [])
+        for source in rows:
+            with self.subTest(identity=source["id"]):
+                self.assertTrue(any("duplicate identity" in problem
+                                    for problem in adjudicate(rows + [source], {})))
 
     def test_binding_shape_rejects_missing_contract_erased_capacity_and_duplicates(self) -> None:
         row = {"kind": "binding-pyfunction", "id": "chelis_python::check_json(typed)",

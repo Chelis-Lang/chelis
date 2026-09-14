@@ -114,9 +114,9 @@ def validate_binding_baseline(payload: object) -> None:
         raise ValueError("BINDING BASELINE requires version: 2 and rows only")
     base = {"kind", "id", "flags"}
     native_transports = {
-        "chelis_python::CompiledModel::__call__": "native/compiled-tensor-call",
-        "chelis_python::NativeTensor::__dlpack__": "native/dlpack-capsule",
-        "chelis_python::NativeTensor::__dlpack_device__": "native/dlpack-device",
+        "chelis_python::CompiledModel::__call__": ("native/compiled-tensor-call", ["float-carrier", "numeric-param", "numeric-return"]),
+        "chelis_python::NativeTensor::__dlpack__": ("native/dlpack-capsule", ["float-carrier", "numeric-param", "numeric-return"]),
+        "chelis_python::NativeTensor::__dlpack_device__": ("native/dlpack-device", ["numeric-return"]),
     }
     compiler_json = {"chelis_python::" + name for name in ("check_json", "compile_json", "desugar_json", "eval_json")}
     seen = set()
@@ -139,7 +139,7 @@ def validate_binding_baseline(payload: object) -> None:
             compiler = (owner in compiler_json and kind == "binding-pyfunction"
                         and row.get("contract") == "compiler-json/" + owner)
             native = (owner in native_transports and kind == "binding-pymethod"
-                      and row.get("contract") == native_transports[owner])
+                      and (row.get("contract"), flags) == native_transports[owner])
             if (row.keys() != keys | {"contract"} or not separator or not (compiler or native)
                     or not flags or not set(flags) <= {"float-carrier", "numeric-param", "numeric-return"}):
                 raise ValueError("BINDING BASELINE invalid final transport comparison row")
@@ -236,6 +236,14 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
     `pull_request` field, so kind is part of the verdict rather than discarded.
     """
     problems: list[str] = []
+    binding_rows = [
+        {key: value for key, value in row.items() if key != "_census_family"}
+        for row in rows if str(row.get("_census_family", "")).strip() == "bindings"
+    ]
+    try:
+        validate_binding_baseline({"version": 2, "rows": binding_rows})
+    except ValueError as error:
+        problems.append(str(error))
     for row in rows:
         family = str(row.get("_census_family", "")).strip()
         if family == "wire":
@@ -246,13 +254,6 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
                 problems.append(problem)
             continue
         if family == "bindings":
-            try:
-                validate_binding_baseline({
-                    "version": 2,
-                    "rows": [{key: value for key, value in row.items() if key != "_census_family"}],
-                })
-            except ValueError as error:
-                problems.append(str(error))
             continue
         citation = str(row.get("citation", "")).strip()
         row_id = f"[{row.get('kind', '?')}] {row.get('id', '?')}"

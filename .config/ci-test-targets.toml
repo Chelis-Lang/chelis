@@ -949,3 +949,21 @@ packages = [
   "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
   "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
 ]
+
+[[path_rule]]
+prefix = "scripts/capacity_census_liveness.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "final census format, legacy rejection and shared liveness API controls execute in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_liveness.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "final census format, legacy rejection and shared liveness API controls execute in script-unit"
+tracking_issue = "chelis#1870"
