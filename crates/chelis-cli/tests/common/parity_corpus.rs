@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
+use syn::visit::Visit;
 use syn::{Expr, Item, Pat, Stmt};
 
 pub fn discover(root: &Path) -> Result<BTreeSet<String>, String> {
@@ -91,9 +92,29 @@ fn example_path(
 
 fn binding(pattern: &Pat) -> Option<&syn::PatIdent> {
     match pattern {
-        Pat::Ident(name) => Some(name),
+        Pat::Ident(name) if name.subpat.is_none() => Some(name),
         Pat::Type(typed) => binding(&typed.pat),
         _ => None,
+    }
+}
+
+#[derive(Default)]
+struct InputSyntax {
+    conditional: bool,
+    bindings: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for InputSyntax {
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
+            self.conditional = true;
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
+    fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+        self.bindings.insert(pattern.ident.to_string());
+        syn::visit::visit_pat_ident(self, pattern);
     }
 }
 
@@ -130,6 +151,13 @@ pub fn declared_inputs(source: &str) -> Result<BTreeSet<String>, String> {
                 return Err(format!("{name}: conditional or unsupported test attribute"));
             }
         }
+        let mut syntax = InputSyntax::default();
+        syntax.visit_block(&test.block);
+        if syntax.conditional {
+            return Err(format!(
+                "{name}: conditional test body cannot supply inputs"
+            ));
+        }
         let mut locals = BTreeMap::new();
         // Rust item declarations are in scope before their textual position.
         let mut shadowed: BTreeSet<_> = test
@@ -150,18 +178,29 @@ pub fn declared_inputs(source: &str) -> Result<BTreeSet<String>, String> {
         for statement in &test.block.stmts {
             match statement {
                 Stmt::Local(local) => {
-                    if let Some(pattern) = binding(&local.pat) {
-                        let key = pattern.ident.to_string();
+                    // All bindings shadow, including destructuring and `name @ pattern`.
+                    // Resolve a simple immutable initializer in the preceding scope.
+                    let input = if let Some(pattern) = binding(&local.pat)
+                        && pattern.mutability.is_none()
+                        && pattern.by_ref.is_none()
+                        && let Some(init) = &local.init
+                    {
+                        example_path(&init.expr, &locals)?
+                    } else {
+                        None
+                    };
+                    let mut syntax = InputSyntax::default();
+                    syntax.visit_pat(&local.pat);
+                    for key in syntax.bindings {
                         if key == "examples_root" {
                             return Err(format!("{name}: shadowed examples_root input owner"));
                         }
                         locals.remove(&key);
-                        shadowed.insert(key.clone());
-                        if pattern.mutability.is_none()
-                            && pattern.by_ref.is_none()
-                            && let Some(init) = &local.init
-                            && let Some(input) = example_path(&init.expr, &locals)?
-                        {
+                        shadowed.insert(key);
+                    }
+                    if let Some(pattern) = binding(&local.pat) {
+                        let key = pattern.ident.to_string();
+                        if let Some(input) = input {
                             locals.insert(key, input);
                         }
                     }

@@ -206,3 +206,115 @@ fn non_utf8_executable_filename_is_an_error_instead_of_an_omission() {
             .contains("UTF-8")
     );
 }
+
+fn regression_rejects_false_membership(source: &str) {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("example.ch"), "").unwrap();
+    let result = parity_corpus::validate(root.path(), source);
+    assert!(result.is_err(), "false membership accepted: {source}");
+}
+
+#[test]
+fn regression_cfg_statement_cannot_supply_input() {
+    regression_rejects_false_membership(
+        r#"
+        #[test] fn conditional() {
+            #[cfg(any())]
+            drive_parity(&examples_root().join("example.ch"), true);
+        }
+    "#,
+    );
+}
+
+#[test]
+fn regression_cfg_local_cannot_replace_actual_input() {
+    regression_rejects_false_membership(
+        r#"
+        #[test] fn conditional() {
+            let path = std::path::PathBuf::from("outside.ch");
+            #[cfg(any())]
+            let path = examples_root().join("example.ch");
+            drive_parity(&path, true);
+        }
+    "#,
+    );
+}
+
+#[test]
+fn regression_destructured_path_shadow_cannot_supply_input() {
+    regression_rejects_false_membership(
+        r#"
+        #[test] fn shadowed() {
+            let path = examples_root().join("example.ch");
+            let (path, expected) = (std::path::PathBuf::from("outside.ch"), true);
+            drive_parity(&path, expected);
+        }
+    "#,
+    );
+}
+
+#[test]
+fn regression_destructured_helper_shadow_cannot_supply_input() {
+    regression_rejects_false_membership(
+        r#"
+        #[test] fn shadowed() {
+            let (drive_parity, expected) = (other, true);
+            drive_parity(&examples_root().join("example.ch"), expected);
+        }
+    "#,
+    );
+}
+
+#[test]
+fn regression_destructured_root_shadow_cannot_supply_input() {
+    regression_rejects_false_membership(
+        r#"
+        #[test] fn shadowed() {
+            let (examples_root, expected) = (other_root, true);
+            drive_parity(&examples_root().join("example.ch"), expected);
+        }
+    "#,
+    );
+}
+
+#[test]
+fn all_pattern_bindings_invalidate_old_input_identity() {
+    for pattern in [
+        "(path, other)",
+        "[path, other]",
+        "Holder { path, .. }",
+        "path @ Some(_)",
+        "(path, other): (_, _)",
+    ] {
+        let source = format!(
+            r#"#[test] fn case() {{
+            let path = examples_root().join("example.ch");
+            let {pattern} = replacement;
+            drive_parity(&path, true);
+        }}"#
+        );
+        assert!(parity_corpus::declared_inputs(&source).is_err(), "{source}");
+    }
+    let source = r#"#[test] fn case() {
+        let path = examples_root().join("example.ch");
+        let (unrelated, other) = (1, 2);
+        let path = path;
+        drive_parity(&path, true);
+    }"#;
+    assert_eq!(
+        parity_corpus::declared_inputs(source).unwrap(),
+        names(&["example.ch"])
+    );
+}
+
+#[test]
+fn conditional_attributes_on_input_subexpressions_fail_closed() {
+    for body in [
+        r#"#[cfg_attr(all(), cfg(any()))] drive_parity(&examples_root().join("example.ch"), true);"#,
+        r#"drive_parity(#[cfg(any())] &examples_root().join("example.ch"), true);"#,
+        r#"let path = #[cfg(any())] examples_root().join("example.ch"); drive_parity(&path, true);"#,
+    ] {
+        let source = format!("#[test] fn case() {{ {body} }}");
+        assert!(parity_corpus::declared_inputs(&source).is_err(), "{source}");
+    }
+}
