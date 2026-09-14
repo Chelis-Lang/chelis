@@ -2044,6 +2044,36 @@ pub fn shape_class(name: &str) -> ShapeClass {
     }
 }
 
+/// Operand-family contract shared by builtin schemes and direct-call diagnostics.
+/// Value constraints attach this contract to whole scalar/tensor operands; authored
+/// dtype bounds still constrain primitive precision parameters only.
+pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
+    use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
+    match name {
+        "mean" | "softmax" | "div" | "matmul" | "layer_norm" | "exp" | "log" | "sin" | "cos"
+        | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip" => {
+            Some(ActiveFloat)
+        }
+        "trunc_div" => Some(ActiveInt),
+        "add" | "mul" | "sub" | "neg" | "floor_div" => Some(ActiveNumeric),
+        _ => None,
+    }
+}
+
+fn operand_value_restrictions(
+    name: &str,
+    operands: &[TypeVar],
+) -> Vec<(TypeVar, TypeVarRestriction)> {
+    operand_dtype_family(name)
+        .map(|family| {
+            operands
+                .iter()
+                .map(|var| (*var, family.for_value()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
 pub fn builtin_env() -> (Env, VarGen) {
     let mut env = Env::new();
@@ -2072,7 +2102,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -2089,7 +2119,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -2175,7 +2205,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let epsilon = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, t3, epsilon],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2, t3, epsilon]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2197,7 +2227,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2213,7 +2243,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2336,7 +2366,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(

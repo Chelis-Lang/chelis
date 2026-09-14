@@ -634,7 +634,8 @@ executed independently in the oracle; genuine tensor roots still select device
 emission. HIP device execution remains with the platform owners.
 WireDag v11 carries both checked operations, integer remainder and the named
 claims an extent witness owes against another witness. Stdlib/library/context cache
-versions 18/14/20 require the authored signature ledger and revalidate it
+versions 20/16/22 retain the authored signature ledger and checked
+operation-family restrictions, and revalidate the ledger
 against fresh lowering. Missing fields and a forged ledger with a valid
 checksum and unchanged proof identity reject at admission.
 
@@ -875,7 +876,7 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-That command now passes. It selects both registered slice phases, runs their
+The command selects both registered slice phases, runs their
 deduplicated targets once, and prints a digest per phase beside the combined
 one. The nightly `runtime-extent-oracle` job runs exactly it, as one step, so
 this class has one acceptance oracle rather than two phase steps whose
@@ -886,15 +887,15 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 146 rows and none of them is an unexplained
-shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
+The phase-B corpus has 148 rows and no registered unexplained
+shortfall. A successful `--phase b` run reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 35 non-`executes_exactly` values
-against 111 `executes_exactly`, and every one of the thirty-five is accounted
-for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
+count of the JSON's `phase_b` column reaches 37 non-`executes_exactly` values
+against 111 `executes_exactly`, and every one of the thirty-seven is accounted
+for. Twenty-nine rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
-defect. Nine of the twenty-seven predate B2c:
+defect. Nine of the twenty-nine predate B2c:
 `expand.positional.replacement.non_unit_source_static`,
 `shrink.to_end.nonzero_start`, and the seven `route.untied` rows
 (`gather.gate`, `matmul.match`, `scatter_replace.gate`, `sum.copy`,
@@ -915,10 +916,12 @@ checker verdict no lane varies is one row and the program never reaches a
 lane. That control is also the only `rejects_exactly` phase-B row whose baseline
 EQUALS its exit state: it was already refused, correctly, before B2c, so it is this section's
 "Invalid-program controls remain `rejects_exactly`" rather than a defect that
-moved. Four more rejection rows cover `dtype.late_precision`:
+moved. Six more rejection rows cover `dtype.late_precision`:
 `instantiation`, `binds_one_application_later`, `declared_bound`, and
 `family_routes`, whose tensor operand's precision was unresolved when the
-dtype policy first ran. One row,
+dtype policy first ran, plus `authored_contract` and
+`indirect_and_transitive`, which require definition-time admission and
+restriction transport instead of callee-body inspection. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
 
@@ -960,22 +963,26 @@ gradient whose forward carries no obligation retains and emits it anyway: 891
 to 931 emitted C lines for an obligation-free `grad`, measured against a
 revert. chelis#1935 owns conditioning the edge.
 
-The `dtype.late_precision` receipts cover direct tensor literals, calls with
-concrete declared result precision, parameter and value bindings resolved in
-lexical order, and tuple projections from concretely typed parameters, when
-the callee's own body applies a restricted operation to its parameter. The
-same argument reader also rejects the bool-arithmetic witness of #1937.
-Local bindings record precision in declaration order, including an unknown
-answer that shadows an outer name. Call-site and substituted-body reads share
-one lexical traversal, so lambda, match, and local callee bindings mask outer
-names in both contexts. The body reader dispatches through the same family
-policy as eager and deferred validation; the matrix checks all sixteen family
-routes with valid and invalid concrete instantiations. The reader does not establish general
-precision transport: #1940 owns function-value calls, #1941 owns polymorphic
-call chains, and local-lambda and ADT-field cases remain under #1805. The
-matrix contains disposition locks for these known gaps. An unresolved
-precision entry still discharges silently at the declaration boundary; this
-change does not adopt #1942's proposed declaration-time rejection.
+The late-precision remediation (#1805/#1942) implements spec/04 §3.1's
+authored generic contract rule through ordinary checking. Operation family
+requirements constrain checked precision variables. The declaration check
+compares the resulting requirements with the bounds the signature supplied,
+including requirements obtained by calling another bounded function; it
+rejects an absent or broader authored bound rather than publishing a
+silently narrowed signature. Inference variables retain [04-INF-1]'s local
+binding rules. Existing scheme restrictions carry admitted families through
+instantiation, unification, generalization and imported checked contexts.
+
+The call-site body walker is retired with this integration, not extended to
+follow more syntax. The acceptance matrix covers each family route,
+standalone and inline signatures, wrappers, higher-order values, local
+lambdas and aggregate projections, with sufficient-bound controls and
+invalid concrete instantiations on both ingresses. The #1940/#1941
+reproductions become definition errors; the corresponding bounded functions
+must still execute with exact eval/C values. Existing lexical-shadowing
+controls remain. The original empty-literal precision witness must also
+receive a checker verdict, independently of authored generic definitions.
+These are delivery obligations, not an execution receipt.
 
 Phase B retains seven grad deferrals. B2c removed the old
 `concat.literal_claim.inlined_root.{c,eval}` deferrals: a claim the lowered

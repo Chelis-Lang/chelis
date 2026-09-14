@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
-pub const SHELL_FORMAT_VERSION: u32 = 3;
+pub const SHELL_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -51,9 +51,9 @@ pub struct TypeVariableRestriction {
     pub domain: TypeVariableDomain,
 }
 
-/// The `spec/04-type-system.md` §5.9 dtype families, as a published package
-/// records a quantified variable's bound. The set is closed: a new family is
-/// a numbered-spec change, and adding one is a shell format version bump.
+/// The §5.9 primitive dtype bounds and §3.1 inferred operation-value
+/// restrictions from `spec/04-type-system.md`, kept distinct in published
+/// metadata. A new semantic domain requires a spec and shell format change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeVariableDomain {
@@ -63,6 +63,12 @@ pub enum TypeVariableDomain {
     ActiveInt,
     /// §5.9 `Numeric`.
     ActiveNumeric,
+    /// An inferred operation operand is a float scalar or tensor, not a dtype.
+    FloatValue,
+    /// An inferred operation operand is a signed integer scalar or tensor.
+    IntValue,
+    /// An inferred operation operand is a numeric scalar or tensor.
+    NumericValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,10 +409,8 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        // v3 is the `TypeVariableDomain` widening for the
-        // `spec/04-type-system.md` §5.9 `Int` and `Numeric` families; a v2
-        // decoder cannot read a shell that carries one.
-        assert_eq!(SHELL_FORMAT_VERSION, 3);
+        // v4 carries operation-value domains separately from authored dtype bounds.
+        assert_eq!(SHELL_FORMAT_VERSION, 4);
     }
 
     #[test]
@@ -430,8 +434,30 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 3"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 4"
         );
+    }
+
+    #[test]
+    fn operation_value_domains_round_trip_without_becoming_dtype_bounds() {
+        for domain in [
+            TypeVariableDomain::FloatValue,
+            TypeVariableDomain::IntValue,
+            TypeVariableDomain::NumericValue,
+        ] {
+            let mut shell = fixture_shell();
+            let symbol = &mut shell.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t0))".into());
+            symbol.type_variable_restrictions = vec![TypeVariableRestriction {
+                variable: "t0".into(),
+                domain,
+            }];
+            let encoded = encode_shell(&shell).unwrap();
+            assert_eq!(decode_shell(&encoded).unwrap(), shell);
+            let mut old_version = encoded;
+            old_version[8..12].copy_from_slice(&3_u32.to_le_bytes());
+            assert!(decode_shell(&old_version).is_err());
+        }
     }
 
     #[test]

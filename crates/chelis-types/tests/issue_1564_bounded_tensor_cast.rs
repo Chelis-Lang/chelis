@@ -107,6 +107,6 @@ fn result_constraints_obey_bounded_target_family() {
     );
     check(
         &format!("{declaration}a: tensor[2, int64] = convert(to_tensor([1, 2]))\n"),
-        Some("TypeMismatch"),
+        Some("PrecisionMismatch"),
     );
 }

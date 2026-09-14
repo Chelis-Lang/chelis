@@ -37,7 +37,7 @@ module_prefix = "Restriction"
         &root.join("src/main.ch"),
         r#"module Restriction.Main
 export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded)
-def restricted_close[p_float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
+def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[p](value: &tensor[n, p]) -> &tensor[n, p] = value
 def integer_identity(value: int32) -> int32 = value
 def int_bounded[q: Int](value: q) -> q = value
@@ -110,7 +110,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 3);
+    assert_eq!(shell_json["format_version"], 4);
     assert_eq!(
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()

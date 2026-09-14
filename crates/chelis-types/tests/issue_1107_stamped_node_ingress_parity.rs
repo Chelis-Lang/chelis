@@ -286,7 +286,7 @@ fn in_module_opaque_construction_checks_clean_on_both_ingresses() {
 
 fn poly_mean_program(call_precision: &str) -> String {
     format!(
-        "(defsig {{}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
+        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
            (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} int32)}} 0))))\n\
@@ -298,13 +298,12 @@ fn poly_mean_program(call_precision: &str) -> String {
 
 #[test]
 fn polymorphic_integer_mean_is_rejected_on_both_ingresses() {
-    // Four separate `List`-only reads (`collect_def_bodies`,
-    // `collect_defsig_exprs`, `build_def_param_scope`, and the callee read in
-    // `check_app_for_poly_op_constraint`) left this whole pass inert on the
-    // stamped ingress, so the chelis#724 capability rejection never fired.
+    // Originally the List-only body validator missed stamped ingress. The
+    // checked Float contract must now reject this instantiation on both
+    // ingresses without looking up the callee body.
     assert_agree_and_reject(
         &poly_mean_program("int64"),
-        "mean on operand precision `int64` is not admitted",
+        "dtype family `Float` (the active float dtypes) cannot be instantiated at `int64`",
         "polymorphic mean instantiated at int64",
     );
 }
@@ -719,7 +718,7 @@ fn negative_tuple_get_index_is_rejected_alike_on_both_ingresses() {
 /// takes its inline-annotation fallback only in exactly this shape.
 fn inline_param_poly_program(call_precision: &str) -> String {
     format!(
-        "(defsig {{}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
+        "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
            (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} int32)}} 0))))\n\
@@ -741,7 +740,7 @@ fn inline_param_poly_program(call_precision: &str) -> String {
 fn inline_param_polymorphic_integer_mean_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
         &inline_param_poly_program("int64"),
-        "mean on operand precision `int64` is not admitted",
+        "dtype family `Float` (the active float dtypes) cannot be instantiated at `int64`",
         "inline-annotated int64 param through a polymorphic mean",
     );
 }

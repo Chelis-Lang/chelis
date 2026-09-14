@@ -756,6 +756,31 @@ Standard Algorithm W with extensions for tensor types. The flow:
 > dimensions remain distinct, and they unify only when an ordinary body
 > constraint requires equality.
 
+Polymorphism does not defer an authored contract's operation-admission
+requirements to a later caller. An operation in a generic definition SHALL be
+valid for every instantiation admitted by that definition's authored signature.
+For a dtype-family requirement, the signature SHALL declare a sufficient bound
+under [04-DTYPE-2]; an absent or broader bound is a `PrecisionMismatch` at
+the definition. This applies equally to inline and standalone signatures,
+implicit named binders, nested local expressions, and calls through aliases or
+function values. A call to a bounded generic function imposes the same
+requirement on its caller's authored contract. Body inference SHALL NOT
+silently narrow an authored binder's admitted family.
+
+An inference variable that is not an authored binder retains the binding and
+generalization rules above. Operation requirements are checked during ordinary
+typing against the resolved operand or its checked restriction. Function use
+preserves those restrictions through instantiation and unification; admission
+does not depend on revisiting a callee's source body at its call sites.
+
+An operation restriction on an inferred scalar-or-tensor operand constrains
+its numeric dtype; it does not turn a dtype-family bound into a family of
+tensor types. An authored `p: Float`, for example, still admits only float
+primitive types, never `tensor[..., f32]`. Restrictions transported by
+function values retain that distinction. A failing transported restriction
+is a `PrecisionMismatch` naming the required family and offending type under
+[04-DTYPE-2], rather than requiring the original operation's body or name.
+
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
 one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,

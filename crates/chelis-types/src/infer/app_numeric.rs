@@ -52,19 +52,17 @@ pub(super) const BOOL_REJECTED_ARITH_OPS: &[&str] = &["add", "sub", "mul", "neg"
 /// chelis#1805: the dtype family an operation's operand admission is stated
 /// over.
 ///
-/// A family policy is one written over [`Prim::is_float`] or
-/// [`Prim::is_integer`]: the operation admits every active dtype of one family
-/// and no dtype outside it. That is exactly the shape a `[p: Float]` or
-/// `[p: Int]` binder bound satisfies, which is why an operand whose precision is
-/// still a variable can be decided by the variable's BOUND alone, with no dtype
-/// in hand. An operation with no such policy has nothing to decide until the
-/// dtype itself arrives, and must keep admitting the variable.
+/// The Float, Int and Numeric policies admit the active dtypes of their
+/// family. A sufficient authored bound decides admission without choosing a
+/// concrete dtype; inferred operands accumulate the same checked restriction.
+/// Operations outside this family policy retain their own admission rules.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum OperandFamily {
     /// `f32`, `f64`, `bf16`, `f16`.
     Float,
     /// The active signed integer dtypes.
     Integer,
+    Numeric,
 }
 
 impl OperandFamily {
@@ -73,6 +71,7 @@ impl OperandFamily {
         match self {
             OperandFamily::Float => TypeVarRestriction::ActiveFloat,
             OperandFamily::Integer => TypeVarRestriction::ActiveInt,
+            OperandFamily::Numeric => TypeVarRestriction::ActiveNumeric,
         }
     }
 
@@ -82,7 +81,7 @@ impl OperandFamily {
     /// a bound that admits one inadmissible dtype cannot make the operation
     /// well typed at every instantiation the binder allows.
     pub(super) fn satisfied_by(self, bound: TypeVarRestriction) -> bool {
-        bound == self.required_bound()
+        bound.intersect(self.required_bound()) == Some(bound)
     }
 
     /// The binder spelling the repair hint offers.
@@ -90,6 +89,7 @@ impl OperandFamily {
         match self {
             OperandFamily::Float => "`[p: Float]`",
             OperandFamily::Integer => "`[p: Int]`",
+            OperandFamily::Numeric => "`[p: Numeric]`",
         }
     }
 
@@ -98,33 +98,20 @@ impl OperandFamily {
         match self {
             OperandFamily::Float => "an active float dtype",
             OperandFamily::Integer => "an active signed integer dtype",
+            OperandFamily::Numeric => "an active numeric dtype",
         }
     }
 }
 
-/// The family `fname` requires of a tensor operand's precision, or `None` when
-/// its admission is not a family question.
-///
-/// This is the one definition of "family policy" in the checker, and it lists
-/// exactly the callees whose policy lives in [`operand_dtype_rejection`] rather
-/// than in their signature.
-///
-/// Two float-only callees are deliberately absent. `dropout` and
-/// `test_assert_close_tensor` declare a `Float`-bounded precision variable in
-/// their own builtin signatures, so unification propagates that bound onto a
-/// caller's binder and rejects an integer instantiation where the caller
-/// supplies it; they have no policy for this function to enforce a second time.
-/// Bool-rejected arithmetic is absent for a different reason: its policy
-/// excludes a single prim rather than admitting one family, so any numeric bound
-/// repairs it and the hint below would name the wrong one. chelis#1937 owns it.
+/// The builtin scheme's family contract, translated for direct diagnostics.
+/// Signature-bounded dropout and assert-close retain their own precise schemes.
 pub(super) fn operand_family_policy(fname: &str) -> Option<OperandFamily> {
-    match fname {
-        "mean" | "softmax" | "div" => Some(OperandFamily::Float),
-        "exp" | "log" | "sin" | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-        | "gelu" | "recip" => Some(OperandFamily::Float),
-        "trunc_div" => Some(OperandFamily::Integer),
-        _ => None,
-    }
+    crate::builtins::operand_dtype_family(fname).map(|family| match family {
+        TypeVarRestriction::ActiveFloat => OperandFamily::Float,
+        TypeVarRestriction::ActiveInt => OperandFamily::Integer,
+        TypeVarRestriction::ActiveNumeric => OperandFamily::Numeric,
+        _ => unreachable!("builtin precision contract is a dtype family"),
+    })
 }
 
 /// chelis#1805: how a dtype-policy diagnostic names the operand's precision.
@@ -134,11 +121,10 @@ pub(super) fn operand_family_policy(fname: &str) -> Option<OperandFamily> {
 /// variable could reach it, and the bounded spelling names the binder and its
 /// declared family rather than a dtype the source never wrote.
 ///
-/// There is no spelling for an UNBOUNDED variable, deliberately. [04-INF-1]
-/// keeps such a binder polymorphic, so its declaration is not rejected and no
-/// diagnostic names it; `validate.rs::check_app_for_poly_op_constraint` rejects
-/// the instantiation instead, naming the dtype the call site supplied.
-/// chelis#1942 records the alternative.
+/// An absent authored bound is diagnosed by the declaration-contract check,
+/// which compares the accumulated requirement with the original signature.
+/// This direct-operation diagnostic names concrete or explicitly bounded
+/// operands; transported restrictions use the unifier's family diagnostic.
 pub(super) enum PrecisionSubject {
     /// The dtype the operand carries.
     Concrete(String),
@@ -204,6 +190,14 @@ pub(super) fn family_policy_rejection(
 ) -> (CheckErrorKind, String, Vec<String>) {
     let rendered = subject.render();
     let (kind, message, mut hints) = match fname {
+        "matmul" | "add" | "mul" | "sub" | "neg" | "floor_div" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} requires {} but operand precision {rendered} admits other types (spec/04-type-system.md §3.1, [04-DTYPE-2])",
+                required.operand_gloss()
+            ),
+            vec![],
+        ),
         "mean" => (
             CheckErrorKind::PrecisionMismatch,
             format!(
@@ -293,13 +287,9 @@ pub(super) enum PrecisionVerdict {
     /// declaration already carries everything the decision needs and no call
     /// site can change it.
     Reject(PrecisionSubject, OperandFamily),
-    /// The variable carries no bound, so nothing is known yet. The call is
-    /// suspended on the variable; the ledger decides it where it binds. An
-    /// entry still unresolved at the declaration boundary discharges silently.
-    Suspend,
 }
 
-/// Decide, or suspend, a family policy against a precision variable.
+/// Check a family policy against an authored precision variable.
 ///
 /// `name` is the subject spelling: the declared binder per [04-FIT-9], or the
 /// inference identity per [04-FIT-10].
@@ -317,44 +307,46 @@ pub(super) fn precision_variable_verdict(
         Some(bound) => {
             PrecisionVerdict::Reject(PrecisionSubject::Bounded(name.to_string(), bound), required)
         }
-        None => PrecisionVerdict::Suspend,
+        None => {
+            // Carry the operation requirement through ordinary inference.
+            // The declaration's rigidity check compares this inferred domain
+            // with its authored bound; a caller cannot silently narrow it.
+            subst
+                .narrow_tvar_restriction(var, required.required_bound())
+                .expect("an unrestricted precision admits its first family constraint");
+            PrecisionVerdict::Admit
+        }
     }
 }
 
-/// The [04-FIT-9] spelling of a precision variable, or its [04-FIT-10]
-/// inference identity when the declaration named none.
-///
-/// [04-FIT-10] is the only admissible route to the second spelling: a producer
-/// holding a name and declining to thread it through is not covered by it,
-/// which is why the lookup is on the declaration's own map rather than on a
-/// nearby guess.
-pub(super) fn precision_subject_name(var: TypeVar, env: &Env) -> String {
-    match env.active_declared_type_names().get(&var) {
-        Some(declared) => declared.clone(),
-        None => format!("?{}", var.0),
-    }
-}
-
-/// chelis#1805: decide, reject, or suspend a family policy on a tensor operand
+/// Check or accumulate a family policy on a tensor operand
 /// whose precision is a variable.
 ///
 /// `Some` means the call was REJECTED, the shape the validators' own `reject!`
 /// produces. All three validators route their precision arm through here, so
 /// one operand shape cannot be handled three ways.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn decide_precision_variable_operand(
     list: &deep::List,
     fname: &str,
     var: TypeVar,
     env: &Env,
-    arg_tys: &[Type],
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
-    suspension: Option<&DtypeAdmissibilitySite<'_>>,
-    result_ty: &Type,
-    product: &mut InferenceProduct,
 ) -> Option<Type> {
-    let name = precision_subject_name(var, env);
+    let authored = env
+        .active_declared_type_names()
+        .to_sorted()
+        .into_iter()
+        .find(|(declared, _)| subst.apply(&Type::Var(**declared)) == Type::Var(var))
+        .map(|(_, name)| name.clone());
+    let Some(name) = authored else {
+        if let Some(required) = operand_family_policy(fname)
+            && let Err(error) = subst.narrow_tvar_restriction(var, required.required_bound())
+        {
+            return Some(report(errors, error.into()));
+        }
+        return None;
+    };
     match precision_variable_verdict(fname, var, &name, subst) {
         PrecisionVerdict::Admit => None,
         PrecisionVerdict::Reject(subject, required) => {
@@ -368,21 +360,14 @@ pub(super) fn decide_precision_variable_operand(
                 ),
             )
         }
-        PrecisionVerdict::Suspend => {
-            if let Some(site) = suspension {
-                site.register_awaiting_precision(arg_tys, result_ty, subst, product, var);
-            }
-            None
-        }
     }
 }
 
 /// The post-desugar operand-dtype policy chokepoint from chelis#860.
 ///
 /// Direct applications, reduction data arguments, and bare pipe stages all
-/// consult this function. Unresolved types stay admissible here; the
-/// polymorphic-instantiation pass mirrors the decided rows until Phase 4
-/// derives both paths from the capability table.
+/// consult this function. Unresolved operands carry the builtin scheme's
+/// checked restriction through ordinary unification; no callee-body walk is used.
 pub(super) fn operand_dtype_rejection(
     fname: &str,
     resolved: &Type,
@@ -607,10 +592,9 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // still has a verdict, from the variable's bound or from the
                 // declaration boundary.
                 Type::Tensor(_, TensorPrec::Var(var)) => {
-                    if let Some(rejected) = decide_precision_variable_operand(
-                        list, fname, *var, env, arg_tys, subst, errors, suspension, result_ty,
-                        product,
-                    ) {
+                    if let Some(rejected) =
+                        decide_precision_variable_operand(list, fname, *var, env, subst, errors)
+                    {
                         return Some(rejected);
                     }
                 }
@@ -662,10 +646,9 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 }
                 // chelis#1805, as in the loop above.
                 Type::Tensor(_, TensorPrec::Var(var)) => {
-                    if let Some(rejected) = decide_precision_variable_operand(
-                        list, fname, *var, env, arg_tys, subst, errors, suspension, result_ty,
-                        product,
-                    ) {
+                    if let Some(rejected) =
+                        decide_precision_variable_operand(list, fname, *var, env, subst, errors)
+                    {
                         return Some(rejected);
                     }
                 }

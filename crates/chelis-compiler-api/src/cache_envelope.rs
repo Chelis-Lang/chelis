@@ -78,14 +78,16 @@ impl CachePayload for crate::LibraryContext {
     // mints extent witnesses carrying named claims. A V13 entry predates that
     // obligation and would silently serve an unguarded program.
     // V15 (#1875): versioned TypeEnv with mandatory dimension-label transport.
-    const FORMAT_VERSION: u32 = 15;
+    // V16: definition-checked operation contracts and operand-value restrictions.
+    const FORMAT_VERSION: u32 = 16;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
 impl CachePayload for crate::StdLibContext {
     // V18: the V14 reason above, for the bundled standard library.
     // V19: the V15 dimension-label transport above, for the standard library.
-    const FORMAT_VERSION: u32 = 19;
+    // V20: the V16 operation-contract transport above, for the standard library.
+    const FORMAT_VERSION: u32 = 20;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "d55833711a2e9f5070fcb9aa6f9bf6d407ff1862bb654c3d9106690787562a78",
+  "corpus_sha256": "476694aae0004b3f1fc36ef21c0ff78579f74c6d30d4f6a88db74c638201f8e4",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -189,6 +189,12 @@
       "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
     },
     {
+      "id": "dtype.late_precision.authored_contract",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_declared_operation_bounds.insufficient_authored_contracts_are_rejected_without_a_call_site"
+    },
+    {
       "id": "dtype.late_precision.binds_one_application_later",
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
@@ -205,6 +211,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation"
+    },
+    {
+      "id": "dtype.late_precision.indirect_and_transitive",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_declared_operation_bounds.invalid_function_value_chain_lambda_and_field_calls_stop_before_execution"
     },
     {
       "id": "dtype.late_precision.instantiation",

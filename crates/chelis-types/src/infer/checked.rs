@@ -415,19 +415,6 @@ pub(super) struct DeferredShapeCheck {
     arg_exprs: Vec<deep::Expr>,
     arg_tys: Vec<Type>,
     result_ty: Type,
-    /// chelis#1805: the PRECISION variable this entry waits on.
-    ///
-    /// `shape_operand_awaits_binding` answers the outer-constructor question,
-    /// and a `Type::Tensor` answers it the moment it is seen whatever its
-    /// precision still holds. A family policy needs the precision too, so an
-    /// entry suspended on one records it here and the replay waits on both.
-    ///
-    /// It is a per-entry wait rather than a widening of the readiness
-    /// predicate. Waiting globally on every free precision variable would hold
-    /// `def g[p](x: tensor[3, p]) = sum(x, 0)`'s shape entry to the declaration
-    /// boundary and reject a legitimate definition, against [04-INF-1]'s
-    /// "declared precision variables remain polymorphic".
-    awaits_precision: Option<TypeVar>,
 }
 
 #[derive(Clone)]
@@ -819,6 +806,27 @@ impl InferenceProduct {
         );
     }
 
+    /// A rejected application supplied an operand, but its checked family
+    /// rejected that binding. The same monomorphic parameter must not also be
+    /// diagnosed as never applied. Unrelated pending parameters remain live.
+    pub(super) fn cancel_shape_checks_for_failed_family_call(
+        &mut self,
+        callee: &Type,
+        subst: &Subst,
+    ) {
+        let Type::Fn(params, _) = subst.apply(callee) else {
+            return;
+        };
+        let failed_parameters: Vec<_> = params.iter().flat_map(crate::env::free_tvars).collect();
+        self.deferred_shape_checks.retain(|check| {
+            !check.arg_tys.iter().any(|argument| {
+                crate::env::free_tvars(&subst.apply(argument))
+                    .iter()
+                    .any(|variable| failed_parameters.contains(variable))
+            })
+        });
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,
@@ -830,23 +838,7 @@ impl InferenceProduct {
         if let DeferredShapeRule::PostApp { site, .. } = &rule {
             record_post_app_key(*site, self.replaying_post_app.is_some());
         }
-        self.push_deferred_shape_check(rule, arg_exprs, arg_tys, result_ty, None);
-    }
-
-    /// chelis#1805: [`Self::defer_shape_check`] for an entry that also waits on
-    /// a precision variable.
-    pub(super) fn defer_shape_check_awaiting_precision(
-        &mut self,
-        rule: DeferredShapeRule,
-        arg_tys: Vec<Type>,
-        result_ty: Type,
-        precision: TypeVar,
-    ) {
-        #[cfg(test)]
-        if let DeferredShapeRule::PostApp { site, .. } = &rule {
-            record_post_app_key(*site, self.replaying_post_app.is_some());
-        }
-        self.push_deferred_shape_check(rule, Vec::new(), arg_tys, result_ty, Some(precision));
+        self.push_deferred_shape_check(rule, arg_exprs, arg_tys, result_ty);
     }
 
     fn push_deferred_shape_check(
@@ -855,7 +847,6 @@ impl InferenceProduct {
         arg_exprs: Vec<deep::Expr>,
         arg_tys: Vec<Type>,
         result_ty: Type,
-        awaits_precision: Option<TypeVar>,
     ) {
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
@@ -865,7 +856,6 @@ impl InferenceProduct {
             arg_exprs,
             arg_tys,
             result_ty,
-            awaits_precision,
         });
     }
 
@@ -906,19 +896,7 @@ impl InferenceProduct {
     ) {
         self.resolve_deferred_type_derivations(vg, subst, adt_reg, errors);
         let checks = std::mem::take(&mut self.deferred_shape_checks);
-        for mut check in checks {
-            // chelis#1805: the precision wait, ahead of the outer-constructor
-            // one. An entry suspended on a precision variable is ready when
-            // that variable binds, and the replay then reaches the family
-            // policy against a settled dtype; the wait is cleared here so a
-            // replay that re-registers is not held by a stale one.
-            if let Some(precision) = check.awaits_precision {
-                if matches!(subst.apply(&Type::Var(precision)), Type::Var(_)) {
-                    self.deferred_shape_checks.push(check);
-                    continue;
-                }
-                check.awaits_precision = None;
-            }
+        for check in checks {
             if check
                 .arg_tys
                 .iter()
@@ -1080,16 +1058,6 @@ impl InferenceProduct {
                 // can be derived at all, which is the acceptance boundary the
                 // shape-computed builtins have carried since chelis#1489.
                 //
-                // chelis#1805: a precision that no application inside this
-                // declaration ever bound discharges here too, and silently.
-                // [04-INF-1] keeps a declared precision variable polymorphic,
-                // so `def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)`
-                // is a legitimate declaration rather than an error: what is
-                // wrong is an INSTANTIATION at a dtype the family excludes, and
-                // `validate.rs::check_app_for_poly_op_constraint` rejects that
-                // where the call site supplies it. Rejecting here instead would
-                // refuse a `sig`-declared program whose precision variable has
-                // no binder list to carry a bound at all.
                 DeferredShapeRule::PostApp { .. } => continue,
             };
             errors.push(CheckError::new(

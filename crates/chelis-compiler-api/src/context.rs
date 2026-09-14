@@ -760,7 +760,7 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V21\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V22\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
@@ -791,7 +791,7 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V21\n";
 /// guard existed.
 /// V21 (#1875): TypeEnv explicitly versions its direct encoding and retains
 /// callable dimension labels independently from authored binder identities.
-const CACHE_FORMAT_VERSION: u32 = 21;
+const CACHE_FORMAT_VERSION: u32 = 22;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1382,13 +1382,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V21\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 21);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V22\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 22);
     }
 
     #[test]
     fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 21);
+        assert_eq!(CACHE_FORMAT_VERSION, 22);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

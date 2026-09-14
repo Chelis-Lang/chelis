@@ -586,7 +586,7 @@
         "restricted_body_precision_follows_lexical_bindings",
         "the_spellings_the_argument_reader_does_not_resolve_remain_unreached"
       ],
-      "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own. chelis#1805 adds the listed precision-policy receipts, signature-bound controls, lexical-scope and bool-arithmetic pairs, full family-instantiation matrix, and measured residual locks. All are checker verdicts with exact named test receipts."
+      "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own. chelis#1805 adds the listed precision-policy receipts, signature-bound controls, lexical-scope and bool-arithmetic pairs, full family-instantiation matrix, and repaired indirect-call controls. All are checker verdicts with exact named test receipts."
     },
     {
       "phase": "b",
@@ -662,6 +662,63 @@
         "the_census_reader_finds_an_entry_guard_that_is_there"
       ],
       "note": "The entry-guard census positive control runs beside the split-kernel tuple and one-kernel runtime receipts. The existing example census covers the shipped corpus."
+    },
+    {
+      "phase": "b",
+      "id": "types_declared_operation_bounds",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_failed_family_application_does_not_also_claim_its_operand_was_never_bound",
+        "a_primitive_function_value_carries_its_admission_requirement",
+        "a_wrapper_cannot_silently_narrow_its_authored_contract",
+        "arithmetic_and_matmul_require_their_operand_families",
+        "bounded_function_values_keep_their_restriction",
+        "each_family_operation_requires_a_sufficient_authored_bound",
+        "empty_literal_precision_cannot_evade_the_operation_contract",
+        "every_family_primitive_alias_preserves_its_requirement",
+        "inferred_family_requirements_intersect_without_narrowing_authored_contracts",
+        "inferred_local_operands_still_bind_before_the_declaration_boundary",
+        "local_lambda_and_aggregate_projection_check_the_declared_precision",
+        "primitive_scalar_contracts_require_bounds_too",
+        "standalone_signatures_express_the_same_contract"
+      ],
+      "note": "Requires declared-family admission and restriction transport, with positive and negative cases for authored and inferred variables."
+    },
+    {
+      "phase": "b",
+      "id": "cli_declared_operation_bounds",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c",
+        "insufficient_authored_contracts_are_rejected_without_a_call_site",
+        "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution"
+      ],
+      "note": "Requires the original invalid witnesses to stop at checking and five Float-bounded controls to execute with exact results on eval and compiled C."
+    },
+    {
+      "phase": "b",
+      "id": "api_declared_operation_bounds",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "checked_library_round_trips_preserve_generic_and_primitive_function_values",
+        "insufficient_authored_contracts_cannot_be_published_as_checked_libraries"
+      ],
+      "note": "Checked stdlib and dependency contexts preserve authored and primitive-operation family restrictions through serialization, and refuse to publish insufficient authored contracts."
     }
   ]
 }

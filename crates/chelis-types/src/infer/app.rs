@@ -384,6 +384,88 @@ fn infer_app_inner(
         return Type::Unit;
     }
 
+    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
+    // It therefore has a scalar surface even before specialization. Reject
+    // mixed surfaces before unification can emit an unrelated occurs-check
+    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
+    if let Some(ref fname) = func_name
+        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
+            || matches!(
+                fname.as_str(),
+                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+            ))
+        && arg_tys.len() == 2
+    {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        let scalar = |ty: &Type| {
+            matches!(ty, Type::Prim(_))
+                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some_and(|bound| !bound.is_value_constraint()))
+        };
+        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
+            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
+        {
+            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
+                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
+            } else {
+                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
+            };
+            let mut error = CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
+                vec![
+                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
+                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
+                ],
+            );
+            if let Some(id) = list_span_id(list) {
+                error.span_offset = parse_span_offset(id);
+                error.span_id = Some(id.to_string());
+            } else {
+                let off = span_of_list(list).offset;
+                if off > 0 {
+                    error.span_offset = Some(off);
+                }
+            }
+            return report(errors, error);
+        }
+    }
+
+    // Preserve the direct operation's diagnostic before its scheme enforces
+    // the same family through unification. Indirect calls need no name lookup:
+    // their checked function value carries the restriction itself.
+    let mixed_division_precisions =
+        matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
+            let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                _ => None,
+            };
+            matches!((precision(&arg_tys[0]), precision(&arg_tys[1])),
+                (Some(left), Some(right)) if left != right)
+        };
+    if let Some(fname) = func_name.as_deref()
+        && operand_family_policy(fname).is_some()
+        && !mixed_division_precisions
+    {
+        let operands = if matches!(fname, "mean" | "softmax") {
+            &arg_tys[..arg_tys.len().min(1)]
+        } else {
+            &arg_tys[..]
+        };
+        for operand in operands {
+            let resolved = type_for_readonly_check(operand, subst);
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
+                return report(errors, CheckError::new(kind, message, hints));
+            }
+            if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
+                && let Some(rejected) =
+                    decide_precision_variable_operand(list, fname, var, env, subst, errors)
+            {
+                return rejected;
+            }
+        }
+    }
+
     // The builtin signature structurally shares one precision variable across
     // both tensors and the tolerance. Preserve the operation-specific direct
     // mismatch diagnostics by inspecting concrete operands before generic
@@ -610,53 +692,6 @@ fn infer_app_inner(
 
     let ret_tv = vg.fresh_type();
 
-    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
-    // It therefore has a scalar surface even before specialization. Reject
-    // mixed surfaces before unification can emit an unrelated occurs-check
-    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
-    if let Some(ref fname) = func_name
-        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
-            || matches!(
-                fname.as_str(),
-                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
-            ))
-        && arg_tys.len() == 2
-    {
-        let lhs = type_for_readonly_check(&arg_tys[0], subst);
-        let rhs = type_for_readonly_check(&arg_tys[1], subst);
-        let scalar = |ty: &Type| {
-            matches!(ty, Type::Prim(_))
-                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some())
-        };
-        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
-            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
-        {
-            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
-                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
-            } else {
-                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
-            };
-            let mut error = CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
-                vec![
-                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
-                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
-                ],
-            );
-            if let Some(id) = list_span_id(list) {
-                error.span_offset = parse_span_offset(id);
-                error.span_id = Some(id.to_string());
-            } else {
-                let off = span_of_list(list).offset;
-                if off > 0 {
-                    error.span_offset = Some(off);
-                }
-            }
-            return report(errors, error);
-        }
-    }
-
     let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, arg_tys.clone(), subst);
     let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
@@ -690,6 +725,9 @@ fn infer_app_inner(
             applied
         }
         Err(te) => {
+            if matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch) {
+                product.cancel_shape_checks_for_failed_family_call(&func_ty, subst);
+            }
             let mut e: CheckError = te.into();
             if let Some(id) = list_span_id(list) {
                 e.span_offset = parse_span_offset(id);

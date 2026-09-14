@@ -1040,10 +1040,11 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # `0820ee28e`. Each is a CHECKER verdict that no lane varies, so each is
         # one row rather than a pair.
         #
-        # Two further instantiation spellings are NOT closed and have no row
-        # here: a helper reached as a function value (chelis#1940) and a
-        # two-def polymorphic chain (chelis#1941).
-        # `two_instantiation_spellings_remain_unreached` locks both.
+        # chelis#1942 replaces body inspection with a declared family contract
+        # checked during ordinary inference. The original unbounded definitions
+        # now fail at the declaration; explicitly bounded helpers retain the
+        # restriction through indirect and transitive calls. The dedicated CLI
+        # target also executes the five valid counterparts through eval and C.
         _row(
             "dtype.late_precision.instantiation",
             "silent_unguarded",
@@ -1067,6 +1068,18 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             TERMINAL_CONTROL,
             "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation",
+        ),
+        _row(
+            "dtype.late_precision.authored_contract",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_declared_operation_bounds.insufficient_authored_contracts_are_rejected_without_a_call_site",
+        ),
+        _row(
+            "dtype.late_precision.indirect_and_transitive",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_declared_operation_bounds.invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
         ),
         # chelis#1822: the C preparation's `Expand` arm was gated on NO axis
         # carrying a real name, so a signature binder on a kept axis sent the

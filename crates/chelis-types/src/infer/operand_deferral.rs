@@ -113,7 +113,6 @@ impl<'a> UnresolvedOperandSite<'a> {
         result_ty: &Type,
         subst: &Subst,
         product: &mut InferenceProduct,
-        awaits_precision: Option<TypeVar>,
     ) {
         // chelis#731 cascade suppression. An error witness never binds, the
         // readiness predicate does not wait for it, and the replay would print
@@ -139,20 +138,7 @@ impl<'a> UnresolvedOperandSite<'a> {
             func_name: self.fname.to_string(),
             env: Box::new(self.env.clone()),
         };
-        match awaits_precision {
-            // chelis#1805: the operand's outer constructor is already a tensor,
-            // so the readiness predicate answers ready for it. The entry waits
-            // on the precision variable instead.
-            Some(precision) => product.defer_shape_check_awaiting_precision(
-                rule,
-                arg_tys.to_vec(),
-                result_ty.clone(),
-                precision,
-            ),
-            None => {
-                product.defer_shape_check(rule, Vec::new(), arg_tys.to_vec(), result_ty.clone())
-            }
-        }
+        product.defer_shape_check(rule, Vec::new(), arg_tys.to_vec(), result_ty.clone());
     }
 
     /// [`Self::register`] for an arm that returns: hands back `eager`, the
@@ -201,27 +187,7 @@ impl<'a> DtypeAdmissibilitySite<'a> {
         product: &mut InferenceProduct,
     ) {
         self.site
-            .register_dtype_admissibility(arg_tys, result_ty, subst, product, None);
-    }
-
-    /// chelis#1805: suspend it on an unresolved operand PRECISION instead.
-    ///
-    /// Separate from [`Self::register`] because the two wait on different
-    /// things and the ledger has to know which: a call whose operand type is
-    /// unknown resumes when the type binds, and one whose operand is a tensor
-    /// at an unknown precision resumes when the precision does. Registering the
-    /// second as the first would make the entry ready immediately, which is
-    /// chelis#1805 itself.
-    pub(super) fn register_awaiting_precision(
-        &self,
-        arg_tys: &[Type],
-        result_ty: &Type,
-        subst: &Subst,
-        product: &mut InferenceProduct,
-        precision: TypeVar,
-    ) {
-        self.site
-            .register_dtype_admissibility(arg_tys, result_ty, subst, product, Some(precision));
+            .register_dtype_admissibility(arg_tys, result_ty, subst, product);
     }
 }
 

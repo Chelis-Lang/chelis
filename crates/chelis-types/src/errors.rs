@@ -440,7 +440,9 @@ impl From<TypeError> for CheckError {
     fn from(te: TypeError) -> Self {
         let kind = match te.kind {
             TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
-            TypeErrorKind::PrecisionMismatch => CheckErrorKind::PrecisionMismatch,
+            TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
+                CheckErrorKind::PrecisionMismatch
+            }
             TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
             TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
             TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,

@@ -104,7 +104,12 @@ impl BuiltinDecl {
                         | TypeVarRestriction::ActiveInt
                         | TypeVarRestriction::ActiveNumeric,
                     ) => true,
-                    None => {
+                    None
+                    | Some(
+                        TypeVarRestriction::FloatValue
+                        | TypeVarRestriction::IntValue
+                        | TypeVarRestriction::NumericValue,
+                    ) => {
                         return Ok(BuiltinCaseSelection::ByOperand(BuiltinCaseObligation {
                             builtin: self.name,
                             arguments,
@@ -230,6 +235,43 @@ pub fn builtin_semantic_identities() -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use crate::types::TypeVar;
+
+    #[test]
+    fn operation_value_bounds_do_not_choose_a_scalar_case_before_binding() {
+        for bound in [
+            TypeVarRestriction::FloatValue,
+            TypeVarRestriction::IntValue,
+            TypeVarRestriction::NumericValue,
+        ] {
+            let variable = TypeVar(1234);
+            let mut subst = Subst::new();
+            subst.narrow_tvar_restriction(variable, bound).unwrap();
+            let builtin = crate::builtins::builtin_decl("to_string").unwrap();
+            assert!(matches!(
+                builtin
+                    .semantic_selection(&[Type::Var(variable)], &subst)
+                    .unwrap(),
+                BuiltinCaseSelection::ByOperand(_)
+            ));
+            let dtype = if bound == TypeVarRestriction::IntValue {
+                crate::types::Prim::Int32
+            } else {
+                crate::types::Prim::F32
+            };
+            crate::unify::unify(
+                &Type::Var(variable),
+                &Type::Tensor(vec![], crate::types::TensorPrec::Concrete(dtype)),
+                &mut subst,
+            )
+            .unwrap();
+            assert_eq!(
+                builtin
+                    .semantic_selection(&[Type::Var(variable)], &subst)
+                    .unwrap(),
+                BuiltinCaseSelection::Resolved("Boundary:to_string:ToStringTensor".into())
+            );
+        }
+    }
 
     #[test]
     fn builtin_atom_discovery_scalar_bounds_choose_numeric_not_recursive_cases() {
