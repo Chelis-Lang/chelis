@@ -659,9 +659,14 @@
         "mode": "exact"
       },
       "expected": [
-        "the_census_reader_finds_an_entry_guard_that_is_there"
+        "no_shipped_example_gains_a_host_lane_guard",
+        "the_census_reader_finds_an_entry_guard_that_is_there",
+        "the_census_reader_ignores_diagnostics_without_executable_guards",
+        "the_census_reader_separates_mixed_entry_and_result_guards",
+        "the_census_signature_oracle_preserves_aliases_and_independent_scopes",
+        "the_census_signature_oracle_rejects_missing_duplicate_reordered_and_wrong_axis_guards"
       ],
-      "note": "The entry-guard census positive control runs beside the split-kernel tuple and one-kernel runtime receipts. The existing example census covers the shipped corpus."
+      "note": "The example census independently derives ordered entry obligations from checked source signatures and compares each emitted owned function, including empty actual guard sets. Alias/scope positives and missing/duplicate/reordered/wrong-axis negatives protect the comparison. Result-guard and refusal enumeration controls remain."
     },
     {
       "id": "cli_signature_entry",

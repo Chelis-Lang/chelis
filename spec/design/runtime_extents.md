@@ -428,6 +428,21 @@ the authored parameter `p` witnesses before callbacks; independent result
 labels named `k` cannot supply that equality. #1991's unpublished draft is not
 a dependency of this implementation.
 
+The shipped-example census keeps result guards and entry guards as distinct
+contracts. Its result-guard set remains empty. Entry obligations are derived
+independently from checked source signatures in parameter/axis order, using
+the authored signature before body refinement where present and expanding
+checked type aliases. The reader compares that expectation against every
+emitted owned function, including a definition with no discovered checks.
+The comparison includes each observed and canonical witness axis, literal or
+binder claim, order and multiplicity. Missing, duplicate, reordered and
+wrong-axis controls must fail. This replaces the obsolete empty entry-guard
+expectation when complete signature checking adds wrapper guards; it neither
+introduces a second example roster nor derives authority from emitted code.
+The same source-directory traversal and asserted capability refusals retain
+the enumeration witness. Existing example parity and signature-entry runtime
+receipts remain required alongside this structural emission check.
+
 #### C2.6 Atomic integration and wire ordering
 
 B2b-1 first implements literal call claims through an explicit IR witness.
