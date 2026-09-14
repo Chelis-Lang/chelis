@@ -21,6 +21,7 @@ REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import dtype_phase4b_oracle as oracle  # noqa: E402
+import phase4b_change_report as change_report  # noqa: E402
 
 
 CONTRACT_FILES = tuple(Path(relative) for relative in oracle.CONTRACT_FILES)
@@ -47,6 +48,18 @@ class ContractValidationTests(unittest.TestCase):
     def assert_contract_fails(self, message: str) -> None:
         with self.assertRaisesRegex(oracle.OracleError, message):
             oracle.validate_contract(self.root)
+
+    def assert_changed_contract_requires_acknowledgement(self, kind: str, identity: str) -> None:
+        # Keep the original additive-prose mutations as enforcing review cues.
+        # Required-clause removal controls continue to call validate_contract.
+        def reader(root):
+            return lambda relative: ((REPO_ROOT if relative == change_report.ORACLE else root) / relative).read_text(encoding="utf-8")
+        before = change_report.snapshot(reader(REPO_ROOT))
+        after = change_report.snapshot(reader(self.root))
+        changes = change_report.compare_snapshots(before, after)
+        self.assertIn((kind, identity), {(row["kind"], row["identity"]) for row in changes})
+        errors = change_report.identity_acknowledgement_violations({"changes": changes}, [])
+        self.assertTrue(any(change_report.acknowledgement_line(kind, identity) in error for error in errors), errors)
 
     def repository_atom(self, atom: str) -> str:
         text = (REPO_ROOT / "spec/05-risc-primitives.md").read_text(
@@ -123,7 +136,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.assert_contract_fails("frozen agent numeric surface discipline")
+        self.assert_changed_contract_requires_acknowledgement('region', 'agent numeric surface discipline')
 
     def test_the_acknowledgement_gate_cannot_be_restated_as_a_digest(self) -> None:
         # The Phase 4 handoff region digest moved when the plan's oracle
@@ -2785,7 +2798,7 @@ class ContractValidationTests(unittest.TestCase):
             "last\n"
             "> element equal to the selected maximum.",
         )
-        self.assert_contract_fails("frozen normative atom 05-OP-12")
+        self.assert_changed_contract_requires_acknowledgement('atom', '05-OP-12')
 
     def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
         self.replace(
@@ -2795,7 +2808,7 @@ class ContractValidationTests(unittest.TestCase):
             "cotangent to only the last element equal to the selected maximum.\n\n"
             "> **[05-OP-13]**",
         )
-        self.assert_contract_fails("frozen numeric primitive contracts")
+        self.assert_changed_contract_requires_acknowledgement('region', 'numeric primitive contracts')
 
     def test_plain_prose_before_multi_axis_contract_cannot_contradict_it(self) -> None:
         self.replace(
@@ -2806,7 +2819,7 @@ class ContractValidationTests(unittest.TestCase):
             "and adjoints.\n\n"
             "Multiple axes may be reduced in one call",
         )
-        self.assert_contract_fails("frozen name-preserving rank polymorphism")
+        self.assert_changed_contract_requires_acknowledgement('region', 'name-preserving rank polymorphism')
 
     def test_legacy_bool_arithmetic_alias_fails(self) -> None:
         self.replace(
@@ -2815,7 +2828,7 @@ class ContractValidationTests(unittest.TestCase):
             "Logical operations do not alias arithmetic primitives. `and` is `mul`, "
             "`or` is `max_elem`, and `not` is `neg` on bool values.",
         )
-        self.assert_contract_fails("frozen logical builtin contract")
+        self.assert_changed_contract_requires_acknowledgement('region', 'logical builtin contract')
 
     def test_product_tree_body_is_required(self) -> None:
         self.replace(
@@ -3240,11 +3253,9 @@ class ContractValidationTests(unittest.TestCase):
             "`and` / `or` / `not` are the logical operations; counting is the "
             "explicit-cast idiom",
         )
-        # Confined to the frozen "numeric value semantics" region, so the
-        # region digest catches it with no git history in play. See
-        # FrozenRegionIndependenceTests for the same mutation run against a
-        # tree the acknowledgement gate cannot see at all.
-        self.assert_contract_fails("frozen numeric value semantics digest")
+        # A required literal retains this clause without relying on Git history
+        # or text digests; the independent copied-tree control below proves it.
+        self.assert_contract_fails("bool counting operation")
 
     def test_num8_keeps_representation_distinct_from_width(self) -> None:
         self.replace(
@@ -3512,7 +3523,7 @@ class ContractValidationTests(unittest.TestCase):
             "nevertheless treat an absent semantic row as `Supported` using its "
             "backend's default kernel",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_changed_contract_requires_acknowledgement("region", "capability schema")
 
     def test_effect_registry_covers_every_fixed_effect(self) -> None:
         self.replace(
@@ -3520,7 +3531,7 @@ class ContractValidationTests(unittest.TestCase):
             "`Random | Accum | IO | Test | Resource(ResourceId)`",
             "`Random | Accum | IO | Resource(ResourceId)`",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_contract_fails("closed effect requirement domain")
 
     def test_effect_registry_has_no_default_disposition(self) -> None:
         self.replace(
@@ -3528,7 +3539,7 @@ class ContractValidationTests(unittest.TestCase):
             "There is no\nmissing-row, wildcard, or default disposition.",
             "A missing effect row defaults to `Implemented`.",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_contract_fails("effect no-default rule")
 
     def test_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
@@ -3820,7 +3831,7 @@ class ContractValidationTests(unittest.TestCase):
             "remaining reduction rows; the parent [#729] MAY silently absorb "
             "and close either child's work without a separate receipt)",
         )
-        self.assert_contract_fails("frozen roadmap ownership")
+        self.assert_changed_contract_requires_acknowledgement('region', 'roadmap ownership')
 
     def test_status_must_keep_external_execution_authority(self) -> None:
         self.replace(
@@ -4905,11 +4916,10 @@ class FrozenContractChangeTests(unittest.TestCase):
 
 
 class FrozenRegionIndependenceTests(unittest.TestCase):
-    """A change inside a frozen region trips its digest on its own.
+    """A required clause fails independently of Git and acknowledgement.
 
-    The acknowledgement gate replaces the whole-file digests. It does not
-    replace the atom and region digests, and it must not be the only thing
-    standing between a rewritten normative clause and a green oracle.
+    Changed prose requires review acknowledgement; removed required literals
+    additionally fail the semantic oracle even without comparison history.
     """
 
     def test_a_region_edit_fails_without_any_git_history(self) -> None:
@@ -4936,7 +4946,7 @@ class FrozenRegionIndependenceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
-                oracle.OracleError, "frozen numeric value semantics digest"
+                oracle.OracleError, "bool counting operation"
             ):
                 oracle.validate_contract(root)
 

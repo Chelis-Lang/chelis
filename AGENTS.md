@@ -762,11 +762,11 @@ When a public surface has an implicit invariant, make it explicit and test it.
   record that its covered head differs, and require CI on the new head. Never
   force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
-  neither does one whose only hand-resolved conflicts are generated or digest lines:
+  neither does one whose only hand-resolved conflicts are generated registry lines:
   regenerate `rejection_registry_generated.rs` with
-  `scripts/generate_rejection_registries.py --write`, take the digest that
-  `scripts/dtype_phase4b_oracle.py` reports for a `FROZEN_ATOM_DIGESTS` or
-  `FROZEN_REGION_DIGESTS` line, and treat the result as mechanical.
+  `scripts/generate_rejection_registries.py --write` and treat that result as
+  mechanical. Atom/region text hashes have been retired; contract changes still
+  owe their required clauses, semantic checks and exact PR acknowledgements.
 
 ## Build Toolchain
 
