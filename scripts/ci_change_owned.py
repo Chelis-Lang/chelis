@@ -25,6 +25,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,7 @@ TEST_FUNCTION = re.compile(
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
 SOFT_BUDGET_SECONDS = 15 * 60
+EXPANSION_EXECUTION_SECONDS = 16 * 60
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -1380,6 +1382,37 @@ def _write_junit(path: Path, suite_documents: Sequence[Path]) -> None:
         handle.write("\n")
 
 
+def run_command(
+    command: Sequence[str], *, timeout: float | None = None, **kwargs: Any
+) -> subprocess.CompletedProcess[str]:
+    """Bound the optional worker's command tree, including inherited pipes."""
+    if timeout is None:
+        return subprocess.run(command, **kwargs)
+    if os.name != "posix":
+        raise ValueError("bounded expansion execution requires POSIX process groups")
+    check = kwargs.pop("check", False)
+    with subprocess.Popen(command, start_new_session=True, **kwargs) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException as error:
+            # Killing only Cargo can leave rustc/nextest/tests holding the pipes
+            # open, so communicate() would outlive the deadline indefinitely.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            if isinstance(error, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(
+                    command, timeout, output=stdout, stderr=stderr
+                ) from None
+            raise
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
+
+
 def execute_shard(
     plan: Mapping[str, Any],
     *,
@@ -1387,7 +1420,7 @@ def execute_shard(
     shard: int,
     output: Path,
     repo: Path = ROOT,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = run_command,
 ) -> dict[str, Any]:
     verify_plan_digest(plan)
     checked_out = _commit(repo, "HEAD")
@@ -1402,6 +1435,11 @@ def execute_shard(
         raise ValueError(f"shard must be one of {SHARDS}")
     shard_started_at = _utc_timestamp()
     shard_started = time.monotonic()
+    deadline = (
+        shard_started + EXPANSION_EXECUTION_SECONDS
+        if lane == "package-expansion" else None
+    )
+    deadline_exhausted = False
     lane_key = LANE_KEYS[lane]
     selected = list(plan["shards"][lane_key][str(shard)])
     output.mkdir(parents=True, exist_ok=True)
@@ -1420,6 +1458,37 @@ def execute_shard(
     executed_tests: list[str] = []
     executed_targets: list[str] = []
     failures: list[str] = []
+    command_started = False
+
+    def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal deadline_exhausted, command_started
+        command_started = False
+        if deadline is None:
+            command_started = True
+            return runner(command, **kwargs)
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 0, output="", stderr="")
+            command_started = True
+            return runner(command, timeout=remaining, **kwargs)
+        except subprocess.TimeoutExpired as error:
+            deadline_exhausted = True
+            failures.append(
+                "package-expansion execution deadline exhausted; "
+                "unfinished selected coverage remains unsuccessful"
+            )
+            # TimeoutExpired can contain bytes even for a text-mode subprocess.
+            def text_output(value: str | bytes | None) -> str:
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                return value or ""
+
+            raise subprocess.CalledProcessError(
+                124, command, output=text_output(error.stdout),
+                stderr=text_output(error.stderr),
+            ) from error
+
     suite_documents: list[Path] = []
     exclusions = _test_exclusions_from_plan(plan)
     cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
@@ -1440,7 +1509,7 @@ def execute_shard(
         build_started_at = _utc_timestamp()
         build_started = time.monotonic()
         try:
-            completed = runner(
+            completed = run(
                 build_command,
                 cwd=repo,
                 check=True,
@@ -1486,12 +1555,14 @@ def execute_shard(
 
     if build_succeeded:
         for canonical in selected:
+            if deadline_exhausted:
+                break
             identity = Identity.parse(canonical)
             list_command = target_command(identity, exclusions, list_only=True)
             list_started_at = _utc_timestamp()
             started = time.monotonic()
             try:
-                listed = runner(
+                listed = run(
                     list_command,
                     cwd=repo,
                     check=True,
@@ -1549,9 +1620,8 @@ def execute_shard(
             produced_junit.unlink(missing_ok=True)
             run_started_at = _utc_timestamp()
             started = time.monotonic()
-            executed_targets.append(canonical)
             try:
-                completed = runner(
+                completed = run(
                     run_command,
                     cwd=repo,
                     check=True,
@@ -1587,6 +1657,8 @@ def execute_shard(
                         "stderr": error.stderr or "",
                     }
                 )
+            if command_started:
+                executed_targets.append(canonical)
             run_seconds = round(time.monotonic() - started, 3)
             target_timings[canonical] = {
                 "list_started_at": list_started_at,
@@ -1604,11 +1676,15 @@ def execute_shard(
                     + ".xml"
                 )
                 shutil.copyfile(produced_junit, target_junit)
-                suite_documents.append(target_junit)
                 try:
                     executed_tests.extend(_junit_tests(target_junit, identity))
                 except (ValueError, ET.ParseError) as error:
                     failures.append(f"{canonical}: malformed JUnit: {error}")
+                else:
+                    # A deadline may interrupt nextest's XML write. Keep that
+                    # failure, but merge only validated suites so receipt
+                    # finalization still preserves earlier completed evidence.
+                    suite_documents.append(target_junit)
             else:
                 failures.append(f"{canonical}: test run produced no JUnit")
 

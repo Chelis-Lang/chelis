@@ -181,6 +181,20 @@ cancel, starve, or change the verdict of required change-owned execution. Step
 4 may make that summary required only after exact-head receipts justify the
 promotion.
 
+The expansion executor has a separate 16-minute deadline, measured from its
+start and shared by the product build, target listings and test commands. On
+expiry it terminates the active command's process group, starts no later
+command, and writes an unsuccessful receipt with the completed evidence and
+the full original target selection. Unfinished targets remain uncovered; a
+deadline is not an exclusion or evidence of passing tests. The existing
+15-minute soft budget remains telemetry. The gap before the 20-minute job
+limit allows receipt upload after normal executor budget exhaustion; setup
+delays, external cancellation and runner loss can still leave a missing shard.
+The required change-owned executor does not acquire this shorter deadline.
+Positive and negative subprocess/receipt tests must exercise expiry during
+build, listing and execution, preservation of earlier results, child-process
+termination, and successful completion without changing required execution.
+
 ### Delivery sequence
 
 1. Land this design amendment.
