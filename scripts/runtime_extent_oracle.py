@@ -1394,6 +1394,56 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # Only tensor/single is repaired here. Every other cell is recorded at
         # the state it was MEASURED in and deferred to the issue that owns its
         # mechanism, so the next spec-admitted kind cannot be unlisted.
+        # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
+        # while beta-reduced C skips its signature and unused actual effects.
+        _row(
+            "entry.beta.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.scopes.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.scopes.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.actual.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
+        _row(
+            "entry.beta.actual.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
         _row(
             "grad.wrt_tensor.single.dead_forward.eval",
             "silent_unguarded",

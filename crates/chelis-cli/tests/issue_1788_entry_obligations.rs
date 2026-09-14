@@ -222,6 +222,195 @@ fn higher_order_app_and_pipe_accept_agreeing_entry_claim() {
     }
 }
 
+const BETA_OPAQUE: &str = "def opaque(x: tensor[n, f32]) -> tensor[*, f32] ! { IO } = { _ = print(\"argument-ran\")\n shrink(x, [[0i64, shape(x, 0i32)]]) }\n";
+
+fn beta_actual(extent: usize) -> String {
+    let values = vec!["1.0f32"; extent].join(", ");
+    format!("opaque(to_tensor([{values}]))")
+}
+
+fn check_beta_entry(
+    source: &str,
+    claims: Option<(&str, &str)>,
+    argument_effects: usize,
+    body_effects: usize,
+) {
+    for c in [false, true] {
+        let output = run(source, c);
+        let rendered = text(&output);
+        assert_eq!(
+            output.status.success(),
+            claims.is_none(),
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("argument-ran").count(),
+            argument_effects,
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("body-ran").count(),
+            body_effects,
+            "C={c}: {rendered}"
+        );
+        if let Some((eval_claim, c_claim)) = claims {
+            assert!(
+                rendered.contains(if c { c_claim } else { eval_claim }),
+                "C={c}: {rendered}"
+            );
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "numeric trap: domain in load at int64"),
+                "C={c}: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.lines().any(|line| line == "out = 7"),
+                "C={c}: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn beta_reduced_callbacks_keep_literal_entry_and_eager_actuals() {
+    for extent in [2, 3] {
+        let actual = beta_actual(extent);
+        let lambda = "fn (x: tensor[2, f32]) -> { _ = print(\"body-ran\")\n 7i64 }";
+        let claims = (extent == 3).then_some((
+            "extent `2`: claimed = 2, x axis 0 = 3",
+            "input `x` axis 0 expected 2, got 3",
+        ));
+        for call in [
+            format!("out = ({lambda})({actual})\n"),
+            format!("out = {{ f = {lambda}\n f({actual}) }}\n"),
+        ] {
+            check_beta_entry(
+                &format!("{BETA_OPAQUE}{call}"),
+                claims,
+                1,
+                usize::from(extent == 2),
+            );
+        }
+        let source = format!(
+            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> int64, a: tensor[p, f32], b: tensor[p, f32]) -> int64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {actual}, {actual})\n"
+        );
+        check_beta_entry(&source, claims, 2, 0);
+    }
+}
+
+#[test]
+fn beta_reduced_callbacks_preserve_signature_order() {
+    for literal_first in [false, true] {
+        for (fixed_bad, pair_bad) in [(false, false), (true, false), (false, true), (true, true)] {
+            let fixed = beta_actual(if fixed_bad { 3 } else { 2 });
+            let a = beta_actual(if pair_bad { 3 } else { 2 });
+            let b = beta_actual(2);
+            let (params, args) = if literal_first {
+                (
+                    "fixed: tensor[2, f32], a: tensor[seq, f32], b: tensor[seq, f32]",
+                    format!("{fixed}, {a}, {b}"),
+                )
+            } else {
+                (
+                    "a: tensor[seq, f32], b: tensor[seq, f32], fixed: tensor[2, f32]",
+                    format!("{a}, {b}, {fixed}"),
+                )
+            };
+            let claims = if fixed_bad && (literal_first || !pair_bad) {
+                Some((
+                    "extent `2`: claimed = 2, fixed axis 0 = 3",
+                    "input `fixed` axis 0 expected 2, got 3",
+                ))
+            } else if pair_bad {
+                Some((
+                    "extent `seq`: a axis 0 = 3, b axis 0 = 2",
+                    "extent `seq`: a axis 0 = 3, b axis 0 = 2",
+                ))
+            } else {
+                None
+            };
+            let source = format!(
+                "{BETA_OPAQUE}out = (fn ({params}) -> {{ _ = print(\"body-ran\")\n 7i64 }})({args})\n"
+            );
+            check_beta_entry(&source, claims, 3, usize::from(claims.is_none()));
+        }
+    }
+}
+
+#[test]
+fn beta_reduced_callbacks_keep_outer_and_inner_claims_independent() {
+    for (first, second) in [(3, 2), (3, 3), (2, 2)] {
+        let source = format!(
+            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> int64, a: tensor[p, f32], b: tensor[p, f32]) -> int64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {}, {})\n",
+            beta_actual(first),
+            beta_actual(second)
+        );
+        let claims = match (first, second) {
+            (3, 2) => Some((
+                "extent `p`: a axis 0 = 3, b axis 0 = 2",
+                "extent `p`: a axis 0 = 3, b axis 0 = 2",
+            )),
+            (3, 3) => Some((
+                "extent `2`: claimed = 2, x axis 0 = 3",
+                "input `x` axis 0 expected 2, got 3",
+            )),
+            _ => None,
+        };
+        check_beta_entry(&source, claims, 2, 0);
+    }
+    for second_extent in [3, 4] {
+        let source = format!(
+            "{BETA_OPAQUE}out = {{ f = fn (x: tensor[seq, f32], y: tensor[seq, f32]) -> 7i64\n first = f({}, {})\n f({}, {}) }}\n",
+            beta_actual(2),
+            beta_actual(2),
+            beta_actual(3),
+            beta_actual(second_extent)
+        );
+        let claims = (second_extent == 4).then_some((
+            "extent `seq`: x axis 0 = 3, y axis 0 = 4",
+            "extent `seq`: x axis 0 = 3, y axis 0 = 4",
+        ));
+        check_beta_entry(&source, claims, 4, 0);
+    }
+}
+
+#[test]
+fn beta_reduced_callbacks_run_failing_actual_before_entry() {
+    let source = format!(
+        "{BETA_OPAQUE}def bad(x: tensor[n, f32]) -> tensor[*, f32] ! {{ IO }} = {{ _ = print(\"argument-ran\")\n shrink(x, [[1i64, add(shape(x, 0i32), 1i64)]]) }}\nout = (fn (x: tensor[2, f32], y: tensor[3, f32]) -> {{ _ = print(\"body-ran\")\n 7i64 }})({}, bad(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
+        beta_actual(3)
+    );
+    for c in [false, true] {
+        let output = run(&source, c);
+        let rendered = text(&output);
+        assert!(!output.status.success(), "C={c}: {rendered}");
+        let expected = if c {
+            "numeric trap: domain in shrink at int64"
+        } else {
+            "error: shrink axis 0 bound [1, 4] is out of range for input dim 3"
+        };
+        assert!(
+            rendered.lines().any(|line| line == expected),
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("argument-ran").count(),
+            2,
+            "C={c}: {rendered}"
+        );
+        assert!(!rendered.contains("body-ran"), "C={c}: {rendered}");
+        assert!(!rendered.contains("domain in load"), "C={c}: {rendered}");
+    }
+    let valid_actuals = format!(
+        "{BETA_OPAQUE}out = (fn (x: tensor[2, f32], y: tensor[3, f32]) -> {{ _ = print(\"body-ran\")\n 7i64 }})({}, {})\n",
+        beta_actual(2),
+        beta_actual(3)
+    );
+    check_beta_entry(&valid_actuals, None, 2, 1);
+}
+
 fn mixed_literal_source(literal_first: bool, repeated_bad: bool, literal_bad: bool) -> String {
     let fixed = "fixed: tensor[2, f32]";
     let pair = "a: tensor[seq, f32], b: tensor[batch, seq, f32]";

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "01fb2afb6d30aedfcfa4c5ae2902dcca9fbcb0615aa0d8c0b0772f748fd22f6c",
+  "corpus_sha256": "efa8c6cb9e4b7f8c41d9206298bdc9466b3dc0ef57a4f998daa14e2503f60b03",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -211,6 +211,54 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation"
+    },
+    {
+      "id": "entry.beta.actual.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry"
+    },
+    {
+      "id": "entry.beta.actual.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry"
+    },
+    {
+      "id": "entry.beta.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals"
+    },
+    {
+      "id": "entry.beta.literal.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals"
+    },
+    {
+      "id": "entry.beta.order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order"
+    },
+    {
+      "id": "entry.beta.order.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order"
+    },
+    {
+      "id": "entry.beta.scopes.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent"
+    },
+    {
+      "id": "entry.beta.scopes.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent"
     },
     {
       "id": "entry.higher_order.invocation.c",

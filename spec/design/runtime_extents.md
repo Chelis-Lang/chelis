@@ -413,7 +413,12 @@ or body operations. This includes obligations whose witnesses the body never
 reads and preserved monomorphized signatures. A private helper may omit only
 the exact signature obligations already executed by its dominating host entry;
 its local operation and result guards remain independent. Standalone helper
-entry retains the complete checks. Ownership must account for every obligation
+entry retains the complete checks.
+Executable beta reduction retains this invocation boundary: evaluate every
+actual once in caller order, including unused actuals, then check the authored
+lambda signature before its substituted body. The enclosing function and
+callback signatures keep separate obligations. Shape-only substitution does
+not authorize erasing the executable argument or entry boundary. Ownership must account for every obligation
 exactly once, rather than suppressing the enclosing plan when any helper owns
 one obligation.
 
@@ -916,13 +921,11 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 154 rows and none of them is an unexplained
-shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
-`RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
-`--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 35 non-`executes_exactly` values
-against 119 `executes_exactly`, and every one of the thirty-five is accounted
-for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
+The phase-B corpus contains 162 rows. Completion requires `--phase b` to
+report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
+and a hand count do not establish that execution result. The JSON's `phase_b`
+column contains 35 non-`executes_exactly` values against 127
+`executes_exactly`; the dispositions below account for the thirty-five. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:
 `expand.positional.replacement.non_unit_source_static`,

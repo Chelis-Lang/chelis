@@ -10578,14 +10578,10 @@ fn lower_app_host_expr(
     // is also the terminal step after a higher-order top-level call is
     // specialized below: substituting an `fn` argument into `f(x)` creates an
     // app whose callee is that inline function.
-    if let Some(specialized) = beta_reduce_inline_host_call(app_expr) {
-        return lower_host_expr_with_expected(
-            &specialized,
-            program,
-            scope,
-            tensor_helpers,
-            expected_ty,
-        );
+    if let Some(lowered) =
+        lower_inline_host_invocation(app_expr, program, scope, tensor_helpers, expected_ty)?
+    {
+        return Ok(lowered);
     }
     let name = kids
         .first()
@@ -11175,13 +11171,10 @@ fn lower_app_host_expr(
     Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
 }
 
-/// Beta-reduce an immediately-invoked anonymous function.
-///
-/// Host C has no portable nested-function value. At a closed call site the
-/// correct representation is compile-time specialization: substitute the
-/// checked arguments into the body and lower the resulting expression. The
-/// substitution helper is binder-aware, so nested functions and lets retain
-/// lexical shadowing.
+/// Beta-reduce an anonymous call for structural shape evidence only.
+/// Executable lowering uses `lower_inline_host_invocation` to retain eager
+/// actual evaluation and signature entry before the substituted body. This
+/// binder-aware syntax walk does not itself represent an executed invocation.
 fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
     let Expr::List(app_list, _) = expr else {
         return None;
@@ -11220,9 +11213,108 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
     )))
 }
 
-/// Keep the signature boundary which body substitution otherwise erases. A
-/// callable specialization remains compile-time syntax; every payload actual
-/// is evaluated once before observing the invocation's tensor parameters.
+/// A specialized invocation retains its own authored entry contract even
+/// when its caller already checked a different signature on the same values.
+struct RetainedHostInvocation<'a> {
+    params: &'a [HostParam],
+    body: &'a Expr,
+    entry: SignatureEntryPlan,
+    name: Option<&'a str>,
+}
+
+impl<'a> RetainedHostInvocation<'a> {
+    fn new(params: &'a [HostParam], body: &'a Expr) -> Self {
+        let entry = SignatureEntryPlan::new(params.iter().filter_map(|param| {
+            let HostTypeTerm::Tensor(ty) = &param.ty else {
+                return None;
+            };
+            Some(HostTensorInput {
+                name: param.name.clone(),
+                ty: ty.clone(),
+            })
+        }));
+        Self {
+            params,
+            body,
+            entry,
+            name: None,
+        }
+    }
+}
+
+/// Executable beta reduction first retains actual evaluation and the lambda's
+/// own signature. The AST-only reducer above is reserved for shape evidence.
+fn lower_inline_host_invocation(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected: Option<&HostTypeTerm>,
+) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let Some(call) = as_list(expr) else {
+        return Ok(None);
+    };
+    let Some(callee) = children(call).first() else {
+        return Ok(None);
+    };
+    let callee = match callee {
+        Expr::MetaExpr(meta, _) => &meta.expr,
+        direct => direct,
+    };
+    let Some(function) = as_list(callee).filter(|list| tag(list) == Some(DeepTag::Fn)) else {
+        return Ok(None);
+    };
+    let children = children(function);
+    let Some(declarations) = children
+        .first()
+        .and_then(as_list)
+        .filter(|list| tag(list) == Some(DeepTag::Params))
+    else {
+        return Err(host_expr_lowering_error(
+            expr,
+            "inline invocation lost its parameters",
+        ));
+    };
+    let Some(body) = children.get(1) else {
+        return Err(host_expr_lowering_error(
+            expr,
+            "inline invocation lost its body",
+        ));
+    };
+    let inferred = expr_fn_type(callee).map(|(params, _)| params);
+    let mut params = Vec::new();
+    for (index, declaration) in self::children(declarations).iter().enumerate() {
+        let Some(name) = param_name(declaration) else {
+            return Err(host_expr_lowering_error(
+                expr,
+                "inline invocation lost a parameter name",
+            ));
+        };
+        // The authored annotation is the obligation. Actualized expression
+        // metadata supplies only parameters whose annotation is absent.
+        let ty = param_host_type(declaration)
+            .or_else(|| {
+                inferred
+                    .as_ref()
+                    .and_then(|params| params.get(index))
+                    .cloned()
+            })
+            .map(|ty| expand_host_type_aliases(program, ty))
+            .unwrap_or_else(fresh_host_inference);
+        params.push(HostParam { name, ty });
+    }
+    lower_retained_host_invocation(
+        expr,
+        RetainedHostInvocation::new(&params, body),
+        expected,
+        program,
+        scope,
+        tensor_helpers,
+    )
+    .map(Some)
+}
+
+/// Keep the signature boundary which named body substitution otherwise erases.
 fn lower_guarded_host_invocation(
     expr: &Expr,
     name: &str,
@@ -11240,27 +11332,50 @@ fn lower_guarded_host_invocation(
     let Some(signature) = host_def_signature(canonical, body, None, program) else {
         return Ok(None);
     };
-    let plan = SignatureEntryPlan::new(signature.params.iter().filter_map(|param| {
-        let HostTypeTerm::Tensor(ty) = &param.ty else {
-            return None;
-        };
-        Some(HostTensorInput {
-            name: param.name.clone(),
-            ty: ty.clone(),
-        })
-    }));
-    if plan.guards().is_empty() {
+    let mut invocation = RetainedHostInvocation::new(&signature.params, &signature.body_expr);
+    if invocation.entry.guards().is_empty() {
         return Ok(None);
     }
+    invocation.name = Some(name);
+    lower_retained_host_invocation(
+        expr,
+        invocation,
+        Some(expected),
+        program,
+        scope,
+        tensor_helpers,
+    )
+    .map(Some)
+}
+
+/// Evaluate payload actuals once in caller order, then execute the complete
+/// entry plan before the substituted body. Callable actuals remain syntax.
+fn lower_retained_host_invocation(
+    expr: &Expr,
+    invocation: RetainedHostInvocation<'_>,
+    expected: Option<&HostTypeTerm>,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let Expr::List(call, span) = expr else {
-        return Ok(None);
+        return Err(host_expr_lowering_error(
+            expr,
+            "retained invocation is not an application",
+        ));
     };
     let call_children = children(call);
     let Some((_, args)) = call_children.split_first() else {
-        return Ok(None);
+        return Err(host_expr_lowering_error(
+            expr,
+            "retained invocation lost its actuals",
+        ));
     };
-    if args.len() != signature.params.len() {
-        return Ok(None);
+    if args.len() != invocation.params.len() {
+        return Err(host_expr_lowering_error(
+            expr,
+            "retained invocation argument count differs from its signature",
+        ));
     }
     let mut reserved = scope
         .to_sorted()
@@ -11268,15 +11383,16 @@ fn lower_guarded_host_invocation(
         .map(|(name, _)| name.clone())
         .collect::<UnordSet<_>>();
     collect_deep_var_names(expr, &mut reserved);
-    collect_deep_var_names(&signature.body_expr, &mut reserved);
-    names_bound_in(&signature.body_expr, &mut reserved)
+    collect_deep_var_names(invocation.body, &mut reserved);
+    names_bound_in(invocation.body, &mut reserved)
         .map_err(|detail| host_expr_lowering_error(expr, detail))?;
-    let mut rewritten = call.clone();
+    let mut substitutions = UnordMap::new();
     let mut local_scope = scope.clone();
     let mut bindings = Vec::new();
     let mut observations = Vec::new();
-    for (index, (arg, formal)) in args.iter().zip(&signature.params).enumerate() {
+    for (index, (arg, formal)) in args.iter().zip(invocation.params).enumerate() {
         if matches!(formal.ty, HostTypeTerm::Fn(..)) {
+            substitutions.insert(formal.name.clone(), arg.clone());
             continue;
         }
         let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
@@ -11300,62 +11416,67 @@ fn lower_guarded_host_invocation(
         if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
             observations.push(HostExpr::new(HostExprKind::Var(local.clone(), ty)));
         }
-        rewritten.elements[index + 3] = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Var), *span),
-                    Expr::Map(Metadata::default(), *span),
-                    Expr::Atom(Atom::Name(local), *span),
-                ],
-            },
-            *span,
+        substitutions.insert(
+            formal.name.clone(),
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Var), *span),
+                        Expr::Map(Metadata::default(), *span),
+                        Expr::Atom(Atom::Name(local), *span),
+                    ],
+                },
+                *span,
+            ),
         );
     }
-    let Some(specialized) = inline_top_level_host_call(&Expr::List(rewritten, *span), program)
-    else {
-        return Err(host_expr_lowering_error(
-            expr,
-            "retained signature invocation lost its callable body",
-        ));
-    };
-    let mut serial = bindings.len();
-    let guard_name = loop {
-        let candidate = format!("__chelis_entry_check_{serial}");
-        if reserved.insert(candidate.clone()) {
-            break candidate;
-        }
-        serial += 1;
-    };
-    bindings.push(HostBinding {
-        name: guard_name,
-        display_name: None,
-        display_roots: Vec::new(),
-        ty: HostTypeTerm::Unit,
-        value: HostExpr::new(HostExprKind::SignatureEntry {
-            plan,
-            args: observations,
-        }),
-    });
-    let pushed = push_inlining(name);
+    let specialized = inline_local_callable_lets(&substitute_expr(
+        invocation.body,
+        &substitutions,
+        &UnordSet::new(),
+    ));
+    if !invocation.entry.guards().is_empty() {
+        let mut serial = bindings.len();
+        let guard_name = loop {
+            let candidate = format!("__chelis_entry_check_{serial}");
+            if reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+            serial += 1;
+        };
+        bindings.push(HostBinding {
+            name: guard_name,
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: HostTypeTerm::Unit,
+            value: HostExpr::new(HostExprKind::SignatureEntry {
+                plan: invocation.entry,
+                args: observations,
+            }),
+        });
+    }
     let definitions = adt_constructor_definitions(program);
-    let expected = canonicalize_representation_erased_adt_args(expected.clone(), &definitions);
+    let expected = expected.map(|expected| {
+        canonicalize_representation_erased_adt_args(expected.clone(), &definitions)
+    });
+    let pushed = invocation.name.is_some_and(push_inlining);
     let lowered = lower_host_expr_with_expected(
         &specialized,
         program,
         &local_scope,
         tensor_helpers,
-        (!expected.is_unresolved()).then_some(&expected),
+        expected.as_ref().filter(|ty| !ty.is_unresolved()),
     );
     if pushed {
-        pop_inlining(name);
+        pop_inlining(invocation.name.expect("named invocation"));
     }
     let body = lowered?;
     let ty = host_expr_type(&body);
-    Ok(Some(HostExpr::new(HostExprKind::Let {
+    Ok(HostExpr::new(HostExprKind::Let {
         bindings,
         body: Box::new(body),
         ty,
-    })))
+    }))
 }
 
 fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
