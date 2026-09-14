@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -627,6 +629,126 @@ class PlanningTests(unittest.TestCase):
 
 
 class ShardingAndExecutionTests(unittest.TestCase):
+    def test_expansion_deadline_preserves_receipts_at_every_command_boundary(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        shard = owned.shard_for(identity)
+        later = next(
+            owned.Identity("p", f"z{n}") for n in range(100)
+            if owned.shard_for(owned.Identity("p", f"z{n}")) == shard
+        )
+        for expired_call in (0, 1, 2, 3, None):
+            with self.subTest(expired_call=expired_call), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                plan = self._plan(lane="package-expansion")
+                plan["eligible_targets"].append(later.canonical)
+                plan["package_expansion"].append(later.canonical)
+                plan["shards"]["package_expansion"] = owned.shard_map([identity, later])
+                owned.attach_plan_digest(plan)
+                calls = []
+
+                def run(command, **kwargs):
+                    index = len(calls)
+                    calls.append((command, kwargs))
+                    if index == expired_call:
+                        raise subprocess.TimeoutExpired(
+                            command, kwargs.get("timeout", 0),
+                            output=b"partial stdout", stderr=b"partial stderr",
+                        )
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    name = command[command.index("--test") + 1]
+                    if command[2] == "list":
+                        cases = {"fast_case": {"ignored": False, "filter-match": {"status": "matches"}}}
+                        if name == "smoke":
+                            cases["slow_case"] = {"ignored": False, "filter-match": {"status": "mismatch"}}
+                        payload = {"rust-suites": {f"p::{name}": {"testcases": cases}}}
+                        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    junit.write_text('<testsuite><testcase name="fast_case"/></testsuite>')
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                    mock.patch.object(owned, "_commit", return_value="b" * 40),
+                ):
+                    receipt = owned.execute_shard(
+                        plan, lane="package-expansion", shard=shard,
+                        output=root / "receipt", repo=root, runner=run,
+                    )
+                self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+                self.assertEqual(receipt["selected_targets"], [identity.canonical, later.canonical])
+                self.assertEqual(receipt["success"], expired_call is None)
+                self.assertEqual(len(calls), 5 if expired_call is None else expired_call + 1)
+                timeouts = [kwargs["timeout"] for _, kwargs in calls]
+                self.assertTrue(all(0 < value <= 960 for value in timeouts))
+                self.assertEqual(timeouts, sorted(timeouts, reverse=True))
+                if expired_call is not None:
+                    self.assertIn("execution deadline", " ".join(receipt["failures"]))
+                    commands = json.loads((root / "receipt/commands.json").read_text())
+                    self.assertEqual(commands[-1]["stdout"], "partial stdout")
+                    self.assertEqual(commands[-1]["stderr"], "partial stderr")
+                    summary = owned.summarize_package_expansion(plan, [receipt])
+                    self.assertFalse(summary["observed_success"])
+                if expired_call == 3:
+                    self.assertEqual(receipt["executed_targets"], [identity.canonical])
+                    self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
+
+    def test_budget_is_shared_and_no_command_starts_after_it_expires(self) -> None:
+        plan = self._plan(lane="package-expansion")
+        current_time = [100.0]
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            current_time[0] += 961
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            mock.patch.object(owned, "_commit", return_value="b" * 40)
+        ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
+            receipt = owned.execute_shard(
+                plan, lane="package-expansion",
+                shard=owned.shard_for(owned.Identity("p", "smoke")),
+                output=Path(tmp), repo=Path(tmp), runner=run,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(receipt["success"])
+        self.assertTrue(receipt["soft_budget_exceeded"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertIn("execution deadline", " ".join(receipt["failures"]))
+
+    def test_expiry_after_listing_does_not_claim_the_target_executed(self) -> None:
+        plan = self._plan(lane="package-expansion")
+        current_time = [100.0]
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "build":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            current_time[0] += 961
+            payload = {"rust-suites": {"p::smoke": {"testcases": {
+                "fast_case": {"ignored": False, "filter-match": {"status": "matches"}},
+                "slow_case": {"ignored": False, "filter-match": {"status": "mismatch"}},
+            }}}}
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            mock.patch.object(owned, "_commit", return_value="b" * 40)
+        ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
+            receipt = owned.execute_shard(
+                plan, lane="package-expansion",
+                shard=owned.shard_for(owned.Identity("p", "smoke")),
+                output=Path(tmp), repo=Path(tmp), runner=run,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(receipt["success"])
+        self.assertEqual(receipt["selected_tests"], ["p::smoke::fast_case"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertEqual(receipt["executed_tests"], [])
+
     def test_shards_are_deterministic_package_qualified_and_cover_all(self) -> None:
         identities = [
             owned.Identity("p", "smoke"),
@@ -760,6 +882,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def run(command, **kwargs):
+                self.assertNotIn("timeout", kwargs)
                 calls.append(command)
                 if command[1:3] == ["nextest", "list"]:
                     payload = {
@@ -930,6 +1053,99 @@ class ShardingAndExecutionTests(unittest.TestCase):
             ]
         )
         self.assertTrue(report.required)
+
+
+@unittest.skipUnless(os.name == "posix", "hosted expansion uses POSIX process groups")
+class BoundedCommandTests(unittest.TestCase):
+    def test_interruption_cleans_up_the_owned_process_group(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.communicate.side_effect = [KeyboardInterrupt(), ("out", "err")]
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = process
+        with (
+            mock.patch.object(owned.subprocess, "Popen", return_value=manager),
+            mock.patch.object(owned.os, "killpg") as kill,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            owned.run_command(["cargo", "build"], timeout=1, check=True)
+        kill.assert_called_once_with(4321, owned.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_real_executor_timeout_writes_a_verifiable_unsuccessful_receipt(self) -> None:
+        plan = ShardingAndExecutionTests()._plan(lane="package-expansion")
+        for stage in ("build", "list", "run"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                # Exercise the production process runner and serializer together,
+                # with an executable stand-in for Cargo instead of a real build.
+                cargo = root / "cargo"
+                cargo.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json,sys,time\n"
+                    f"if {stage!r} in sys.argv[1:3]:\n"
+                    " print('deadline output', flush=True)\n"
+                    " time.sleep(30)\n"
+                    "if 'list' in sys.argv[1:3]:\n"
+                    " print(json.dumps({'rust-suites': {'p::smoke': {'testcases': {"
+                    "'fast_case': {'ignored': False, 'filter-match': {'status': 'matches'}},"
+                    "'slow_case': {'ignored': False, 'filter-match': {'status': 'mismatch'}}}}}}))\n"
+                )
+                cargo.chmod(0o755)
+                with (
+                    mock.patch.dict(os.environ, {
+                        "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "CARGO_TARGET_DIR": str(root / "target"),
+                    }),
+                    mock.patch.object(owned, "_commit", return_value="b" * 40),
+                    mock.patch.object(owned, "EXPANSION_EXECUTION_SECONDS", 0.5),
+                ):
+                    receipt = owned.execute_shard(
+                        plan, lane="package-expansion",
+                        shard=owned.shard_for(owned.Identity("p", "smoke")),
+                        output=root / "receipt", repo=root,
+                    )
+                self.assertFalse(receipt["success"])
+                self.assertIn("execution deadline", " ".join(receipt["failures"]))
+                self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+                commands = json.loads((root / "receipt/commands.json").read_text())
+                self.assertEqual(commands[-1]["returncode"], 124)
+                self.assertEqual(commands[-1]["stdout"], "deadline output\n")
+                self.assertEqual(receipt["executed_tests"], [])
+
+    def test_success_and_nonzero_exit_preserve_command_output(self) -> None:
+        for code in (0, 7):
+            command = [sys.executable, "-c", f"import sys; print('out'); print('err', file=sys.stderr); sys.exit({code})"]
+            kwargs = dict(cwd=Path.cwd(), check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if code:
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    owned.run_command(command, **kwargs)
+                result = caught.exception
+            else:
+                result = owned.run_command(command, **kwargs)
+            self.assertEqual(result.returncode, code)
+            self.assertEqual(result.stdout, "out\n")
+            self.assertEqual(result.stderr, "err\n")
+
+    def test_timeout_terminates_a_child_that_inherits_output_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "child-survived"
+            child = f"import pathlib,time; time.sleep(1.5); pathlib.Path({str(marker)!r}).write_text('alive')"
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                "print('started', flush=True); print('stderr', file=sys.stderr, flush=True); time.sleep(30)"
+            )
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                owned.run_command(
+                    [sys.executable, "-c", parent], cwd=Path(tmp), check=True,
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=0.5,
+                )
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertIn("started", caught.exception.stdout)
+            self.assertIn("stderr", caught.exception.stderr)
+            time.sleep(1.6)
+            self.assertFalse(marker.exists(), "the timed-out command left its child alive")
 
 
 class ReportTests(unittest.TestCase):
