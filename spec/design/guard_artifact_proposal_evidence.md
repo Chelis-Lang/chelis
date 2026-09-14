@@ -279,9 +279,14 @@ Acknowledgement enforcement moves to a separate required check so description
 edits do not enter compiler or Hull workflows and therefore cannot cancel or
 replace implementation evidence. Base retargets remain implementation events:
 a separate required head receipt waits for trusted-base exact-head/exact-base
-CI and Hull dispatches against the new synthetic merge. Empty-plan setup
-avoidance, exact verified overlap reuse, package batching and comparative cost
-measurements are a separate slice and are not evidenced by the runs above.
+CI and Hull dispatches against the new synthetic merge. The separate
+execution-optimization candidate adds
+plan-proven empty-shard receipts before setup, exact
+candidate/configuration-bound standing coverage reuse, and package-batched
+expansion with exact target/test reconstruction. Its local controls cover empty
+selections, duplicate target names, stale or tampered overlap, missing results,
+failures, timeouts and retained partial results. Comparative hosted cost
+measurements remain required and are not established by the runs above.
 
 ## Historical extended-run evidence at `23729c638`
 
