@@ -778,21 +778,20 @@ fn a_symbolic_declared_result_is_not_guarded() {
 // The census. Which shipped code gains a declared-result guard?
 // ---------------------------------------------------------------------------
 
-/// Every emitted declared-result guard in one C source, as
-/// `(enclosing function, guarded variable, axis, required extent)`.
-///
-/// Read back out of the SHIPPED artifact rather than recomputed from the
-/// declaration, so the census cannot drift from the emitter's own decision.
-///
-/// chelis#1771 moved the guard off the return boundary, so the variable is no
-/// longer always `__result`: a block-bodied return guards the let temporary the
-/// producing operation wrote. The reader therefore captures the variable
-/// instead of matching one spelling, which is also what keeps it from silently
-/// stopping to find guards it used to find.
-fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
+/// A complete emitted host shape guard. Diagnostics alone are not guards:
+/// the comparison, diagnostic and canonical trap must share the same block.
+struct EmittedShapeGuard<'a> {
+    function: String,
+    condition: &'a str,
+    diagnostic: &'a str,
+    trap: &'a str,
+}
+
+fn emitted_shape_guard_blocks(c_source: &str) -> Vec<EmittedShapeGuard<'_>> {
+    let lines: Vec<_> = c_source.lines().collect();
     let mut found = Vec::new();
     let mut enclosing: Option<String> = None;
-    for line in c_source.lines() {
+    for (index, line) in lines.iter().enumerate() {
         if let Some(head) = line.split("__chelis_owned_body(").next()
             && line.contains("__chelis_owned_body(")
             && line.trim_end().ends_with('{')
@@ -805,18 +804,59 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
             );
             continue;
         }
-        if line == "}" {
-            // A closing brace at column zero ends the emitted function. The
-            // scope matters: the DAG lane emits its own `chelis_tensor_shape`
-            // comparisons into the `__with_rng` kernel helpers, and those are
-            // a different guard model with a different owner.
+        if *line == "}" {
+            // Helpers have their own guard owner and are outside this census.
             enclosing = None;
             continue;
         }
         let Some(function) = enclosing.as_ref() else {
             continue;
         };
-        let Some(rest) = line.trim().strip_prefix("if (chelis_tensor_shape(") else {
+        let condition = line.trim();
+        if !condition.starts_with("if (")
+            || !condition.ends_with('{')
+            || !condition.contains("chelis_tensor_shape(")
+            || !condition.contains(" != ")
+        {
+            continue;
+        }
+        let Some(body) = lines.get(index + 1..index + 4) else {
+            continue;
+        };
+        let diagnostic = body[0].trim();
+        let trap = body[1].trim();
+        if !diagnostic.starts_with("fprintf(stderr, ")
+            || !trap.starts_with("chelis_numeric_trap(\"numeric trap: domain in ")
+            || !trap.ends_with(" at int64\");")
+            || body[2].trim() != "}"
+            || line.len() - line.trim_start().len() != body[2].len() - body[2].trim_start().len()
+        {
+            continue;
+        }
+        found.push(EmittedShapeGuard {
+            function: function.clone(),
+            condition,
+            diagnostic,
+            trap,
+        });
+    }
+    found
+}
+
+/// Every emitted declared-result guard, as
+/// `(enclosing function, guarded variable, axis, required extent)`.
+/// Read the shipped comparison and its result diagnostic together: literal
+/// signature entries also compare shapes with literals, while a moved result
+/// guard may target a let temporary rather than `__result`.
+fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
+    let mut found = Vec::new();
+    for guard in emitted_shape_guard_blocks(c_source) {
+        if !guard.diagnostic.starts_with("fprintf(stderr, \"extent `")
+            || !guard.diagnostic.contains("`: claimed = ")
+        {
+            continue;
+        }
+        let Some(rest) = guard.condition.strip_prefix("if (chelis_tensor_shape(") else {
             continue;
         };
         let Some((target, rest)) = rest.split_once(", ") else {
@@ -828,18 +868,11 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
         let Some(required) = tail.split(')').next() else {
             continue;
         };
-        // Only a declared-result guard compares against a LITERAL. This is not
-        // what excludes the chelis#1788 entry-obligation guard, which the
-        // prefix match above already misses because that guard opens with its
-        // null and rank preconditions rather than with `chelis_tensor_shape`.
-        // It is here for the next guard whose left side IS a bare shape read
-        // and whose right side is another one, so the census cannot silently
-        // start counting a guard it does not own.
         if required.trim().parse::<i64>().is_err() {
             continue;
         }
         found.push((
-            function.clone(),
+            guard.function,
             target.to_string(),
             axis.to_string(),
             required.trim().to_string(),
@@ -848,55 +881,28 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
     found
 }
 
-/// Every emitted chelis#1788 ENTRY-OBLIGATION guard in one C source, as
-/// `(enclosing function, the rendered claim)`.
-///
-/// A different guard model from the one above and therefore a different
-/// reader: this one compares two runtime shapes rather than a shape against a
-/// literal, it opens with its null and rank preconditions, and it names the
-/// `load` primitive rather than the producing operation. The census needs both,
-/// because chelis#1788 adds emitted lines to every authored host-bodied def
-/// whose signature repeats a binder, and "no example gained a declared-result
-/// guard" says nothing about that set.
+/// Every emitted signature-entry guard, as `(enclosing function, claim)`.
+/// Named comparisons retain their binder label; literals retain the input,
+/// axis and expected extent. Rank/null metadata checks are separate and do not
+/// count. Requiring the load trap and entry diagnostic distinguishes these
+/// comparisons from declared-result claims, even when both compare literals.
 fn emitted_entry_guards(c_source: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
-    let mut enclosing: Option<String> = None;
-    let mut pending: Option<String> = None;
-    for line in c_source.lines() {
-        if let Some(head) = line.split("__chelis_owned_body(").next()
-            && line.contains("__chelis_owned_body(")
-            && line.trim_end().ends_with('{')
+    for guard in emitted_shape_guard_blocks(c_source) {
+        if guard.trap != "chelis_numeric_trap(\"numeric trap: domain in load at int64\");" {
+            continue;
+        }
+        if let Some(rest) = guard.diagnostic.strip_prefix("fprintf(stderr, \"input ")
+            && let Some((claim, _)) = rest.split_once(", got %lld")
+            && claim.contains(" axis ")
+            && claim.contains(" expected ")
         {
-            enclosing = Some(
-                head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or("<none>")
-                    .to_string(),
-            );
-            continue;
-        }
-        if line == "}" {
-            enclosing = None;
-            pending = None;
-            continue;
-        }
-        let Some(function) = enclosing.as_ref() else {
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.starts_with("if (") && trimmed.contains("chelis_tensor_rank(") {
-            pending = Some(function.clone());
-            continue;
-        }
-        // The claim is on the `fprintf` the guard body opens with, which is
-        // what a reader has to capture: the condition alone does not say WHICH
-        // binder disagreed, and a census that recorded only the condition would
-        // stay green through a wrong label.
-        if let Some(owner) = pending.take()
-            && let Some(rest) = trimmed.strip_prefix("fprintf(stderr, \"extent `")
-            && let Some((claim, _)) = rest.split_once('`')
+            found.push((guard.function, format!("input {claim}")));
+        } else if let Some(rest) = guard.diagnostic.strip_prefix("fprintf(stderr, \"extent `")
+            && let Some((claim, detail)) = rest.split_once('`')
+            && !detail.starts_with(": claimed = ")
         {
-            found.push((owner, claim.to_string()));
+            found.push((guard.function, claim.to_string()));
         }
     }
     found
@@ -928,6 +934,62 @@ fn the_census_reader_finds_an_entry_guard_that_is_there() {
         "and the declared-result reader must not also claim it: the two guard \
          models are counted separately"
     );
+}
+
+#[test]
+fn the_census_reader_separates_mixed_entry_and_result_guards() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mixed_guard_witness.ch");
+    let source = format!(
+        "def d(x: tensor[n, 4, f32], y: tensor[n, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n\
+         out = d(to_tensor({TWO_BY_FOUR}), to_tensor([1.0, 2.0]))\n"
+    );
+    fs::write(&path, source).expect("write fixture");
+    let emitted = emit_c(
+        path.to_str().expect("UTF-8 path"),
+        &dir.path().join("mixed-guard-out"),
+    );
+    assert_eq!(
+        emitted_entry_guards(&emitted),
+        vec![
+            ("d".to_string(), "input `x` axis 1 expected 4".to_string()),
+            ("d".to_string(), "n".to_string()),
+        ],
+        "literal and repeated-binder entry guards stay in signature order"
+    );
+    assert_eq!(
+        emitted_guards(&emitted),
+        vec![(
+            "d".to_string(),
+            "__result".to_string(),
+            "0".to_string(),
+            "3".to_string(),
+        )],
+        "the result reader must not absorb a literal entry comparison"
+    );
+}
+
+#[test]
+fn the_census_reader_ignores_diagnostics_without_executable_guards() {
+    let source = r#"
+chelis_tensor *d__chelis_owned_body(chelis_tensor *x, chelis_tensor *y) {
+    fprintf(stderr, "input `x` axis 0 expected 3, got %lld\n", (long long)chelis_tensor_shape(x, 0));
+    fprintf(stderr, "extent `n`: x axis 0 = %lld, y axis 0 = %lld\n", 2LL, 3LL);
+    fprintf(stderr, "extent `3`: claimed = 3, diagonal axis 0 = %lld\n", 2LL);
+    if (chelis_tensor_shape(x, 0) != 3) {
+        fprintf(stderr, "extent `3`: claimed = 3, diagonal axis 0 = %lld\n", (long long)chelis_tensor_shape(x, 0));
+    }
+    if (x == NULL || chelis_tensor_rank(x) != 1 || chelis_tensor_shape(x, 0) != chelis_tensor_shape(y, 0)) {
+        fprintf(stderr, "extent `n`: x axis 0 = %lld, y axis 0 = %lld\n", 2LL, 3LL);
+    }
+    if (unrelated) {
+        fprintf(stderr, "extent `3`: claimed = 3, diagonal axis 0 = %lld\n", 2LL);
+        chelis_numeric_trap("numeric trap: domain in diagonal at int64");
+    }
+}
+"#;
+    assert!(emitted_guards(source).is_empty());
+    assert!(emitted_entry_guards(source).is_empty());
 }
 
 /// Every executable Phase 0 example, sorted: the `.ch` files directly under
