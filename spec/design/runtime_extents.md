@@ -305,7 +305,7 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | DCE | unread signature witnesses and potentially trapping extent checks survive; deleting either must make a mismatch test fail |
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
 | specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
-| grad | remap all bound slots and preserve primal obligations; the gradient splice roots only the per-wrt cotangents, so the forward activation is retained as their shape dependency (chelis#1821, a TENSOR-typed single `wrt`; the axis is every `wrt` kind spec/04 991-995 admits, and the other five cells are residual: a multi-target `wrt` forms only one of the callee's interface witnesses on the interpreter, chelis#1920, an aggregate-typed `wrt` forms the claim but loses it on the differentiated route, chelis#1924, and a float prim `wrt` is silent on eval and refused on C, chelis#1934); the edge is unconditional, chelis#1935; bounds keep spec/05's zero-cotangent boundary |
+| grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar admission remains #1934. The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
 | vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, the same edge the grad row records and under the same tensor-typed single-`wrt` bound (chelis#1821) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
 
@@ -968,8 +968,9 @@ dtype policy first ran. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
 
-Seven rows are deferred, and `PHASE_B_DEFERRED` names the owning issue for each.
-They are the unrepaired halves of the `wrt`-kind axis below.
+Two rows are deferred under #1934: the native primitive-scalar single/multiple
+target cells. `PHASE_B_DEFERRED` names both; the five evaluator rows have real
+failure receipts rather than their earlier successful-gradient dispositions.
 
 The `wrt` ARGUMENT KIND is an axis of this corpus, enumerated from the SPEC's
 category rather than from what a review round happened to find. Three
@@ -979,8 +980,8 @@ varying that kind, which is what a witness-by-witness list cannot stop:
 "differentiable target" and admits a float tensor of any rank, a float PRIM
 scalar, and an aggregate of those; only a non-differentiable `wrt` is a type
 error. The axis is therefore **every `wrt` kind the spec admits, three of them,
-crossed with single and multi target: six cells, fourteen rows, seven measured
-at an exit state and seven deferred.**
+crossed with single and multi target: six cells, fourteen rows, twelve
+at an exit state and two native primitive-scalar rows deferred.**
 
 None of the three kinds folds into another, and that is measured rather than
 asserted. A rank-0 `tensor[f32]` target traps on both lanes where a float prim
@@ -989,17 +990,22 @@ value. Every aggregate spelling behaves identically, tuple, record, one-field
 record, nested record and a record with a non-differentiable leaf, so one value
 covers all five.
 
-Only tensor/single is repaired, by chelis#1821. The other five cells are
-recorded at the state they were MEASURED in, and their mechanisms are distinct:
-under a multi target the interpreter emits only one of the callee's two
-interface witnesses, so the claim is never formed (chelis#1920); under an
-aggregate target the claim IS formed, since its undifferentiated control traps
-on both lanes, and only the differentiated route loses it (chelis#1924); and
-under a float prim target eval computes a derivative for a program the
-undifferentiated call rejects while the C lane reaches no exit state at all,
-because its build is REFUSED with the host-lane transform-position diagnostic
-that the rank-0 tensor and tensor variants of the same inline `grad` do not hit
-(chelis#1934, which owns both halves, and whose silence is pre-existing).
+The evaluator now preserves activation obligations for all six cells. The
+#1920 trace established the shared defect: both formal interface witnesses
+were created, but transform lowering supplied an inferred result binder in
+place of the authored result signature. With parameter binders `n` and `m`
+and an inferred result binder such as `d43`, the declared equality never
+formed before differentiation and dead-code elimination. Passing authored
+signatures separately from inferred checked types repairs #1920, the five
+aggregate layouts under #1924, and both primitive-scalar evaluator selections
+under #1934. The existing witness preparation and #1912 forward-activation
+dependency remain in place; no extra primal execution is added.
+
+The undifferentiated and differentiated routes now compare the same original
+witnesses and report the same `load` Domain failure. Native primitive-scalar
+admission remains separate: C still refuses the inline transform position for
+single/multiple primitive-scalar targets, while tensor and aggregate targets
+retain their existing native receipts. #1934 owns those two remaining rows.
 
 chelis#1821's forward-activation dependency is recorded unconditionally, so a
 gradient whose forward carries no obligation retains and emits it anyway: 891
@@ -1023,7 +1029,7 @@ matrix contains disposition locks for these known gaps. An unresolved
 precision entry still discharges silently at the declaration boundary; this
 change does not adopt #1942's proposed declaration-time rejection.
 
-Phase B retains seven grad deferrals. B2c removed the old
+Phase B retains two native primitive-scalar grad deferrals. B2c removed the old
 `concat.literal_claim.inlined_root.{c,eval}` deferrals: a claim the lowered
 graph proves wrong is rejected before execution. A deferred row stays at its
 measured start state with its reason; `exit_shortfall` skips it in every

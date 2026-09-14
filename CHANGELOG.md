@@ -34,6 +34,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Host gradients retain authored named-extent claims when lowering tensor,
+  aggregate and primitive scalar targets, including multiple targets and unused
+  zero cotangents. A rejected forward activation now fails with the same extent
+  context and producer attribution in these evaluator paths (#1821, #1920,
+  #1924 and the evaluator portion of #1934).
+
 - A tensor whose dtype is a declared type parameter can flow through an `if`/`then`/`else`. Previously any such program aborted the compiler with an internal `BUG: monomorphization missed precision var` message and exit 101 instead of returning a verdict, so a dtype-generic definition containing a conditional could not be checked, built, or run at all. The abort came from a routing predicate that asked whether an `if` could be lowered to the float DAG and read the node's precision through a reader that panicked on an unresolved binder; an unresolved dtype simply means the predicate cannot establish a float DAG join, so it now answers "no" and the item takes the general host lane. Generic definitions monomorphize at their concrete call sites as before, including under the `Float` and `Int` dtype-family bounds of `spec/04-type-system.md` §5.9, and the `§5.8.1` backend assertion is unchanged on the emission path where it belongs (chelis#1541).
 
 - Restore each integration worker's current test plan after its Cargo cache, so cache replacement cannot remove or overwrite the plan before execution.

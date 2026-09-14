@@ -599,7 +599,7 @@
     {
       "id": "grad.wrt_aggregate.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -611,7 +611,7 @@
     {
       "id": "grad.wrt_aggregate.single.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -623,7 +623,7 @@
     {
       "id": "grad.wrt_prim_scalar.multi.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -635,7 +635,7 @@
     {
       "id": "grad.wrt_prim_scalar.single.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -647,7 +647,7 @@
     {
       "id": "grad.wrt_tensor.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
     },
     {

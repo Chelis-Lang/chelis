@@ -423,6 +423,16 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_grad_extent_claim() {
+    let path = examples_root().join("grad_extent_claim.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out.0 = tensor(shape=[3], data=[0.0, 0.0, 0.0])\nout.1 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\n"
+    );
+}
+
+#[test]
 fn parity_grad_fused_zero() {
     drive_parity(&examples_root().join("grad_fused_zero.ch"), true);
 }

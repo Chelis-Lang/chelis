@@ -1444,9 +1444,10 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # the prim scalar is its own value. Every aggregate spelling behaves
         # identically, so one value covers all five of them.
         #
-        # Only tensor/single is repaired here. Every other cell is recorded at
-        # the state it was MEASURED in and deferred to the issue that owns its
-        # mechanism, so the next spec-admitted kind cannot be unlisted.
+        # Every evaluator cell now retains the authored activation contract.
+        # The primitive-scalar C cells remain at their measured baseline and
+        # are explicitly deferred until native admission is repaired.
+        #
         # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
         # while beta-reduced C skips its signature and unused actual effects.
         _row(
@@ -1592,31 +1593,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c",
         ),
-        # The other three cells of the axis. Each C lane reaches the exit
-        # state and each eval lane does not, so each `.eval` row records the
-        # `lane_divergent` it was measured in and is named in
-        # PHASE_B_DEFERRED against the issue that owns its mechanism.
-        # Declaring `executes_exactly` for one of them would assert an exit its
-        # own receipt denies, and `exit_shortfall` reads that field rather than
-        # measured behaviour, so the oracle could not see the contradiction.
-        # Deferring keeps `--phase b` green without `--allow-shortfall` AND
-        # leaves the oracle a complete view of the divergence.
-        #
-        # Each deferred row carries `lane_divergent` in BOTH columns, the way
-        # phase A's deferred Metal row does, because `validate_transition`
-        # permits only a move from a start state to an exit class: the lattice
-        # is one-way, so a start-to-start move like `silent_unguarded` to
-        # `lane_divergent` is refused by design and is not expressible. These
-        # programs were silent on both lanes before this change, which C5's
-        # prose and each lock's comment state; the row records where the cell
-        # now sits and that it has not moved.
-        #
-        # The two mechanisms are distinct. Under a multi-target `wrt` the
-        # interpreter emits only one of the callee's two interface witnesses,
-        # so the claim is never FORMED (chelis#1920). Under an aggregate `wrt`
-        # it IS formed, measured: the undifferentiated call traps on both lanes
-        # at base and at head, and only the differentiated interpreter route
-        # loses it (chelis#1924).
+        # #1920/#1924: runtime transform lowering formerly used an inferred
+        # result binder in place of the authored result signature. Both
+        # interface witnesses existed, but no declared equality formed before
+        # AD/DCE. Passing authored signatures separately restores the same
+        # activation obligation for tensor and aggregate target selections.
+        # Historical baseline states and row identities remain unchanged.
         _row(
             "grad.wrt_tensor.multi.dead_forward.c",
             "silent_unguarded",
@@ -1626,7 +1608,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "grad.wrt_tensor.multi.dead_forward.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
         ),
         _row(
@@ -1638,7 +1620,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "grad.wrt_aggregate.single.dead_forward.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
         ),
         _row(
@@ -1650,21 +1632,16 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "grad.wrt_aggregate.multi.dead_forward.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
         ),
-        # The float PRIM scalar, the kind round 3 found unlisted. Its eval
-        # lane computes a derivative for a program the undifferentiated call
-        # rejects, and its C lane does not reach a lane at all: the build is
-        # REFUSED with the host-lane transform-position diagnostic, which the
-        # rank-0 tensor and tensor variants of the same inline `grad` in the
-        # same def-body position do not hit. So there is no `.c` row at an
-        # exit state to write; the refusal is recorded and deferred with the
-        # eval half against chelis#1934, which owns both.
+        # The authored-signature repair also restores the primitive-scalar
+        # evaluator obligation. Native scalar transform admission remains
+        # #1934: these two C rows still record the measured build refusal.
         _row(
             "grad.wrt_prim_scalar.single.dead_forward.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
         _row(
@@ -1673,14 +1650,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
-        # The prim scalar crossed with a multi target, measured rather than
-        # assumed from the single cell: eval computes both cotangents
-        # (`main.0 = 21.0` beside the tensor cotangent's zeros) and C refuses
-        # the same way. Same owner.
+        # The multiple-target primitive cell has its own execution control;
+        # the evaluator repair does not claim that native admission is fixed.
         _row(
             "grad.wrt_prim_scalar.multi.dead_forward.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
         _row(
@@ -1927,45 +1902,17 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (self_test_target(python), *manifest_targets("b"))
 
 
-_AGGREGATE_WRT_DEFERRAL = (
-    "runtime_extents.md C5: an aggregate-typed `wrt` forms the callee's "
-    "interface witness claim, measured by its undifferentiated control "
-    "trapping on both lanes, and only the interpreter's differentiated route "
-    "loses it; chelis#1924 owns that route"
-)
-
-
 PHASE_B_DEFERRED: Mapping[str, str] = {
-    # Seven measured grad obligations remain with their named owners.
-    "grad.wrt_tensor.multi.dead_forward.eval": (
-        "runtime_extents.md C5: the interpreter's lowering of a multi-target "
-        "`grad` emits only one of the callee's two interface witnesses, so the "
-        "claim is never formed and no retained activation can carry it; "
-        "chelis#1920 owns forming it"
-    ),
-    "grad.wrt_aggregate.single.dead_forward.eval": _AGGREGATE_WRT_DEFERRAL,
-    "grad.wrt_aggregate.multi.dead_forward.eval": _AGGREGATE_WRT_DEFERRAL,
-    "grad.wrt_prim_scalar.single.dead_forward.eval": (
-        "runtime_extents.md C5: `spec/04-type-system.md` 991-995 admits a "
-        "float prim parameter as a differentiable single target, and this "
-        "kind computes a derivative for a program the undifferentiated call "
-        "rejects; chelis#1934 owns it. Pre-existing, not introduced by "
-        "chelis#1821"
-    ),
-    "grad.wrt_prim_scalar.multi.dead_forward.eval": (
-        "runtime_extents.md C5: the prim-scalar kind crossed with a multi "
-        "target, measured to behave as its single cell does; chelis#1934"
+    # Authored-signature transport repairs all five evaluator rows. Native
+    # primitive-scalar gradient admission remains a separate #1934 repair.
+    "grad.wrt_prim_scalar.single.dead_forward.c": (
+        "runtime_extents.md C5: the C lane refuses the primitive-scalar "
+        "gradient with the host-lane transform-position diagnostic; #1934 "
+        "owns native admission"
     ),
     "grad.wrt_prim_scalar.multi.dead_forward.c": (
-        "runtime_extents.md C5: the same build refusal as the single cell; "
-        "chelis#1934"
-    ),
-    "grad.wrt_prim_scalar.single.dead_forward.c": (
-        "runtime_extents.md C5: the C lane reaches no exit state for this "
-        "kind because the build is refused with the host-lane "
-        "transform-position diagnostic, which the rank-0 tensor and tensor "
-        "variants of the same inline `grad` do not hit; chelis#1934 owns both "
-        "halves"
+        "runtime_extents.md C5: the same native build refusal for multiple "
+        "targets including a primitive scalar; #1934"
     ),
 }
 

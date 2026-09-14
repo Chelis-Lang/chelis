@@ -1795,14 +1795,63 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     }))
 }
 
+/// Definition scope for subexpression lowering. Checked value types and
+/// authored callable contracts remain separate: inference may rename a
+/// dimension, but that renamed result cannot replace its declared binder.
 #[derive(Clone)]
-pub(crate) struct SubexprLoweringContext {
+pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
 }
 
 impl SubexprLoweringContext {
+    pub fn new(
+        checked_types: UnordMap<String, Expr>,
+        definitions: UnordMap<String, Expr>,
+        declared_signatures: UnordMap<String, Expr>,
+    ) -> Self {
+        prepare_subexpr_lowering_context(
+            &checked_types.into_sorted().into_iter().collect(),
+            Arc::new(definitions.into_sorted().into_iter().collect()),
+            Arc::new(declared_signatures.into_sorted().into_iter().collect()),
+        )
+    }
+
+    /// Lower an expression using its checked inputs and the same declared
+    /// contracts as every other execution route through this context.
+    pub fn lower_with_random_state(
+        &self,
+        expr: &Expr,
+        scoped_types: UnordMap<String, TensorType>,
+        random: crate::host::RandomLoweringState,
+    ) -> Result<(Dag, crate::host::RandomLoweringState), LowerDiagnostic> {
+        try_lower_subexpr_program_with_context_and_random_state(
+            expr,
+            scoped_types,
+            self,
+            random.seed,
+            random.counter,
+        )
+        .map(|(dag, counter)| (dag, crate::host::RandomLoweringState { counter, ..random }))
+    }
+
+    pub fn lower_evaluation_plan(
+        &self,
+        expr: &Expr,
+        scoped_types: UnordMap<String, TensorType>,
+        execution: &crate::evaluation::RandomExecutionContext,
+    ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+        try_lower_subexpr_evaluation_with_ordered_inputs(
+            expr,
+            scoped_types.into_sorted(),
+            self,
+            None,
+            false,
+            execution,
+        )
+    }
+
     pub(crate) fn evaluation_profile(
         &self,
         expr: &Expr,
