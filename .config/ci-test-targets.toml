@@ -1272,3 +1272,21 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
 tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate checks the reviewed foundation and executes its frozen mutations"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_structural.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle validates structural wire roles against executed current-version codec cases"
+tracking_issue = "chelis#729"
