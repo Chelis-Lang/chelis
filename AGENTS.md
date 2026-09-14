@@ -141,6 +141,10 @@ obligations.
 
 ### Pull Request Review Gate
 
+- Before starting work on a pull request, and again before merging it, read
+  [the PR-author guide for tests and protected contracts](docs/guard_changes_for_pr_authors.md).
+  Follow its change-specific instructions and use the checker's required
+  acknowledgement lines in the PR description.
 - Every pull request, documentation-only work included, gets at least one compliant
   red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
   round reviews the pushed head while CI runs on it. Applicable CI checks must pass on

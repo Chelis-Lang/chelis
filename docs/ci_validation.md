@@ -1,10 +1,13 @@
 # CI validation cadence
 
+For the actions to take when preparing a PR, read
+[Changing tests, inventories and protected contracts](guard_changes_for_pr_authors.md).
+
 Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a phase acceptance result** for a full or feature-specific oracle that runs nightly.
 
 | Owner | Cadence | Coverage |
 |---|---|---|
-| `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the 75 reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
+| `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` change-owned shards and report | PR and main push, with the existing docs-only skip | Every default-enabled integration target added or directly modified by the change, or its exact reviewed alternative owner; four deterministic shards with a 20-minute limit each |
 | `ci.yml` package-expansion shards and summary | After the required change-owned report on PR and main push | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate non-required summary |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and rejection liveness |
