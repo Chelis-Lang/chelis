@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -1151,6 +1152,13 @@ jobs:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
+
+      - name: Require protected-test acknowledgements
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .venv/bin/python scripts/phase3_test_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase3-test-changes.json
 
       - name: Publish Phase 3 required-test changes
         if: ${{ always() }}

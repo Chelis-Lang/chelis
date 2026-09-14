@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report committed Phase 3 required-test changes alongside existing guards.
+"""Report and acknowledge committed Phase 3 required-test changes.
 
 The report is a review cue, not a behavioral acceptance oracle. Definition
 digests, comparator checks, receipts, and mutation controls remain in force.
@@ -10,6 +10,7 @@ import argparse
 import ast
 from collections import Counter
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -26,6 +27,7 @@ DOCTRINE = (
     "Changed definitions require review and independent behavior evidence; "
     "this report does not replace the Phase 3 oracle."
 )
+ACKNOWLEDGEMENT_KEY = "Protected-test-change: "
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -201,7 +203,42 @@ def changed_tests(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dic
     return {
         "version": 1, "comparison_ref": comparison, "base": base, "candidate": candidate,
         "changes": changes, "problems": problems, "doctrine": DOCTRINE,
+        "required_acknowledgements": [
+            f'{ACKNOWLEDGEMENT_KEY}{row["path"]}::{row["test"]}' for row in changes
+        ],
     }
+
+
+def acknowledgement_violations(result: dict, body: str) -> list[str]:
+    """Read only the plain opening block, before any Markdown context exists."""
+    expected = set(result["required_acknowledgements"])
+    seen: Counter[str] = Counter()
+    problems = []
+    near_miss = re.compile(r"^[\s>]*(?:[-*+]\s+)?protected[-_ ]?test[-_ ]?change\s*:", re.I)
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if not line:
+            if seen:
+                break
+            continue
+        if line.startswith(ACKNOWLEDGEMENT_KEY):
+            seen[line] += 1
+            continue
+        if near_miss.match(line):
+            problems.append(f"malformed protected-test acknowledgement: {line!r}")
+        elif seen:
+            problems.append("separate the opening acknowledgement block from prose with a blank line")
+        # Prose or an example ends the prologue. Later lines never acquire
+        # authority, so no Markdown or HTML parser is part of admission.
+        break
+    for line in sorted(expected - seen.keys()):
+        problems.append(f"missing opening acknowledgement: {line}")
+    for line in sorted(seen.keys() - expected):
+        problems.append(f"stale or unknown opening acknowledgement: {line}")
+    for line, count in sorted(seen.items()):
+        if count != 1:
+            problems.append(f"duplicate acknowledgement ({count}): {line}")
+    return problems
 
 
 def resolve_comparison(repo: Path, candidate: str, base: str, pr_head: str) -> tuple[str, str]:
@@ -221,11 +258,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr-head", default="", help="exact event head; validate candidate merge parents")
     parser.add_argument("--candidate", default="HEAD", help="committed candidate revision (default HEAD)")
     parser.add_argument("--output", type=Path, required=True, help="JSON report to publish")
+    parser.add_argument("--require-acknowledgement", action="store_true", help="require every changed identity exactly once in the PR body")
+    body_source = parser.add_mutually_exclusive_group()
+    body_source.add_argument("--acknowledgements-file", type=Path, help="saved PR body")
+    body_source.add_argument("--acknowledgements-env", help="environment variable containing the PR body")
     args = parser.parse_args(argv)
     try:
         args.output.unlink(missing_ok=True)
         base, candidate = resolve_comparison(ROOT, args.candidate, args.base, args.pr_head)
         result = changed_tests(ROOT, base, candidate)
+        result["acknowledgement_problems"] = []
+        if args.require_acknowledgement:
+            if args.acknowledgements_file is not None:
+                body = args.acknowledgements_file.read_text()
+            elif args.acknowledgements_env is not None and args.acknowledgements_env in os.environ:
+                body = os.environ[args.acknowledgements_env]
+            else:
+                raise ValueError("enforcing acknowledgement requires an available PR body file or environment variable")
+            result["acknowledgement_problems"] = acknowledgement_violations(result, body)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")
     except (ValueError, OSError) as error:
@@ -234,10 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f'Phase 3 required-test comparison: {result["base"]} -> {result["candidate"]}')
     for row in result["changes"]:
         print(f'  {row["path"]}::{row["test"]}: {", ".join(row["changes"])}')
+    for line in result["required_acknowledgements"]:
+        print(line)
     print(DOCTRINE)
-    for problem in result["problems"]:
+    problems = result["problems"] + result["acknowledgement_problems"]
+    for problem in problems:
         print(problem, file=sys.stderr)
-    if result["problems"]:
+    if problems:
         print("PHASE 3 TEST CHANGE REPORT: FAIL", file=sys.stderr)
         return 1
     print(f'PHASE 3 TEST CHANGE REPORT: PASS ({len(result["changes"])} changed identities; behavior not certified)')
