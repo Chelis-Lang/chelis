@@ -644,8 +644,8 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
     def test_docstring_names_every_hand_maintained_artifact(self):
         doc = regen_all.__doc__ or ""
         for name in (
-            "FROZEN_ATOM_DIGESTS",
-            "FROZEN_REGION_DIGESTS",
+            "REQUIRED_ATOMS",
+            "REQUIRED_REGIONS",
             "FREEZE_SHA256",
             "loud_unsupported_tripwire.rs",
             "runtime_extent_oracle_baseline.json",

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Publish committed Phase 4B contract changes beside the existing freeze.
+"""Publish committed Phase 4B changes for enforcing contract acknowledgements.
 
-This review cue does not replace digests, literal anchors, acknowledgement,
-semantic registrations, or the authoritative Phase 4B oracle.
+Required identities, literal anchors and semantic registrations remain separate
+requirements of the authoritative Phase 4B oracle.
 """
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ORACLE = "scripts/dtype_phase4b_oracle.py"
 ATOM_FILES = ("spec/04-type-system.md", "spec/05-risc-primitives.md")
 BUILTINS = "spec/registry/builtin_semantic_identities.md"
-TABLES = ("CONTRACT_FILES", "FROZEN_ATOM_DIGESTS", "FROZEN_REGION_DIGESTS", "OP_MANIFEST_REGISTRY_FILES")
+TABLES = ("CONTRACT_FILES", "REQUIRED_ATOMS", "REQUIRED_REGIONS", "OP_MANIFEST_REGISTRY_FILES")
+HISTORICAL_TABLES = ("CONTRACT_FILES", "FROZEN_ATOM_DIGESTS", "FROZEN_REGION_DIGESTS", "OP_MANIFEST_REGISTRY_FILES")
 ATOM_ID = re.compile(r"(?:04|05)-[A-Z]+-[1-9][0-9]*\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -33,7 +34,7 @@ REGISTRY_REF = re.compile(r"(?<![A-Za-z0-9_/])(?:spec/)?registry/[A-Za-z0-9._/-]
 DOCTRINE = (
     "Guard artifact: changing a guard merely to accept an edit is not a repair. "
     "A changed atom or region owes its owning spec/design update, every consuming "
-    "contract, and an adversarial mutation. Existing digests, anchors and "
+    "contract, and an adversarial mutation. Required identities, anchors and "
     "Frozen-contract-change acknowledgements remain authoritative."
 )
 
@@ -52,9 +53,14 @@ def read_inventory(source: str) -> dict:
     try:
         module = ast.parse(source)
         parents = {child: parent for parent in ast.walk(module) for child in ast.iter_child_nodes(parent)}
+        names = {node.id for node in ast.walk(module) if isinstance(node, ast.Name)}
+        current = bool(names & set(TABLES[1:3]))
+        if current and names & set(HISTORICAL_TABLES[1:3]):
+            raise ValueError("mixed current and historical Phase 4B inventories")
+        tables = TABLES if current else HISTORICAL_TABLES
         result = {}
         declarations = {}
-        for name in TABLES:
+        for name in tables:
             nodes = [node for node in module.body if isinstance(node, ast.Assign)
                      and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)]
             if len(nodes) != 1 or len(nodes[0].targets) != 1:
@@ -67,22 +73,23 @@ def read_inventory(source: str) -> dict:
                     raise ValueError(f"duplicate inventory key in {name}")
             result[name] = ast.literal_eval(value)
         for node in ast.walk(module):
-            if isinstance(node, ast.Name) and node.id in TABLES and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if isinstance(node, ast.Name) and node.id in tables and isinstance(node.ctx, (ast.Store, ast.Del)):
                 if node is not declarations[node.id]:
                     raise ValueError(f"{node.id} cannot be rebound")
-            if isinstance(node, ast.Name) and node.id in TABLES[1:] and isinstance(node.ctx, ast.Load):
+            if isinstance(node, ast.Name) and node.id in tables[1:] and isinstance(node.ctx, ast.Load):
                 parent = parents[node]
                 readonly_subscript = isinstance(parent, ast.Subscript) and isinstance(parent.ctx, ast.Load)
                 call = parents.get(parent)
                 readonly_method = isinstance(parent, ast.Attribute) and parent.attr in {"get", "items", "keys", "values"} and isinstance(call, ast.Call) and call.func is parent
-                if not (readonly_subscript or readonly_method):
+                immutable_atoms = current and node.id == "REQUIRED_ATOMS"
+                if not (immutable_atoms or readonly_subscript or readonly_method):
                     raise ValueError(f"{node.id} requires direct read-only access; aliases are unsupported")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 receiver = node.func.value
-                if isinstance(receiver, ast.Name) and receiver.id in TABLES and node.func.attr not in {"get", "items", "keys", "values"}:
+                if isinstance(receiver, ast.Name) and receiver.id in tables and node.func.attr not in {"get", "items", "keys", "values"}:
                     raise ValueError(f"{receiver.id} must remain a literal inventory")
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-                if node.value.id in TABLES and not isinstance(node.ctx, ast.Load):
+                if node.value.id in tables and not isinstance(node.ctx, ast.Load):
                     raise ValueError(f"{node.value.id} cannot be mutated")
     except (SyntaxError, TypeError) as error:
         raise ValueError(f"invalid Phase 4B inventory: {error}") from error
@@ -93,25 +100,39 @@ def read_inventory(source: str) -> dict:
         path_value(path)
     if not set((*ATOM_FILES, BUILTINS)) <= set(files):
         raise ValueError("the report requires both atom chapters and the builtin registry")
-    for name in TABLES[1:]:
-        if not isinstance(result[name], dict):
+    atom_name, region_name, registry_name = tables[1:]
+    atoms, regions, registries = (result[name] for name in tables[1:])
+    for name, value in ((region_name, regions), (registry_name, registries)):
+        if not isinstance(value, dict):
             raise ValueError(f"{name} must be a literal dictionary")
-    atoms, regions, registries = (result[name] for name in TABLES[1:])
-    for atom, digest in atoms.items():
-        if not isinstance(atom, str) or not ATOM_ID.fullmatch(atom) or not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-            raise ValueError(f"invalid frozen atom: {atom!r}")
+    if current:
+        if not isinstance(atoms, tuple) or not all(isinstance(atom, str) for atom in atoms) or len(atoms) != len(set(atoms)):
+            raise ValueError("REQUIRED_ATOMS must be a unique literal tuple")
+    else:
+        if not isinstance(atoms, dict):
+            raise ValueError(f"{atom_name} must be a literal dictionary")
+        for atom, digest in atoms.items():
+            if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+                raise ValueError(f"invalid historical atom digest: {atom!r}")
+        atoms = tuple(atoms)
+    for atom in atoms:
+        if not isinstance(atom, str) or not ATOM_ID.fullmatch(atom):
+            raise ValueError(f"invalid required atom: {atom!r}")
+    boundaries = {}
     for label, row in regions.items():
-        if not isinstance(label, str) or not label.strip() or not isinstance(row, tuple) or len(row) != 4:
+        if not isinstance(label, str) or not label.strip() or not isinstance(row, tuple) or len(row) != (3 if current else 4):
             raise ValueError(f"invalid region: {label!r}")
-        path, start, end, digest = row
+        path, start, end = row[:3]
         if path_value(path) not in files or not all(isinstance(marker, str) and marker for marker in (start, end)) or start == end:
             raise ValueError(f"invalid region boundaries: {label}")
-        if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-            raise ValueError(f"invalid region digest declaration: {label}")
+        if not current and (not isinstance(row[3], str) or not DIGEST.fullmatch(row[3])):
+            raise ValueError(f"invalid historical region digest: {label}")
+        boundaries[label] = (path, start, end)
     for atom, path in registries.items():
         if not isinstance(atom, str) or not ATOM_ID.fullmatch(atom) or path_value(path) not in files or not path.startswith("spec/registry/"):
             raise ValueError(f"invalid registry owner: {atom!r}")
-    return result
+    return {"CONTRACT_FILES": files, "REQUIRED_ATOMS": atoms,
+            "REQUIRED_REGIONS": boundaries, "OP_MANIFEST_REGISTRY_FILES": registries}
 
 
 def location(text: str, start: int, block: str) -> list[int]:
@@ -132,14 +153,14 @@ def snapshot(read: Callable[[str], str]) -> dict:
                 entries[("atom", atom)] = {
                     "path": path, "lines": location(docs[path], match.start(), block),
                     "text": normalize_frozen_block(block), "registries": {},
-                    "protected": atom in inventory["FROZEN_ATOM_DIGESTS"],
+                    "protected": atom in inventory["REQUIRED_ATOMS"],
                 }
                 for reference in REGISTRY_REF.findall(block):
                     registry = reference if reference.startswith("spec/") else f"spec/{reference}"
                     if path_value(registry) not in docs:
                         raise ValueError(f"atom {atom} names an undeclared registry {registry}")
                     entries[("atom", atom)]["registries"][registry] = normalize_frozen_block(docs[registry])
-        for atom in inventory["FROZEN_ATOM_DIGESTS"]:
+        for atom in inventory["REQUIRED_ATOMS"]:
             if ("atom", atom) not in entries:
                 raise ValueError(f"missing frozen atom {atom}")
         for atom, path in inventory["OP_MANIFEST_REGISTRY_FILES"].items():
@@ -154,7 +175,7 @@ def snapshot(read: Callable[[str], str]) -> dict:
                 raise ValueError(f"builtin registry names missing atom {atom}")
             identities = sorted(identity for identity, owner in builtin_rows.items() if owner == bracketed)
             entries[("atom", atom)]["registries"][BUILTINS] = normalize_frozen_block(shared_text) + json.dumps(identities)
-        for label, (path, start, end, _) in inventory["FROZEN_REGION_DIGESTS"].items():
+        for label, (path, start, end) in inventory["REQUIRED_REGIONS"].items():
             block = frozen_region(docs[path], start, end, label)
             entries[("region", label)] = {
                 "path": path, "lines": location(docs[path], docs[path].index(start), block),
@@ -285,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in result["changed_contract_files"]:
         print(f"  changed contract file: {path}")
     print(DOCTRINE)
-    print(f'PHASE 4B CHANGE REPORT: PASS ({len(result["changes"])} changed identities; freeze not replaced)')
+    print(f'PHASE 4B CHANGE REPORT: PASS ({len(result["changes"])} changed identities; contract review required)')
     return 0
 
 

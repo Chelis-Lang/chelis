@@ -2582,16 +2582,20 @@ reinterpret either.
 `.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
-atom and region digests, the frozen-contract acknowledgement gate, phase
-naming, and generated rejection-registry agreement. Narrower atom and section
-fingerprints supply owning diagnostics for a changed clause. Roadmap and
-current-state documents are validated through required contract markers.
+atom identities and region boundaries, the frozen-contract acknowledgement
+gate, phase naming, and generated rejection-registry agreement. The committed
+report names each changed atom and region, including owned registry text, and
+requires its exact acknowledgement in addition to the changed-file line.
+Required-literal anchors and their mutations remain independent checks.
+Roadmap and current-state documents retain their required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
 4C implementation.
 
 The additive-contradiction leg is an acknowledgement, not a whole-file digest.
-An atom or region digest cannot defend its own boundaries, so the oracle also
-diffs every `CONTRACT_FILES` path against the merge base with the base branch
+The report derives changes from both revisions' reviewed required identities
+and region boundaries; historical digest declarations remain readable without
+executing historical Python. Current declarations have no text hashes. The
+oracle also diffs every `CONTRACT_FILES` path against the merge base with the base branch
 and requires each changed file to be named in the pull request body:
 
 ```text
@@ -2605,6 +2609,15 @@ change and an acknowledgement naming an unchanged file both fail
 `--require-acknowledgement`, which is the mode CI runs on a pull request. A
 local run without that flag lists the changed contract files and the lines the
 body needs, then exits 0.
+
+Atom and region addresses use `Frozen-contract-change: atom:05-OP-33` and
+`Frozen-contract-change: region:"exact region label"`. Missing, duplicate,
+stale, malformed or unknown addresses fail enforcing PR mode. Every changed
+file still requires its line, including changes outside reported regions.
+Acknowledgement does not excuse missing required clauses or identities and
+does not prove that added prose is semantically correct. Historical atom/region
+digest moves below and above describe the former review cue; the current cue
+is the named committed report and its mandatory acknowledgement.
 
 Acknowledging a design or status document is ordinary synchronized
 maintenance, not a semantic decision; only a change to the controlling
