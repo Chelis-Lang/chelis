@@ -920,6 +920,23 @@ completeness-test definition stays frozen, and every other required definition
 and ignore-ledger rule is retained. This membership check does not prove
 comparator execution or replace the full acceptance command above.
 
+The `phase3_body_contract` standing target and full oracle also parse every
+required body's Rust syntax against call roles exported by this oracle's one
+required-identity inventory. Each body must name its designated comparison or
+harness; evaluator canaries additionally name their receipt entrypoint. Parity
+calls retain their reviewed literal execution mode, including executable rows
+whose historical names still end in `library_only`. Standard assertion
+conditions count, while comments, literals, unknown macro payloads and deferred
+closure/async/const bodies do not. Local items, conditional configuration and
+local pattern bindings that shadow required owners are rejected. Branches and
+loops are visited without claiming that arbitrary control flow reaches them.
+This is a parallel structural trial: all definition hashes remain, including
+their ignored-result, empty-body, library-only and forged-receipt controls.
+Correct result handling and runtime behavior still require their own evidence.
+The Metal rank-2 rejection now checks its empty emitted artifact through the
+shared exact comparator, retaining its status and diagnostic assertions; only
+that intentionally reviewed definition digest moves.
+
 Chelis#1870 trials structured unsupported identity beside this frozen
 comparison rather than weakening it. The rejected-cell exact comparator and
 its mutations remain, including the Phase 3 definition digest. The actual

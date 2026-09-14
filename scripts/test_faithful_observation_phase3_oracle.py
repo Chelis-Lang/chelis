@@ -68,6 +68,47 @@ class RustDeclarationTests(unittest.TestCase):
                                         for item in oracle.source_violations(sources)))
 
 
+class BodyRoleTests(unittest.TestCase):
+    def test_export_covers_exactly_the_current_required_identities(self):
+        contract = oracle.required_body_contract()
+        self.assertEqual(contract["schema_version"], 1)
+        observed = {
+            oracle.Path(row["path"]): {test["name"] for test in row["tests"]}
+            for row in contract["sources"]
+        }
+        self.assertEqual(observed, oracle.REQUIRED_TESTS)
+        for row in contract["sources"]:
+            self.assertEqual(len(row["tests"]), len(observed[oracle.Path(row["path"])]))
+            self.assertTrue(all(test["calls"] for test in row["tests"]))
+
+    def test_historical_library_suffix_does_not_disable_execution(self):
+        source = next(row for row in oracle.required_body_contract()["sources"]
+                      if row["path"] == str(oracle.PARITY_SOURCE))
+        by_name = {row["name"]: row for row in source["tests"]}
+        for name in ("parity_hello_tensor_library_only", "parity_opaque_invariants_simplex_library_only"):
+            self.assertIs(by_name[name]["run_parity"], True)
+        self.assertIs(by_name["parity_induction_bond_library_only"]["run_parity"], False)
+
+    def test_stale_reviewed_role_or_unknown_source_fails(self):
+        required = {path: set(names) for path, names in oracle.REQUIRED_TESTS.items()}
+        required[oracle.PARITY_SOURCE].remove("parity_induction_bond_library_only")
+        with mock.patch.object(oracle, "REQUIRED_TESTS", required), self.assertRaises(ValueError):
+            oracle.required_body_contract()
+        required = dict(oracle.REQUIRED_TESTS)
+        required[oracle.Path("unknown.rs")] = {"new_test"}
+        with mock.patch.object(oracle, "REQUIRED_TESTS", required), self.assertRaises(ValueError):
+            oracle.required_body_contract()
+
+    def test_every_empty_definition_remains_rejected_by_the_parallel_hash(self):
+        original = oracle.shipped_sources()
+        for path, names in oracle.REQUIRED_TESTS.items():
+            for name in names:
+                with self.subTest(path=path, name=name):
+                    sources = dict(original)
+                    sources[path] = oracle.replace_test_body(sources[path], name, "{}")
+                    self.assertTrue(any(name in item for item in oracle.definition_digest_violations(sources)))
+
+
 class RunnerTests(unittest.TestCase):
     def _run_main_with(self, fake_run):
         with (

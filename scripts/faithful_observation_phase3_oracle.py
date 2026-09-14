@@ -115,6 +115,65 @@ REQUIRED_TESTS = {
     },
 }
 
+
+def required_body_contract() -> dict:
+    """Export reviewed call roles from the one required-identity inventory.
+
+    This is structural adoption, not proof of runtime reach or result handling.
+    The definition hashes and executable comparator/receipt controls remain.
+    """
+    canaries = {
+        "agreement_operation_identity_is_derived_from_ir": "agreement_op_for_risc",
+        "agreement_compiled_observation_reaches_comparator": "compare_lanes_with",
+        "agreement_expected_value_reaches_comparator": "assert_expected",
+        "agreement_width_nonconformance_is_behavioral": "compare_rendered_elements",
+    }
+    unary_rows = {
+        "agreement_atan", "agreement_cos", "agreement_log", "agreement_sin",
+        "agreement_sqrt_is_exact", "agreement_tan",
+    }
+    # These are reviewed library-only dispositions, not inferred from names:
+    # hello_tensor and opaque_invariants_simplex retain old suffixes but execute.
+    library_rows = {
+        "parity_constraint_directed_risk_guards_library_only",
+        "parity_induction_bond_library_only", "parity_linreg_library_only",
+        "parity_mnist_library_only", "parity_opaque_invariants_library_only",
+        "parity_rank_poly_borrow_library_only", "parity_transformer_block_library_only",
+        "parity_vmap_relu_library_only",
+    }
+    if not library_rows <= REQUIRED_TESTS.get(PARITY_SOURCE, set()):
+        raise ValueError("stale reviewed library-only body role")
+    if not (set(canaries) | unary_rows) <= REQUIRED_TESTS.get(EVAL_AGREEMENT_SOURCE, set()):
+        raise ValueError("stale reviewed evaluator body role")
+    sources = []
+    for path, names in REQUIRED_TESTS.items():
+        tests = []
+        for name in sorted(names):
+            run_parity = None
+            if path == PARITY_SOURCE:
+                if name == "parity_corpus_is_complete":
+                    calls = ["parity_corpus::validate"]
+                elif name.startswith("parity_comparator_"):
+                    calls = ["assert_parity"]
+                else:
+                    calls = ["drive_parity"]
+                    run_parity = name not in library_rows
+            elif path == EVAL_AGREEMENT_SOURCE:
+                if name in canaries:
+                    calls = [canaries[name], "record_phase3_receipt"]
+                elif name in unary_rows:
+                    calls = ["assert_unary_transcendental"]
+                else:
+                    calls = ["assert_agrees", "assert_expected"]
+            elif path == REJECTED_SOURCE:
+                calls = ["compare_exact_observations"]
+            else:
+                raise ValueError(f"no reviewed body-call role for {path}::{name}")
+            tests.append({"name": name, "calls": calls, "run_parity": run_parity})
+        sources.append({"path": str(path), "tests": tests})
+    return {"schema_version": 1, "sources": sources}
+
+
 REQUIRED_EVAL_RECEIPTS = {
     "operation-identity-canary",
     "compiled-observation-canary",
@@ -194,6 +253,9 @@ REQUIRED_EVAL_RECEIPTS = {
 # on its error. The standing parity_corpus_contract controls independently cover
 # newly uncovered examples, missing inputs, hidden/conditional declarations and
 # removal of each discovered example input; all other test definitions stay exact.
+# chelis#1868 deliberately routes the Metal empty-artifact check through the
+# shared exact comparator. Status and diagnostic checks remain; the AST trial
+# and rejection corpus validate the replacement, and all other hashes stay exact.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_checked_reshape": "3f2defb3802726dac732a24ee5a9815433c8a16679f60a8ae337268305119424",
@@ -277,7 +339,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "agreement_width_nonconformance_is_behavioral": "8b99a54287fe3517ab80544f77a25eadda35a9d84ec85f0687e15fa4910feb86",
     },
     REJECTED_SOURCE: {
-        "metal_rank2_gap_rejects_without_an_artifact": "bfc6fefc2678cea4e76a9bf9935e00e23b7dd1af4a8c98ecfe982cca3f7ff18e",
+        "metal_rank2_gap_rejects_without_an_artifact": "32c020ac54bbe93c8ba2d72c9e45b99736f7bda600debcee40fb13509d6a61b7",
         "rejected_cells_fail_the_build_with_their_pinned_diagnostics": "c1751e1db4ab78e882ed73710c3a4367c724fb223f718ccb800430c40a1ebd12",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics": "d37afb668293c790033ab1f469f7535ff780a19a4c68cc1e5b88092013ec2a60",
     },
@@ -308,6 +370,8 @@ SUITE_COMMANDS = (
             "parity",
             "--test",
             "parity_corpus_contract",
+            "--test",
+            "phase3_body_contract",
             "--test",
             "issue_687_rejected_cells_corpus",
         ),

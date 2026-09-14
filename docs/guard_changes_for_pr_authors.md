@@ -51,6 +51,14 @@ are rejected. The completeness check derives membership from those inputs,
 without a second filename list. The test still owes its applicable execution
 and comparison checks.
 
+Each protected test must also retain its designated comparison or harness call
+and the reviewed executable/library mode. CI checks parsed calls in each body;
+comments, strings, unused closures and macro examples cannot replace them.
+Keep helpers at module scope and avoid shadowing their names inside a protected
+test. This additional check runs alongside the existing body hashes. It does
+not prove the comparison runs or that its result is checked, so retain the
+behavioral assertions and the full owning acceptance checks.
+
 ## Updating an inventory
 
 First determine what each row means.

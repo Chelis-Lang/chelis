@@ -153,6 +153,7 @@ default-filter = '''
         + binary_id(/^chelis-cli::observation_roundtrip_harness$/)
         + binary_id(/^chelis-cli::parity$/)
         + binary_id(/^chelis-cli::parity_corpus_contract$/)
+        + binary_id(/^chelis-cli::phase3_body_contract$/)
         + binary_id(/^chelis-cli::precision_matrix$/)
         + binary_id(/^chelis-cli::prove_int64_exactness$/)
         + binary_id(/^chelis-cli::reduction_and_bitwise_matrix$/)
