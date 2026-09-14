@@ -1366,6 +1366,59 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         ),
+        # #1788 residual: host entry owns every signature obligation before
+        # body/helper execution. Eval already enforced these measured claims;
+        # C omitted mixed witnesses or reported a later unrelated failure.
+        # The enrolled target also checks literal/binder precedence, valid
+        # independent signatures, unused witnesses and argument/body effects.
+        _row(
+            "entry.host_helper.unused_witness.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.unused_witness.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.signature_order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.host_helper.signature_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.higher_order.invocation.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.higher_order.invocation.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.inline_callback.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
+        _row(
+            "entry.inline_callback.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
         # chelis#1821: the gradient splice imported the forward activation and
         # rooted it nowhere, so the entry-point DCE removed it together with the
         # carrier holding its witness claims. The `live_forward` pair separates

@@ -83,6 +83,10 @@ pub struct CEmitter {
     /// prologue already compares, so the witness does not emit a second
     /// comparison of the same two axes (spec/04 §4.7, "exactly once").
     entry_covered_claims: Vec<(NodeId, usize)>,
+    /// Exact immutable input comparisons proven by the enclosing host entry.
+    /// Only the private helper emitter accepts this projection; public DAG
+    /// entry always supplies an empty set and retains every check.
+    host_entry_coverage: Vec<chelis_ir::axis_sources::EntryExtentGuard>,
     use_blas: bool,
     /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
     math_lib: crate::MathLib,
@@ -221,6 +225,16 @@ struct CFusedReuse {
     token: ReusableOwnedStorage,
 }
 
+/// Private invocation evidence accompanies the exact verified helper graph.
+/// Public tensor entries construct this without discharged host obligations.
+struct InvocationEmission<'a> {
+    private_random_context: bool,
+    execution: Option<EvaluationEmissionView<'a>>,
+    entry_coverage: &'a [chelis_ir::axis_sources::EntryExtentGuard],
+    #[cfg(feature = "native-random-observer")]
+    source_location: Option<(usize, usize)>,
+}
+
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
     #[cfg(test)]
@@ -292,10 +306,13 @@ impl CEmitter {
             fused_reuse,
             func_name,
             options,
-            false,
-            execution,
-            #[cfg(feature = "native-random-observer")]
-            None,
+            InvocationEmission {
+                private_random_context: false,
+                execution,
+                entry_coverage: &[],
+                #[cfg(feature = "native-random-observer")]
+                source_location: None,
+            },
         )
     }
 
@@ -303,6 +320,7 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
+        entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
         let memory_plan = MemoryPlan::from_layout(&plan);
@@ -322,10 +340,13 @@ impl CEmitter {
             fused_reuse,
             func_name,
             options,
-            true,
-            None,
-            #[cfg(feature = "native-random-observer")]
-            None,
+            InvocationEmission {
+                private_random_context: true,
+                execution: None,
+                entry_coverage,
+                #[cfg(feature = "native-random-observer")]
+                source_location: None,
+            },
         )
     }
 
@@ -334,6 +355,7 @@ impl CEmitter {
         execution: EvaluationEmissionView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
+        entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
         #[cfg(feature = "native-random-observer")] source_location: (usize, usize),
     ) -> Result<String, Unsupported> {
         for node in dag.nodes() {
@@ -364,26 +386,31 @@ impl CEmitter {
             fused_reuse,
             func_name,
             options,
-            true,
-            Some(execution),
-            #[cfg(feature = "native-random-observer")]
-            Some(source_location),
+            InvocationEmission {
+                private_random_context: true,
+                execution: Some(execution),
+                entry_coverage,
+                #[cfg(feature = "native-random-observer")]
+                source_location: Some(source_location),
+            },
         )
     }
 
-    // The opt-in eighth argument keeps the sealed helper owner alongside its
-    // execution view without changing ordinary entry signatures or options.
-    #[cfg_attr(feature = "native-random-observer", allow(clippy::too_many_arguments))]
     fn emit_preplanned(
         dag: VerifiedDagView<'_>,
         memory_plan: MemoryPlan,
         fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
         func_name: &str,
         options: crate::CodegenOptions,
-        private_random_context: bool,
-        execution: Option<EvaluationEmissionView<'_>>,
-        #[cfg(feature = "native-random-observer")] source_location: Option<(usize, usize)>,
+        invocation: InvocationEmission<'_>,
     ) -> Result<String, Unsupported> {
+        let InvocationEmission {
+            private_random_context,
+            execution,
+            entry_coverage,
+            #[cfg(feature = "native-random-observer")]
+            source_location,
+        } = invocation;
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
         // realized output axis must have one checked extent source. This
         // runs here rather than in `codegen_with_options` because the host
@@ -501,6 +528,7 @@ impl CEmitter {
             lines: Vec::new(),
             indent: 0,
             entry_covered_claims: dag.entry_covered_witness_claims(),
+            host_entry_coverage: entry_coverage.to_vec(),
             use_blas: dag
                 .nodes()
                 .iter()
@@ -2329,6 +2357,15 @@ impl CEmitter {
             self.line("}");
             for (axis, dim) in ty.dims.iter().enumerate() {
                 if let Some(expected) = Self::known_dim_size(dim) {
+                    if self.host_entry_coverage.iter().any(|guard| {
+                        matches!(guard, chelis_ir::axis_sources::EntryExtentGuard::Literal {
+                            required, observed: (load, observed_axis)
+                        } if *required == expected && *observed_axis == axis
+                            && matches!(&dag.get(*load).expect("covered input").op,
+                                RiscOp::Load { name } if name.as_str() == label))
+                    }) {
+                        continue;
+                    }
                     if literal_claim_pairs.get(&(slot, axis as i32)) == Some(&expected) {
                         continue;
                     }
@@ -2386,6 +2423,9 @@ impl CEmitter {
         // Shared IR owns ordering and witness identity. Rendering never
         // re-groups checks by class, name or guard kind.
         for guard in entry_guards {
+            if self.host_entry_coverage.contains(&guard) {
+                continue;
+            }
             use chelis_ir::axis_sources::EntryExtentGuard;
             let input_read = |(load, axis): (NodeId, usize)| {
                 let RiscOp::Load { name } = &dag.get(load).expect("entry input").op else {

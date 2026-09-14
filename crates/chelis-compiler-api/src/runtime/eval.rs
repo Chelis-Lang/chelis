@@ -1960,85 +1960,112 @@ impl<'a> EvalContext<'a> {
                     // extent as compiled lowering instead of looking up an
                     // unbound textual runtime name (chelis#1382).
                     let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
-                    // chelis#1788: the binder's DECLARING witness, as
-                    // `(parameter, axis, extent)`. Section 4.7 evaluates an
-                    // all-interface guard at function entry in declared
-                    // signature order, so the first witness of a binder is the
-                    // one every later occurrence is compared against, and it is
-                    // the half rendered first.
-                    let mut binder_witnesses: UnordMap<String, (String, usize, usize)> =
-                        UnordMap::new();
-                    // A directly declared tensor retains its source binders
-                    // for diagnostics and the callee frame. An alias needs
-                    // the checked signature to expose that tensor structure.
+                    // Decode the declaration before observing actual dimensions. An
+                    // actualized parameter type is evidence about its value, not a
+                    // replacement for a literal or repeated signature obligation.
                     let checked_params = checked_signature
                         .as_ref()
                         .and_then(checked_function_children)
                         .and_then(|children| children.split_last())
                         .map(|(_, params)| params);
+                    let mut entry_inputs = Vec::new();
+                    let mut entry_shapes = Vec::new();
                     for (index, arg) in args.iter().enumerate() {
                         let RuntimeValue::Tensor(tensor) = arg else {
                             continue;
                         };
-                        let actualize = |declared: &Expr| {
-                            declared_tensor_type_for_shape(
-                                declared,
-                                &tensor.value.shape,
-                                tensor.precision,
-                                true,
-                            )
-                            .ok()
-                        };
-                        let actualized = param_types
+                        let declared =
+                            |expr: &Expr| match chelis_ir::host_type_state::decode_host_type(expr)
+                                .ok()?
+                            {
+                                chelis_ir::HostTypeTerm::Tensor(ty) => Some(ty),
+                                chelis_ir::HostTypeTerm::PolymorphicTensor(_) => {
+                                    declared_tensor_type_for_shape(
+                                        expr,
+                                        &tensor.value.shape,
+                                        tensor.precision,
+                                        true,
+                                    )
+                                    .ok()
+                                }
+                                _ => None,
+                            };
+                        let Some(ty) = param_types
                             .get(index)
                             .and_then(Option::as_ref)
-                            .and_then(actualize)
+                            .and_then(declared)
                             .or_else(|| {
-                                checked_params
-                                    .and_then(|params| params.get(index))
-                                    .and_then(actualize)
-                            });
-                        let Some(actualized) = actualized else {
-                            // Rank-polymorphic declarations are handled by
-                            // their existing routed path; they do not expose
-                            // an unambiguous fixed-axis witness here.
+                                checked_params.and_then(|p| p.get(index)).and_then(declared)
+                            })
+                        else {
                             continue;
                         };
-                        let parameter = params
-                            .get(index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("argument {index}"));
-                        for (axis, dim) in actualized.dims.into_iter().enumerate() {
-                            let DimInfo::Named(name, Some(size)) = dim else {
-                                continue;
-                            };
-                            // §4.5: `*` describes an unknown extent, not a
-                            // binder shared by independent axes/arguments.
-                            if name == "*" {
-                                continue;
+                        let parameter = params[index].clone();
+                        if ty.dims.len() != tensor.value.shape.len() {
+                            return Err(format!(
+                                "input `{parameter}` expected rank {}, got {}",
+                                ty.dims.len(),
+                                tensor.value.shape.len()
+                            ));
+                        }
+                        for (dim, size) in ty.dims.iter().zip(&tensor.value.shape) {
+                            if let DimInfo::Named(name, _) = dim
+                                && name != "*"
+                            {
+                                dimension_bindings.entry(name.clone()).or_insert(*size);
                             }
-                            match dimension_bindings.insert(name.clone(), size) {
-                                Some(previous) if previous != size => {
-                                    // [04-NUM-9]: a runtime extent guard IS the
-                                    // trap-producing primitive, and an
-                                    // all-interface guard names the `load` of
-                                    // the later witness. The private message
-                                    // this replaced conveyed neither the
-                                    // parameters nor the axes.
-                                    let (first_param, first_axis, first_size) = binder_witnesses
-                                        .get(&name)
-                                        .cloned()
-                                        .unwrap_or_else(|| (parameter.clone(), axis, previous));
-                                    return Err(format!(
-                                        "extent `{name}`: {first_param} axis {first_axis} = {first_size}, {parameter} axis {axis} = {size}\n\
-                                         numeric trap: domain in load at int64"
-                                    ));
-                                }
-                                _ => {}
+                        }
+                        entry_inputs.push(chelis_ir::host::HostTensorInput {
+                            name: parameter,
+                            ty,
+                        });
+                        entry_shapes.push(&tensor.value.shape);
+                    }
+                    let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
+                    let read = |(node, axis): (NodeId, usize)| {
+                        let RiscOp::Load { name } = &entry_plan
+                            .observations()
+                            .get(node)
+                            .expect("entry observation")
+                            .op
+                        else {
+                            unreachable!("signature observation")
+                        };
+                        (name.as_str(), axis, entry_shapes[node.0][axis])
+                    };
+                    for guard in entry_plan.guards() {
+                        use chelis_ir::axis_sources::EntryExtentGuard;
+                        let (left, right, context) = match guard {
+                            EntryExtentGuard::Named {
+                                claim,
+                                canonical,
+                                observed,
+                            } => {
+                                let (first, first_axis, left) = read(*canonical);
+                                let (later, later_axis, right) = read(*observed);
+                                (
+                                    left,
+                                    right,
+                                    format!(
+                                        "extent `{claim}`: {first} axis {first_axis} = {left}, {later} axis {later_axis} = {right}"
+                                    ),
+                                )
                             }
-                            binder_witnesses
-                                .entry(name)
-                                .or_insert((parameter.clone(), axis, size));
+                            EntryExtentGuard::Literal { required, observed } => {
+                                let (parameter, axis, right) = read(*observed);
+                                (
+                                    *required,
+                                    right,
+                                    format!(
+                                        "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {right}"
+                                    ),
+                                )
+                            }
+                        };
+                        if left != right {
+                            return Err(format!(
+                                "{context}\nnumeric trap: domain in load at int64"
+                            ));
                         }
                     }
                     let caller_precisions = saved_precisions.clone();

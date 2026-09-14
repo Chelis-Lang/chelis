@@ -1,4 +1,6 @@
+mod signature_entry;
 pub mod staged;
+pub use signature_entry::SignatureEntryPlan;
 
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
@@ -1604,6 +1606,13 @@ impl<T> HostExpr<T> {
 
 #[derive(Debug, Clone)]
 pub enum HostExprKind<T = HostTypeTerm> {
+    /// A retained invocation's signature check, after its actual arguments
+    /// have been evaluated and before its specialized body runs. All operands
+    /// are borrowed observations, including parameters unused by that body.
+    SignatureEntry {
+        plan: SignatureEntryPlan,
+        args: Vec<HostExpr<T>>,
+    },
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -1795,6 +1804,13 @@ fn resolve_host_callback(
 
 fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostTypeResolutionError> {
     let kind = match expr.kind {
+        HostExprKind::SignatureEntry { plan, args } => ConcreteHostExprKind::SignatureEntry {
+            plan,
+            args: args
+                .into_iter()
+                .map(resolve_host_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
         HostExprKind::Int(value) => ConcreteHostExprKind::Int(value),
         HostExprKind::Float(value) => ConcreteHostExprKind::Float(value),
         HostExprKind::Bool(value) => ConcreteHostExprKind::Bool(value),
@@ -3154,7 +3170,7 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
         HostExprKind::Builtin { name, args, .. } => {
             name == builtin || args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
-        HostExprKind::Call { args, .. } => {
+        HostExprKind::Call { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
             args.iter().any(|arg| host_body_uses_builtin(arg, builtin))
         }
         HostExprKind::TensorCall { args, .. } => {
@@ -3342,7 +3358,7 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
                     walk(arg, out);
                 }
             }
-            HostExprKind::Builtin { args, .. } => {
+            HostExprKind::Builtin { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
                 for arg in args {
                     walk(arg, out);
                 }
@@ -3667,6 +3683,7 @@ fn host_body_has_call_matching<T>(
     let recurse =
         |e: &HostExpr<T>| host_body_has_call_matching(e, builtin_matches, function_matches);
     match &expr.kind {
+        HostExprKind::SignatureEntry { args, .. } => args.iter().any(recurse),
         HostExprKind::Builtin { name, args, .. } => {
             builtin_matches(name) || args.iter().any(recurse)
         }
@@ -8028,7 +8045,9 @@ fn collect_named_callback_signatures(
     out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     match &expr.kind {
-        HostExprKind::Call { args, .. } | HostExprKind::Builtin { args, .. } => {
+        HostExprKind::Call { args, .. }
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::SignatureEntry { args, .. } => {
             for arg in args {
                 collect_named_callback_signatures(arg, out);
             }
@@ -8208,7 +8227,7 @@ fn infer_callable_param_types_in_expr(
                 infer_callable_param_types_in_expr(item, unknown, out);
             }
         }
-        HostExprKind::Builtin { args, .. } => {
+        HostExprKind::Builtin { args, .. } | HostExprKind::SignatureEntry { args, .. } => {
             for arg in args {
                 infer_callable_param_types_in_expr(arg, unknown, out);
             }
@@ -8357,6 +8376,11 @@ fn refine_host_expr_types(
                     *ty = ret;
                     changed = true;
                 }
+            }
+        }
+        HostExprKind::SignatureEntry { args, .. } => {
+            for arg in args {
+                changed |= refine_host_expr_types(arg, scope, signatures);
             }
         }
         HostExprKind::Builtin { name, args, ty } => {
@@ -11011,6 +11035,18 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
+    if has_callable_params
+        && let Some(guarded) = lower_guarded_host_invocation(
+            app_expr,
+            &name,
+            &explicit_ty,
+            program,
+            scope,
+            tensor_helpers,
+        )?
+    {
+        return Ok(guarded);
+    }
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let pushed = push_inlining(&name);
@@ -11182,6 +11218,142 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
         &substitutions,
         &UnordSet::new(),
     )))
+}
+
+/// Keep the signature boundary which body substitution otherwise erases. A
+/// callable specialization remains compile-time syntax; every payload actual
+/// is evaluated once before observing the invocation's tensor parameters.
+fn lower_guarded_host_invocation(
+    expr: &Expr,
+    name: &str,
+    expected: &HostTypeTerm,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    if is_inlining(name) {
+        return Ok(None);
+    }
+    let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
+        return Ok(None);
+    };
+    let Some(signature) = host_def_signature(canonical, body, None, program) else {
+        return Ok(None);
+    };
+    let plan = SignatureEntryPlan::new(signature.params.iter().filter_map(|param| {
+        let HostTypeTerm::Tensor(ty) = &param.ty else {
+            return None;
+        };
+        Some(HostTensorInput {
+            name: param.name.clone(),
+            ty: ty.clone(),
+        })
+    }));
+    if plan.guards().is_empty() {
+        return Ok(None);
+    }
+    let Expr::List(call, span) = expr else {
+        return Ok(None);
+    };
+    let call_children = children(call);
+    let args = call_children.get(1..).unwrap_or_default();
+    if args.len() != signature.params.len() {
+        return Ok(None);
+    }
+    let mut reserved = scope
+        .to_sorted()
+        .into_iter()
+        .map(|(name, _)| name.clone())
+        .collect::<UnordSet<_>>();
+    collect_deep_var_names(expr, &mut reserved);
+    collect_deep_var_names(&signature.body_expr, &mut reserved);
+    names_bound_in(&signature.body_expr, &mut reserved)
+        .map_err(|detail| host_expr_lowering_error(expr, detail))?;
+    let mut rewritten = call.clone();
+    let mut local_scope = scope.clone();
+    let mut bindings = Vec::new();
+    let mut observations = Vec::new();
+    for (index, (arg, formal)) in args.iter().zip(&signature.params).enumerate() {
+        if matches!(formal.ty, HostTypeTerm::Fn(..)) {
+            continue;
+        }
+        let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
+        let ty = host_expr_type(&value);
+        let mut serial = index;
+        let local = loop {
+            let candidate = format!("__chelis_entry_arg_{serial}");
+            if reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+            serial += 1;
+        };
+        bindings.push(HostBinding {
+            name: local.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ty.clone(),
+            value,
+        });
+        local_scope.insert(local.clone(), ty.clone());
+        if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
+            observations.push(HostExpr::new(HostExprKind::Var(local.clone(), ty)));
+        }
+        rewritten.elements[index + 3] = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Var), *span),
+                    Expr::Map(Metadata::default(), *span),
+                    Expr::Atom(Atom::Name(local), *span),
+                ],
+            },
+            *span,
+        );
+    }
+    let Some(specialized) = inline_top_level_host_call(&Expr::List(rewritten, *span), program)
+    else {
+        return Err(host_expr_lowering_error(
+            expr,
+            "retained signature invocation lost its callable body",
+        ));
+    };
+    let mut serial = bindings.len();
+    let guard_name = loop {
+        let candidate = format!("__chelis_entry_check_{serial}");
+        if reserved.insert(candidate.clone()) {
+            break candidate;
+        }
+        serial += 1;
+    };
+    bindings.push(HostBinding {
+        name: guard_name,
+        display_name: None,
+        display_roots: Vec::new(),
+        ty: HostTypeTerm::Unit,
+        value: HostExpr::new(HostExprKind::SignatureEntry {
+            plan,
+            args: observations,
+        }),
+    });
+    let pushed = push_inlining(name);
+    let definitions = adt_constructor_definitions(program);
+    let expected = canonicalize_representation_erased_adt_args(expected.clone(), &definitions);
+    let lowered = lower_host_expr_with_expected(
+        &specialized,
+        program,
+        &local_scope,
+        tensor_helpers,
+        (!expected.is_unresolved()).then_some(&expected),
+    );
+    if pushed {
+        pop_inlining(name);
+    }
+    let body = lowered?;
+    let ty = host_expr_type(&body);
+    Ok(Some(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(body),
+        ty,
+    })))
 }
 
 fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
@@ -12768,7 +12940,61 @@ fn lower_host_callback(
             let Some(body_expr) = kids.get(1) else {
                 return Ok(None);
             };
-            let body = lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?;
+            let mut body = lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?;
+            // Actualized callback types choose representation; the authored
+            // parameter still supplies the obligation checked at invocation.
+            let plan =
+                SignatureEntryPlan::new(children(params_list).iter().zip(&params).filter_map(
+                    |(declaration, param)| {
+                        let declared = param_host_type(declaration)
+                            .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
+                            .unwrap_or_else(|| param.ty.clone());
+                        let HostTypeTerm::Tensor(ty) = declared else {
+                            return None;
+                        };
+                        Some(HostTensorInput {
+                            name: param.name.clone(),
+                            ty,
+                        })
+                    },
+                ));
+            if !plan.guards().is_empty() {
+                let args = params
+                    .iter()
+                    .filter(|param| matches!(param.ty, HostTypeTerm::Tensor(_)))
+                    .map(|param| {
+                        HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()))
+                    })
+                    .collect();
+                let mut reserved = callback_scope
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<UnordSet<_>>();
+                collect_deep_var_names(body_expr, &mut reserved);
+                names_bound_in(body_expr, &mut reserved)
+                    .map_err(|detail| host_expr_lowering_error(expr, detail))?;
+                let mut serial = 0;
+                let name = loop {
+                    let candidate = format!("__chelis_callback_entry_{serial}");
+                    if reserved.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                    serial += 1;
+                };
+                let ty = host_expr_type(&body);
+                body = HostExpr::new(HostExprKind::Let {
+                    bindings: vec![HostBinding {
+                        name,
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: HostTypeTerm::Unit,
+                        value: HostExpr::new(HostExprKind::SignatureEntry { plan, args }),
+                    }],
+                    body: Box::new(body),
+                    ty,
+                });
+            }
             let ret_ty = if ret_ty.is_unresolved() {
                 host_expr_type(&body)
             } else {
@@ -15445,7 +15671,7 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. } => ty.clone(),
-        HostExprKind::Unit => HostTypeTerm::Unit,
+        HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostTypeTerm::Unit,
     }
 }
 

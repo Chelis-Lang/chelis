@@ -904,8 +904,8 @@ fn a_nested_application_divergence_is_older_than_this_change() {
 
 /// Two disagreeing runtime extents reach one absorbed class through two
 /// function-typed arguments. Eval rejects at host entry, naming the authored
-/// binder and the first/later witnesses under section 4.7. C still rejects at
-/// the earlier shrink result guard; #1788 owns the remaining lane divergence.
+/// binder and the first/later witnesses under section 4.7. #1788 retains that
+/// same invocation boundary in C; the historical test identity stays stable.
 #[test]
 fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() {
     let source = format!(
@@ -964,11 +964,13 @@ fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() 
         String::from_utf8_lossy(&compiled.stderr)
     );
     assert!(
-        compiled_output.contains("extent `k`: claimed = 2, shrink axis 0 = 1"),
-        "C refuses at the guard instead, with its own context: {compiled_output}"
+        compiled_output.contains("extent `p`: v axis 0 = 2, w axis 0 = 1"),
+        "C retains the authored entry binder and witnesses: {compiled_output}"
     );
     assert!(
-        compiled_output.contains("numeric trap: domain in shrink at int64"),
-        "and [04-NUM-9]'s trap line: {compiled_output}"
+        compiled_output
+            .lines()
+            .any(|line| line == "numeric trap: domain in load at int64"),
+        "and [04-NUM-9]'s exact entry trap line: {compiled_output}"
     );
 }

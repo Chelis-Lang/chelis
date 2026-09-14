@@ -2,6 +2,7 @@ use chelis_ir::host::{
     HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary, HostTensorHelper,
     HostTensorSpecialization,
 };
+mod entry;
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
 /// Mirrors the three `HostTensorSpecialization` / `HostFunctionSpecialization`
@@ -308,19 +309,23 @@ pub(crate) fn emit_host_abi_program(
         body.push(String::new());
     }
 
+    let global_entry_coverage = entry::global_helper_coverage(program);
     for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
         let helper_name = global_tensor_helper_name(program_name, index);
         if external_helpers.contains(&helper_name) {
             append_external_helper_declaration(&mut body, &helper_name);
         } else {
-            helper_requirements.merge(append_helper(
-                &mut body,
-                helper,
-                projected
-                    .global_tensor_helper(index)
-                    .expect("projected global helper retains verified child"),
-                &helper_name,
-            )?);
+            for (variant, coverage) in global_entry_coverage.variants[index].iter().enumerate() {
+                helper_requirements.merge(append_helper(
+                    &mut body,
+                    helper,
+                    projected
+                        .global_tensor_helper(index)
+                        .expect("projected global helper retains verified child"),
+                    &entry::variant_name(&helper_name, variant),
+                    coverage,
+                )?);
+            }
         }
     }
     // chelis#730 Phase 1: an emission failure inside a function that the
@@ -371,6 +376,7 @@ pub(crate) fn emit_host_abi_program(
                 .function_owner_bindings(function_index)
                 .expect("projected function retains verified body-owner bindings"),
             &helper_output_counts,
+            external_helpers,
             #[cfg(feature = "native-random-observer")]
             &source_sites
                 .iter()
@@ -403,6 +409,7 @@ pub(crate) fn emit_host_abi_program(
             // (possibly unemittable) tensor helpers entirely.
             continue;
         }
+        let entry_coverage = entry::helper_coverage(function);
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
@@ -411,14 +418,17 @@ pub(crate) fn emit_host_abi_program(
             if external_helpers.contains(&helper_name) {
                 append_external_helper_declaration(&mut body, &helper_name);
             } else {
-                helper_requirements.merge(append_helper(
-                    &mut body,
-                    helper,
-                    projected
-                        .function_tensor_helper(function_index, index)
-                        .expect("projected function helper retains verified child"),
-                    &helper_name,
-                )?);
+                for (variant, coverage) in entry_coverage.variants[index].iter().enumerate() {
+                    helper_requirements.merge(append_helper(
+                        &mut body,
+                        helper,
+                        projected
+                            .function_tensor_helper(function_index, index)
+                            .expect("projected function helper retains verified child"),
+                        &entry::variant_name(&helper_name, variant),
+                        coverage,
+                    )?);
+                }
             }
         }
     }
@@ -452,6 +462,7 @@ pub(crate) fn emit_host_abi_program(
             projected.root_sites(),
             &internal_names,
             &helper_output_counts,
+            external_helpers,
         )?;
     }
 
@@ -1633,6 +1644,7 @@ fn append_helper(
     helper: &HostTensorHelper,
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
+    entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = random_helper_name(helper_name);
     if verified.execution().is_none()
@@ -1678,11 +1690,12 @@ fn append_helper(
             execution,
             &helper_name,
             options,
+            entry_coverage,
             #[cfg(feature = "native-random-observer")]
             verified.source_location(),
         )?
     } else {
-        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options)?
+        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?
     };
     // The CEmitter prepends dtype-specific uniform sampling helpers to
     // every DAG it emits so that a standalone-emitted kernel
@@ -1977,115 +1990,86 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 "#.to_string());
 }
 
-/// Whether a tensor helper owns a literal input-axis obligation or can
-/// already see a repeated dimension binder among its own inputs.
-///
-/// The helper's existing input checks establish an order among obligations.
-/// A wrapper guard runs before the helper call, so it could preempt an earlier
-/// literal-axis check or assigned-slot claim. The helper keeps that ordering;
-/// mixed helper and wrapper obligations remain residual.
-///
-/// The wrapper guard fills the gap only where no helper owns any of it, which
-/// is exactly the split-kernel shape chelis#1788 reports: every tensor leaf of
-/// a tuple-bodied def is lowered from its own subexpression, so no helper
-/// receives two witnesses of one binder and nothing on this lane owned the
-/// signature's obligation. A function that mixes the two is left to the DAG
-/// lane's ordering and is residual.
-fn a_helper_owns_an_entry_obligation(function: &HostFunction) -> bool {
-    for helper in &function.tensor_helpers {
-        let mut seen: Vec<&str> = Vec::new();
-        for input in &helper.inputs {
-            for dim in &input.ty.dims {
-                if matches!(dim, DimInfo::Lit(_)) {
-                    return true;
-                }
-                let DimInfo::Named(name, _) = dim else {
-                    continue;
-                };
-                if name == "*" {
-                    continue;
-                }
-                if seen.contains(&name.as_str()) {
-                    return true;
-                }
-                seen.push(name.as_str());
-            }
-        }
-    }
-    false
+/// The complete signature owns entry order; helper partitioning does not.
+fn function_entry_plan(function: &HostFunction) -> chelis_ir::host::SignatureEntryPlan {
+    chelis_ir::host::SignatureEntryPlan::new(function.params.iter().filter_map(|param| {
+        let HostAbiType::Tensor(ty) = &param.ty else {
+            return None;
+        };
+        Some(chelis_ir::host::HostTensorInput {
+            name: param.name.clone(),
+            ty: ty.clone(),
+        })
+    }))
 }
 
-/// chelis#1788. The entry obligation a host-bodied def's SIGNATURE carries when
-/// one dimension binder names two or more declared parameter axes.
-///
-/// A tuple-bodied def is host-bodied, and each tensor leaf becomes its own
-/// kernel helper lowered from its own subexpression, so
-/// `def both(x: tensor[seq, f32], y: tensor[batch, seq, f32]) -> (...)` reaches
-/// no DAG that can see `seq` twice and nothing on C owned the signature's
-/// obligation. `spec/04-type-system.md` section 4.7 puts that guard here: a
-/// guard whose operands are all interface values is evaluated at function
-/// entry, in declared signature order, before any other operation of the
-/// function runs, and its `[04-NUM-9]` `<op>` slot is the `load` primitive of
-/// the later witness.
-///
-/// Each later occurrence is compared against the FIRST, which is the one the
-/// declaration establishes, so the two rendered halves come out in signature
-/// order and agree with the one-kernel form's DAG guard byte for byte.
-///
-/// The NULL and rank preconditions are not defensive noise. A nonexistent axis
-/// has no extent to compare, and extra axes also invalidate the declared rank.
-/// The wrong-rank and NULL-input diagnostics
-/// belong to the kernel helper that already reports them; without the
-/// preconditions this guard would reach `chelis_tensor_shape` first and replace
-/// a named diagnostic with a generic one.
-fn entry_binder_guards(function: &HostFunction, indent: &str) -> Vec<String> {
-    // (binder, parameter index, axis, declared rank), in declared signature order.
-    let mut occurrences: Vec<(&str, usize, usize, usize)> = Vec::new();
-    for (index, param) in function.params.iter().enumerate() {
-        let HostAbiType::Tensor(ty) = &param.ty else {
-            continue;
-        };
-        for (axis, dim) in ty.dims.iter().enumerate() {
-            let DimInfo::Named(name, _) = dim else {
-                continue;
-            };
-            // Section 4.5: `*` describes an unknown extent, not a binder shared
-            // by independent axes or arguments (chelis#1898).
-            if name == "*" {
-                continue;
-            }
-            occurrences.push((name.as_str(), index, axis, ty.dims.len()));
-        }
+fn signature_entry_lines(
+    plan: &chelis_ir::host::SignatureEntryPlan,
+    args: &[String],
+    indent: &str,
+) -> Result<Vec<String>, Unsupported> {
+    use chelis_ir::axis_sources::EntryExtentGuard;
+    if args.len() != plan.observations().nodes().len() {
+        return Err(invalid_abi_shape(
+            "signature entry lost an input observation".into(),
+            "signature entry",
+        ));
     }
-    let mut declared: Vec<(&str, usize, usize, usize)> = Vec::new();
     let mut lines = Vec::new();
-    for &(name, index, axis, rank) in &occurrences {
-        let Some(&(_, first_index, first_axis, first_rank)) =
-            declared.iter().find(|(seen, _, _, _)| *seen == name)
-        else {
-            declared.push((name, index, axis, rank));
-            continue;
+    // No extent read may obscure a malformed external input's rank/null
+    // diagnostic. These metadata checks dominate the ordered comparisons.
+    for (node, actual) in plan.observations().nodes().iter().zip(args) {
+        let RiscOp::Load { name } = &node.op else {
+            unreachable!("signature observation")
         };
-        let first = c_ident(&function.params[first_index].name);
-        let later = c_ident(&function.params[index].name);
-        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name);
-        let first_label = chelis_ir::span_sanitize::sanitize_for_format_string(
-            &function.params[first_index].name,
-        );
-        let later_label =
-            chelis_ir::span_sanitize::sanitize_for_format_string(&function.params[index].name);
-        lines.push(format!(
-            "{indent}if ({first} != NULL && {later} != NULL && chelis_tensor_rank({first}) == {first_rank} && chelis_tensor_rank({later}) == {rank} && chelis_tensor_shape({later}, {axis}) != chelis_tensor_shape({first}, {first_axis})) {{"
-        ));
-        lines.push(format!(
-            "{indent}    fprintf(stderr, \"extent `{label}`: {first_label} axis {first_axis} = %lld, {later_label} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape({first}, {first_axis}), (long long)chelis_tensor_shape({later}, {axis}));"
-        ));
+        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+        let rank = node.output_type.dims.len();
+        lines.push(format!("{indent}if ({actual} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"));
+        lines.push(format!("{indent}if (chelis_tensor_rank({actual}) != {rank}) {{ fprintf(stderr, \"input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank({actual})); abort(); }}"));
+    }
+    let read = |(load, axis): (chelis_ir::NodeId, usize)| {
+        let node = plan.observations().get(load).expect("signature witness");
+        let RiscOp::Load { name } = &node.op else {
+            unreachable!("signature observation")
+        };
+        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+        (
+            format!("chelis_tensor_shape({}, {axis})", args[load.0]),
+            label.into_owned(),
+            axis,
+        )
+    };
+    for guard in plan.guards() {
+        let (left, right, context) = match guard {
+            EntryExtentGuard::Named {
+                claim,
+                canonical,
+                observed,
+            } => {
+                let (left, first, first_axis) = read(*canonical);
+                let (right, later, later_axis) = read(*observed);
+                let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
+                let context = format!(
+                    "fprintf(stderr, \"extent `{claim}`: {first} axis {first_axis} = %lld, {later} axis {later_axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                );
+                (left, right, context)
+            }
+            EntryExtentGuard::Literal { required, observed } => {
+                let (right, label, axis) = read(*observed);
+                let context = format!(
+                    "fprintf(stderr, \"input `{label}` axis {axis} expected {required}, got %lld\\n\", (long long)({right}));"
+                );
+                (required.to_string(), right, context)
+            }
+        };
+        lines.push(format!("{indent}if ({right} != {left}) {{"));
+        lines.push(format!("{indent}    {context}"));
         lines.push(format!(
             "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at int64\");"
         ));
         lines.push(format!("{indent}}}"));
     }
-    lines
+    Ok(lines)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2099,6 +2083,7 @@ fn emit_function(
     ownership_sites: &[ProjectedHostSite<'_>],
     owner_bindings: &[(VerifiedOwnerId, String)],
     helper_output_counts: &[usize],
+    external_helpers: &UnordSet<String>,
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
@@ -2133,6 +2118,8 @@ fn emit_function(
         helper_output_counts,
         ownership_sites,
     );
+    emitter.entry_projection = entry::helper_coverage(function);
+    emitter.external_helpers = external_helpers.clone();
     #[cfg(feature = "native-random-observer")]
     {
         if !crate::random_observer::source_bijection(source_sites, &emitter.expression_sites) {
@@ -2186,10 +2173,18 @@ fn emit_function(
                 "verified C host ownership emission",
             )
         })?;
-    if authored && !a_helper_owns_an_entry_obligation(function) {
-        let guards = entry_binder_guards(function, &emitter.indent);
-        emitter.lines.extend(guards);
-    }
+    let entry_plan = function_entry_plan(function);
+    let entry_args = function
+        .params
+        .iter()
+        .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
+        .map(|param| c_ident(&param.name).into_owned())
+        .collect::<Vec<_>>();
+    emitter.lines.extend(signature_entry_lines(
+        &entry_plan,
+        &entry_args,
+        &emitter.indent,
+    )?);
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
     emitter.emit_entry_terminals(entry, authored)?;
@@ -2368,6 +2363,7 @@ fn emit_main(
     ownership_sites: &[ProjectedHostSite<'_>],
     internal_names: &UnordMap<String, String>,
     helper_output_counts: &[usize],
+    external_helpers: &UnordSet<String>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     append_invocation_random_context(out);
@@ -2384,6 +2380,8 @@ fn emit_main(
         helper_output_counts,
         ownership_sites,
     );
+    emitter.entry_projection = entry::global_helper_coverage(program);
+    emitter.external_helpers = external_helpers.clone();
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
         emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
@@ -2595,6 +2593,7 @@ fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             }
         }
         HostExprKind::Call { args, .. }
+        | HostExprKind::SignatureEntry { args, .. }
         | HostExprKind::Builtin { args, .. }
         | HostExprKind::TensorCall { args, .. } => {
             for arg in args {
@@ -2699,7 +2698,9 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
                     walk(arg, out);
                 }
             }
-            HostExprKind::Builtin { args, .. } | HostExprKind::TensorCall { args, .. } => {
+            HostExprKind::Builtin { args, .. }
+            | HostExprKind::TensorCall { args, .. }
+            | HostExprKind::SignatureEntry { args, .. } => {
                 for arg in args {
                     walk(arg, out);
                 }
@@ -2851,6 +2852,8 @@ struct HostEmitter<'a> {
     tensor_helper_output_counts: &'a [usize],
     expression_sites: Vec<ProjectedHostSite<'a>>,
     expression_site_index: usize,
+    entry_projection: entry::Projection,
+    external_helpers: UnordSet<String>,
     #[cfg(feature = "native-random-observer")]
     source_sites: Vec<crate::random_observer::SourceSite<'a>>,
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
@@ -2920,6 +2923,8 @@ impl<'a> HostEmitter<'a> {
                 .cloned()
                 .collect(),
             expression_site_index: 0,
+            entry_projection: entry::Projection::default(),
+            external_helpers: UnordSet::new(),
             #[cfg(feature = "native-random-observer")]
             source_sites: Vec::new(),
             pre_emitted_clone_sites: UnordSet::new(),
@@ -4258,7 +4263,33 @@ impl<'a> HostEmitter<'a> {
                 }
             }
             HostExprKind::TensorCall { helper, args, ty } => {
-                self.assign_tensor_call(target, *helper, args, ty)?;
+                let expression = self
+                    .expression_sites
+                    .iter()
+                    .position(|candidate| candidate.id == site.id)
+                    .expect("current verified expression site");
+                let variant = self
+                    .entry_projection
+                    .call_variant(expression, *helper)
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "tensor call lost its signature-entry schedule identity".into(),
+                            "signature entry projection",
+                        )
+                    })?;
+                self.assign_tensor_call(target, *helper, variant, args, ty)?;
+            }
+            HostExprKind::SignatureEntry { plan, args } => {
+                require_same_abi_type(ty, &HostType::Unit, "signature entry")?;
+                let mut actuals = Vec::with_capacity(args.len());
+                for arg in args {
+                    let temp = self.next_temp("entry_arg");
+                    self.emit_expr_to_var(arg, &temp, &host_type(arg))?;
+                    actuals.push(temp);
+                }
+                self.lines
+                    .extend(signature_entry_lines(plan, &actuals, &self.indent)?);
+                self.lines.push(format!("{}{target} = 0;", self.indent));
             }
             HostExprKind::Unit => {
                 require_same_abi_type(ty, &HostType::Unit, "unit expression")?;
@@ -6209,6 +6240,7 @@ impl<'a> HostEmitter<'a> {
         &mut self,
         target: &str,
         helper: usize,
+        entry_variant: usize,
         args: &[HostExpr],
         ty: &HostType,
     ) -> Result<(), Unsupported> {
@@ -6252,7 +6284,13 @@ impl<'a> HostEmitter<'a> {
             }
         }
 
-        let helper_name = random_helper_name(&format!("{}__tensor_{helper}", self.helper_prefix));
+        let base = format!("{}__tensor_{helper}", self.helper_prefix);
+        let entry_variant = if self.external_helpers.contains(&base) {
+            0
+        } else {
+            entry_variant
+        };
+        let helper_name = random_helper_name(&entry::variant_name(&base, entry_variant));
         let mut tensor_args: Vec<(String, Option<String>)> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let inferred_ty = host_type(arg);
@@ -8633,7 +8671,7 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::FlatMap { ty, .. }
         | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. } => ty.clone(),
-        HostExprKind::Unit => HostType::Unit,
+        HostExprKind::Unit | HostExprKind::SignatureEntry { .. } => HostType::Unit,
     }
 }
 

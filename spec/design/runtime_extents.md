@@ -406,19 +406,34 @@ primitive. Named host declared-result claims remain #1900.
 
 ##### Host entry guards (#1788)
 
-The ENTRY-OBLIGATION guard compares the witnesses a signature's repeated
-dimension binder names on two or more declared parameter axes. It exists
-because a tuple-bodied def is host-bodied and each tensor leaf is lowered from
-its own subexpression into its own kernel helper, so no DAG on that lane ever
-receives two witnesses of the binder. The interpreter reads the resolved checked parameter types, so aliases carry
-the same witnesses as the C ABI. The guard is emitted in the owned body,
-before body operations and entry ownership drops, comparing each later occurrence
-against the first in declared signature order, and it is suppressed entirely
-for a function where a helper owns a literal input-axis obligation or already
-receives two witnesses of one binder. That suppression is not an optimization: such a helper's prologue owns
-the slot ORDER section 4.7 requires across the whole signature, and a wrapper
-guard would preempt an earlier slot's claim. A function that mixes the two
-shapes is left to the DAG lane's ordering and is residual.
+Retain the expanded checked signature before helper extraction, body
+refinement, inlining, or parameter pruning. Construct one ordered entry plan
+from that retained declaration. The plan retains each literal obligation and
+repeated binder's ordered parameter-axis
+witnesses, source labels, and scoped identity. Compare every later binder
+witness with its first witness; equal spellings in independent signatures do
+not create an equality. Signature order, not helper extraction order, selects
+the first semantic failure.
+
+The owning invocation executes the complete plan before entry ownership drops
+or body operations. This includes obligations whose witnesses the body never
+reads and preserved monomorphized signatures. A private helper may omit only
+the exact signature obligations already executed by its dominating host entry;
+its local operation and result guards remain independent. Standalone helper
+entry retains the complete checks. Ownership must account for every obligation
+exactly once, rather than suppressing the enclosing plan when any helper owns
+one obligation.
+
+Higher-order inlining must retain an invocation boundary: evaluate actual
+arguments once in caller order, map the original signature witnesses to those
+values, execute its entry plan, then run the substituted body and callbacks.
+An indirect invocation likewise retains its checked callable contract. Inline
+collection callbacks retain a signature-entry node before their body, so each
+iteration checks even a parameter whose value the callback never reads. Eval
+and C consume the same ordered obligations. The #1991 `apply4` control compares
+the authored parameter `p` witnesses before callbacks; independent result
+labels named `k` cannot supply that equality. #1991's unpublished draft is not
+a dependency of this implementation.
 
 #### C2.6 Atomic integration and wire ordering
 
@@ -893,12 +908,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 154 rows and none of them is an unexplained
+The recorded phase-B corpus has 162 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 30 non-`executes_exactly` values
-against 124 `executes_exactly`, and every one of the thirty is accounted
+against 132 `executes_exactly`, and every one of the thirty is accounted
 for. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:
