@@ -300,8 +300,10 @@ evidence, not device execution.
 That trial is not replacement coverage yet. In particular, the current
 unimplemented authority stores an issue number but has no exact capability
 Table A/B key; the issue remains nonsemantic tracking metadata. The existing
-exact rejected-cell pins, mutations, and Phase 3 definition digests therefore
-remain blocking. The two chelis#1918 softmax consumers read one generated
+exact rejected-cell pins and their mutations therefore remain blocking.
+The Phase 3 body/result audit and required changed-test acknowledgements
+replace its definition digests under chelis#1868; that retirement does not
+relax the diagnostic-text comparison. The two chelis#1918 softmax consumers read one generated
 reviewed snapshot from a canonical reviewed row, owned by
 `scripts/regen_all.py --tier 0`, while their structured identity is checked
 separately. This tier-0 snapshot is not production-derived: tier 0 cannot

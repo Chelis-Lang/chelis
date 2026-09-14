@@ -449,7 +449,8 @@ missing required clause, atom or region boundary. Additive prose changes that
 preserve those requirements pass only after their exact file and identity
 acknowledgements in enforcing PR mode. That is a review obligation, not an
 automated proof that the prose is semantically correct. Other frozen artifacts
-and Phase 3 test-definition digests are unaffected.
+were unaffected by that atom/region retirement. The separate Phase 3
+definition replacement is specified above.
 
 ### Closed-corpus and count ratchets
 
