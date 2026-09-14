@@ -7,13 +7,12 @@ Usage:
 
     .venv/bin/python scripts/dtype_phase4b_oracle.py
 
-The freeze has three legs. Narrow ``FROZEN_ATOM_DIGESTS`` and
-``FROZEN_REGION_DIGESTS`` pin the exact text of individual normative atoms and
-delimited contract regions. The third leg is the additive-contradiction gate:
-a region digest cannot defend its own boundaries, so contradictory prose can be
-inserted immediately before a region's start or after its end, and prose can be
-appended to a contract file that carries no region at all. That leg is an
-explicit per-file acknowledgement, not a whole-file digest.
+Required atom identities and unambiguous contract-region boundaries are reviewed
+literal declarations. Required semantic clauses, schema checks and fresh
+source/compiler agreement remain independent guards. Text changes are named
+by the committed report and require exact file/atom/region acknowledgements in
+PR mode. No atom or region text digest needs recomputing. Acknowledgement is a
+review obligation, not permission to omit a required clause or identity.
 
 Acknowledgement gate
 --------------------
@@ -62,7 +61,7 @@ exact lines the body must carry, then exits 0, so a local run is a checklist
 rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
 it can never be read as "nothing changed".
 
-This replaces a table of whole-file SHA-256 digests. That table made two pull
+The acknowledgement gate first replaced whole-file SHA-256 digests. That table made two pull
 requests that edited *different* contract files conflict on adjacent lines of
 one Python dict, and two that edited the *same* file conflict on one line whose
 correct post-rebase value is the digest of the merged text, so the conflict was
@@ -77,7 +76,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -87,7 +85,7 @@ import sys
 
 
 from phase4b_contract_text import (
-    ATOM_START, OracleError, frozen_region, normalize_frozen_block, strict_atom_block,
+    ATOM_START, OracleError, frozen_region, strict_atom_block,
 )
 from phase4b_change_report import (
     acknowledgement_line, changed_contracts, identity_acknowledgement_violations,
@@ -495,174 +493,156 @@ EXPECTED_OP_MANIFESTS = {
     ),
 }
 
-FROZEN_ATOM_DIGESTS = {
-    '05-OP-45': '68421184e132aaa0acdf115ce5b1300aae3a717cf78e754127901839fb4e55b9',
-    '04-FIT-18': '24894c3cdf89f26da5372f59d0443a4ce74e1b684db654159c91830107e669aa',
-    "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
-    "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
-    "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
-    "04-LIN-6": "6cfcc780a3f5b9836507772cf7ef76ce231a0505f07e9a06b3c1ba55e0946d92",
-    "04-LIN-7": "6c1d8d77d251d245df6e1aa6e2138458048bdac31a407adfeba586302b0f3625",
-    "04-LIN-8": "3e0013311e070716145da9245eea66361c8cf91fc6914ad200b68790b41313eb",
-    "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
-    "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
-    "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
-    "04-NUM-11": "903b437e9aaa98b7c4d7c0c019393bee203d8bf76621902fc2ad53d872945f3f",
-    "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
-    "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
-    "04-SHAPE-1": "0f3f3f71731481b457b226bbcc8877d54962d268ec8787fbc6aa56ab4324d17c",
-    "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
-    "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
-    "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
-    "05-OP-4": "f45693d5e3ef37033aef4c9a3f03de1806ea034d8247390c3ff6113d1c2ffa13",
-    "05-OP-5": "011173c34344dc89d15eda5518a8ea833470fa953378bafba611391e8d083549",
-    "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
-    "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
-    "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
-    "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
-    "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "ecf20846cbb70956b075e5d7397ce068d59b51d51986bcd2f5e25236f88c3ff7",
-    "05-OP-12": "9a0acc6c7279de3d7c1696e9ce3c4f9a16667a9aca25c43857ac76b8e4d4a793",
-    "05-OP-13": "8cf9f59c3af760dec33de17c98940af57b3771c7c7842360baee7ba7fcd9d8c1",
-    "05-OP-14": "6de7de82e7c3daca3c1089c855b94584cf9bfee47f71fe7020e3a9d6621961eb",
-    "05-OP-15": "ce451642a40332fea15da796393f833880ba94948f663c60023e77043bedd0cd",
-    "05-OP-16": "ddced357a351860e42537449d526dfa3ba8cda0a2aa28073d3ea5b81eae2008f",
-    "05-OP-17": "7c85fa51323c9993bb63f97ee4728c8fc5c13bd2c30315f6bcf7a69a77a39304",
-    "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
-    "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
-    "05-OP-20": "302cee9a558337a469751b4a5ec3ef009a2ee5ef5d9c68e32fd40c23cf1479f1",
-    "05-OP-21": "ced775b654a61c4d36d2313191145b3543e55ef75825a5066e04b3c114437545",
-    "05-OP-22": "f7c7c00b0fbea5176eb3427b517f5fb9f7434e24caaacd86fc1408455658329a",
-    "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
-    "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
-    "05-OP-25": "29f27a57545efd179e0f6b2766f48d7fdafb7c2ac6c3bbaeeaf5b0c0646ed502",
-    "05-OP-26": "3371ca252044c6c2da596ce3df10ad6151221430d93a6bc3dbc98098e3e8d31d",
-    "05-OP-27": "9fb4c24b5756860675db850ab82192199afb562b157e2b5197b0e132704333ea",
-    "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
-    "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
-    "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
-    "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "04fdb17037f755f45826d8bcdbcfc76bb1bd5b955d60e57006669932da442cd0",
-    "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
-    "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
-    "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
-    "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "39e4e800864ca561f12d83cb0bb1b17489f46c59112bd1aacd3f00cf15e3e33d",
-    "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
-    "05-OP-40": "12c188d00bf6544645b1b4a7cb6b09af563b6dbbc98c2e931db9189d16e11376",
-    "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
-    "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
-    "05-OP-43": "ec1ffe9abb148062ed80d696b0f9b5a60af477633b218dc2ca51675170e887b1",
-    "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
-}
+REQUIRED_ATOMS = (
+    '05-OP-45',
+    '04-FIT-18',
+    '04-LIN-3',
+    '04-LIN-4',
+    '04-LIN-5',
+    '04-LIN-6',
+    '04-LIN-7',
+    '04-LIN-8',
+    '04-NUM-2',
+    '04-NUM-4',
+    '04-NUM-8',
+    '04-NUM-11',
+    '04-NUM-14',
+    '04-NUM-16',
+    '04-SHAPE-1',
+    '05-OP-1',
+    '05-OP-2',
+    '05-OP-3',
+    '05-OP-4',
+    '05-OP-5',
+    '05-OP-6',
+    '05-OP-7',
+    '05-OP-8',
+    '05-OP-9',
+    '05-OP-10',
+    '05-OP-11',
+    '05-OP-12',
+    '05-OP-13',
+    '05-OP-14',
+    '05-OP-15',
+    '05-OP-16',
+    '05-OP-17',
+    '05-OP-18',
+    '05-OP-19',
+    '05-OP-20',
+    '05-OP-21',
+    '05-OP-22',
+    '05-OP-23',
+    '05-OP-24',
+    '05-OP-25',
+    '05-OP-26',
+    '05-OP-27',
+    '05-OP-28',
+    '05-OP-29',
+    '05-OP-30',
+    '05-OP-31',
+    '05-OP-32',
+    '05-OP-33',
+    '05-OP-34',
+    '05-OP-35',
+    '05-OP-36',
+    '05-OP-37',
+    '05-OP-38',
+    '05-OP-39',
+    '05-OP-40',
+    '05-OP-41',
+    '05-OP-42',
+    '05-OP-43',
+    '05-OP-44',
+)
 
-# The markers are part of the freeze contract: each must occur exactly once,
-# and the end marker is excluded from the digest. Digests are not a self-bless
-# mechanism. An intentional change owes the owning spec/design update, every
-# consuming contract, and an adversarial mutation before this manifest moves.
-FROZEN_REGION_DIGESTS = {
+# Each boundary must occur exactly once; the end marker is excluded from the
+# reported region. An intentional declaration change owes its owning contract,
+# consumers, adversarial controls and exact PR acknowledgement.
+REQUIRED_REGIONS = {
     'Python numeric boundary': (
         'spec/11-ffi.md',
         '## 1. Python Interop',
         '## 2. C Interop',
-        '5dab69dbeb509abc8994fc77c0d67c13da09bc1c41802609382fffc6b3d4e692',
     ),
     'numeric wire codecs and roles': (
         'spec/10-serialization.md',
         '### 3.2 Exact Numeric Value Codec',
         '## 4. Invariant Revalidation At Decode Boundaries',
-        '273568d1ffaf227ad5d67ba2cba960de0c9a1121187d973c831b201947798caa',
     ),
-    "agent numeric surface discipline": (
-        "AGENTS.md",
-        "### Numeric Surface Discipline",
-        "### Public-Surface Change Rule",
-        "5d9de6c42998203610d1b807c6557e0dd766ec1a0a49dcbdfdf882fcb8cc7ed3",
+    'agent numeric surface discipline': (
+        'AGENTS.md',
+        '### Numeric Surface Discipline',
+        '### Public-Surface Change Rule',
     ),
-    "numeric value semantics": (
-        "spec/04-type-system.md",
-        "## 9. Numeric Value Semantics",
-        "## 10. Checker Totality",
-        "edb150de60effbadeaff33f02ba39929dbde7ae61db4bdedaa8f4bfb3e334086",
+    'numeric value semantics': (
+        'spec/04-type-system.md',
+        '## 9. Numeric Value Semantics',
+        '## 10. Checker Totality',
     ),
-    "numeric primitive contracts": (
-        "spec/05-risc-primitives.md",
-        "### 2.1 Elementwise Binary",
-        "### 2.4 Movement",
-        "53a56bb68ec04334105f5c84e8eb499d101007bc657f4c9b36a2ec32630402b2",
+    'numeric primitive contracts': (
+        'spec/05-risc-primitives.md',
+        '### 2.1 Elementwise Binary',
+        '### 2.4 Movement',
     ),
-    "logical builtin contract": (
-        "spec/05-risc-primitives.md",
-        "### 3.2 Comparison and Logical Operations",
-        "### 3.3 Activation Functions",
-        "3c65a26f4a5f3bd8469bf6b78e32c79df3b8d61c119016bceb13cecb14097cb5",
+    'logical builtin contract': (
+        'spec/05-risc-primitives.md',
+        '### 3.2 Comparison and Logical Operations',
+        '### 3.3 Activation Functions',
     ),
-    "name-preserving rank polymorphism": (
-        "spec/04-type-system.md",
-        "#### 4.5.3 Name-Preserving Rank Polymorphism",
-        "#### 4.5.4 Concat Result Typing",
-        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
+    'name-preserving rank polymorphism': (
+        'spec/04-type-system.md',
+        '#### 4.5.3 Name-Preserving Rank Polymorphism',
+        '#### 4.5.4 Concat Result Typing',
     ),
-    "window extrema contract": (
-        "spec/05-risc-primitives.md",
-        "### 2.3.1 Windowed Reduction",
-        "### 2.4 Movement",
-        "cc2096d327307abec84098d50e4788d1a599f8ce2fadd930541ee078e1d7c786",
+    'window extrema contract': (
+        'spec/05-risc-primitives.md',
+        '### 2.3.1 Windowed Reduction',
+        '### 2.4 Movement',
     ),
-    "to_string contract section": (
-        "spec/05-risc-primitives.md",
-        "### 3.6.3 Canonical value-to-string conversion",
-        "### 3.7 Host-Lane Data I/O Numeric Operations",
-        "8520543d576332fce2cd9821a3d917b083bfeb54e16f2054ccc7b94217dcecda",
+    'to_string contract section': (
+        'spec/05-risc-primitives.md',
+        '### 3.6.3 Canonical value-to-string conversion',
+        '### 3.7 Host-Lane Data I/O Numeric Operations',
     ),
-    "named lossy cast section": (
-        "spec/05-risc-primitives.md",
-        "### 3.8 Named Lossy Cast Forms",
-        "## 4. Standard Lowerings",
-        "0cbc42c557573fbcbf9662ca579e74dc001ef548ce242ffa26fbac872ab66cd8",
+    'named lossy cast section': (
+        'spec/05-risc-primitives.md',
+        '### 3.8 Named Lossy Cast Forms',
+        '## 4. Standard Lowerings',
     ),
-    "capability schema": (
-        "spec/design/capability_table.md",
-        "## The two-table design",
-        "## Seed dispositions the table must ship with",
-        "e623262cd4cd37b6646c651fd0596435cf28f24423b8d9d755620d009520c09d",
+    'capability schema': (
+        'spec/design/capability_table.md',
+        '## The two-table design',
+        '## Seed dispositions the table must ship with',
     ),
-    "capability seed dispositions": (
-        "spec/design/capability_table.md",
-        "## Seed dispositions the table must ship with",
-        "## New numeric ops before the table lands (added 2026-07-30)",
-        "965b58fa0644d6b56f5106b66b35ad0917dfd4201c70737d42c132f94686dc14",
+    'capability seed dispositions': (
+        'spec/design/capability_table.md',
+        '## Seed dispositions the table must ship with',
+        '## New numeric ops before the table lands (added 2026-07-30)',
     ),
-    "Phase 4 handoff": (
-        "spec/design/dtype_semantics.md",
-        "## Phase 4 - the capability table becomes the permanent guard",
-        "## I1. Interlock with loud unsupported ([#730])",
-        "f2cbc2ff47b83fe887c740f437798e38c03e6027e73275a42e9bbdcb31dfd862",
+    'Phase 4 handoff': (
+        'spec/design/dtype_semantics.md',
+        '## Phase 4 - the capability table becomes the permanent guard',
+        '## I1. Interlock with loud unsupported ([#730])',
     ),
-    "compiled stdlib consumer": (
-        "spec/design/loud_unsupported.md",
-        "### LU5 - derived compiled-stdlib acceptance corpus ([#955])",
-        "### LU6 - exhaustive checked host-cast planning ([#1150])",
-        "30ba46096ab69975228a288c42633ace364da7c5fe92307fd696d8100df3a17e",
+    'compiled stdlib consumer': (
+        'spec/design/loud_unsupported.md',
+        '### LU5 - derived compiled-stdlib acceptance corpus ([#955])',
+        '### LU6 - exhaustive checked host-cast planning ([#1150])',
     ),
-    "provenance governed surfaces": (
-        "spec/design/spec_provenance.md",
-        "| Capability-row, Deep-tag, tolerance-row, and diagnostic citations |",
-        "| OpenSpec proving inadequate as the trigger for provenance work |",
-        "56675ebf30876d376c9eeb1817472381d9cfb0254522f57a3894366762da782c",
+    'provenance governed surfaces': (
+        'spec/design/spec_provenance.md',
+        '| Capability-row, Deep-tag, tolerance-row, and diagnostic citations |',
+        '| OpenSpec proving inadequate as the trigger for provenance work |',
     ),
-    "roadmap ownership": (
-        "spec/design/remediation_roadmap.md",
-        "| **v0.19.0 - grounded dtype storage break",
-        "| **v0.20.0 - behavior-preserving permanent guards**",
-        "b59c7db4c9a53e26798ca258d39b90c9937c0940b9c5e51d38b0e1a619e6de6e",
+    'roadmap ownership': (
+        'spec/design/remediation_roadmap.md',
+        '| **v0.19.0 - grounded dtype storage break',
+        '| **v0.20.0 - behavior-preserving permanent guards**',
     ),
-    "status dtype row": (
-        "docs/investigations/remediation_status_2026_08_04.md",
-        "| **#729 dtype semantics** |",
-        "| **#730 loud unsupported** |",
-        "bbb8be3bf01b8143b368b59211a1f123318a53df2a8f6b803d088878c2c34793",
+    'status dtype row': (
+        'docs/investigations/remediation_status_2026_08_04.md',
+        '| **#729 dtype semantics** |',
+        '| **#730 loud unsupported** |',
     ),
 }
 
@@ -780,12 +760,6 @@ def validate_op_manifests(
             "[05-OP-35] stdlib numeric manifest must have exactly eighty-four "
             "unique identities"
         )
-
-
-def frozen_digest(text: str) -> str:
-    return hashlib.sha256(normalize_frozen_block(text).encode("utf-8")).hexdigest()
-
-
 
 
 # --------------------------------------------------------------------------
@@ -1021,7 +995,7 @@ def validate_frozen_contract_changes(
         changed = sorted(set(changed_contract_files(root, merge_base, contract_files))
                          | set(committed_contract_changes))
     except OracleError as error:
-        # Advisory mode reports and continues so the atom and region digests
+        # Advisory mode reports and continues so the independent contract checks
         # still run on a checkout whose git state this leg cannot read. The
         # enforcing mode re-raises: a check that did not run is never a pass.
         if require_acknowledgement:
@@ -1074,43 +1048,25 @@ def validate_frozen_contract_changes(
     return report
 
 
-def validate_frozen_contract(
+def validate_required_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    # These digests identify the owning contract when an existing clause
-    # changes. They cannot defend their own boundaries: contradictory prose
-    # inserted immediately before a region's start or after its end leaves
-    # every digest here intact. The additive-contradiction gate is the
-    # per-file acknowledgement in `validate_frozen_contract_changes`, which
-    # sees any byte that moved in any CONTRACT_FILES path. Moving a digest
-    # below is a semantic freeze change and owes the owning spec/design
-    # update, every consuming contract, and an adversarial mutation.
-    for atom, expected in FROZEN_ATOM_DIGESTS.items():
+    # Required identities and boundaries survive text-hash retirement. The
+    # committed report and enforcing acknowledgements own deliberate text edits;
+    # required semantic clauses below still fail independently of Git history.
+    for atom in REQUIRED_ATOMS:
         relative = (
             "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"
         )
         try:
-            actual = frozen_digest(strict_atom_block(docs[relative], atom))
+            strict_atom_block(docs[relative], atom)
         except OracleError as error:
             violations.append(str(error))
-            continue
-        if actual != expected:
-            violations.append(
-                f"frozen normative atom {atom} digest mismatch: "
-                f"expected {expected}, got {actual}"
-            )
-
-    for label, (relative, start, end, expected) in FROZEN_REGION_DIGESTS.items():
+    for label, (relative, start, end) in REQUIRED_REGIONS.items():
         try:
-            block = frozen_region(docs[relative], start, end, label)
+            frozen_region(docs[relative], start, end, label)
         except OracleError as error:
             violations.append(str(error))
-            continue
-        actual = frozen_digest(block)
-        if actual != expected:
-            violations.append(
-                f"frozen {label} digest mismatch: expected {expected}, got {actual}"
-            )
 
 
 def normalize_atom_body(body: str) -> str:
@@ -1149,6 +1105,13 @@ def validate_normative_contract(
     spec02 = docs["spec/02-surf-syntax.md"]
     spec03 = docs["spec/03-deep-syntax.md"]
     spec04 = docs["spec/04-type-system.md"]
+    require(
+        spec04,
+        "`and` / `or` / `not` are the\n  logical operations and "
+        "`count` is the bool-tensor counting operation",
+        "bool counting operation",
+        violations,
+    )
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
@@ -3833,7 +3796,7 @@ def validate_contract(root: Path = REPO_ROOT) -> None:
     violations: list[str] = []
     validate_normative_contract(docs, violations)
     validate_schema_and_consumers(docs, violations)
-    validate_frozen_contract(docs, violations)
+    validate_required_contract(docs, violations)
     if violations:
         raise OracleError("; ".join(violations))
 

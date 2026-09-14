@@ -64,10 +64,12 @@ unclassified export does not authorize it.
 
 ## Changing a protected rule or test
 
-Keep the existing digest, required-literal and negative-test protections. A
-report naming a change is review evidence, not permission to weaken the check.
-Review the underlying change, its consumers and its independent positive and
-negative behavior evidence before making a deliberate freeze update.
+Protected rules and contract regions no longer need checksum updates. Review
+the underlying change, its consumers, and its positive and negative behavior
+evidence, then supply the exact acknowledgements below. Required identities,
+region boundaries, literal clauses and semantic checks remain blocking; an
+acknowledgement cannot waive them. Other frozen artifacts, including protected
+test definitions and the temporary Nix workflow, keep their existing digests.
 
 After committing a contract change, obtain the exact required PR-description
 lines with:

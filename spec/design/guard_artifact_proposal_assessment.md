@@ -348,11 +348,22 @@ the synthetic merge's two parents before choosing that base; push/local runs
 remain advisory about acknowledgements. JSON evidence includes the exact
 required lines, while the PR body records the author's acknowledgement.
 
-This slice retains all digests, literal anchors, file acknowledgements, semantic
-registrations, and the authoritative Phase 4B oracle. It does not authorize
-retirement. Every current frozen atom
-and region has a parallel mutation control that checks both the retained guard's
-rejection and the report's named identity.
+The report and enforcing acknowledgement gate supply the atom/region digest
+replacement. Required atom identities and unambiguous region boundaries remain
+literal reviewed declarations; current declarations carry no text hashes. The
+report reads the explicit historical digest format when comparing old commits,
+without executing historical Python, and normalizes both formats to the same
+protected identities and boundaries. Mixed or malformed declarations fail.
+
+Every previously protected atom and region has a mutation control that names
+its edit and rejects an omitted acknowledgement. Required-literal anchors and
+their negative controls, semantic registrations, and fresh source/compiler
+agreement remain independent requirements: acknowledgement does not excuse a
+missing required clause, atom or region boundary. Additive prose changes that
+preserve those requirements pass only after their exact file and identity
+acknowledgements in enforcing PR mode. That is a review obligation, not an
+automated proof that the prose is semantically correct. Other frozen artifacts
+and Phase 3 test-definition digests are unaffected.
 
 ### Closed-corpus and count ratchets
 

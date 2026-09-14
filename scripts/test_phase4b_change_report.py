@@ -35,6 +35,38 @@ def inventory(*, atoms=None, regions=None, registries=None):
     )
 
 
+def current_inventory(*, atoms=("05-OP-31",), regions=None):
+    return (
+        f"CONTRACT_FILES = {(OP, TYPES, REGISTRY, BUILTINS, DESIGN)!r}\n"
+        f"REQUIRED_ATOMS = {atoms!r}\n"
+        f"REQUIRED_REGIONS = {({'example': (DESIGN, '## Start', '## End')} if regions is None else regions)!r}\n"
+        f"OP_MANIFEST_REGISTRY_FILES = {{'05-OP-31': {REGISTRY!r}}}\n"
+    )
+
+
+class InventoryRetirementTests(unittest.TestCase):
+    def test_old_and_current_formats_have_identical_protection(self):
+        old = report.read_inventory(inventory())
+        new = report.read_inventory(current_inventory())
+        self.assertEqual(old, new)
+        self.assertEqual(new["REQUIRED_ATOMS"], ("05-OP-31",))
+        self.assertEqual(new["REQUIRED_REGIONS"], {"example": (DESIGN, "## Start", "## End")})
+
+    def test_mixed_duplicate_mutated_and_incomplete_formats_fail(self):
+        for source in (
+            current_inventory() + "FROZEN_ATOM_DIGESTS = {}\n",
+            inventory() + "REQUIRED_REGIONS = {}\n",
+            current_inventory(atoms=("05-OP-31", "05-OP-31")),
+            current_inventory(atoms=["05-OP-31"]),
+            current_inventory().replace("REQUIRED_REGIONS =", "MISSING_REGIONS ="),
+            current_inventory() + "REQUIRED_ATOMS += ('05-OP-32',)\n",
+            current_inventory() + "REQUIRED_REGIONS.clear()\n",
+            current_inventory() + "alias = REQUIRED_REGIONS\nalias.clear()\n",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                report.read_inventory(source)
+
+
 class GitChanges(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -85,6 +117,16 @@ class GitChanges(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             oracle.main(args, root=self.root)
             run.assert_called_once()
+
+    def test_retirement_changes_no_identity_and_later_edits_require_acknowledgement(self):
+        base = self.commit()
+        transition = self.commit({report.ORACLE: current_inventory()})
+        self.assertEqual(self.compare(base)["changes"], [])
+        self.commit({OP: ATOM.replace("Exact values.", "Reviewed exact values.")})
+        self.assertIn(("atom", "05-OP-31"), self.identities(self.compare(transition)))
+        with self.assertRaises(SystemExit):
+            self.enforce(transition, (OP,))
+        self.enforce(transition, (OP, "atom:05-OP-31"))
 
     def test_granular_acknowledgements_require_each_changed_identity(self):
         base = self.commit()
@@ -349,20 +391,20 @@ class GitChanges(unittest.TestCase):
 
 
 class RetainedMutationTests(unittest.TestCase):
-    def test_every_current_frozen_atom_and_region_keeps_independent_detection(self):
+    def test_every_required_atom_and_region_edit_keeps_enforcing_review(self):
         root = Path(__file__).resolve().parents[1]
         documents = {name: (root / name).read_text() for name in oracle.CONTRACT_FILES}
         documents[report.ORACLE] = (root / report.ORACLE).read_text()
         baseline_failures = []
-        oracle.validate_frozen_contract(documents, baseline_failures)
+        oracle.validate_required_contract(documents, baseline_failures)
         self.assertEqual(baseline_failures, [])
         before = report.snapshot(documents.__getitem__)
         cases = []
-        for atom in oracle.FROZEN_ATOM_DIGESTS:
+        for atom in oracle.REQUIRED_ATOMS:
             path = TYPES if atom.startswith("04-") else OP
             block = oracle.strict_atom_block(documents[path], atom)
             cases.append(("atom", atom, path, block, block.rstrip() + "\n> Mutated obligation.\n"))
-        for label, (path, start, end, _) in oracle.FROZEN_REGION_DIGESTS.items():
+        for label, (path, start, end) in oracle.REQUIRED_REGIONS.items():
             block = oracle.frozen_region(documents[path], start, end, label)
             cases.append(("region", label, path, block, block + "Mutated obligation.\n"))
         for kind, identity, path, old, new in cases:
@@ -370,8 +412,10 @@ class RetainedMutationTests(unittest.TestCase):
                 mutated = dict(documents)
                 mutated[path] = mutated[path].replace(old, new, 1)
                 failures = []
-                oracle.validate_frozen_contract(mutated, failures)
-                self.assertTrue(any(identity in failure for failure in failures))
+                oracle.validate_required_contract(mutated, failures)
+                oracle.validate_normative_contract(mutated, failures)
+                oracle.validate_schema_and_consumers(mutated, failures)
+                self.assertEqual(failures, [], "wording has no mechanical digest requirement")
                 changes = report.compare_snapshots(before, report.snapshot(mutated.__getitem__))
                 self.assertIn((kind, identity), {(row["kind"], row["identity"]) for row in changes})
                 result = {"changes": changes}
@@ -381,6 +425,27 @@ class RetainedMutationTests(unittest.TestCase):
                 self.assertTrue(any(report.acknowledgement_line(kind, identity) in failure for failure in failures))
                 address = report.acknowledgement_line(kind, identity).removeprefix("Frozen-contract-change: ")
                 self.assertEqual(oracle.acknowledgement_identity(address), (kind, identity))
+
+
+    def test_missing_or_ambiguous_required_definitions_and_boundaries_still_fail(self):
+        root = Path(__file__).resolve().parents[1]
+        documents = {name: (root / name).read_text() for name in oracle.CONTRACT_FILES}
+        cases = []
+        for atom in oracle.REQUIRED_ATOMS:
+            path = TYPES if atom.startswith("04-") else OP
+            block = oracle.strict_atom_block(documents[path], atom)
+            cases.extend((atom, path, block, replacement) for replacement in ("", block + block))
+        for label, (path, start, end) in oracle.REQUIRED_REGIONS.items():
+            cases.extend((label, path, marker, replacement)
+                         for marker in (start, end) for replacement in ("REMOVED", marker + marker))
+        for identity, path, old, new in cases:
+            with self.subTest(identity=identity, replacement=new[:30]):
+                mutated = dict(documents)
+                mutated[path] = mutated[path].replace(old, new, 1)
+                failures = []
+                oracle.validate_required_contract(mutated, failures)
+                self.assertTrue(any(identity in failure for failure in failures), failures)
+
 
 
 class WorkflowTests(unittest.TestCase):
