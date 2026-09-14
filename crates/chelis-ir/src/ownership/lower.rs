@@ -842,7 +842,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 // Copy scalars: a heap value (tensor, string, container, ...)
                 // still moves on its proven last use, so a genuine
                 // use-after-move of an owned resource stays rejected.
-                let is_copy_scalar = matches!(info.class, ValueClass::NonHeap(NonHeapKind::Scalar(_)));
+                let is_copy_scalar =
+                    matches!(info.class, ValueClass::NonHeap(NonHeapKind::Scalar(_)));
                 let movable = info.origin == OwnerOrigin::Owned
                     && !is_copy_scalar
                     && tail.is_some_and(|scope| depth >= scope);

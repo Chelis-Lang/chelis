@@ -213,7 +213,9 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     // Unused helpers: they inflate the per-application clone cost the fix
     // removes, without being reached by the fold body's classification.
     for level in 0..HELPERS {
-        source.push_str(&format!("def helper{level}(x: int64) -> int64 = add(x, x)\n"));
+        source.push_str(&format!(
+            "def helper{level}(x: int64) -> int64 = add(x, x)\n"
+        ));
     }
     // One closure, applied once per list element by `fold`. Each application
     // routes through `admit_execution_profile`. `result` is a top-level value

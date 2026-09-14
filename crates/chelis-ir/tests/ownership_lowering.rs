@@ -437,9 +437,7 @@ fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
                   def dupstr(s: string) -> string = joins(s, s)\n\
                   def run_main() -> string = dupstr(\"hi\")\n";
     let error = match lower_source(source) {
-        Ok(lowered) => {
-            verify_ownership(lowered).expect_err("heap double-move must be rejected")
-        }
+        Ok(lowered) => verify_ownership(lowered).expect_err("heap double-move must be rejected"),
         Err(error) => error,
     };
     assert!(
