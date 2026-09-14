@@ -299,3 +299,54 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
         }
     }
 }
+
+#[test]
+fn deferred_window_shape_errors_precede_late_family_rejection() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("deferred-window-contract.ch");
+    let source = |dtype: &str, windows: &str| {
+        format!(
+            "def use(x: tensor[3, {dtype}]) -> tensor[2, {dtype}] = {{\n\
+             windowed = fn (value) -> \
+             reduce_window_sum(value, {windows}, {windows})\n\
+             windowed(x)\n\
+             }}\n"
+        )
+    };
+
+    for dtype in ["bool", "int32"] {
+        let invalid_rank = source(dtype, "[1i64, 1i64]");
+        fs::write(&path, &invalid_rank).unwrap();
+        let checked = cli("check", &path, &dir.path().join("deferred-window-out"));
+        assert!(!checked.status.success(), "{invalid_rank}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&checked.stdout).expect("check JSON");
+        let errors = report["errors"].as_array().expect("check errors");
+        assert!(
+            errors.iter().any(|error| error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("window arity 2 exceeds tensor rank 1"))),
+            "{invalid_rank}: {report}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|error| error["kind"] != "PrecisionMismatch"),
+            "{invalid_rank}: {report}"
+        );
+    }
+
+    let valid_rank = source("bool", "[1i64]");
+    fs::write(&path, &valid_rank).unwrap();
+    let checked = cli("check", &path, &dir.path().join("deferred-window-out"));
+    assert!(!checked.status.success(), "{valid_rank}");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("check JSON");
+    assert!(
+        report["errors"]
+            .as_array()
+            .expect("check errors")
+            .iter()
+            .any(|error| error["kind"] == "PrecisionMismatch"),
+        "{valid_rank}: {report}"
+    );
+}

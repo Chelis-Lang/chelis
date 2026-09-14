@@ -45,12 +45,26 @@ pub(super) fn unify_checked_call_contract(
 ) -> Result<Type, Type> {
     let ret_ty = vg.fresh_type();
     let unify_arg_tys = auto_borrow_call_arg_types(func_ty, arg_tys.to_vec(), subst);
-    let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_ty.clone()));
+    let expected_fn = Type::Fn(unify_arg_tys.clone(), Box::new(ret_ty.clone()));
 
     match unify(func_ty, &expected_fn, subst) {
         Ok(()) => Ok(ret_ty),
         Err(te) => {
             let family_mismatch = matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch);
+            if family_mismatch
+                && let Some(rejected) = product.report_preceding_shape_error_for_failed_family_call(
+                    func_ty,
+                    &unify_arg_tys,
+                    vg,
+                    subst,
+                    errors,
+                )
+            {
+                if let Type::Error(witness) = rejected {
+                    product.cancel_shape_checks_for_failed_family_call(func_ty, subst, witness);
+                }
+                return Err(rejected);
+            }
             let mut error: CheckError = te.into();
             if let Some(id) = list_span_id(list) {
                 error.span_offset = parse_span_offset(id);

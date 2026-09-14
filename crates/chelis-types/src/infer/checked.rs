@@ -1047,6 +1047,109 @@ impl InferenceProduct {
         });
     }
 
+    /// Give an already-suspended specialized shape rule its documented
+    /// diagnostic precedence when a later call structurally binds its operand
+    /// but fails the checked dtype family.
+    ///
+    /// Ordinary unification cannot publish that binding: the family rejection
+    /// rolls the transaction back before the deferred rule becomes ready.
+    /// Build a restriction-free structural overlay instead, apply it only to
+    /// the pending rule's arguments, and execute the rule against cloned solver
+    /// state. A shape-valid preview emits nothing and leaves the family error
+    /// authoritative. A rejecting preview removes the exact deferred entry so
+    /// the declaration boundary cannot report it again.
+    pub(super) fn report_preceding_shape_error_for_failed_family_call(
+        &mut self,
+        callee: &Type,
+        arguments: &[Type],
+        vg: &VarGen,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        let Type::Fn(parameters, _) = subst.apply(callee) else {
+            return None;
+        };
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+
+        // Restrictions live in `subst`, not in `Type`, so a fresh
+        // substitution records exactly the structural relation that the
+        // failed call established without weakening the real solver.
+        let mut structural = Subst::default();
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            if unify(
+                &subst.apply(parameter),
+                &subst.apply(argument),
+                &mut structural,
+            )
+            .is_err()
+            {
+                return None;
+            }
+        }
+
+        let failed_parameters: Vec<_> = parameters
+            .iter()
+            .flat_map(crate::env::free_tvars)
+            .filter(|variable| subst.tvar_restriction(*variable).is_some())
+            .collect();
+        let candidates: Vec<_> = self
+            .deferred_shape_checks
+            .iter()
+            .filter_map(|check| {
+                let shares_failed_parameter = check.arg_tys.iter().any(|argument| {
+                    crate::env::free_tvars(&subst.apply(argument))
+                        .iter()
+                        .any(|variable| failed_parameters.contains(variable))
+                });
+                let DeferredShapeRule::ShapeRoute { route, list, kids } = &check.rule else {
+                    return None;
+                };
+                shares_failed_parameter.then(|| {
+                    (
+                        check.id,
+                        route.clone(),
+                        list.clone(),
+                        kids.clone(),
+                        check.arg_tys.clone(),
+                    )
+                })
+            })
+            .collect();
+        for (id, route, list, kids, pending_arguments) in candidates {
+            let settled: Vec<_> = pending_arguments
+                .iter()
+                .map(|ty| structural.apply(&subst.apply(ty)))
+                .collect();
+            if settled
+                .iter()
+                .any(|ty| shape_operand_awaits_binding(ty, &structural))
+            {
+                continue;
+            }
+
+            let checkpoint = errors.checkpoint();
+            let mut trial_vg = vg.clone();
+            let mut trial_subst = subst.clone();
+            let result = check_shape_route_signature(
+                &route,
+                &list,
+                &kids,
+                &settled,
+                &mut trial_vg,
+                &mut trial_subst,
+                errors,
+            );
+            if errors.iter_since(checkpoint).next().is_none() {
+                continue;
+            }
+            self.deferred_shape_checks.retain(|check| check.id != id);
+            return Some(result);
+        }
+        None
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,

@@ -681,6 +681,7 @@
         "arithmetic_and_matmul_require_their_operand_families",
         "bounded_function_values_keep_their_restriction",
         "contract_transport_and_unconstrained_inference_remain_polymorphic",
+        "deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingresses",
         "each_family_operation_requires_a_sufficient_authored_bound",
         "empty_literal_precision_cannot_evade_the_operation_contract",
         "escaping_lambdas_need_sufficient_authored_admission",
@@ -711,6 +712,7 @@
       },
       "expected": [
         "bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c",
+        "deferred_window_shape_errors_precede_late_family_rejection",
         "insufficient_authored_contracts_are_rejected_without_a_call_site",
         "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
         "window_reduction_contracts_reject_invalid_public_calls"

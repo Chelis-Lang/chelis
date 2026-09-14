@@ -368,6 +368,48 @@ fn window_shape_diagnostics_precede_family_admission_on_both_ingresses() {
 }
 
 #[test]
+fn deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingresses() {
+    let source = |dtype: &str, windows: &str| {
+        format!(
+            "def use(x: tensor[3, {dtype}]) -> tensor[2, {dtype}] = {{\n\
+             windowed = fn (value) -> \
+             reduce_window_sum(value, {windows}, {windows})\n\
+             windowed(x)\n\
+             }}\n"
+        )
+    };
+
+    for dtype in ["bool", "int32"] {
+        let invalid_rank = source(dtype, "[1i64, 1i64]");
+        let diagnostics = both_ingress_diagnostics(&invalid_rank);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("window arity 2 exceeds tensor rank 1")),
+            "the deferred window diagnostic must remain authoritative:\n\
+             {invalid_rank}\n{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|message| !message.starts_with("[PrecisionMismatch] ")),
+            "late family admission must not hide a deferred window error:\n\
+             {invalid_rank}\n{diagnostics:?}"
+        );
+    }
+
+    let valid_rank = source("bool", "[1i64]");
+    let diagnostics = both_ingress_diagnostics(&valid_rank);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.starts_with("[PrecisionMismatch] ")),
+        "a shape-valid bool operand must still fail Numeric admission:\n\
+         {valid_rank}\n{diagnostics:?}"
+    );
+}
+
+#[test]
 fn a_lexically_shadowed_window_builtin_keeps_its_function_contract() {
     check_both_ingresses(
         "def apply(\
