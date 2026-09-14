@@ -8,9 +8,10 @@ is still OPEN. Wire baseline version 2 has no legacy admission: this script
 validates its final-row shape before any issue lookup. The live wire verifier
 owns graph completeness, semantic authority, and execution evidence; a valid
 baseline shape does not prove those obligations.
-The binding baseline likewise separates structural and executed CompilerJson
-comparison rows from its four remaining native legacy signatures. Its shape
-cannot replace the binding gate's current registration and codec execution.
+The binding baseline likewise admits only final structural, CompilerJson,
+native transport and shape-operation comparison rows. It rejects every legacy
+citation. Its shape cannot replace the binding gate's current registration,
+graph, codec and execution evidence.
 
 Network gate (run by the change-gated and nightly liveness jobs; it also runs
 manually at release cuts and during red-team passes):
@@ -19,11 +20,10 @@ manually at release cuts and during red-team passes):
 
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
-Issue-bound legacy dispositions name at least one chelis#N reference. Exact
-foundation-era dispositions are closed, family-specific strings backed by
-immutable complete-row universes in the owning Rust tripwires. Active legacy
-sets may shrink as rows acquire final authority, but no new or changed identity
-may inherit one of these dispositions.
+Issue-bound legacy dispositions name at least one chelis#N reference. The wire
+and binding readers reject legacy fields before lookup; no permanent-disposition string supplies admission.
+The shared typed issue lookup remains used by the rejection and prerequisite
+validators independently of these persisted census shapes.
 """
 
 from __future__ import annotations
@@ -44,18 +44,6 @@ CENSUS_RELS = (
     Path("spec/design/capacity_census_bindings.json"),
 )
 ISSUE_REF = re.compile(r"chelis#(\d+)")
-LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY = {
-    "bindings": frozenset(
-        {
-            "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)",
-        }
-    ),
-}
-LEGACY_TRANSITION_DISPOSITIONS = frozenset(
-    disposition
-    for dispositions in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.values()
-    for disposition in dispositions
-)
 WIRE_ROW_KEYS = frozenset({"kind", "id", "flags", "authority", "contract"})
 
 
@@ -119,14 +107,17 @@ def wire_json_object(pairs: list[tuple[str, object]]) -> dict:
 
 
 def validate_binding_baseline(payload: object) -> None:
-    """Check comparison/legacy shape; the Rust gate owns exact row admission."""
+    """Check final comparison shape; the Rust gate owns current row admission."""
     if (not isinstance(payload, dict) or payload.keys() != {"version", "rows"}
             or type(payload["version"]) is not int or payload["version"] != 2
             or not isinstance(payload["rows"], list)):
         raise ValueError("BINDING BASELINE requires version: 2 and rows only")
     base = {"kind", "id", "flags"}
-    native = {"chelis_python::CompiledModel::__call__", "chelis_python::NativeTensor::shape",
-              "chelis_python::NativeTensor::__dlpack__", "chelis_python::NativeTensor::__dlpack_device__"}
+    native_transports = {
+        "chelis_python::CompiledModel::__call__": ("native/compiled-tensor-call", ["float-carrier", "numeric-param", "numeric-return"]),
+        "chelis_python::NativeTensor::__dlpack__": ("native/dlpack-capsule", ["float-carrier", "numeric-param", "numeric-return"]),
+        "chelis_python::NativeTensor::__dlpack_device__": ("native/dlpack-device", ["numeric-return"]),
+    }
     compiler_json = {"chelis_python::" + name for name in ("check_json", "compile_json", "desugar_json", "eval_json")}
     seen = set()
     for row in payload["rows"]:
@@ -141,17 +132,23 @@ def validate_binding_baseline(payload: object) -> None:
             raise ValueError("BINDING BASELINE duplicate identity")
         seen.add(name)
         if "citation" in row:
-            if (row.keys() != base | {"citation"} or name.split("(", 1)[0] not in native
-                    or kind != "binding-pymethod" or row["citation"] not in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY["bindings"]):
-                raise ValueError("BINDING BASELINE only unchanged native rows may retain legacy shape")
-            continue
+            raise ValueError("BINDING BASELINE final rows forbid every legacy citation")
         keys = base | {"authority"}
+        owner, separator, _ = name.partition("(")
         if row.get("authority") == "TaggedTransport":
-            owner = name.split("(", 1)[0]
-            if (row.keys() != keys | {"contract"} or owner not in compiler_json
-                    or kind != "binding-pyfunction" or row["contract"] != "compiler-json/" + owner
+            compiler = (owner in compiler_json and kind == "binding-pyfunction"
+                        and row.get("contract") == "compiler-json/" + owner)
+            native = (owner in native_transports and kind == "binding-pymethod"
+                      and (row.get("contract"), flags) == native_transports[owner])
+            if (row.keys() != keys | {"contract"} or not separator or not (compiler or native)
                     or not flags or not set(flags) <= {"float-carrier", "numeric-param", "numeric-return"}):
-                raise ValueError("BINDING BASELINE invalid CompilerJson comparison row")
+                raise ValueError("BINDING BASELINE invalid final transport comparison row")
+        elif row.get("authority") == "NumericOperation":
+            if (row.keys() != keys | {"contract"} or not separator
+                    or owner != "chelis_python::NativeTensor::shape"
+                    or kind != "binding-pymethod" or row["contract"] != "[05-OP-45]"
+                    or flags != ["numeric-return"]):
+                raise ValueError("BINDING BASELINE invalid native shape operation registration")
         elif row.keys() != keys or row.get("authority") != "nonnumeric" or flags:
             raise ValueError("BINDING BASELINE invalid structural comparison row")
 
@@ -239,6 +236,14 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
     `pull_request` field, so kind is part of the verdict rather than discarded.
     """
     problems: list[str] = []
+    binding_rows = [
+        {key: value for key, value in row.items() if key != "_census_family"}
+        for row in rows if str(row.get("_census_family", "")).strip() == "bindings"
+    ]
+    try:
+        validate_binding_baseline({"version": 2, "rows": binding_rows})
+    except ValueError as error:
+        problems.append(str(error))
     for row in rows:
         family = str(row.get("_census_family", "")).strip()
         if family == "wire":
@@ -248,6 +253,8 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
             if problem:
                 problems.append(problem)
             continue
+        if family == "bindings":
+            continue
         citation = str(row.get("citation", "")).strip()
         row_id = f"[{row.get('kind', '?')}] {row.get('id', '?')}"
         if not citation:
@@ -255,22 +262,10 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
         if citation == "TODO":
             problems.append(f"TODO legacy disposition (Rust tripwire should have caught this): {row_id}")
             continue
-        family_dispositions = LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.get(
-            family, frozenset()
-        )
-        if citation in family_dispositions:
-            continue
-        if citation in LEGACY_TRANSITION_DISPOSITIONS:
-            problems.append(
-                f"WRONG CENSUS FAMILY: permanent disposition does not belong to "
-                f"{family or '<missing>'}: {row_id}"
-            )
-            continue
         issue_numbers = extract_issue_refs(citation)
         if not issue_numbers:
             problems.append(
-                f"UNRECOGNIZED disposition (expected an exact permanent disposition "
-                f"or chelis#N): {row_id}"
+                f"UNRECOGNIZED disposition (expected chelis#N): {row_id}"
             )
             continue
         for number in issue_numbers:

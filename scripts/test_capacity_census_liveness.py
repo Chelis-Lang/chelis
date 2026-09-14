@@ -17,7 +17,6 @@ from unittest.mock import patch
 import capacity_census_liveness
 
 from capacity_census_liveness import (
-    LEGACY_TRANSITION_DISPOSITIONS,
     IssueKind,
     IssueRecord,
     IssueState,
@@ -25,6 +24,11 @@ from capacity_census_liveness import (
     extract_issue_refs,
     fetch_issue,
     load_census_rows,
+)
+
+
+RETIRED_NATIVE_DISPOSITION = (
+    "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
 )
 
 
@@ -89,15 +93,79 @@ class LoadCensusRows(unittest.TestCase):
             with self.assertRaises(ValueError):
                 capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**transport, key: "supplied"}]})
 
-    def test_binding_legacy_shape_cannot_be_copied_to_retired_json_rows(self) -> None:
-        disposition = next(iter(LEGACY_TRANSITION_DISPOSITIONS))
-        row = {"kind": "binding-pymethod", "id": "chelis_python::NativeTensor::shape(unchanged)",
-               "flags": [], "citation": disposition}
-        capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [row]})
-        for name in ("check_json", "compile_json", "desugar_json", "eval_json", "new_binding"):
-            changed = {**row, "kind": "binding-pyfunction", "id": f"chelis_python::{name}(old)"}
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [changed]})
+    def test_every_binding_row_rejects_all_legacy_citations(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        baseline = json.loads((root / "spec/design/capacity_census_bindings.json").read_text())
+        for source in baseline["rows"]:
+            for citation in ("", "chelis#893", RETIRED_NATIVE_DISPOSITION):
+                with self.subTest(identity=source["id"], citation=citation):
+                    changed = {**source, "citation": citation}
+                    with self.assertRaises(ValueError):
+                        capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [changed]})
+                    problems = adjudicate(
+                        [{**changed, "_census_family": "bindings"}],
+                        {893: IssueRecord(IssueKind.ISSUE, IssueState.OPEN)},
+                    )
+                    self.assertTrue(problems)
+                    legacy = {key: value for key, value in source.items()
+                              if key not in {"authority", "contract"}}
+                    legacy["citation"] = citation
+                    with self.assertRaises(ValueError):
+                        capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [legacy]})
+
+    def test_final_native_contracts_and_shape_operation_match_the_rust_format(self) -> None:
+        cases = (
+            ("CompiledModel::__call__", "TaggedTransport", "native/compiled-tensor-call", ["float-carrier", "numeric-param", "numeric-return"]),
+            ("NativeTensor::__dlpack__", "TaggedTransport", "native/dlpack-capsule", ["float-carrier", "numeric-param", "numeric-return"]),
+            ("NativeTensor::__dlpack_device__", "TaggedTransport", "native/dlpack-device", ["numeric-return"]),
+            ("NativeTensor::shape", "NumericOperation", "[05-OP-45]", ["numeric-return"]),
+        )
+        for owner, authority, contract, flags in cases:
+            source = {"kind": "binding-pymethod", "id": f"chelis_python::{owner}(typed)",
+                      "flags": flags, "authority": authority, "contract": contract}
+            with self.subTest(owner=owner):
+                capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [source]})
+                self.assertEqual(adjudicate([{**source, "_census_family": "bindings"}], {}), [])
+                for change in ({"id": "chelis_python::unknown(typed)"},
+                               {"kind": "binding-pyfunction"}, {"contract": "other"},
+                               {"contract": "[05-OP-999]"}, {"flags": []},
+                               {"flags": ["unknown-capacity"]}, {"flags": ["numeric-return", "numeric-return"]},
+                               {"authority": "legacy"}, {"evidence": "passed"}):
+                    with self.subTest(change=change), self.assertRaises(ValueError):
+                        capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**source, **change}]})
+
+    def test_native_roles_reject_every_wrong_valid_vocabulary_capacity(self) -> None:
+        from itertools import combinations
+
+        root = Path(__file__).resolve().parents[1]
+        baseline = json.loads((root / "spec/design/capacity_census_bindings.json").read_text())
+        native_rows = [row for row in baseline["rows"]
+                       if row.get("contract", "").startswith("native/")]
+        vocabulary = ("float-carrier", "numeric-param", "numeric-return")
+        for source in native_rows:
+            for size in range(4):
+                for subset in combinations(vocabulary, size):
+                    if list(subset) == source["flags"]:
+                        continue
+                    changed = {**source, "flags": list(subset)}
+                    with self.subTest(owner=source["id"], flags=subset):
+                        with self.assertRaises(ValueError):
+                            capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [changed]})
+                        self.assertTrue(adjudicate([{**changed, "_census_family": "bindings"}], {}))
+                        with TemporaryDirectory() as temporary:
+                            path = Path(temporary) / "capacity_census_bindings.json"
+                            path.write_text(json.dumps({"version": 2, "rows": [changed]}))
+                            with self.assertRaises(ValueError):
+                                load_census_rows(Path(temporary), (Path(path.name),))
+
+    def test_direct_binding_adjudication_retains_cross_row_duplicate_check(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        rows = load_census_rows(root, (Path("spec/design/capacity_census_bindings.json"),))
+        self.assertEqual(adjudicate(rows, {}), [])
+        for source in rows:
+            with self.subTest(identity=source["id"]):
+                self.assertTrue(any("duplicate identity" in problem
+                                    for problem in adjudicate(rows + [source], {})))
 
     def test_binding_shape_rejects_missing_contract_erased_capacity_and_duplicates(self) -> None:
         row = {"kind": "binding-pyfunction", "id": "chelis_python::check_json(typed)",
@@ -221,14 +289,8 @@ class Adjudicate(unittest.TestCase):
         )
         self.assertEqual(problems, [])
 
-    def test_exact_deferred_family_disposition_passes_without_issue_lookup(self) -> None:
-        disposition = next(
-            value
-            for value in LEGACY_TRANSITION_DISPOSITIONS
-            if "PyO3" in value
-        )
-        problems = adjudicate([row(disposition, census_family="bindings")], {})
-        self.assertEqual(problems, [])
+    def test_retired_native_disposition_no_longer_supplies_admission(self) -> None:
+        self.assertTrue(adjudicate([row(RETIRED_NATIVE_DISPOSITION, census_family="bindings")], {}))
 
     def test_retired_primary_disposition_fails_closed(self) -> None:
         disposition = (
@@ -245,24 +307,24 @@ class Adjudicate(unittest.TestCase):
         self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_near_miss_permanent_disposition_fails_closed(self) -> None:
-        disposition = next(iter(LEGACY_TRANSITION_DISPOSITIONS))
+        disposition = RETIRED_NATIVE_DISPOSITION
         problems = adjudicate([row(f"{disposition} copied")], {})
         self.assertEqual(len(problems), 1)
         self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_permanent_disposition_cannot_move_between_census_families(self) -> None:
-        bindings = next(value for value in LEGACY_TRANSITION_DISPOSITIONS if "PyO3" in value)
+        bindings = RETIRED_NATIVE_DISPOSITION
         for family in ("primary", "unregistered"):
             with self.subTest(family=family):
                 problems = adjudicate([row(bindings, census_family=family)], {})
                 self.assertEqual(len(problems), 1)
-                self.assertIn("WRONG CENSUS FAMILY", problems[0])
+                self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_wire_cannot_admit_legacy_even_with_an_open_issue(self) -> None:
         citations = (
             "chelis#1288",
             "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",
-            *LEGACY_TRANSITION_DISPOSITIONS,
+            RETIRED_NATIVE_DISPOSITION,
         )
         for citation in citations:
             with self.subTest(citation=citation):
@@ -319,6 +381,13 @@ class Adjudicate(unittest.TestCase):
 
 
 class Main(unittest.TestCase):
+    def test_current_final_baselines_pass_without_querying_the_tracker(self) -> None:
+        output = io.StringIO()
+        with patch.object(capacity_census_liveness, "fetch_issue") as fetch, contextlib.redirect_stdout(output):
+            self.assertEqual(capacity_census_liveness.main(), 0, output.getvalue())
+        fetch.assert_not_called()
+        self.assertTrue(output.getvalue().endswith("CAPACITY CENSUS LIVENESS: PASS\n"))
+
     def test_final_wire_rows_pass_without_network_lookup(self) -> None:
         rows = load_wire({"version": 2, "rows": [final_wire_row()]})
         output = io.StringIO()
