@@ -2165,6 +2165,14 @@ class CiParityTests(unittest.TestCase):
             "needs: [changes, ci-fast, change-owned-report]",
             workspace_block,
         )
+        self.assertIn(
+            "if: github.event_name == 'push'",
+            workspace_block,
+        )
+        self.assertIn(
+            "if: github.event_name != 'push'",
+            workspace_block,
+        )
         self.assertNotIn("    needs:", oracle_block)
         self.assertEqual(oracle_block.count("    needs:"), 0)
         self.assertNotIn("needs.integration", oracle_block)
@@ -4088,6 +4096,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             "needs.integration-plan.result == 'success'",
             required.get("if", ""),
         )
+        self.assertIn("github.event_name != 'push'", required.get("if", ""))
         for job in self.DEPENDENCY_GATED_JOBS:
             self.assertIn("!cancelled()", attrs[job].get("if", ""))
 
@@ -4107,6 +4116,48 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.ci-fast.result", block)
         self.assertIn("needs.change-owned-report.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
+        self.assertIn(
+            "      - name: Require the fixed main integration suite",
+            block,
+        )
+        main_step, pr_step = block.split(
+            "      - name: Require all pull-request integration legs",
+            1,
+        )
+        self.assertIn("if: github.event_name == 'push'", main_step)
+        self.assertIn("ci-fast=${{ needs.ci-fast.result }}", main_step)
+        self.assertNotIn("change-owned-report=", main_step)
+        self.assertIn("if: github.event_name != 'push'", pr_step)
+        self.assertIn("ci-fast=${{ needs.ci-fast.result }}", pr_step)
+        self.assertIn(
+            "change-owned-report=${{ needs.change-owned-report.result }}",
+            pr_step,
+        )
+
+    def test_change_owned_jobs_have_exact_pr_only_predicates(self):
+        attrs = _parse_job_attrs()
+        expected = {
+            "integration-plan": (
+                "${{ !cancelled() && github.event_name != 'push' && "
+                "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.docs_only != 'true') }}"
+            ),
+            "change-owned-shard": (
+                "${{ !cancelled() && github.event_name != 'push' && "
+                "needs.integration-plan.result == 'success' }}"
+            ),
+            "change-owned-report": (
+                "${{ always() && github.event_name != 'push' && "
+                "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.docs_only != 'true') }}"
+            ),
+        }
+        for job, predicate in expected.items():
+            with self.subTest(job=job):
+                self.assertEqual(
+                    " ".join(attrs[job].get("if", "").split()),
+                    " ".join(predicate.split()),
+                )
 
     def test_generalize_sweep_aggregator_is_fail_closed_nightly(self):
         attrs = _parse_job_attrs(CI_YML.with_name("heavy-e2e.yml").read_text())

@@ -13,10 +13,35 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 EXPANSION_WORKFLOW = ROOT / ".github/workflows/pr-package-expansion.yml"
 SHARDS = [0, 1, 2, 3]
+PR_ONLY_JOB_IF = {
+    "integration-plan": (
+        "${{ !cancelled() && github.event_name != 'push' && "
+        "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.docs_only != 'true') }}"
+    ),
+    "change-owned-shard": (
+        "${{ !cancelled() && github.event_name != 'push' && "
+        "needs.integration-plan.result == 'success' }}"
+    ),
+    "change-owned-report": (
+        "${{ always() && github.event_name != 'push' && "
+        "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.docs_only != 'true') }}"
+    ),
+}
 
 
 def _run_steps(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
+
+
+def _assert_pr_only_job(
+    test: unittest.TestCase, name: str, job: dict
+) -> None:
+    test.assertEqual(
+        " ".join(job["if"].split()),
+        " ".join(PR_ONLY_JOB_IF[name].split()),
+    )
 
 
 def _assert_empty_shard_skips_preparation(
@@ -90,6 +115,7 @@ def assert_change_owned_topology(
     test.assertFalse(planner.get("continue-on-error", False))
     test.assertIn("needs.changes.outputs.docs_only != 'true'", planner["if"])
     test.assertIn("needs.changes.result != 'success'", planner["if"])
+    _assert_pr_only_job(test, "integration-plan", planner)
     checkout = next(
         step
         for step in planner["steps"]
@@ -107,6 +133,7 @@ def assert_change_owned_topology(
     test.assertFalse(required["strategy"]["fail-fast"])
     test.assertEqual(required["strategy"]["matrix"]["shard"], SHARDS)
     test.assertIn("needs.integration-plan.result == 'success'", required["if"])
+    _assert_pr_only_job(test, "change-owned-shard", required)
     test.assertIn(
         "scripts/ci_change_owned.py run-shard", _run_steps(required)
     )
@@ -130,6 +157,7 @@ def assert_change_owned_topology(
         ["changes", "ci-fast", "integration-plan", "change-owned-shard"],
     )
     test.assertIn("always()", required_report["if"])
+    _assert_pr_only_job(test, "change-owned-report", required_report)
     test.assertFalse(required_report.get("continue-on-error", False))
     required_report_commands = _run_steps(required_report)
     test.assertIn("scripts/ci_require_success.py", required_report_commands)
@@ -149,9 +177,24 @@ def assert_change_owned_topology(
     )
     stable_commands = _run_steps(stable)
     test.assertIn("ci-fast=${{ needs.ci-fast.result }}", stable_commands)
+    main_step = next(
+        step
+        for step in stable["steps"]
+        if step.get("name") == "Require the fixed main integration suite"
+    )
+    test.assertEqual(main_step.get("if"), "github.event_name == 'push'")
+    test.assertIn("ci-fast=${{ needs.ci-fast.result }}", main_step["run"])
+    test.assertNotIn("change-owned-report", main_step["run"])
+    pr_step = next(
+        step
+        for step in stable["steps"]
+        if step.get("name") == "Require all pull-request integration legs"
+    )
+    test.assertEqual(pr_step.get("if"), "github.event_name != 'push'")
+    test.assertIn("ci-fast=${{ needs.ci-fast.result }}", pr_step["run"])
     test.assertIn(
         "change-owned-report=${{ needs.change-owned-report.result }}",
-        stable_commands,
+        pr_step["run"],
     )
     test.assertNotIn("package-expansion", str(stable))
 
@@ -302,6 +345,73 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                 report["needs"].remove("change-owned-shard")
             with self.subTest(mutation=mutation), self.assertRaises(
                 AssertionError
+            ):
+                assert_change_owned_topology(
+                    self, workflow, self.expansion_workflow
+                )
+
+    def test_main_push_cannot_enter_or_depend_on_the_change_owned_lane(self) -> None:
+        for mutation in (
+            "planner-on-push",
+            "worker-on-push",
+            "report-on-push",
+            "planner-reenabled-on-push",
+            "worker-reenabled-on-push",
+            "report-reenabled-on-push",
+            "main-requires-change-owned",
+            "pr-omits-change-owned",
+        ):
+            workflow = copy.deepcopy(self.workflow)
+            if mutation == "planner-on-push":
+                job = workflow["jobs"]["integration-plan"]
+                job["if"] = job["if"].replace(
+                    "github.event_name != 'push' && ", ""
+                )
+            elif mutation == "worker-on-push":
+                job = workflow["jobs"]["change-owned-shard"]
+                job["if"] = job["if"].replace(
+                    "github.event_name != 'push' && ", ""
+                )
+            elif mutation == "report-on-push":
+                job = workflow["jobs"]["change-owned-report"]
+                job["if"] = job["if"].replace(
+                    "github.event_name != 'push' && ", ""
+                )
+            elif mutation.endswith("-reenabled-on-push"):
+                job_name = {
+                    "planner-reenabled-on-push": "integration-plan",
+                    "worker-reenabled-on-push": "change-owned-shard",
+                    "report-reenabled-on-push": "change-owned-report",
+                }[mutation]
+                job = workflow["jobs"][job_name]
+                job["if"] = job["if"].replace(
+                    " }}", " || github.event_name == 'push' }}"
+                )
+            elif mutation == "main-requires-change-owned":
+                step = next(
+                    step
+                    for step in workflow["jobs"]["integration"]["steps"]
+                    if step.get("name")
+                    == "Require the fixed main integration suite"
+                )
+                step["run"] += (
+                    "\n  change-owned-report="
+                    "${{ needs.change-owned-report.result }}"
+                )
+            else:
+                step = next(
+                    step
+                    for step in workflow["jobs"]["integration"]["steps"]
+                    if step.get("name")
+                    == "Require all pull-request integration legs"
+                )
+                step["run"] = step["run"].replace(
+                    " change-owned-report="
+                    "${{ needs.change-owned-report.result }}",
+                    "",
+                )
+            with self.subTest(mutation=mutation), self.assertRaises(
+                (AssertionError, StopIteration)
             ):
                 assert_change_owned_topology(
                     self, workflow, self.expansion_workflow

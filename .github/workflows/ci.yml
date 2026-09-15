@@ -675,7 +675,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -721,7 +721,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, integration-plan]
-    if: ${{ !cancelled() && needs.integration-plan.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.integration-plan.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -819,7 +819,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast, integration-plan, change-owned-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -895,7 +895,14 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      - name: Require all integration legs
+      - name: Require the fixed main integration suite
+        if: github.event_name == 'push'
+        run: >-
+          python3 scripts/ci_require_success.py
+          ci-fast=${{ needs.ci-fast.result }}
+
+      - name: Require all pull-request integration legs
+        if: github.event_name != 'push'
         run: >-
           python3 scripts/ci_require_success.py
           ci-fast=${{ needs.ci-fast.result }}
