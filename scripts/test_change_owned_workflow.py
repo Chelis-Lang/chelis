@@ -18,6 +18,7 @@ PR_ONLY_JOB_IF = {
         "${{ !cancelled() && github.event_name != 'push' && "
         "needs.changes.outputs.candidate_preflight == 'success' && "
         "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.rebase_lane == 'full' || "
         "(needs.changes.outputs.rebase_lane != 'docs' && "
         "(needs.changes.outputs.rebase_lane == 'targeted' || "
         "needs.changes.outputs.docs_only != 'true'))) }}"
@@ -29,6 +30,7 @@ PR_ONLY_JOB_IF = {
     "change-owned-report": (
         "${{ always() && github.event_name != 'push' && "
         "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.rebase_lane == 'full' || "
         "(needs.changes.outputs.rebase_lane != 'docs' && "
         "(needs.changes.outputs.rebase_lane == 'targeted' || "
         "needs.changes.outputs.docs_only != 'true'))) }}"

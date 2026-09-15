@@ -230,10 +230,16 @@ jobs:
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
           }
+          record_ordinary() {
+            echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+          }
           if [ "$EVENT_NAME" != "pull_request" ] ||
              [ "$ACTION" != "synchronize" ] ||
              [ "$LIFECYCLE" != "success" ]; then
-            record_full "not an eligible synchronize event"
+            record_ordinary "not an eligible synchronize event"
             exit 0
           fi
           verifier="../trusted-rebase/scripts/ci_rebase_reuse.py"
@@ -362,7 +368,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
     permissions:
       contents: read
     env:
@@ -402,7 +408,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -489,7 +495,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     permissions:
       contents: read
     steps:
@@ -544,7 +550,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
-    if: ${{ always() && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -575,7 +581,7 @@ jobs:
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     # cvc5 builds from source into target/ on top of the workspace build —
     # the heaviest disk consumer of any Linux job — so it gets both the
     # free-disk reclaim and the debuginfo strip (chelis#392). It was the
@@ -734,7 +740,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     # The immutable digest supplies Python, git, curl, and CA certificates
     # before checkout while retaining Debian 11's glibc 2.31. After checkout,
     # ci_apt_get replaces its moving mirrors with the repository-pinned
@@ -837,7 +843,7 @@ jobs:
     timeout-minutes: 20
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane == 'full' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -905,7 +911,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1057,7 +1063,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast, integration-plan, change-owned-shard]
-    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1143,7 +1149,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast, change-owned-report]
-    if: ${{ always() && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1178,7 +1184,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane == 'full' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.ci-fast.result == 'success' }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) && needs.ci-fast.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1217,7 +1223,7 @@ jobs:
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1

@@ -68,9 +68,11 @@ and that complete delta to be documentation-only. A code-bearing patch or delta
 reruns combined-candidate lint, every default-feature Rust library/binary unit,
 Python units, and base-sensitive checks plus every required change-owned and
 package-targeted test selected for the affected paths. The trusted verifier
-applies the planner's static mapping before fan-out; CI-policy changes,
-retargets, missing receipts, non-forward updates, unmapped paths, and uncertain
-history run full CI. Every required context still reports on the new head.
+applies the planner's exact Cargo target identities and package/path rules
+before fan-out; ambiguous targets, CI-policy changes, retargets, missing
+receipts, non-forward updates, unmapped paths, and uncertain history run full
+CI. That fail-closed full lane overrides the ordinary docs-only skip. Every
+required context still reports on the new head.
 Patch changes and path overlap are reported so the standing reviewer can
 inspect the resolution; they do not alone force unrelated work to rerun.
 

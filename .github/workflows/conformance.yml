@@ -232,10 +232,16 @@ jobs:
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
           }
+          record_ordinary() {
+            echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+          }
           if [ "$EVENT_NAME" != "pull_request" ] ||
              [ "$ACTION" != "synchronize" ] ||
              [ "$LIFECYCLE" != "success" ]; then
-            record_full "not an eligible synchronize event"
+            record_ordinary "not an eligible synchronize event"
             exit 0
           fi
           verifier="../trusted-rebase/scripts/ci_rebase_reuse.py"
@@ -363,7 +369,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

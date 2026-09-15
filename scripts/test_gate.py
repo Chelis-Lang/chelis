@@ -4175,6 +4175,7 @@ class DocsOnlySkipTests(unittest.TestCase):
                 "${{ !cancelled() && github.event_name != 'push' && "
                 "needs.changes.outputs.candidate_preflight == 'success' && "
                 "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.rebase_lane == 'full' || "
                 "(needs.changes.outputs.rebase_lane != 'docs' && "
                 "(needs.changes.outputs.rebase_lane == 'targeted' || "
                 "needs.changes.outputs.docs_only != 'true'))) }}"
@@ -4186,6 +4187,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             "change-owned-report": (
                 "${{ always() && github.event_name != 'push' && "
                 "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.rebase_lane == 'full' || "
                 "(needs.changes.outputs.rebase_lane != 'docs' && "
                 "(needs.changes.outputs.rebase_lane == 'targeted' || "
                 "needs.changes.outputs.docs_only != 'true'))) }}"

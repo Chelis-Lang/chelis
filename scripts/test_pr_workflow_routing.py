@@ -139,6 +139,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("--timeline", reuse["run"])
     test.assertIn("--github-output", reuse["run"])
     test.assertIn("rebase_contract_changed=false", reuse["run"])
+    test.assertIn("rebase_lane=ordinary", reuse["run"])
     publish = next(
         step
         for step in changes["steps"]
@@ -253,6 +254,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         "needs.changes.outputs.rebase_lane == 'full'",
         workflow["jobs"]["ci-fast"]["if"],
     )
+    test.assertIn(
+        "needs.changes.outputs.rebase_lane == 'ordinary'",
+        workflow["jobs"]["ci-fast"]["if"],
+    )
     for job_id in ("lint-rust", "script-unit"):
         test.assertIn(
             "needs.changes.outputs.rebase_lane != 'docs'",
@@ -285,6 +290,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         targeted_units["run"],
         "python3 scripts/gate.py targeted-units",
     )
+    test.assertFalse(targeted_units.get("continue-on-error", False))
     for job_id in (
         "diagnostic-kind-oracle",
         "backend-sanitizers",
@@ -470,6 +476,7 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         "${{ !cancelled() && "
         "(needs.changes.outputs.candidate_preflight != 'success' || "
         "needs.changes.result != 'success' || "
+        "needs.changes.outputs.rebase_lane == 'full' || "
         "(needs.changes.outputs.rebase_lane != 'docs' && "
         "(needs.changes.outputs.rebase_lane == 'targeted' || "
         "needs.changes.outputs.docs_only != 'true'))) }}",

@@ -196,13 +196,14 @@ obligations.
   A code-bearing patch or delta runs the base-sensitive required checks,
   combined-candidate lint, every default-feature Rust library/binary unit, Python
   units, and all change-owned and package-targeted tests selected for the affected
-  paths. Before fan-out, the trusted verifier applies the planner's static package and
-  path-rule mapping to every delta path. A CI-policy delta, missing or ineligible
-  receipt, retarget, non-forward update, candidate mismatch, unmapped path, or
-  uncertain history runs full CI. Every required context still reports on the new
-  head. Path overlap and patch-identity changes are recorded for review, not treated as
-  proof that all prior evidence is unusable. The standing reviewer inspects any
-  hand-resolved intersection; use a fresh round only under the review rules above.
+  paths. Before fan-out, the trusted verifier applies the planner's exact Cargo target
+  identities and package/path rules to every delta path. An ambiguous target,
+  CI-policy delta, missing or ineligible receipt, retarget, non-forward update,
+  candidate mismatch, unmapped path, or uncertain history runs full CI, overriding
+  the ordinary docs-only skip. Every required context still reports on the new head.
+  Path overlap and patch-identity changes are recorded for review, not treated as proof
+  that all prior evidence is unusable. The standing reviewer inspects any hand-resolved
+  intersection; use a fresh round only under the review rules above.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for

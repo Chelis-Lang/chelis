@@ -11,11 +11,9 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
-from pathlib import PurePosixPath
 import re
 import subprocess
 import sys
-import tomllib
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
@@ -176,53 +174,7 @@ def _changed_paths(
     return paths
 
 
-def _workspace_packages_at(
-    repository_path: Path, commit: str
-) -> tuple[ci_change_owned.PackageInfo, ...]:
-    try:
-        root_manifest = tomllib.loads(
-            _git(repository_path, "show", f"{commit}:Cargo.toml").stdout.decode(
-                "utf-8"
-            )
-        )
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise ReuseError(f"cannot read workspace manifest at {commit}") from error
-    workspace = _mapping(root_manifest.get("workspace"), "workspace manifest")
-    members = workspace.get("members")
-    if (
-        not isinstance(members, list)
-        or not members
-        or any(not isinstance(member, str) or not member for member in members)
-        or len(members) != len(set(members))
-    ):
-        raise ReuseError("workspace members must be unique nonempty paths")
-    packages: list[ci_change_owned.PackageInfo] = []
-    for index, member in enumerate(members):
-        if (
-            member.startswith("/")
-            or member.endswith("/")
-            or "\\" in member
-            or any(character in member for character in "*?[]")
-        ):
-            raise ReuseError(f"workspace member is not an exact path: {member!r}")
-        parts = PurePosixPath(member).parts
-        if not parts or any(part in {"", ".", ".."} for part in parts):
-            raise ReuseError(f"workspace member is not a safe path: {member!r}")
-        manifest = f"{member}/Cargo.toml"
-        present = _git(
-            repository_path,
-            "cat-file",
-            "-e",
-            f"{commit}:{manifest}",
-            check=False,
-        )
-        if present.returncode != 0:
-            raise ReuseError(f"workspace member has no manifest: {member!r}")
-        packages.append(ci_change_owned.PackageInfo(f"member-{index}", member))
-    return tuple(packages)
-
-
-def _unmapped_delta_paths(
+def _unsafe_delta_paths(
     repository_path: Path,
     *,
     prior_candidate: str,
@@ -232,20 +184,22 @@ def _unmapped_delta_paths(
     config = ci_change_owned.read_config(
         TRUSTED_ROOT / ".config/ci-test-targets.toml"
     )
-    packages = tuple(
-        sorted(
-            set(
-                _workspace_packages_at(repository_path, prior_candidate)
-                + _workspace_packages_at(repository_path, current_candidate)
-            ),
-            key=lambda package: (package.root, package.name),
-        )
+    base_metadata = ci_change_owned.metadata_at(
+        repository_path, prior_candidate
     )
-    covered = {"package", "docs", "rule"}
+    candidate_metadata = ci_change_owned.metadata_at(
+        repository_path, current_candidate
+    )
+    covered = {"integration_target", "package", "docs", "rule"}
     return [
         path
         for path in delta_paths
-        if ci_change_owned.static_path_classification(path, packages, config)[0]
+        if ci_change_owned.exact_preflight_path_classification(
+            path,
+            base_metadata=base_metadata,
+            candidate_metadata=candidate_metadata,
+            config=config,
+        )
         not in covered
     ]
 
@@ -285,6 +239,42 @@ def _full(
         "prior_receipt_run_id": prior_receipt_run_id,
         "ci_contract_changed": ci_contract_changed,
     }
+
+
+def _ordinary(
+    reason: str,
+    *,
+    before_sha: str | None = None,
+    head_sha: str | None = None,
+    base_sha: str | None = None,
+    delta_paths: Sequence[str] = (),
+    ci_contract_changed: bool = False,
+) -> dict[str, object]:
+    return {
+        "schema": SCHEMA,
+        "lane": "ordinary",
+        "reason": reason,
+        "before_sha": before_sha,
+        "head_sha": head_sha,
+        "base_sha": base_sha,
+        "delta_paths": list(delta_paths),
+        "prior_receipt_run_id": None,
+        "ci_contract_changed": ci_contract_changed,
+    }
+
+
+def _is_linear_content_update(
+    repository_path: Path, before_sha: str, head_sha: str
+) -> bool:
+    if not _is_ancestor(repository_path, before_sha, head_sha):
+        return False
+    rows = _git(
+        repository_path,
+        "rev-list",
+        "--parents",
+        f"{before_sha}..{head_sha}",
+    ).stdout.decode().splitlines()
+    return bool(rows) and all(len(row.split()) == 2 for row in rows)
 
 
 def _timeline_events(timeline: Sequence[object]) -> list[Mapping[str, Any]]:
@@ -328,14 +318,14 @@ def evaluate_rebase(
     receipt_created_at: str | None,
     timeline: Sequence[object],
 ) -> dict[str, object]:
-    """Return ``full``, ``docs``, or ``targeted`` for one synchronize event."""
+    """Return ``ordinary``, ``full``, ``docs``, or ``targeted``."""
     repository_path = Path(repository_path)
     if not repository_path.is_dir():
         raise ReuseError("repository_path must be an existing directory")
     if not REPOSITORY.fullmatch(repository):
         raise ReuseError("repository must be an owner/name identifier")
     if event.get("action") != "synchronize":
-        return _full("event is not a pull-request synchronize")
+        return _ordinary("event is not a pull-request synchronize")
     before_sha = _sha(event.get("before"), "event before")
     head_sha = _sha(event.get("after"), "event after")
     pr_number = _positive_integer(current_pr.get("number"), "pull request number")
@@ -379,6 +369,15 @@ def evaluate_rebase(
         )
     delta_contract_safe, _ = candidate_receipt.reuse_eligibility(delta_paths)
     delta_contract_changed = not delta_contract_safe
+    if _is_linear_content_update(repository_path, before_sha, head_sha):
+        return _ordinary(
+            "ordinary linear content update",
+            before_sha=before_sha,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            delta_paths=delta_paths,
+            ci_contract_changed=delta_contract_changed,
+        )
 
     def fallback(
         reason: str,
@@ -501,20 +500,20 @@ def evaluate_rebase(
             prior_receipt_run_id=prior_run_id,
         )
     try:
-        unmapped_paths = _unmapped_delta_paths(
+        unsafe_paths = _unsafe_delta_paths(
             repository_path,
             prior_candidate=prior_candidate,
             current_candidate=candidate_sha,
             delta_paths=delta_paths,
         )
-    except (OSError, ReuseError, ValueError):
+    except (OSError, ReuseError, ValueError, subprocess.CalledProcessError):
         return fallback(
             "trusted test mapping could not classify the rebase delta",
             prior_receipt_run_id=prior_run_id,
         )
-    if unmapped_paths:
+    if unsafe_paths:
         return fallback(
-            "rebase delta contains a path without a trusted test mapping",
+            "rebase delta is not safely classifiable by the trusted planner",
             prior_receipt_run_id=prior_run_id,
         )
     base_delta_paths = _changed_paths(repository_path, prior_base, base_sha)

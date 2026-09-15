@@ -751,6 +751,28 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p", "q"])
         self.assertEqual(plan["path_dispositions"][0]["kind"], "path_rule_packages")
 
+    def test_exact_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
+        shared = "crates/p/tests/shared.rs"
+        duplicate = metadata(
+            package(
+                "p",
+                [
+                    ("first", shared, []),
+                    ("second", shared, []),
+                ],
+            )
+        )
+
+        self.assertEqual(
+            owned.exact_preflight_path_classification(
+                shared,
+                base_metadata=duplicate,
+                candidate_metadata=duplicate,
+                config=load_config(),
+            ),
+            "ambiguous_integration_target",
+        )
+
     def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/heavy.rs")])
         self.assertEqual(plan["change_owned"], [])
