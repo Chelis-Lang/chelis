@@ -84,12 +84,14 @@ the exact head-rewrite record. Before selecting an incremental lane, the trusted
 verifier applies the planner's exact preflight classification to every delta
 path, including Cargo metadata identities for integration targets and the
 reviewed package/path rules.
-An ambiguous target, CI-policy delta, stale or missing receipt, retarget,
-non-forward update, candidate mismatch, unmapped path, or uncertain history
-falls back to full CI. That fail-closed lane overrides the ordinary docs-only
-skip. A linear content update remains on ordinary docs-aware routing rather
-than attempting receipt reuse. No pull-request workflow can issue its own
-trusted receipt.
+An ambiguous target, path owned by standing evidence that the targeted lane
+would reuse rather than rerun, CI-policy delta, stale or missing receipt,
+retarget, non-forward update, candidate mismatch, unmapped path, or uncertain
+history falls back to full CI. This includes inputs owned by `ci-fast`, which
+the targeted lane otherwise skips. That fail-closed lane overrides the ordinary
+docs-only skip. A linear content update remains on ordinary docs-aware routing
+rather than attempting receipt reuse. No pull-request workflow can issue its
+own trusted receipt.
 
 The cheap docs lane requires both the prior/current PR patch and the complete
 rebase delta to be documentation-only. It runs the contract preflight, PR

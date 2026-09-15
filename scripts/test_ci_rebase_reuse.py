@@ -555,6 +555,20 @@ class RebaseReuseTests(unittest.TestCase):
             "rebase delta is not safely classifiable by the trusted planner",
         )
 
+    def test_reused_ci_fast_owner_falls_back_to_full_before_fanout(self) -> None:
+        repository = RebaseRepository(
+            delta_path="examples/declared_operation_bounds.ch"
+        )
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertEqual(
+            decision["reason"],
+            "rebase delta is not safely classifiable by the trusted planner",
+        )
+
     def test_literal_docs_conflict_uses_docs_delta_and_standing_review(self) -> None:
         repository = RebaseRepository(
             overlap=True,

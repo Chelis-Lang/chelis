@@ -69,9 +69,11 @@ reruns combined-candidate lint, every default-feature Rust library/binary unit,
 Python units, and base-sensitive checks plus every required change-owned and
 package-targeted test selected for the affected paths. The trusted verifier
 applies the planner's exact Cargo target identities and package/path rules
-before fan-out; ambiguous targets, CI-policy changes, retargets, missing
-receipts, non-forward updates, unmapped paths, and uncertain history run full
-CI. That fail-closed full lane overrides the ordinary docs-only skip. Every
+before fan-out; ambiguous targets, paths owned by standing evidence that would
+otherwise be reused, CI-policy changes, retargets, missing receipts, non-forward
+updates, unmapped paths, and uncertain history run full CI. That includes a
+changed `ci-fast` input because targeted rebases otherwise skip that standing
+job. The fail-closed full lane overrides the ordinary docs-only skip. Every
 required context still reports on the new head.
 Patch changes and path overlap are reported so the standing reviewer can
 inspect the resolution; they do not alone force unrelated work to rerun.

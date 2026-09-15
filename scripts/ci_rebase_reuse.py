@@ -194,7 +194,7 @@ def _unsafe_delta_paths(
     return [
         path
         for path in delta_paths
-        if ci_change_owned.exact_preflight_path_classification(
+        if ci_change_owned.targeted_rebase_preflight_path_classification(
             path,
             base_metadata=base_metadata,
             candidate_metadata=candidate_metadata,

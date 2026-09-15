@@ -198,9 +198,11 @@ obligations.
   units, and all change-owned and package-targeted tests selected for the affected
   paths. Before fan-out, the trusted verifier applies the planner's exact Cargo target
   identities and package/path rules to every delta path. An ambiguous target,
-  CI-policy delta, missing or ineligible receipt, retarget, non-forward update,
-  candidate mismatch, unmapped path, or uncertain history runs full CI, overriding
-  the ordinary docs-only skip. Every required context still reports on the new head.
+  path owned by standing evidence that the targeted lane would reuse instead of
+  rerunning, CI-policy delta, missing or ineligible receipt, retarget, non-forward
+  update, candidate mismatch, unmapped path, or uncertain history runs full CI,
+  overriding the ordinary docs-only skip. Every required context still reports on the
+  new head.
   Path overlap and patch-identity changes are recorded for review, not treated as proof
   that all prior evidence is unusable. The standing reviewer inspects any hand-resolved
   intersection; use a fresh round only under the review rules above.

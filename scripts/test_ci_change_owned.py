@@ -751,7 +751,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p", "q"])
         self.assertEqual(plan["path_dispositions"][0]["kind"], "path_rule_packages")
 
-    def test_exact_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
+    def test_targeted_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
         shared = "crates/p/tests/shared.rs"
         duplicate = metadata(
             package(
@@ -764,13 +764,46 @@ class PlanningTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            owned.exact_preflight_path_classification(
+            owned.targeted_rebase_preflight_path_classification(
                 shared,
                 base_metadata=duplicate,
                 candidate_metadata=duplicate,
                 config=load_config(),
             ),
             "ambiguous_integration_target",
+        )
+
+    def test_targeted_preflight_rejects_every_reused_standing_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        reused = [
+            rule
+            for rule in config.path_rules
+            if rule.owner is not None
+            and (rule.owner.workflow, rule.owner.job)
+            in owned.TARGETED_REBASE_REUSED_OWNER_JOBS
+        ]
+        self.assertTrue(reused)
+        for rule in reused:
+            with self.subTest(path=rule.prefix):
+                self.assertEqual(
+                    owned.targeted_rebase_preflight_path_classification(
+                        rule.prefix,
+                        base_metadata=fixture_metadata(),
+                        candidate_metadata=fixture_metadata(),
+                        config=config,
+                    ),
+                    "reused_standing_owner",
+                )
+
+        self.assertEqual(
+            owned.targeted_rebase_preflight_path_classification(
+                "scripts/gate.py",
+                base_metadata=fixture_metadata(),
+                candidate_metadata=fixture_metadata(),
+                config=config,
+            ),
+            "rule",
         )
 
     def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:

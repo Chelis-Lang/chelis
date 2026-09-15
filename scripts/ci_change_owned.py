@@ -71,6 +71,7 @@ STANDING_EXECUTION = {
     "run_ignored": "default",
     "no_fail_fast": True,
 }
+TARGETED_REBASE_REUSED_OWNER_JOBS = frozenset({("ci.yml", "ci-fast")})
 
 
 @dataclass(frozen=True, order=True)
@@ -641,14 +642,14 @@ def static_path_classification(
     )
 
 
-def exact_preflight_path_classification(
+def targeted_rebase_preflight_path_classification(
     path: str,
     *,
     base_metadata: Mapping[str, Any],
     candidate_metadata: Mapping[str, Any],
     config: Config,
 ) -> str:
-    """Classify one path with the planner's exact Cargo target identities."""
+    """Classify one path against exact targets and targeted-lane owner execution."""
     base_targets = _target_at_path(path, all_integration_targets(base_metadata))
     candidate_targets = _target_at_path(
         path, all_integration_targets(candidate_metadata)
@@ -657,11 +658,20 @@ def exact_preflight_path_classification(
         return "ambiguous_integration_target"
     if base_targets or candidate_targets:
         return "integration_target"
-    classification, _, _ = static_path_classification(
+    classification, _, matching_rules = static_path_classification(
         path,
         (*package_infos(base_metadata), *package_infos(candidate_metadata)),
         config,
     )
+    if classification == "rule":
+        rule = matching_rules[0]
+        if (
+            rule.disposition == "owner"
+            and rule.owner is not None
+            and (rule.owner.workflow, rule.owner.job)
+            in TARGETED_REBASE_REUSED_OWNER_JOBS
+        ):
+            return "reused_standing_owner"
     return classification
 
 
