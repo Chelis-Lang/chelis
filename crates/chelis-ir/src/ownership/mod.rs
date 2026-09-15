@@ -255,6 +255,13 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::result_extent_sites(self.dag, root)
     }
 
+    pub fn literal_result_witness_requirements(
+        self,
+        witness: NodeId,
+    ) -> Vec<chelis_types::ScalarValue> {
+        crate::axis_sources::literal_result_witness_requirements(self.dag, witness)
+    }
+
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
         crate::axis_sources::derive_runtime_dim_classes(self.dag)
             .into_iter()

@@ -2640,7 +2640,9 @@ where
                     .shape
                     .get(*axis as usize)
                     .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
-                for required in requirements {
+                for required in requirements.iter().chain(
+                    crate::axis_sources::literal_result_witness_requirements(dag, node.id).iter(),
+                ) {
                     let required = required
                         .as_i64_exact()
                         .ok_or_else(|| "extent witness requires int64".to_string())?;

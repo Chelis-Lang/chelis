@@ -127,6 +127,103 @@ fn helper_owned_claims(native: bool) {
     }
 }
 
+/// Section 4.7 requires the extent precondition before the producer's first
+/// shape-dependent element access, including an independently trapping add.
+fn producer_precondition_order(native: bool) {
+    for own in [false, true] {
+        let (callee_claim, caller_claim) = if own { ("3", "*") } else { ("*", "3") };
+        for (values, expected) in [
+            ("[0i64, 1i64, 2i64, 3i64]", "success"),
+            ("[0i64, 127i64, 127i64]", "extent"),
+            ("[0i64, 127i64, 127i64, 127i64]", "element"),
+        ] {
+            let source = format!(
+                "def double(x: tensor[n, int8]) -> tensor[{callee_claim}, int8] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
+                 def caller(x: tensor[n, int8]) -> tensor[{caller_claim}, int8] ! {{ IO }} = {{\n _ = print(\"add-before\")\n value = double(x)\n _ = print(\"add-after\")\n value\n}}\n\
+                 out = caller(cast(to_tensor({values}), int8))\n"
+            );
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, expected == "success", "{source}\n{output}");
+            assert!(output.contains("add-before"), "{source}\n{output}");
+            assert_eq!(output.contains("add-after"), ok, "{source}\n{output}");
+            match expected {
+                "success" => assert!(
+                    output.contains("out = tensor(shape=[3], data=[2, 4, 6])"),
+                    "{source}\n{output}"
+                ),
+                "extent" => {
+                    assert!(
+                        output.contains("extent `3`: claimed = 3, add axis 0 = 2"),
+                        "{source}\n{output}"
+                    );
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "numeric trap: domain in add at int64"),
+                        "{source}\n{output}"
+                    );
+                }
+                "element" => assert!(
+                    output
+                        .lines()
+                        .any(|line| line.strip_prefix("error: ").unwrap_or(line)
+                            == "numeric trap: overflow in add at int8"),
+                    "{source}\n{output}"
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+fn gradient_claims(native: bool) {
+    for mode in ["used", "zero", "unused"] {
+        let body = match mode {
+            "used" => "sum(value, 0i32)",
+            "zero" => "mul(sum(value, 0i32), scalar_to_tensor(0.0f32))",
+            "unused" => "sum(mul(x, x), 0i32)",
+            _ => unreachable!(),
+        };
+        for agrees in [true, false] {
+            let values = if agrees {
+                "[1.0f32, 2.0f32, 3.0f32]"
+            } else {
+                "[1.0f32, 2.0f32, 3.0f32, 4.0f32]"
+            };
+            let source = format!(
+                "def cut(x: tensor[n, f32]) -> tensor[2, f32] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
+                 def loss(x: tensor[n, f32]) -> tensor[f32] = {{\n value = cut(copy(x))\n {body}\n}}\n\
+                 out = grad(loss, wrt=x)(to_tensor({values}))\n"
+            );
+            let (ok, output) = run(&source, native);
+            assert_eq!(ok, agrees, "{source}\n{output}");
+            if agrees {
+                let expected = match mode {
+                    "used" => "[0.0, 2.0, 2.0]",
+                    "zero" => "[0.0, 0.0, 0.0]",
+                    "unused" => "[2.0, 4.0, 6.0]",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    output.contains(&format!("out = tensor(shape=[3], data={expected})")),
+                    "{source}\n{output}"
+                );
+            } else {
+                assert!(
+                    output.contains("extent `2`: claimed = 2, add axis 0 = 3"),
+                    "{source}\n{output}"
+                );
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line == "numeric trap: domain in add at int64"),
+                    "{source}\n{output}"
+                );
+            }
+        }
+    }
+}
+
 fn cast_element_and_extent_order(native: bool) {
     for (values, expected) in [
         ("[1.0f32, 2.0f32, 3.0f32, 4.0f32]", "success"),
@@ -180,4 +277,24 @@ fn c_inherited_result_claim_enters_pure_helpers() {
     pure_helper_claims(true);
     cast_element_and_extent_order(true);
     helper_owned_claims(true);
+}
+
+#[test]
+fn eval_literal_result_claim_survives_zero_and_unused_cotangents() {
+    gradient_claims(false);
+}
+
+#[test]
+fn c_literal_result_claim_survives_zero_and_unused_cotangents() {
+    gradient_claims(true);
+}
+
+#[test]
+fn eval_literal_result_precondition_precedes_element_failure() {
+    producer_precondition_order(false);
+}
+
+#[test]
+fn c_literal_result_precondition_precedes_element_failure() {
+    producer_precondition_order(true);
 }

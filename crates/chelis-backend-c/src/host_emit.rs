@@ -354,13 +354,16 @@ pub(crate) fn emit_host_abi_program(
             .get(&function.name)
             .expect("host function emitted name");
         let mut fn_buf: Vec<String> = Vec::new();
-        let helper_output_counts = (0..function.tensor_helpers.len())
+        let verified_helpers = (0..function.tensor_helpers.len())
             .map(|helper| {
-                let verified = projected
+                projected
                     .function_tensor_helper(function_index, helper)
-                    .expect("projected function helper retains verified child");
-                CEmitter::output_labels(verified.dag()).len().max(1)
+                    .expect("projected function helper retains verified child")
             })
+            .collect::<Vec<_>>();
+        let helper_output_counts = verified_helpers
+            .iter()
+            .map(|verified| CEmitter::output_labels(verified.dag()).len().max(1))
             .collect::<Vec<_>>();
         match emit_function(
             &mut fn_buf,
@@ -376,6 +379,7 @@ pub(crate) fn emit_host_abi_program(
                 .function_owner_bindings(function_index)
                 .expect("projected function retains verified body-owner bindings"),
             &helper_output_counts,
+            &verified_helpers,
             external_helpers,
             #[cfg(feature = "native-random-observer")]
             &source_sites
@@ -409,7 +413,14 @@ pub(crate) fn emit_host_abi_program(
             // (possibly unemittable) tensor helpers entirely.
             continue;
         }
-        let entry_coverage = entry::helper_coverage(function);
+        let verified_helpers = (0..function.tensor_helpers.len())
+            .map(|helper| {
+                projected
+                    .function_tensor_helper(function_index, helper)
+                    .expect("projected function helper retains verified child")
+            })
+            .collect::<Vec<_>>();
+        let entry_coverage = entry::helper_coverage_with_verified(function, &verified_helpers);
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
@@ -2031,6 +2042,7 @@ fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
+    delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len() {
@@ -2063,7 +2075,11 @@ fn signature_entry_lines(
             axis,
         )
     };
-    for guard in plan.guards() {
+    for guard in plan
+        .guards()
+        .iter()
+        .filter(|guard| !delegated.contains(guard))
+    {
         let (left, right, context) = match guard {
             EntryExtentGuard::Named {
                 claim,
@@ -2107,6 +2123,7 @@ fn emit_function(
     ownership_sites: &[ProjectedHostSite<'_>],
     owner_bindings: &[(VerifiedOwnerId, String)],
     helper_output_counts: &[usize],
+    verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
@@ -2142,7 +2159,7 @@ fn emit_function(
         helper_output_counts,
         ownership_sites,
     );
-    emitter.entry_projection = entry::helper_coverage(function);
+    emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     #[cfg(feature = "native-random-observer")]
     {
@@ -2204,10 +2221,12 @@ fn emit_function(
         .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
         .map(|param| c_ident(&param.name).into_owned())
         .collect::<Vec<_>>();
+    let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
     emitter.lines.extend(signature_entry_lines(
         &entry_plan,
         &entry_args,
         &emitter.indent,
+        &delegated_entry_guards,
     )?);
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
@@ -4318,7 +4337,7 @@ impl<'a> HostEmitter<'a> {
                     actuals.push(temp);
                 }
                 self.lines
-                    .extend(signature_entry_lines(plan, &actuals, &self.indent)?);
+                    .extend(signature_entry_lines(plan, &actuals, &self.indent, &[])?);
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
             HostExprKind::Unit => {

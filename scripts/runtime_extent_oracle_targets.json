@@ -925,7 +925,11 @@
       },
       "expected": [
         "c_inherited_result_claim_enters_pure_helpers",
-        "eval_inherited_result_claim_enters_pure_helpers"
+        "c_literal_result_claim_survives_zero_and_unused_cotangents",
+        "c_literal_result_precondition_precedes_element_failure",
+        "eval_inherited_result_claim_enters_pure_helpers",
+        "eval_literal_result_claim_survives_zero_and_unused_cotangents",
+        "eval_literal_result_precondition_precedes_element_failure"
       ],
       "note": "Inherited literal claims cross pure helpers with exact producing primitives, helper-local claims and source effect order. Native receipts require a compiler and execute the generated binary. Callback and selected-alias continuations are separately enrolled when implemented."
     },
@@ -939,6 +943,7 @@
         "mode": "all"
       },
       "expected": [
+        "administrative_copies_preserve_literal_producer_through_fusion",
         "distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds",
         "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
       ],

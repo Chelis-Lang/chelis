@@ -7,6 +7,7 @@
 use super::*;
 use chelis_ir::axis_sources::EntryExtentGuard;
 use chelis_ir::host::SignatureEntryPlan;
+use chelis_ir::ownership::VerifiedHostTensorHelperView;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,6 +98,102 @@ fn plan_facts(
         .collect()
 }
 
+fn same_claim(left: &EntryExtentGuard, right: &EntryExtentGuard) -> bool {
+    match (left, right) {
+        (
+            EntryExtentGuard::Named { claim: left, .. },
+            EntryExtentGuard::Named { claim: right, .. },
+        ) => left == right,
+        (
+            EntryExtentGuard::Literal { required: left, .. },
+            EntryExtentGuard::Literal {
+                required: right, ..
+            },
+        ) => left == right,
+        _ => false,
+    }
+}
+
+/// Signature guards that a direct tensor helper must retain to preserve one
+/// ordered entry schedule.
+///
+/// The host adapter normally owns every signature comparison and the helper
+/// omits the facts that adapter established. A helper can introduce an
+/// earlier result-literal obligation that the authored input signature does
+/// not contain, though. If the same helper later carries one of the
+/// signature's guards, executing that guard in the adapter would move it
+/// ahead of the earlier literal. Delegate only that exact later guard, and
+/// only for a direct helper body: callbacks, branches, and preceding host
+/// operations do not provide the domination proof needed to move entry work.
+pub(super) fn delegated_function_guards(
+    function: &HostFunction,
+    verified_helpers: &[VerifiedHostTensorHelperView<'_>],
+) -> Vec<EntryExtentGuard> {
+    let HostExprKind::TensorCall { helper, args, .. } = &function.body.kind else {
+        return Vec::new();
+    };
+    let Some(source) = verified_helpers.get(*helper).copied() else {
+        return Vec::new();
+    };
+
+    let mut env = BTreeMap::new();
+    for (index, param) in function.params.iter().enumerate() {
+        env.insert(param.name.clone(), index);
+    }
+    let plan = function_entry_plan(function);
+    let plan_args = function
+        .params
+        .iter()
+        .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
+        .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
+        .collect::<Vec<_>>();
+    let plan_guards = plan
+        .guards()
+        .iter()
+        .filter_map(|guard| {
+            fact(guard, |load, axis| {
+                var_read(plan_args.get(load.0)?, axis, &env)
+            })
+            .map(|known| (guard, known))
+        })
+        .collect::<Vec<_>>();
+    let read = |load, axis| {
+        let RiscOp::Load { name } = &source.dag().get(load)?.op else {
+            return None;
+        };
+        let input = source
+            .inputs()
+            .iter()
+            .position(|candidate| candidate.name == name.as_str())?;
+        var_read(args.get(input)?, axis, &env)
+    };
+    let helper_guards = source
+        .dag()
+        .entry_extent_guards()
+        .into_iter()
+        .filter_map(|guard| fact(&guard, read).map(|known| (guard, known)))
+        .collect::<Vec<_>>();
+
+    let mut established = Vec::new();
+    let mut delegated = Vec::new();
+    for (guard, known) in plan_guards {
+        let helper_position = helper_guards
+            .iter()
+            .position(|(candidate, fact)| same_claim(guard, candidate) && fact == &known);
+        let must_follow_helper_prefix = helper_position.is_some_and(|position| {
+            helper_guards[..position]
+                .iter()
+                .any(|(_, earlier)| !implies(&established, earlier))
+        });
+        if must_follow_helper_prefix {
+            delegated.push(guard.clone());
+        } else {
+            established.push(known);
+        }
+    }
+    delegated
+}
+
 /// A schedule is tied to the verified payload's structural expression order,
 /// so cloning the immutable tree preserves each call's identity.
 #[derive(Default)]
@@ -121,7 +218,10 @@ pub(super) fn variant_name(base: &str, variant: usize) -> String {
     }
 }
 
-pub(super) fn helper_coverage(function: &HostFunction) -> Projection {
+pub(super) fn helper_coverage_with_verified(
+    function: &HostFunction,
+    verified_helpers: &[VerifiedHostTensorHelperView<'_>],
+) -> Projection {
     let mut walker = Walker::new(&function.tensor_helpers);
     let mut env = BTreeMap::new();
     for param in &function.params {
@@ -133,9 +233,21 @@ pub(super) fn helper_coverage(function: &HostFunction) -> Projection {
         .filter(|p| matches!(p.ty, HostAbiType::Tensor(_)))
         .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
         .collect::<Vec<_>>();
-    let mut facts = plan_facts(&function_entry_plan(function), &args, &env);
+    let plan = function_entry_plan(function);
+    let delegated = delegated_function_guards(function, verified_helpers);
+    let mut facts = plan
+        .guards()
+        .iter()
+        .filter(|guard| !delegated.contains(guard))
+        .filter_map(|guard| fact(guard, |load, axis| var_read(args.get(load.0)?, axis, &env)))
+        .collect();
     walker.walk(&function.body, &env, &mut facts);
     walker.finish()
+}
+
+#[cfg(test)]
+fn helper_coverage(function: &HostFunction) -> Projection {
+    helper_coverage_with_verified(function, &[])
 }
 
 pub(super) fn global_helper_coverage(program: &crate::host_abi::HostAbiProgram) -> Projection {
@@ -360,6 +472,37 @@ mod tests {
     use chelis_ir::{Dag, TensorType};
     use chelis_types::types::Prim;
 
+    fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
+        let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
+        let deep = chelis_surf::desugar::desugar_program(&declarations);
+        let checked = chelis_types::check_typed_program(&deep)
+            .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
+        let checked = chelis_effects::check_program(&checked).expect("effects host source");
+        let checked = chelis_types::check_linearity(&checked).expect("linearity host source");
+        let realizability = chelis_effects::realizability::infer_realizability(
+            &checked,
+            crate::TENSOR_CAPABLE_PRIMS,
+        );
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+        let lowered =
+            chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+                .expect("lower host source");
+        let host =
+            crate::prepare_host_program_for_codegen(lowered.host.expect("source uses host lane"))
+                .expect("select C host payload");
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            manifest,
+            chelis_types::types::Target::C,
+        );
+        chelis_ir::ownership::verify_ownership(
+            chelis_ir::ownership::lower_host_ownership(&manifested, host)
+                .expect("lower host ownership"),
+        )
+        .expect("verify host ownership")
+    }
+
     fn tensor(name: &str) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Named(name.into(), None)],
@@ -423,7 +566,33 @@ mod tests {
         let required =
             chelis_ir::axis_sources::entry_extent_guards(&function.tensor_helpers[0].dag);
         assert_eq!(required.len(), 1);
+        assert!(delegated_function_guards(&function, &[]).is_empty());
         assert_eq!(helper_coverage(&function).variants, vec![vec![required]]);
+    }
+
+    #[test]
+    fn lowered_mixed_result_claim_delegates_the_following_rows_guard() {
+        let verified = verified_host_from_source(
+            "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] = insert(add(z, q), 1i32, shape(a, 0i32))",
+        );
+        let projected = crate::host_abi::project_program(verified.emission()).unwrap();
+        let function = &projected.program().functions[0];
+        let helper = projected.function_tensor_helper(0, 0).unwrap();
+        let plan = function_entry_plan(function);
+        assert_eq!(plan.guards().len(), 1);
+        let helper_guards = helper.dag().entry_extent_guards();
+        assert!(
+            matches!(helper_guards.as_slice(), [
+                EntryExtentGuard::Literal { required: 3, .. },
+                EntryExtentGuard::Named { claim, .. }
+            ] if claim == "rows"),
+            "{helper_guards:#?}"
+        );
+        assert_eq!(
+            delegated_function_guards(function, &[helper]),
+            plan.guards()
+        );
+        assert!(helper_coverage_with_verified(function, &[helper]).variants[0][0].is_empty());
     }
 
     #[test]

@@ -2204,6 +2204,19 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
         )
     };
     let mut guards = Vec::new();
+    // An authored literal result whose extent is an exact parameter witness
+    // is ready at that witness's signature position. The token identifies
+    // the obligation; a matching physical dimension is not ownership proof.
+    for (_, source, required) in literal_result_interface_claims(dag) {
+        let Some(observed) = source.entry_axis(dag) else {
+            continue;
+        };
+        guards.push(EntryExtentGuard::Literal {
+            required: usize::try_from(required.as_i64_exact().expect("literal requirement"))
+                .expect("nonnegative literal requirement"),
+            observed,
+        });
+    }
     // This is the same interface projection used by symbolic bindings: local
     // members do not prevent two input witnesses from disagreeing at entry.
     for class in derive_dim_witnesses(dag) {
@@ -2758,6 +2771,13 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
                 LocalGuardObservation::Carrier(carrier.clone())
             } else if let Some(computed) = op_computed_axis_extent(&node.op, axis) {
                 LocalGuardObservation::ComputedExtent(computed)
+            } else if let Some(AxisSource::InputAxis { input, axis }) =
+                output_axis_sources(dag, producer).get(axis)
+            {
+                LocalGuardObservation::Carrier(RtDim::InputAxis {
+                    tensor: *input,
+                    axis: *axis,
+                })
             } else {
                 LocalGuardObservation::RealizedExtent
             };
@@ -2776,8 +2796,8 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
 }
 
 pub(crate) fn has_literal_result_claim(dag: &Dag, producer: NodeId) -> bool {
-    dag.get(producer).is_some_and(|node| {
-        node.shape_deps.iter().any(|dependency| {
+    dag.nodes().iter().any(|owner| {
+        let owns_claim = owner.shape_deps.iter().any(|dependency| {
             matches!(
                 dag.get(*dependency).map(|node| &node.op),
                 Some(RiscOp::ExtentWitness {
@@ -2785,8 +2805,295 @@ pub(crate) fn has_literal_result_claim(dag: &Dag, producer: NodeId) -> bool {
                     ..
                 })
             )
-        })
+        });
+        if !owns_claim {
+            return false;
+        }
+        // A return carrier owns the token, but the numeric operation behind
+        // it owns attribution. Preserve both that operation and a cast's
+        // source placement when a rewrite would otherwise erase either.
+        let mut current = owner.id;
+        loop {
+            if current == producer {
+                return true;
+            }
+            let Some(node) = dag.get(current) else {
+                return false;
+            };
+            if !matches!(
+                node.op,
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            ) {
+                return false;
+            }
+            let Some(input) = node.inputs.first() else {
+                return false;
+            };
+            current = *input;
+        }
     })
+}
+
+/// The latest `Caller` witness at or before `not_after` that reads this exact
+/// tensor axis.
+///
+/// A returned value can be passed to another invocation later in the DAG.
+/// Such a downstream witness observes the same physical quantity but does not
+/// own the earlier result claim, so the upper bound is part of the identity.
+fn caller_witness_for_axis(
+    dag: &Dag,
+    tensor: NodeId,
+    axis: usize,
+    not_after: NodeId,
+) -> Option<NodeId> {
+    dag.nodes().iter().rev().find_map(|node| {
+        let RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller,
+            axis: RtAxis::Lit(observed),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        (node.id.0 <= not_after.0
+            && usize::try_from(observed).ok() == Some(axis)
+            && node.inputs.first() == Some(&tensor))
+        .then_some(node.id)
+    })
+}
+
+/// A scalar parameter witness through administrative movement only.
+///
+/// `copy` preserves identity, and section 4.7 says a cast takes the placement
+/// of the value it casts. Any arithmetic or shape-producing operation ends
+/// the walk and keeps the result obligation local to its producer.
+fn caller_witness_through_movement(dag: &Dag, mut value: NodeId) -> Option<NodeId> {
+    for _ in 0..dag.len() {
+        let node = dag.get(value)?;
+        match node.op {
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                ..
+            } => return Some(value),
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
+                value = *node.inputs.first()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralResultInterfaceObservation {
+    Witness(NodeId),
+    InputAxis { load: NodeId, axis: usize },
+}
+
+impl LiteralResultInterfaceObservation {
+    fn entry_axis(self, dag: &Dag) -> Option<(NodeId, usize)> {
+        match self {
+            Self::Witness(witness) => {
+                let node = dag.get(witness)?;
+                let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
+                    return None;
+                };
+                let observed = interface_witness_axis(dag, witness)?;
+                let RiscOp::Load { name } = &dag.get(observed.0)?.op else {
+                    return None;
+                };
+                (parameter == name.as_str()).then_some(observed)
+            }
+            Self::InputAxis { load, axis } => {
+                abi_input_slot(dag, load)?;
+                Some((load, axis))
+            }
+        }
+    }
+}
+
+/// The exact parameter observation supplying a returned axis, when the
+/// output shape directly reads it.
+///
+/// This intentionally follows the one-hop [`AxisSource`] path instead of the
+/// terminal [`ExtentOrigin`]. Resolving to an origin loses which invocation's
+/// witness supplied an `InputAxis`, which changed alias diagnostics and could
+/// select the wrong parameter when two inputs had the same runtime extent.
+/// Arithmetic and locally computed movement extents remain producer
+/// obligations even when their inputs are parameters.
+fn literal_result_interface_observation(
+    dag: &Dag,
+    owner: NodeId,
+    axis: usize,
+) -> Option<LiteralResultInterfaceObservation> {
+    fn walk(
+        dag: &Dag,
+        node_id: NodeId,
+        axis: usize,
+        not_after: NodeId,
+        remaining: usize,
+    ) -> Option<LiteralResultInterfaceObservation> {
+        if remaining == 0 {
+            return None;
+        }
+        if let Some(witness) = caller_witness_for_axis(dag, node_id, axis, not_after) {
+            return Some(LiteralResultInterfaceObservation::Witness(witness));
+        }
+        let node = dag.get(node_id)?;
+        match output_axis_sources(dag, node_id).get(axis)? {
+            AxisSource::ScalarInput { input } => {
+                caller_witness_through_movement(dag, *node.inputs.get(*input)?)
+                    .map(LiteralResultInterfaceObservation::Witness)
+            }
+            AxisSource::ExternalAxis { load, axis } => {
+                caller_witness_for_axis(dag, *load, *axis, not_after)
+                    .map(LiteralResultInterfaceObservation::Witness)
+                    .or(Some(LiteralResultInterfaceObservation::InputAxis {
+                        load: *load,
+                        axis: *axis,
+                    }))
+            }
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            } if matches!(
+                node.op,
+                RiscOp::Copy
+                    | RiscOp::Cast { .. }
+                    | RiscOp::CastTrunc { .. }
+                    | RiscOp::Expand { .. }
+            ) || sets_axis(&node.op, axis) =>
+            {
+                walk(
+                    dag,
+                    *node.inputs.get(*input)?,
+                    usize::try_from(*read).ok()?,
+                    not_after,
+                    remaining - 1,
+                )
+            }
+            AxisSource::InputAxis { .. } => None,
+            AxisSource::Literal { .. }
+            | AxisSource::OpComputed { .. }
+            | AxisSource::ClassSupplied { .. } => None,
+        }
+    }
+
+    walk(dag, owner, axis, owner, dag.len())
+}
+
+fn interface_witness_axis(dag: &Dag, witness: NodeId) -> Option<(NodeId, usize)> {
+    let node = dag.get(witness)?;
+    let RiscOp::ExtentWitness {
+        axis: RtAxis::Lit(axis),
+        ..
+    } = node.op
+    else {
+        return None;
+    };
+    let load = load_through_casts(dag, witness, 0)?;
+    abi_input_slot(dag, load)?;
+    Some((load, usize::try_from(axis).ok()?))
+}
+
+/// A named equality can discharge a literal restatement only when its exact
+/// other observation is fixed by the graph. An ABI shape promise is still
+/// an obligation, not such a proof (the #1782 distinction).
+fn literal_result_is_entailed(dag: &Dag, witness: NodeId, required: i64) -> bool {
+    let fixed = |id: NodeId| {
+        let node = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        match resolve_axis_extent(dag, *node.inputs.first()?, usize::try_from(axis).ok()?)? {
+            ExtentOrigin::Literal(value) => Some(value),
+            _ => None,
+        }
+    };
+    dag.nodes().iter().any(|node| {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            return false;
+        };
+        claims
+            .iter()
+            .zip(node.inputs.iter().skip(1))
+            .any(|(_, edge)| {
+                (node.id == witness && fixed(*edge) == Some(required))
+                    || (*edge == witness && fixed(node.id) == Some(required))
+            })
+    })
+}
+
+fn literal_result_interface_claims(
+    dag: &Dag,
+) -> Vec<(
+    NodeId,
+    LiteralResultInterfaceObservation,
+    chelis_types::ScalarValue,
+)> {
+    let mut claims = Vec::new();
+    for owner in dag.nodes() {
+        for token in &owner.shape_deps {
+            let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: RtAxis::Lit(axis),
+                        requirements,
+                        ..
+                    },
+                ..
+            }) = dag.get(*token)
+            else {
+                continue;
+            };
+            let Some(observed) =
+                literal_result_interface_observation(dag, owner.id, *axis as usize)
+            else {
+                continue;
+            };
+            let required = requirements[0];
+            let entailed = match observed {
+                LiteralResultInterfaceObservation::Witness(witness) => literal_result_is_entailed(
+                    dag,
+                    witness,
+                    required.as_i64_exact().expect("literal requirement"),
+                ),
+                LiteralResultInterfaceObservation::InputAxis { .. } => false,
+            };
+            if !entailed {
+                claims.push((*token, observed, required));
+            }
+        }
+    }
+    claims
+}
+
+/// Literal result obligations executed at an invocation's exact parameter
+/// witness.
+///
+/// A witness retains the callee parameter identity even when it reads an ABI
+/// `Load`: two calls can pass different outer parameters through the same
+/// inner name. Collapsing it into the outer entry schedule loses that identity
+/// and also moves an invocation-local obligation ahead of the call that owns
+/// it. Only a raw input-axis observation with no witness enters the common
+/// entry schedule above.
+pub fn literal_result_witness_requirements(
+    dag: &Dag,
+    witness: NodeId,
+) -> Vec<chelis_types::ScalarValue> {
+    literal_result_interface_claims(dag)
+        .into_iter()
+        .filter_map(|(_, observed, required)| {
+            (observed == LiteralResultInterfaceObservation::Witness(witness)
+                && observed.entry_axis(dag).is_none())
+            .then_some(required)
+        })
+        .collect()
 }
 
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
@@ -2821,6 +3128,11 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             }) = dag.get(*required)
             {
                 let axis = usize::try_from(*axis).expect("verified literal result axis");
+                if literal_result_interface_observation(dag, node.id, axis).is_some() {
+                    // This exact token is an entry obligation or a proven
+                    // named restatement, never a second local producer guard.
+                    continue;
+                }
                 let site = result_extent_sites(dag, node.id)
                     .into_iter()
                     .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
@@ -2830,7 +3142,13 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 let (producer, observed) = if required.0 < site.producer.0 {
                     (site.producer, site.observation)
                 } else {
-                    (node.id, LocalGuardObservation::RealizedExtent)
+                    (
+                        node.id,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
                 };
                 let literal = requirements[0]
                     .as_i64_exact()

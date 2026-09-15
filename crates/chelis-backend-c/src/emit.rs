@@ -920,6 +920,7 @@ impl CEmitter {
             if e.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            e.emit_input_axis_result_guards(node, dag);
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
@@ -1555,7 +1556,10 @@ impl CEmitter {
                         unreachable!("literal role handled above")
                     }
                 };
-                for required in requirements {
+                for required in requirements
+                    .iter()
+                    .chain(dag.literal_result_witness_requirements(node.id).iter())
+                {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
                     self.line(&format!(
                         "if (chelis_tensor_shape(t{input}, {axis}) != {required}) {{"
@@ -6862,6 +6866,60 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.line("}");
         }
         self.emit_inherited_result_guards(id, extents);
+    }
+
+    /// Shape-preserving producers know their result extent from input metadata.
+    /// Check it before allocating or evaluating a potentially trapping element.
+    fn emit_input_axis_result_guards(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        use chelis_ir::axis_sources::LocalGuardObservation;
+        let mut carriers = Vec::new();
+        if let Some(sites) = self.local_dim_guard_sites.get(&node.id.0) {
+            for (axis, claim) in sites {
+                if let LocalGuardObservation::Carrier(carrier @ RtDim::InputAxis { .. }) =
+                    &claim.observed
+                {
+                    carriers.push((*axis, carrier.clone()));
+                }
+            }
+        }
+        for site in &self.inherited_result_sites {
+            if site.producer() == node.id
+                && let LocalGuardObservation::Carrier(carrier @ RtDim::InputAxis { .. }) =
+                    site.observation()
+            {
+                let RtAxis::Lit(axis) = site.producer_axis();
+                if !carriers
+                    .iter()
+                    .any(|(existing, _)| *existing == axis as usize)
+                {
+                    carriers.push((axis as usize, carrier.clone()));
+                }
+            }
+        }
+        // Movement owners already check their carriers at their dedicated
+        // preallocation hooks. They must not execute a second comparison here.
+        carriers.retain(|(axis, _)| {
+            !matches!(&node.op, RiscOp::Expand { axis: set, .. } if axis == set)
+                && !matches!(node.op, RiscOp::Reshape { .. })
+        });
+        if carriers.is_empty() {
+            return;
+        }
+        let operand = node
+            .inputs
+            .first()
+            .expect("input-axis observation has an operand")
+            .0;
+        let extents = carriers
+            .into_iter()
+            .map(|(axis, carrier)| {
+                (
+                    axis,
+                    Self::bound_c_expr(&carrier, &node.inputs, operand, axis, dag),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(node.id.0, &extents);
     }
 
     /// Consume invocation frames in declaration/axis order at one producer.
