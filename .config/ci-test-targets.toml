@@ -590,6 +590,15 @@ disposition = "packages"
 packages = ["chelis-types", "chelis-compiler-api"]
 
 [[path_rule]]
+prefix = "examples/declared_operation_bounds.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::parity target checks this exact example and compares eval with generated C"
+tracking_issue = "chelis#1942"
+
+[[path_rule]]
 prefix = "examples/caller_actual_scope.ch"
 disposition = "owner"
 workflow = "ci.yml"

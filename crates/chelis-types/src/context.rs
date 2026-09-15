@@ -116,7 +116,7 @@ pub struct TypeEnv {
 // Source-free snapshots are faithful transports from a trusted checker
 // producer, not independently re-proved programs. Structural validation does
 // not establish completeness of a maliciously edited label summary.
-const TYPE_ENV_FORMAT_VERSION: u32 = 1;
+const TYPE_ENV_FORMAT_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -293,7 +293,7 @@ mod tests {
         let old = bincode::serialize(&(&context.inner, context.library_proof_id)).unwrap();
         assert!(bincode::deserialize::<TypeEnv>(&old).is_err());
         let mut json = serde_json::to_value(&context).unwrap();
-        json["format_version"] = serde_json::json!(0);
+        json["format_version"] = serde_json::json!(1);
         assert!(serde_json::from_value::<TypeEnv>(json).is_err());
         let mut json = serde_json::to_value(&context).unwrap();
         json["inner"]["subst"]
@@ -388,6 +388,69 @@ mod tests {
     }
 
     #[test]
+    fn operation_value_restrictions_survive_context_round_trips() {
+        let encoded = bincode::serialize(&TypeEnv::empty()).unwrap();
+        let decoded: TypeEnv = bincode::deserialize(&encoded).unwrap();
+        for (name, restriction, accepted, rejected) in [
+            (
+                "mean",
+                TypeVarRestriction::FloatValue,
+                Prim::F32,
+                Prim::Int32,
+            ),
+            (
+                "trunc_div",
+                TypeVarRestriction::IntValue,
+                Prim::Int32,
+                Prim::F32,
+            ),
+            (
+                "add",
+                TypeVarRestriction::NumericValue,
+                Prim::Int32,
+                Prim::Bool,
+            ),
+        ] {
+            let mut resumed = decoded.resume_for_new_check();
+            let scheme = resumed.env.lookup(name).unwrap().clone();
+            assert!(
+                scheme
+                    .tvar_restrictions
+                    .iter()
+                    .any(|(_, bound)| *bound == restriction)
+            );
+            let Type::Fn(params, _) =
+                resumed
+                    .env
+                    .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
+            else {
+                panic!("operation remains callable");
+            };
+            let precision = resumed.var_gen.fresh_tvar();
+            let tensor = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Var(precision));
+            let operand = if matches!(params[0], Type::Ref(_)) {
+                Type::Ref(Box::new(tensor))
+            } else {
+                tensor
+            };
+            unify(&params[0], &operand, &mut resumed.subst)
+                .expect("a value restriction must admit tensor operands");
+            let mut valid = resumed.subst.clone();
+            unify(&Type::Var(precision), &Type::Prim(accepted), &mut valid).unwrap();
+            let error = unify(
+                &Type::Var(precision),
+                &Type::Prim(rejected),
+                &mut resumed.subst,
+            )
+            .expect_err("late dtype binding must enforce the deserialized family");
+            assert!(matches!(
+                error.kind,
+                crate::unify::TypeErrorKind::DtypeFamilyMismatch
+            ));
+        }
+    }
+
+    #[test]
     fn type_variable_restrictions_survive_context_round_trips() {
         let empty = TypeEnv::empty();
         let mut inner = empty.inner().clone();
@@ -434,7 +497,7 @@ mod tests {
         .expect_err("round-tripped restriction must reject int32");
         assert!(matches!(
             error.kind,
-            crate::unify::TypeErrorKind::PrecisionMismatch
+            crate::unify::TypeErrorKind::DtypeFamilyMismatch
         ));
 
         let mut float_trial = resumed.subst.clone();

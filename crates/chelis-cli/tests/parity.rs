@@ -458,6 +458,11 @@ fn parity_checked_reshape() {
 }
 
 #[test]
+fn declared_operation_bounds_example() {
+    drive_parity(&examples_root().join("declared_operation_bounds.ch"), true);
+}
+
+#[test]
 fn parity_dict_foundation() {
     drive_parity(&examples_root().join("dict_foundation.ch"), true);
 }

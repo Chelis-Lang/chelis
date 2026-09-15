@@ -1284,28 +1284,43 @@ pub(super) fn infer_reduce_window_app(
             ),
         );
     }
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let window_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
     let stride_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
-    if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
+    if let Some(err) = propagate_if_error([&func_ty, &input_ty, &window_ty, &stride_ty]) {
         return err;
     }
 
     let route_arg_tys = vec![input_ty, window_ty, stride_ty];
-    defer_or_check_shape_route(
+    let result = defer_or_check_shape_route(
         ShapeRouteKind::ReduceWindow {
             name: name.to_string(),
         },
         list,
         kids,
-        route_arg_tys,
+        route_arg_tys.clone(),
         vg,
         subst,
         errors,
         product,
-    )
+    );
+    if matches!(result, Type::Error(_)) {
+        return result;
+    }
+
+    // The specialized route owns window/stride/rank diagnostics and its exact
+    // output shape. It does not own a separate dtype-admission policy: consume
+    // the checked fallback scheme through the same helper as ordinary calls.
+    product.record_call_operand_contracts(&func_ty, Some(name), &route_arg_tys, env, subst);
+    if let Err(rejected) =
+        unify_checked_call_contract(list, &func_ty, &route_arg_tys, vg, subst, errors, product)
+    {
+        return rejected;
+    }
+    product.record_call_result_contracts(&func_ty, Some(name), env, subst);
+    subst.apply(&result)
 }
 
 /// chelis#1512: the route's own rule, over already-inferred argument

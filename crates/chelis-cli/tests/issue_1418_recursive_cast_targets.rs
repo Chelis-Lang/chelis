@@ -156,7 +156,15 @@ fn unactualized_generic_target_is_not_replaced_by_the_operand_dtype() {
         "def f[p: Float]() -> p = cast(1, p)\nout = f()\n",
     )
     .unwrap();
-    success(&run(dir.path(), None, &["check", "probe.ch"]));
+    // The unresolved result cannot publish an inferred Float restriction.
+    // [04-INF-9] rejects it during checking, before cast actualization.
+    let checked = run(dir.path(), None, &["check", "probe.ch"]);
+    assert!(!checked.status.success(), "{checked:?}");
+    let report = String::from_utf8_lossy(&checked.stdout);
+    assert!(
+        report.contains("PrecisionMismatch") && report.contains("declared contract"),
+        "{report}"
+    );
     for args in [
         &["eval", "--file", "probe.ch"][..],
         &["build", "probe.ch", "--target", "c", "--output", "out"],
@@ -165,7 +173,7 @@ fn unactualized_generic_target_is_not_replaced_by_the_operand_dtype() {
         assert!(!result.status.success(), "{result:?}");
         let errors = String::from_utf8_lossy(&result.stderr);
         assert!(
-            errors.contains("cast") && errors.contains("primitive"),
+            errors.contains("PrecisionMismatch") && errors.contains("declared contract"),
             "{errors}"
         );
         assert!(!dir.path().join("out/probe.c").exists());

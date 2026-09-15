@@ -72,6 +72,9 @@ pub struct TypeError {
 pub enum TypeErrorKind {
     TypeMismatch,
     PrecisionMismatch,
+    /// A checked family restriction failed, including before its operand
+    /// acquired a concrete type. Rendered publicly as PrecisionMismatch.
+    DtypeFamilyMismatch,
     DimensionMismatch,
     ArityMismatch,
     OccursCheck,
@@ -476,6 +479,26 @@ impl DeferredOperandGate {
         }
     }
 
+    // A consumer may have constrained the provisional result's dtype before
+    // this producer settles. Preserve that family's error; the producer did
+    // not violate its own operand contract (a valid cast can produce an int).
+    fn reconcile_result(&self, result: &Type, settled: Type, subst: &mut Subst) {
+        if let Err(error) = unify(result, &settled, subst) {
+            if matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch) {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: error.into(),
+                });
+            } else {
+                let expected = subst.apply(result);
+                subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                    gate: self.clone(),
+                    expected,
+                    settled,
+                });
+            }
+        }
+    }
+
     /// Settle this constraint against the type its operand was just bound to
     /// (chelis#1489).
     ///
@@ -493,14 +516,7 @@ impl DeferredOperandGate {
             Self::Copy { ref result } => {
                 match crate::infer::expr::copy_result_from_source(resolved) {
                     Some(settled) => {
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     None => subst.record_operand_gate_failure(OperandGateFailure::Rejected {
                         gate: self.clone(),
@@ -519,14 +535,7 @@ impl DeferredOperandGate {
                     mode,
                 ) {
                     Ok(settled) => {
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
                         error: *error,
@@ -568,14 +577,7 @@ impl DeferredOperandGate {
                             });
                             return;
                         }
-                        if unify(result.as_ref(), &settled, subst).is_err() {
-                            let expected = subst.apply(result.as_ref());
-                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                                gate: self.clone(),
-                                expected,
-                                settled,
-                            });
-                        }
+                        self.reconcile_result(result, settled, subst);
                     }
                     Err(message) => {
                         subst.record_operand_gate_failure(OperandGateFailure::Decision {
@@ -1996,7 +1998,7 @@ impl Subst {
             .clear();
         for (source, restriction) in restrictions.into_sorted() {
             let resolved = trial.resolve_tvar(source);
-            ensure_tvar_restriction(restriction, &resolved)?;
+            ensure_tvar_restriction(restriction, &resolved, &trial)?;
             if let Type::Var(target) = resolved {
                 trial.narrow_tvar_restriction(target, restriction)?;
             }
@@ -2040,7 +2042,7 @@ impl Subst {
                 let Some(restriction) = self.tvar_restriction(*source) else {
                     return Ok(());
                 };
-                ensure_tvar_restriction(restriction, target)?;
+                ensure_tvar_restriction(restriction, target, self)?;
                 if let Type::Var(target) = target {
                     self.narrow_tvar_restriction(*target, restriction)?;
                 }
@@ -2191,7 +2193,7 @@ fn merge_tvar_restrictions(
     incoming: TypeVarRestriction,
 ) -> Result<TypeVarRestriction, TypeError> {
     existing.intersect(incoming).ok_or_else(|| TypeError {
-        kind: TypeErrorKind::PrecisionMismatch,
+        kind: TypeErrorKind::DtypeFamilyMismatch,
         message: format!(
             "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
             existing.family_name(),
@@ -2627,7 +2629,7 @@ fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeE
         (found, None) | (None, found) => found,
     };
     if let Some(restriction) = source_restriction {
-        ensure_tvar_restriction(restriction, ty)?;
+        ensure_tvar_restriction(restriction, ty, subst)?;
     }
 
     // An older variable that becomes bound to a younger composite makes all
@@ -2647,21 +2649,44 @@ fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeE
 /// An unresolved variable and a witnessed error both pass: the first is
 /// narrowed instead by [`Subst::narrow_tvar_restriction`], and the second
 /// already owns a diagnostic.
-fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
+fn ensure_tvar_restriction(
+    restriction: TypeVarRestriction,
+    ty: &Type,
+    subst: &Subst,
+) -> Result<(), TypeError> {
     let family = restriction.family_name();
     let gloss = restriction.membership_gloss();
     match ty {
+        Type::Ref(inner) if restriction.is_value_constraint() => {
+            ensure_tvar_restriction(restriction, inner, subst)
+        }
+        Type::Tensor(_, precision) if restriction.is_value_constraint() => {
+            let family = restriction.precision_family();
+            match precision {
+                TensorPrec::Concrete(prim) => {
+                    ensure_tvar_restriction(family, &Type::Prim(*prim), subst)
+                }
+                TensorPrec::Var(var) => {
+                    let resolved = subst.apply(&Type::Var(*var));
+                    if let Type::Var(var) = resolved {
+                        subst.narrow_tvar_restriction(var, family)
+                    } else {
+                        ensure_tvar_restriction(family, &resolved, subst)
+                    }
+                }
+            }
+        }
         Type::Var(_) | Type::Error(_) => Ok(()),
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
-            kind: TypeErrorKind::PrecisionMismatch,
+            kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
                 "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
         other => Err(TypeError {
-            kind: TypeErrorKind::PrecisionMismatch,
+            kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
                 "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
             ),
@@ -3665,7 +3690,7 @@ mod tests {
             let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
                 .expect_err("a narrowed variable must reject a non-float dtype");
             assert!(
-                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch)
                     && error.message.contains("Float"),
                 "expected a Float PrecisionMismatch, got: {}",
                 error.message
@@ -3705,8 +3730,72 @@ mod tests {
             &mut call_subst,
         )
         .expect_err("instantiated alias must retain its active-float domain");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
+    }
+
+    #[test]
+    fn operation_value_restrictions_survive_serialization_and_late_tensor_binding() {
+        for restriction in [
+            TypeVarRestriction::FloatValue,
+            TypeVarRestriction::IntValue,
+            TypeVarRestriction::NumericValue,
+        ] {
+            let mut vg = var_gen();
+            let value = vg.fresh_tvar();
+            let scheme = Scheme {
+                tvars: vec![value],
+                tvar_restrictions: vec![(value, restriction)],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Var(value),
+            };
+            let scheme: Scheme =
+                bincode::deserialize(&bincode::serialize(&scheme).unwrap()).unwrap();
+            assert_eq!(scheme.tvar_restrictions, vec![(value, restriction)]);
+            for (dtype, accepts) in [
+                (Prim::F32, restriction != TypeVarRestriction::IntValue),
+                (Prim::Int32, restriction != TypeVarRestriction::FloatValue),
+                (Prim::Bool, false),
+            ] {
+                let mut subst = Subst::new();
+                let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
+                let precision = vg.fresh_tvar();
+                unify(
+                    &instantiated,
+                    &Type::Tensor(vec![], TensorPrec::Var(precision)),
+                    &mut subst,
+                )
+                .unwrap();
+                assert_eq!(
+                    unify(&Type::Var(precision), &Type::Prim(dtype), &mut subst).is_ok(),
+                    accepts,
+                    "{restriction:?} at {dtype:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authored_dtype_bounds_still_reject_whole_tensor_types() {
+        let mut vg = var_gen();
+        for restriction in [
+            TypeVarRestriction::ActiveFloat,
+            TypeVarRestriction::ActiveInt,
+            TypeVarRestriction::ActiveNumeric,
+        ] {
+            let mut subst = Subst::new();
+            let value = vg.fresh_tvar();
+            subst.narrow_tvar_restriction(value, restriction).unwrap();
+            assert!(
+                unify(
+                    &Type::Var(value),
+                    &Type::Tensor(vec![], TensorPrec::Concrete(Prim::F32)),
+                    &mut subst
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -3800,7 +3889,7 @@ mod tests {
         let error = receiver
             .compose(&other)
             .expect_err("the merged substitution must enforce the receiver restriction");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
         assert_eq!(receiver.types_snapshot(), receiver_types_before);
         assert_eq!(
@@ -3823,7 +3912,7 @@ mod tests {
         let error = receiver
             .compose(&other)
             .expect_err("the merged substitution must enforce the right restriction");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
         assert_eq!(receiver.types_snapshot(), receiver_types_before);
         assert_eq!(
@@ -3844,7 +3933,7 @@ mod tests {
             .insert_type(restricted, Type::Prim(Prim::Int32))
             .expect_err("a forbidden direct insertion must fail explicitly");
 
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
         assert!(error.message.contains("int32"));
         assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
@@ -3915,7 +4004,7 @@ mod tests {
         let error = subst
             .insert_type(declared_precision, Type::Prim(Prim::Bool))
             .expect_err("the projected declaration must reject a non-float");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
     }
 
     #[test]
@@ -3937,7 +4026,7 @@ mod tests {
         let error = subst
             .project_tvar_restrictions(&inferred, &declared)
             .expect_err("a forbidden declared slot rejects the whole projection");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert_eq!(subst.tvar_restrictions_snapshot(), restrictions_before);
         assert_eq!(subst.tvar_restriction(first_target), None);
     }

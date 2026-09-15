@@ -187,7 +187,7 @@ fn a_bound_survives_a_generic_wrapper() {
         r#"
 sig only_ints[p: Int]: p -> p
 def only_ints(x) = x
-def wrap[q](x: q) -> q = only_ints(x)
+def wrap[q: Int](x: q) -> q = only_ints(x)
 def probe(x: f64) -> f64 = wrap(x)
 "#,
         "a generic wrapper over an `Int`-bounded function",
@@ -233,7 +233,7 @@ fn a_wrapper_of_a_bounded_function_still_accepts_its_own_family() {
         r#"
 sig only_ints[p: Int]: p -> p
 def only_ints(x) = x
-def wrap[q](x: q) -> q = only_ints(x)
+def wrap[q: Int](x: q) -> q = only_ints(x)
 def probe(x: int16) -> int16 = wrap(x)
 "#,
         "a generic wrapper at an admitted dtype",
@@ -260,15 +260,29 @@ def probe(x: int32) -> int32 = any_numeric(x)
 
 #[test]
 fn a_narrowed_numeric_binder_still_accepts_its_intersection() {
-    assert_accepted(
-        r#"
+    // Intersection is valid for inference variables, not a license to narrow
+    // an authored Numeric contract. The declaration fails even with an f32 call.
+    let source = r#"
 sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 sig any_numeric[q: Numeric]: q -> q
 def any_numeric(x) = only_floats(x)
 def probe(x: f32) -> f32 = any_numeric(x)
-"#,
-        "a `Numeric` binder narrowed to `Float`, used at f32",
+"#;
+    let errors = diagnostics(source);
+    assert!(
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                && error.message.contains("any_numeric")
+                && error.message.contains("Numeric")
+                && error.message.contains("Float")
+        ),
+        "{}",
+        rendered(&errors)
+    );
+    assert_accepted(
+        &source.replace("q: Numeric", "q: Float"),
+        "the explicitly sufficient contract admits f32",
     );
 }
 

@@ -575,17 +575,17 @@ fn rt4_invariant_int_matmul_rejected_for_every_int_dtype() {
     }
 }
 
-/// Working: cross-row enforcement at polymorphic instantiation. Even
+/// Working: checked-family enforcement at polymorphic instantiation. Even
 /// when the offending op (matmul) is in a dead-code branch (`if false
 /// then matmul(x,y) else matmul(x,y)`), the static analysis fires
-/// because instantiation type-checks regardless of runtime branch.
+/// because the authored contract is checked regardless of runtime branch.
 #[test]
 fn rt4_invariant_polymorphic_int_matmul_rejected_through_dead_branch() {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join("dead_int_matmul.ch");
     write_file(
         &src,
-        r#"sig wrap: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
+        r#"sig wrap[p: Float]: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
 def wrap(branch, x, y) = if branch then matmul(x, y) else matmul(x, y)
 def use_int(x: &tensor[2, 3, int32], y: &tensor[3, 4, int32]) -> tensor[2, 4, int32] = wrap(false, x, y)
 "#,
@@ -598,7 +598,9 @@ def use_int(x: &tensor[2, 3, int32], y: &tensor[3, 4, int32]) -> tensor[2, 4, in
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("5.7.2")),
+        messages
+            .iter()
+            .any(|m| m.contains("dtype family `Float`") && m.contains("`int32`")),
         "RT-4 invariant: polymorphic int matmul through any branch must be rejected; got {messages:?}"
     );
 }

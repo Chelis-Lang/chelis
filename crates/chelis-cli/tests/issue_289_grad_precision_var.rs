@@ -6,7 +6,7 @@
 //! The reproducer differentiates `loss`, a fully-concrete `f32` entry
 //! point, whose body routes through `lin_p`, a precision-polymorphic
 //! callee written in the canonical def-level explicit-quantifier form
-//! `def lin_p[p](x: tensor[2, p], ...)` (spec §P4b). Before the fix the
+//! `def lin_p[p: Numeric](x: tensor[2, p], ...)` (spec §P4b). Before the fix the
 //! grad transform lowered `loss`'s body in a fresh sub-context whose
 //! precision-substitution map was empty, so inlining `lin_p` tripped the
 //! §5.8.1 "monomorphization missed precision var `p`" tripwire — even
@@ -107,7 +107,7 @@ fn error_messages(json: &Value) -> Vec<String> {
 // for the single-output and tuple forms.
 fn reproducer_source_wrt(wrt_target: &str) -> String {
     format!(
-        "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+        "def lin_p[p: Numeric](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_p(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
@@ -118,7 +118,7 @@ fn reproducer_source_wrt(wrt_target: &str) -> String {
 
 fn reproducer_source(proj: &str) -> String {
     format!(
-        "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+        "def lin_p[p: Numeric](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_p(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
@@ -235,10 +235,10 @@ fn issue_289_negative_grad_over_polymorphic_loss_with_no_concrete_site_is_reject
     // diagnostic rather than panicking or emitting silently-wrong code.
     write_file(
         &path,
-        "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
-         def loss[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[p] =\n\
+        "def lin_p[p: Numeric](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+         def loss[p: Float](x: tensor[2, p], w: tensor[2, p]) -> tensor[p] =\n\
            sum(lin_p(x, w), cast(0, int32))\n\
-         def dloss[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] =\n\
+         def dloss[p: Float](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] =\n\
            (grad(loss)(x, w)).0\n",
     );
     let output = run_build(&path);

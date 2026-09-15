@@ -384,6 +384,129 @@ fn infer_app_inner(
         return Type::Unit;
     }
 
+    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
+    // It therefore has a scalar surface even before specialization. Reject
+    // mixed surfaces before unification can emit an unrelated occurs-check
+    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
+    if let Some(ref fname) = func_name
+        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
+            || matches!(
+                fname.as_str(),
+                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+            ))
+        && arg_tys.len() == 2
+    {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        let scalar = |ty: &Type| {
+            matches!(ty, Type::Prim(_))
+                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some_and(|bound| !bound.is_value_constraint()))
+        };
+        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
+            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
+        {
+            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
+                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
+            } else {
+                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
+            };
+            let mut error = CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
+                vec![
+                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
+                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
+                ],
+            );
+            if let Some(id) = list_span_id(list) {
+                error.span_offset = parse_span_offset(id);
+                error.span_id = Some(id.to_string());
+            } else {
+                let off = span_of_list(list).offset;
+                if off > 0 {
+                    error.span_offset = Some(off);
+                }
+            }
+            return report(errors, error);
+        }
+    }
+
+    product.record_call_operand_contracts(&func_ty, func_name.as_deref(), &arg_tys, env, subst);
+
+    // Preserve the direct operation's diagnostic before its scheme enforces
+    // the same family through unification. Indirect calls need no name lookup:
+    // their checked function value carries the restriction itself.
+    // Matmul's concrete integer refusal belongs to its signature checker.
+    // Run that existing refusal before the scheme's family error can hide it.
+    if let Some(fname) = func_name.as_deref()
+        && (INT_BINOPS.contains(&fname) || INT_SHIFT_OPS.contains(&fname))
+        && arg_tys.iter().any(|ty| {
+            matches!(type_for_readonly_check(ty, subst),
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
+        })
+        && let Some(rejected) = integer_binop_result_type(
+            list, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+        )
+    {
+        // Preserve the existing direct operation's diagnostic. Symbolic
+        // family requirements still travel through ordinary unification.
+        return rejected;
+    }
+    if func_name.as_deref() == Some("matmul") && arg_tys.len() == 2 {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        if let (
+            Type::Tensor(_, TensorPrec::Concrete(left)),
+            Type::Tensor(_, TensorPrec::Concrete(right)),
+        ) = (&lhs, &rhs)
+            && left == right
+            && left.is_integer()
+        {
+            return check_matmul_signature(&arg_tys, &Type::Unit, subst, errors);
+        }
+    }
+    let mixed_division_precisions =
+        matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
+            let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                _ => None,
+            };
+            matches!((precision(&arg_tys[0]), precision(&arg_tys[1])),
+                (Some(left), Some(right)) if left != right)
+        };
+    if let Some(fname) = func_name.as_deref()
+        && operand_family_policy(fname).is_some()
+        && !mixed_division_precisions
+    {
+        let operands = if matches!(fname, "mean" | "softmax") {
+            &arg_tys[..arg_tys.len().min(1)]
+        } else {
+            &arg_tys[..]
+        };
+        for operand in operands {
+            let resolved = type_for_readonly_check(operand, subst);
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
+                return report(
+                    errors,
+                    CheckError::new(
+                        kind,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            message,
+                        ),
+                        hints,
+                    ),
+                );
+            }
+            if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
+                && let Some(rejected) =
+                    decide_precision_variable_operand(list, fname, var, env, subst, errors)
+            {
+                return rejected;
+            }
+        }
+    }
+
     // The builtin signature structurally shares one precision variable across
     // both tensors and the tolerance. Preserve the operation-specific direct
     // mismatch diagnostics by inspecting concrete operands before generic
@@ -608,101 +731,40 @@ fn infer_app_inner(
         }
     }
 
-    let ret_tv = vg.fresh_type();
-
-    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
-    // It therefore has a scalar surface even before specialization. Reject
-    // mixed surfaces before unification can emit an unrelated occurs-check
-    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
-    if let Some(ref fname) = func_name
-        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
-            || matches!(
-                fname.as_str(),
-                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
-            ))
-        && arg_tys.len() == 2
-    {
-        let lhs = type_for_readonly_check(&arg_tys[0], subst);
-        let rhs = type_for_readonly_check(&arg_tys[1], subst);
-        let scalar = |ty: &Type| {
-            matches!(ty, Type::Prim(_))
-                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some())
+    let ret_tv =
+        match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
+            Ok(ret_ty) => ret_ty,
+            Err(rejected) => return rejected,
         };
-        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
-            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
-        {
-            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
-                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
-            } else {
-                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
-            };
-            let mut error = CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
-                vec![
-                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
-                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
-                ],
-            );
-            if let Some(id) = list_span_id(list) {
-                error.span_offset = parse_span_offset(id);
-                error.span_id = Some(id.to_string());
-            } else {
-                let off = span_of_list(list).offset;
-                if off > 0 {
-                    error.span_offset = Some(off);
-                }
-            }
-            return report(errors, error);
-        }
+    absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
+    // chelis#1512: watch whether the eager pass rejects this call. A
+    // route can suspend on one operand and then reject on another in
+    // the same pass, and the replay re-enters the whole route, so the
+    // rejection would be reported a second time. A call that has
+    // already failed has nothing left to decide, so its suspension is
+    // cancelled here.
+    let checkpoint = errors.checkpoint();
+    let contract_name = func_name.clone();
+    let applied = finish_unified_app(
+        list,
+        kids,
+        func_name,
+        arg_tys,
+        ret_tv,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+    );
+    if errors.iter_since(checkpoint).next().is_some() {
+        product.cancel_post_app_check_for(list);
+    } else {
+        product.record_call_result_contracts(&func_ty, contract_name.as_deref(), env, subst);
     }
-
-    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, arg_tys.clone(), subst);
-    let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
-
-    match unify(&func_ty, &expected_fn, subst) {
-        Ok(()) => {
-            absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
-            // chelis#1512: watch whether the eager pass rejects this call. A
-            // route can suspend on one operand and then reject on another in
-            // the same pass, and the replay re-enters the whole route, so the
-            // rejection would be reported a second time. A call that has
-            // already failed has nothing left to decide, so its suspension is
-            // cancelled here.
-            let checkpoint = errors.checkpoint();
-            let applied = finish_unified_app(
-                list,
-                kids,
-                func_name,
-                arg_tys,
-                ret_tv,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-                expected_result,
-            );
-            if errors.iter_since(checkpoint).next().is_some() {
-                product.cancel_post_app_check_for(list);
-            }
-            applied
-        }
-        Err(te) => {
-            let mut e: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
-                e.span_offset = parse_span_offset(id);
-                e.span_id = Some(id.to_string());
-            } else {
-                let off = span_of_list(list).offset;
-                if off > 0 {
-                    e.span_offset = Some(off);
-                }
-            }
-            report(errors, e)
-        }
-    }
+    applied
 }
 
 /// Bind every alias class this application's instantiation minted a member of

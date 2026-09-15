@@ -627,7 +627,8 @@ fn stdlib_cache_key_folds_the_compiler_version() {
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
     // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 21 (authored
-    // signatures, checked extent transport and named witness claims); the
+    // signatures, checked operation restrictions and named witness claims);
+    // the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {

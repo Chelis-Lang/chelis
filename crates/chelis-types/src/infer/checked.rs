@@ -309,6 +309,10 @@ pub(super) struct InferenceProduct {
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    /// Newly authored parameter holes and call operand/result requirements,
+    /// not contracts transported by function values. These retain their
+    /// original variables until the declaration boundary.
+    inferred_admission_contracts: Vec<InferredAdmissionContract>,
     pub(super) builtin_selections: Vec<crate::builtin_discovery::BuiltinCaseSelection>,
     pending_builtin_selections: Vec<usize>,
     /// chelis#1801: the fresh dimension variables scheme instantiation minted
@@ -337,6 +341,34 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+}
+
+struct InferredAdmissionContract {
+    subject: String,
+    variable: TypeVar,
+    /// Declared capabilities in the enclosing function. A local hole may
+    /// resolve to one of these without requiring a concrete instantiation.
+    givens: Vec<(TypeVar, TypeVarRestriction)>,
+    failed_application: Option<ErrorWitness>,
+}
+
+impl InferredAdmissionContract {
+    fn unmet_families(&self, subst: &Subst) -> Vec<(TypeVar, TypeVarRestriction)> {
+        if self.failed_application.is_some() {
+            return Vec::new();
+        }
+        crate::env::free_tvars(&subst.apply(&Type::Var(self.variable)))
+            .into_iter()
+            .filter_map(|variable| {
+                let required = subst.tvar_restriction(variable)?;
+                let provided = self.givens.iter().any(|(given, bound)| {
+                    subst.apply(&Type::Var(*given)) == Type::Var(variable)
+                        && bound.intersect(required) == Some(*bound)
+                });
+                (!provided).then_some((variable, required))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -415,19 +447,6 @@ pub(super) struct DeferredShapeCheck {
     arg_exprs: Vec<deep::Expr>,
     arg_tys: Vec<Type>,
     result_ty: Type,
-    /// chelis#1805: the PRECISION variable this entry waits on.
-    ///
-    /// `shape_operand_awaits_binding` answers the outer-constructor question,
-    /// and a `Type::Tensor` answers it the moment it is seen whatever its
-    /// precision still holds. A family policy needs the precision too, so an
-    /// entry suspended on one records it here and the replay waits on both.
-    ///
-    /// It is a per-entry wait rather than a widening of the readiness
-    /// predicate. Waiting globally on every free precision variable would hold
-    /// `def g[p](x: tensor[3, p]) = sum(x, 0)`'s shape entry to the declaration
-    /// boundary and reject a legitimate definition, against [04-INF-1]'s
-    /// "declared precision variables remain polymorphic".
-    awaits_precision: Option<TypeVar>,
 }
 
 #[derive(Clone)]
@@ -530,6 +549,183 @@ impl InferenceProduct {
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
         self.next_deferred_shape_id
+    }
+
+    /// Snapshot before body inference: operation and callee constraints may
+    /// narrow these holes, but cannot turn them into implicit generic bounds.
+    pub(super) fn record_inferred_contract(
+        &mut self,
+        subject: &str,
+        ty: &Type,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let variables = crate::env::free_tvars(&subst.apply(ty))
+            .into_iter()
+            .filter(|variable| {
+                // Explicit binders have their own rigidity/entailment check.
+                subst.tvar_restriction(*variable).is_none()
+                    && !env.active_declared_type_names().contains_key(variable)
+            });
+        self.record_admission_variables(subject, variables, env, subst);
+    }
+
+    fn record_admission_variables(
+        &mut self,
+        subject: &str,
+        variables: impl IntoIterator<Item = TypeVar>,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let givens: Vec<_> = env
+            .active_declared_type_names()
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(variable, _)| {
+                // Unification can move a declared variable's restriction to
+                // its representative before a call result is registered.
+                let Type::Var(resolved) = subst.apply(&Type::Var(*variable)) else {
+                    return None;
+                };
+                subst
+                    .tvar_restriction(resolved)
+                    .map(|bound| (*variable, bound))
+            })
+            .collect();
+        for variable in variables {
+            self.inferred_admission_contracts
+                .push(InferredAdmissionContract {
+                    subject: subject.to_string(),
+                    variable,
+                    givens: givens.clone(),
+                    failed_application: None,
+                });
+        }
+    }
+
+    /// Operand requirements can originate in a temporary value, not only in
+    /// a function parameter (for example `sin(to_tensor([]))`). Record them
+    /// before the checked callee's requirements enter ordinary unification.
+    /// Merely transporting a function value never passes through this edge.
+    pub(super) fn record_call_operand_contracts(
+        &mut self,
+        callee: &Type,
+        name: Option<&str>,
+        arguments: &[Type],
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let Type::Fn(parameters, _) = subst.apply(callee) else {
+            return;
+        };
+        for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
+            if crate::env::free_tvars(parameter)
+                .iter()
+                .any(|variable| subst.tvar_restriction(*variable).is_some())
+            {
+                self.record_inferred_contract(
+                    &format!(
+                        "operand {} of `{}`",
+                        index + 1,
+                        name.unwrap_or("<function value>")
+                    ),
+                    argument,
+                    env,
+                    subst,
+                );
+            }
+        }
+    }
+
+    pub(super) fn record_call_result_contracts(
+        &mut self,
+        callee: &Type,
+        name: Option<&str>,
+        env: &Env,
+        subst: &Subst,
+    ) {
+        let Type::Fn(_, result) = subst.apply(callee) else {
+            return;
+        };
+        // Calling a result-polymorphic factory must satisfy its requirement
+        // too, even when it has no operands. Inspect only data positions:
+        // a returned function (including one nested in an aggregate) carries
+        // its already-checked contract, rather than invoking that contract.
+        let mut pending = vec![result.as_ref()];
+        let mut variables = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            match ty {
+                Type::Var(variable) | Type::Tensor(_, TensorPrec::Var(variable)) => {
+                    if subst.tvar_restriction(*variable).is_some() {
+                        variables.insert(*variable);
+                    }
+                }
+                Type::Ref(inner) => pending.push(inner),
+                Type::Adt(_, fields) | Type::Tuple(fields) => pending.extend(fields),
+                Type::KindedAdt(_, arguments) => {
+                    pending.extend(arguments.iter().filter_map(NominalArg::as_type));
+                }
+                Type::Fn(..)
+                | Type::Prim(_)
+                | Type::Tensor(_, TensorPrec::Concrete(_))
+                | Type::Unit
+                | Type::Error(_) => {}
+            }
+        }
+        self.record_admission_variables(
+            &format!("result of `{}`", name.unwrap_or("<function value>")),
+            variables,
+            env,
+            subst,
+        );
+    }
+
+    pub(super) fn admission_contract_checkpoint(&self) -> usize {
+        self.inferred_admission_contracts.len()
+    }
+
+    pub(super) fn has_pending_admission_contract_since(
+        &self,
+        checkpoint: usize,
+        subst: &Subst,
+    ) -> bool {
+        self.inferred_admission_contracts[checkpoint..]
+            .iter()
+            .any(|contract| !contract.unmet_families(subst).is_empty())
+    }
+
+    fn finish_admission_contracts(
+        &mut self,
+        declaration: Option<&str>,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let mut reported = BTreeSet::new();
+        for contract in self.inferred_admission_contracts.drain(..) {
+            for (variable, required) in contract.unmet_families(subst) {
+                if !reported.insert(variable) {
+                    continue;
+                }
+                errors.push(CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "{} in `{}` requires `{}` \
+                         admission, but its unresolved type `{}` has no sufficient declared \
+                         contract at the declaration boundary (spec/04-type-system.md §3.1)",
+                        contract.subject,
+                        declaration.unwrap_or("<anonymous>"),
+                        required.family_name(),
+                        subst.apply(&Type::Var(contract.variable)),
+                    ),
+                    vec![
+                        "Declare the required dtype-family bound or a concrete parameter type; \
+                        a local inference hole must bind within its enclosing declaration, \
+                        not acquire an implicit generic bound."
+                            .to_string(),
+                    ],
+                ));
+            }
+        }
     }
 
     pub(super) fn defer_tuple_projection(&mut self, source: Type, index: usize, projected: Type) {
@@ -819,6 +1015,141 @@ impl InferenceProduct {
         );
     }
 
+    /// A rejected application supplied an operand, but its checked family
+    /// rejected that binding. The same monomorphic parameter must not also be
+    /// diagnosed as never applied. Unrelated pending parameters remain live.
+    pub(super) fn cancel_shape_checks_for_failed_family_call(
+        &mut self,
+        callee: &Type,
+        subst: &Subst,
+        failure: ErrorWitness,
+    ) {
+        let Type::Fn(params, _) = subst.apply(callee) else {
+            return;
+        };
+        let failed_parameters: Vec<_> = params.iter().flat_map(crate::env::free_tvars).collect();
+        for contract in &mut self.inferred_admission_contracts {
+            if crate::env::free_tvars(&subst.apply(&Type::Var(contract.variable)))
+                .iter()
+                .any(|variable| failed_parameters.contains(variable))
+            {
+                // Retain the slot so lexical checkpoints remain stable.
+                // Only an already-reported application can discharge it.
+                contract.failed_application = Some(failure);
+            }
+        }
+        self.deferred_shape_checks.retain(|check| {
+            !check.arg_tys.iter().any(|argument| {
+                crate::env::free_tvars(&subst.apply(argument))
+                    .iter()
+                    .any(|variable| failed_parameters.contains(variable))
+            })
+        });
+    }
+
+    /// Give an already-suspended specialized shape rule its documented
+    /// diagnostic precedence when a later call structurally binds its operand
+    /// but fails the checked dtype family.
+    ///
+    /// Ordinary unification cannot publish that binding: the family rejection
+    /// rolls the transaction back before the deferred rule becomes ready.
+    /// Build a restriction-free structural overlay instead, apply it only to
+    /// the pending rule's arguments, and execute the rule against cloned solver
+    /// state. A shape-valid preview emits nothing and leaves the family error
+    /// authoritative. A rejecting preview removes the exact deferred entry so
+    /// the declaration boundary cannot report it again.
+    pub(super) fn report_preceding_shape_error_for_failed_family_call(
+        &mut self,
+        callee: &Type,
+        arguments: &[Type],
+        vg: &VarGen,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        let Type::Fn(parameters, _) = subst.apply(callee) else {
+            return None;
+        };
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+
+        // Restrictions live in `subst`, not in `Type`, so a fresh
+        // substitution records exactly the structural relation that the
+        // failed call established without weakening the real solver.
+        let mut structural = Subst::default();
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            if unify(
+                &subst.apply(parameter),
+                &subst.apply(argument),
+                &mut structural,
+            )
+            .is_err()
+            {
+                return None;
+            }
+        }
+
+        let failed_parameters: Vec<_> = parameters
+            .iter()
+            .flat_map(crate::env::free_tvars)
+            .filter(|variable| subst.tvar_restriction(*variable).is_some())
+            .collect();
+        let candidates: Vec<_> = self
+            .deferred_shape_checks
+            .iter()
+            .filter_map(|check| {
+                let shares_failed_parameter = check.arg_tys.iter().any(|argument| {
+                    crate::env::free_tvars(&subst.apply(argument))
+                        .iter()
+                        .any(|variable| failed_parameters.contains(variable))
+                });
+                let DeferredShapeRule::ShapeRoute { route, list, kids } = &check.rule else {
+                    return None;
+                };
+                shares_failed_parameter.then(|| {
+                    (
+                        check.id,
+                        route.clone(),
+                        list.clone(),
+                        kids.clone(),
+                        check.arg_tys.clone(),
+                    )
+                })
+            })
+            .collect();
+        for (id, route, list, kids, pending_arguments) in candidates {
+            let settled: Vec<_> = pending_arguments
+                .iter()
+                .map(|ty| structural.apply(&subst.apply(ty)))
+                .collect();
+            if settled
+                .iter()
+                .any(|ty| shape_operand_awaits_binding(ty, &structural))
+            {
+                continue;
+            }
+
+            let checkpoint = errors.checkpoint();
+            let mut trial_vg = vg.clone();
+            let mut trial_subst = subst.clone();
+            let result = check_shape_route_signature(
+                &route,
+                &list,
+                &kids,
+                &settled,
+                &mut trial_vg,
+                &mut trial_subst,
+                errors,
+            );
+            if errors.iter_since(checkpoint).next().is_none() {
+                continue;
+            }
+            self.deferred_shape_checks.retain(|check| check.id != id);
+            return Some(result);
+        }
+        None
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,
@@ -830,23 +1161,7 @@ impl InferenceProduct {
         if let DeferredShapeRule::PostApp { site, .. } = &rule {
             record_post_app_key(*site, self.replaying_post_app.is_some());
         }
-        self.push_deferred_shape_check(rule, arg_exprs, arg_tys, result_ty, None);
-    }
-
-    /// chelis#1805: [`Self::defer_shape_check`] for an entry that also waits on
-    /// a precision variable.
-    pub(super) fn defer_shape_check_awaiting_precision(
-        &mut self,
-        rule: DeferredShapeRule,
-        arg_tys: Vec<Type>,
-        result_ty: Type,
-        precision: TypeVar,
-    ) {
-        #[cfg(test)]
-        if let DeferredShapeRule::PostApp { site, .. } = &rule {
-            record_post_app_key(*site, self.replaying_post_app.is_some());
-        }
-        self.push_deferred_shape_check(rule, Vec::new(), arg_tys, result_ty, Some(precision));
+        self.push_deferred_shape_check(rule, arg_exprs, arg_tys, result_ty);
     }
 
     fn push_deferred_shape_check(
@@ -855,7 +1170,6 @@ impl InferenceProduct {
         arg_exprs: Vec<deep::Expr>,
         arg_tys: Vec<Type>,
         result_ty: Type,
-        awaits_precision: Option<TypeVar>,
     ) {
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
@@ -865,7 +1179,6 @@ impl InferenceProduct {
             arg_exprs,
             arg_tys,
             result_ty,
-            awaits_precision,
         });
     }
 
@@ -906,19 +1219,7 @@ impl InferenceProduct {
     ) {
         self.resolve_deferred_type_derivations(vg, subst, adt_reg, errors);
         let checks = std::mem::take(&mut self.deferred_shape_checks);
-        for mut check in checks {
-            // chelis#1805: the precision wait, ahead of the outer-constructor
-            // one. An entry suspended on a precision variable is ready when
-            // that variable binds, and the replay then reaches the family
-            // policy against a settled dtype; the wait is cleared here so a
-            // replay that re-registers is not held by a stale one.
-            if let Some(precision) = check.awaits_precision {
-                if matches!(subst.apply(&Type::Var(precision)), Type::Var(_)) {
-                    self.deferred_shape_checks.push(check);
-                    continue;
-                }
-                check.awaits_precision = None;
-            }
+        for check in checks {
             if check
                 .arg_tys
                 .iter()
@@ -1049,12 +1350,14 @@ impl InferenceProduct {
     /// source must state the intended parameter/result shape explicitly.
     pub(super) fn finish_deferred_shape_checks(
         &mut self,
+        declaration: Option<&str>,
         vg: &mut VarGen,
         subst: &mut Subst,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        self.finish_admission_contracts(declaration, subst, errors);
         for check in self.deferred_shape_checks.drain(..) {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
@@ -1080,16 +1383,6 @@ impl InferenceProduct {
                 // can be derived at all, which is the acceptance boundary the
                 // shape-computed builtins have carried since chelis#1489.
                 //
-                // chelis#1805: a precision that no application inside this
-                // declaration ever bound discharges here too, and silently.
-                // [04-INF-1] keeps a declared precision variable polymorphic,
-                // so `def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)`
-                // is a legitimate declaration rather than an error: what is
-                // wrong is an INSTANTIATION at a dtype the family excludes, and
-                // `validate.rs::check_app_for_poly_op_constraint` rejects that
-                // where the call site supplies it. Rejecting here instead would
-                // refuse a `sig`-declared program whose precision variable has
-                // no binder list to carry a bound at all.
                 DeferredShapeRule::PostApp { .. } => continue,
             };
             errors.push(CheckError::new(
@@ -1407,7 +1700,11 @@ pub(super) fn reconcile_replayed_result(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if unify(published, &produced, subst).is_err() {
+    if let Err(error) = unify(published, &produced, subst) {
+        if matches!(error.kind, crate::unify::TypeErrorKind::DtypeFamilyMismatch) {
+            errors.push(error.into());
+            return produced;
+        }
         let expected = subst.apply(published);
         errors.push(CheckError::new(
             CheckErrorKind::TypeMismatch,
@@ -1566,6 +1863,10 @@ pub(crate) enum ReconcileMutationCase {
     Disagrees,
     /// The rule produces the type a fresh published variable can take.
     Agrees,
+    /// A consumer requires float values but the producer settles to integers.
+    FamilyDisagrees,
+    /// The same consumer accepts a float result.
+    FamilyAgrees,
 }
 
 /// Returns the rendered produced type and whether the published type ended up
@@ -1581,10 +1882,21 @@ pub(crate) fn run_reconcile_mutation_case(
     let published = match case {
         ReconcileMutationCase::Disagrees => tensor(3),
         ReconcileMutationCase::Agrees => Type::Var(vg.fresh_tvar()),
+        ReconcileMutationCase::FamilyDisagrees | ReconcileMutationCase::FamilyAgrees => {
+            let var = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(var, TypeVarRestriction::FloatValue)
+                .unwrap();
+            Type::Var(var)
+        }
     };
     let produce = match case {
         ReconcileMutationCase::Disagrees => tensor(4),
         ReconcileMutationCase::Agrees => tensor(3),
+        ReconcileMutationCase::FamilyDisagrees => {
+            Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::Int32))
+        }
+        ReconcileMutationCase::FamilyAgrees => tensor(3),
     };
     let produced = reconcile_replayed_result("permute", &published, produce, &mut subst, errors);
     let bound = subst.apply(&published) == produced;

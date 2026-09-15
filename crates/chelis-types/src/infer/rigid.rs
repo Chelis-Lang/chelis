@@ -12,9 +12,9 @@
 //! This is the type-variable twin of §4.4's dimension rule, which
 //! [`super::app_shape_helpers::check_declared_dvars_rigid`] enforces; the two
 //! run at the same point in [`super::common::infer_top_level`], immediately
-//! after the post-body signature unification, and report the same two shapes:
-//! a binder pinned to a concrete type, and two distinct binders collapsed onto
-//! each other.
+//! after the post-body signature unification. In addition to concrete pins
+//! and collapsed binders, the type check rejects a body that requires a
+//! narrower dtype family than its authored contract permits.
 //!
 //! An inference hole (`(t-var {} _)`) is NOT a binder and is not checked here.
 //! [04-INF-5] gives the hole the type its body determines; it never reaches
@@ -25,7 +25,7 @@ use chelis_unord::UnordMap;
 
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Type, TypeVar};
+use crate::types::{Type, TypeVar, TypeVarRestriction};
 use crate::unify::Subst;
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
@@ -127,6 +127,44 @@ pub(super) fn check_declared_tvars_rigid(
             ));
         } else {
             seen.push((resolved_var, binder));
+        }
+    }
+}
+
+/// The dtype-family part of the authored contract also applies at reserved
+/// wrapper boundaries that project checked types instead of unifying shapes.
+pub(super) fn check_declared_dtype_bounds(
+    declaration: &str,
+    type_names: &UnordMap<TypeVar, String>,
+    declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    for (binder, _) in type_names.to_sorted() {
+        let binder = *binder;
+        let Type::Var(resolved_var) = subst.apply(&Type::Var(binder)) else {
+            // Concrete pins are owned by the separate type-rigidity check.
+            continue;
+        };
+        let declared_bound = declared_bounds.get(&binder).copied().flatten();
+        if let Some(required) = subst.tvar_restriction(resolved_var)
+            && declared_bound != Some(required)
+        {
+            let authored = declared_bound
+                .map(|bound| format!("the declared `{}` family", bound.family_name()))
+                .unwrap_or_else(|| "an unbounded authored variable".to_string());
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "declared type parameter {} of `{declaration}` requires dtype family `{}` in its body, but its signature admits {authored}; an authored generic contract must satisfy its operation requirements at the definition (spec/04-type-system.md §3.1, [04-DTYPE-2])",
+                    render_declared_binder(type_names, binder), required.family_name(),
+                ),
+                vec![format!(
+                    "Declare this binder with `{}: {}` in the signature's binder list.",
+                    type_names.get(&binder).expect("an authored binder has a source name"),
+                    required.family_name(),
+                )],
+            ));
         }
     }
 }

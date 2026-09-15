@@ -219,7 +219,7 @@ def driver() -> f32 = {{
 // ─── (3b) fresh separate-sig def, shape-computed builtins, no bare tvar ───
 
 const FRESH_SEPARATE_SIG: &str = "\
-sig ffn: tensor[n, d, p] -> tensor[d, h, p] -> tensor[h, d, p] -> tensor[n, d, p] -> tensor[n, d, p]
+sig ffn[p: Float]: tensor[n, d, p] -> tensor[d, h, p] -> tensor[h, d, p] -> tensor[n, d, p] -> tensor[n, d, p]
 def ffn(x, w1, w2, r) = {
   hidden = matmul(x, w1)
   proj = matmul(hidden, w2)

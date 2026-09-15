@@ -27,6 +27,63 @@ pub(super) fn auto_borrow_call_arg_types(
         .collect()
 }
 
+/// Apply the checked function contract shared by ordinary and specialized
+/// application paths.
+///
+/// Procedural routes may compute a more precise result than their fallback HM
+/// scheme, but they must still consume the scheme's argument restrictions.
+/// Keeping unification and family-failure cleanup here prevents such a route
+/// from becoming a second admission mechanism.
+pub(super) fn unify_checked_call_contract(
+    list: &deep::List,
+    func_ty: &Type,
+    arg_tys: &[Type],
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Result<Type, Type> {
+    let ret_ty = vg.fresh_type();
+    let unify_arg_tys = auto_borrow_call_arg_types(func_ty, arg_tys.to_vec(), subst);
+    let expected_fn = Type::Fn(unify_arg_tys.clone(), Box::new(ret_ty.clone()));
+
+    match unify(func_ty, &expected_fn, subst) {
+        Ok(()) => Ok(ret_ty),
+        Err(te) => {
+            let family_mismatch = matches!(te.kind, TypeErrorKind::DtypeFamilyMismatch);
+            if family_mismatch
+                && let Some(rejected) = product.report_preceding_shape_error_for_failed_family_call(
+                    func_ty,
+                    &unify_arg_tys,
+                    vg,
+                    subst,
+                    errors,
+                )
+            {
+                if let Type::Error(witness) = rejected {
+                    product.cancel_shape_checks_for_failed_family_call(func_ty, subst, witness);
+                }
+                return Err(rejected);
+            }
+            let mut error: CheckError = te.into();
+            if let Some(id) = list_span_id(list) {
+                error.span_offset = parse_span_offset(id);
+                error.span_id = Some(id.to_string());
+            } else {
+                let offset = span_of_list(list).offset;
+                if offset > 0 {
+                    error.span_offset = Some(offset);
+                }
+            }
+            let rejected = report(errors, error);
+            if family_mismatch && let Type::Error(witness) = rejected {
+                product.cancel_shape_checks_for_failed_family_call(func_ty, subst, witness);
+            }
+            Err(rejected)
+        }
+    }
+}
+
 /// Implicit-copy fan-out v3 Shape A relaxation: when a def's body's
 /// tail-position expression is a bare `(var x)` reference (possibly
 /// wrapped in `let`, `if`, or `match` structures whose sibling branches

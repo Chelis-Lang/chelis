@@ -298,6 +298,19 @@ mod unresolved_operand_reconcile_tests {
             "agreement must be silent, got {errors:?}"
         );
     }
+
+    #[test]
+    fn replay_preserves_the_consumers_dtype_family_contract() {
+        let (produced, _, errors) = run(ReconcileMutationCase::FamilyDisagrees);
+        assert_eq!(produced, "tensor[3, int32]");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(matches!(errors[0].kind, CheckErrorKind::PrecisionMismatch));
+        assert!(errors[0].message.contains("Float") && errors[0].message.contains("int32"));
+        let (produced, bound, errors) = run(ReconcileMutationCase::FamilyAgrees);
+        assert_eq!(produced, "tensor[3, f32]");
+        assert!(bound);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
 }
 
 #[cfg(test)]

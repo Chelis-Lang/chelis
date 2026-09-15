@@ -66,7 +66,7 @@ fn shared_precision_generic_wrapper_is_accepted_for_every_active_float_dtype() {
     for dtype in FLOAT_DTYPES {
         let source = format!(
             r#"
-def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+def close[p: Float](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
   test_assert_close_tensor(actual, expected, tol, "generic")
 
 def check(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
@@ -292,7 +292,7 @@ fn shared_precision_generic_wrapper_rejects_non_float_instantiations() {
     for dtype in REJECTED_DTYPES {
         let source = format!(
             r#"
-def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+def close[p: Float](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
   test_assert_close_tensor(actual, expected, tol, "generic")
 
 def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =

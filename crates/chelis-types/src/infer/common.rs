@@ -408,7 +408,9 @@ pub(super) fn pattern_constructor_for_scrutinee<'adt>(
 pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
     match kind {
         TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
-        TypeErrorKind::PrecisionMismatch => CheckErrorKind::PrecisionMismatch,
+        TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
+            CheckErrorKind::PrecisionMismatch
+        }
         TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
         TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
         TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
@@ -2566,6 +2568,12 @@ pub(super) fn infer_top_level(
         // THIS declaration computed rather than reading the parked one
         // back, which body inference could have replaced.
         env.set_active_declared_type_names(declared_type_names.clone());
+        let declared_dtype_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>> =
+            declared_type_names
+                .to_sorted()
+                .into_iter()
+                .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
+                .collect();
         let mut body_env = env.clone();
         body_env.set_type_resolution_binders(
             declared_signatures
@@ -2815,6 +2823,7 @@ pub(super) fn infer_top_level(
                 // [04-ADT-4].
                 let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
                     Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
+                    Some(TypeErrorKind::DtypeFamilyMismatch) => CheckErrorKind::PrecisionMismatch,
                     _ => CheckErrorKind::TypeMismatch,
                 };
                 // RT-2 fixup B1: when the mismatch is a tensor
@@ -2824,22 +2833,30 @@ pub(super) fn infer_top_level(
                 // so the user sees the result-precision table rule
                 // rather than a generic "doesn't match declared
                 // signature".
-                let extra = match (&resolved_body, &resolved_decl) {
-                    (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
-                        if body_prec != decl_prec =>
-                    {
-                        format!(
-                            " (precision `{}` vs declared `{}`; if the body is a \
+                let extra = if let Some(error) = unify_result
+                    .as_ref()
+                    .err()
+                    .filter(|error| matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch))
+                {
+                    format!(": {}", error.message)
+                } else {
+                    match (&resolved_body, &resolved_decl) {
+                        (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
+                            if body_prec != decl_prec =>
+                        {
+                            format!(
+                                " (precision `{}` vs declared `{}`; if the body is a \
                              `reduce_sum`, see spec/04-type-system.md §5.7.1: \
                              narrow integer operands widen to int32 to prevent \
                              silent overflow; use `tensor[{}]` or omit the result \
                              type)",
-                            body_prec.name(),
-                            decl_prec.name(),
-                            body_prec.name(),
-                        )
+                                body_prec.name(),
+                                decl_prec.name(),
+                                body_prec.name(),
+                            )
+                        }
+                        _ => String::new(),
                     }
-                    _ => String::new(),
                 };
                 errors.push(CheckError::new(
                     mismatch_kind,
@@ -2869,6 +2886,14 @@ pub(super) fn infer_top_level(
         } else {
             body_ty
         };
+
+        check_declared_dtype_bounds(
+            &name,
+            &declared_type_names,
+            &declared_dtype_bounds,
+            subst,
+            errors,
+        );
 
         if let Some(level) = ordinary_level {
             subst.leave_level(level, vg);

@@ -51,7 +51,7 @@ fn root_tensor<'a>(
 
 fn reproducer_source(proj: &str) -> String {
     format!(
-        "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+        "def lin_p[p: Numeric](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_p(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
@@ -109,10 +109,10 @@ fn issue289_host_eval_grad_through_precision_var_callee_dw_equals_x() {
 
 #[test]
 fn issue289_host_eval_polymorphic_no_site_does_not_internal_panic() {
-    let src = "def lin_p[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
-         def loss[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[p] =\n\
+    let src = "def lin_p[p: Numeric](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] = mul(x, w)\n\
+         def loss[p: Float](x: tensor[2, p], w: tensor[2, p]) -> tensor[p] =\n\
            sum(lin_p(x, w), cast(0, int32))\n\
-         def dloss[p](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] =\n\
+         def dloss[p: Float](x: tensor[2, p], w: tensor[2, p]) -> tensor[2, p] =\n\
            (grad(loss)(x, w)).0\n";
     // No `out =` call site pins `p`. The fix concretizes only when a
     // concrete call-site precision exists, so this stays under-determined

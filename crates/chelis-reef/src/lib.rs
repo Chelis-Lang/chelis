@@ -8136,6 +8136,9 @@ fn canonical_shell_scheme(
             TypeVarRestriction::ActiveFloat => TypeVariableDomain::ActiveFloat,
             TypeVarRestriction::ActiveInt => TypeVariableDomain::ActiveInt,
             TypeVarRestriction::ActiveNumeric => TypeVariableDomain::ActiveNumeric,
+            TypeVarRestriction::FloatValue => TypeVariableDomain::FloatValue,
+            TypeVarRestriction::IntValue => TypeVariableDomain::IntValue,
+            TypeVarRestriction::NumericValue => TypeVariableDomain::NumericValue,
         };
         restrictions.push((
             canonical.0,

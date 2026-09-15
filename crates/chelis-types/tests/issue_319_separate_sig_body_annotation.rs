@@ -168,7 +168,7 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
 }
 
 const SEPARATE_SIG_SDPA: &str = "\
-sig sdpa: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
+sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)

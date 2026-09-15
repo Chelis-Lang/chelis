@@ -226,15 +226,17 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          widening\n",
     ),
     (
+        // [04-INF-9]: the Float admission contract rejects this before
+        // lowering. Retain the exact original source and byte comparator.
         "c_int_tensor_cos",
         "def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
          out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
          cast(4, int32)]))\n",
         "c",
-        "error: unsupported: builtin `cos` on tensor operands in `chelis build` host emission \
-         (no tensor emission arm for this op) (codegen:c); deliberate [04-TOT-2]: a checked \
-         tensor operation must route through the typed DAG lane; the C host scalar lane has no \
-         fallback tensor expression\n",
+        "error: Check errors: Type errors: [CheckError { kind: PrecisionMismatch, message: \
+         \"type variable bounded by dtype family `Float` (the active float dtypes) cannot be \
+         instantiated at `int32`\", suggestions: [\"Insert explicit cast\"], severity: 0.8, \
+         expected: None, got: None, span_offset: Some(51), span_id: Some(\"surf:51..57\") }]\n",
     ),
     (
         "c_nonliteral_window",
@@ -343,20 +345,22 @@ fn nonliteral_window_rejection_is_equal_across_build_lanes() {
 /// existing `Lowering error:` compatibility wrapper.
 #[test]
 fn unrelated_lowering_rejection_retains_the_legacy_wrapper() {
-    let program = "def loss(x: tensor[4, f32]) -> f32 = \
-         tensor_to_scalar(sum(cast(cos(cast(x, int32)), f32), 0))\n\
-         def dloss(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)\n\
-         out = dloss(to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
-    let (ok, stderr, emitted) = build_target(program, "hip_int_tensor_cos_wrapper", "hip");
-    assert!(!ok, "HIP integer-tensor cos must be rejected");
+    // Integer cos now fails ordinary checking under [04-INF-9]. Use the
+    // sum identity, which is not the max identity selected by #1870, to
+    // keep executing the production lowering adapter's other branch.
+    let program = "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+         reduce_window_sum(x, [w], [s])\n\
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n";
+    let (ok, stderr, emitted) = build_target(program, "hip_window_sum_wrapper", "hip");
+    assert!(!ok, "HIP runtime-window sum must be rejected");
     assert!(emitted.is_empty(), "rejected HIP build wrote: {emitted}");
     assert!(
         stderr.starts_with("error: Lowering error: unsupported:"),
         "an unrelated lowering rejection lost its compatibility wrapper: {stderr}"
     );
     assert!(
-        stderr.contains("`Cos`") || stderr.contains("`cos`"),
-        "the production witness must remain the integer-tensor cos rejection: {stderr}"
+        stderr.contains("non-literal window list for `reduce_window_sum`"),
+        "the production witness must be the runtime-window sum rejection: {stderr}"
     );
 }
 

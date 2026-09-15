@@ -184,7 +184,7 @@ fn separate_sig_sdpa_checks_clean() {
     // traversal here; keep this as the coarse end-to-end guard.
     let deep = surf_to_deep(
         "\
-sig sdpa: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
+sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -198,7 +198,7 @@ def sdpa(q, k, v, scale) = {
         "D: separate-sig SDPA must check clean; got {:?}",
         check_ir_program(&surf_to_deep(
             "\
-sig sdpa: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
+sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)

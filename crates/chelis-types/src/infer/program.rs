@@ -384,7 +384,7 @@ pub(super) fn infer_program_with_product_in_session(
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(&mut vg, &mut subst, &adt_reg, errors);
+            product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
             product.finish_root(&subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -450,12 +450,6 @@ pub(super) fn infer_program_with_product_in_session(
     // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
-
-    // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
-    // are reached through a polymorphic-precision sig instantiated at a
-    // dtype the spec rules forbid (§5.7.2 / §5.4).
-    let local_ir_env = build_ir_type_env(exprs);
-    validate_polymorphic_op_constraints(exprs, &local_ir_env, errors);
 
     // If any walker bailed on a nearly-exhausted stack during this run,
     // surface it as a hard located failure (covered-or-rejected).
@@ -541,8 +535,6 @@ pub(crate) fn build_type_env_from_library_in_session(
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
-    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
     stack_scope.drain_into(errors);
@@ -694,7 +686,6 @@ pub(crate) fn build_compiled_library_context_in_session(
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -866,7 +857,6 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -1070,8 +1060,6 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(new_exprs, &combined_ir, errors);
-    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -1212,7 +1200,6 @@ pub(crate) fn infer_ir_program_in_session(
     validate_ir_program(exprs, &type_env, &product.top_level_references, errors);
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
-    validate_polymorphic_op_constraints(exprs, &type_env, errors);
     // Surface any walker stack bail as a hard located error.
     stack_scope.drain_into(errors);
     stats
@@ -1475,6 +1462,7 @@ pub(super) fn infer_ir_program_with_state(
                 deferred_bindings.push(binding);
             }
             product.finish_deferred_shape_checks(
+                top_level_decl_name(expr),
                 &mut state.var_gen,
                 &mut state.subst,
                 &state.adt_reg,

@@ -791,6 +791,14 @@
     },
     {
       "file": "checked.rs",
+      "function": "record_call_result_contracts",
+      "ordinal": 1,
+      "pattern": "Type::Var(variable) | Type::Tensor(_ , TensorPrec::Var(variable))",
+      "disposition": "not_a_route",
+      "reason": "records constrained call-result variables for declaration-boundary admission checking; local bindings or authored givens discharge them, otherwise finish_admission_contracts rejects them under [04-INF-9]"
+    },
+    {
+      "file": "checked.rs",
       "function": "resolve_deferred_type_derivations",
       "ordinal": 1,
       "pattern": "Type::Var(_)",

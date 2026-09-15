@@ -2044,6 +2044,41 @@ pub fn shape_class(name: &str) -> ShapeClass {
     }
 }
 
+/// Operand-family contract shared by builtin schemes and direct-call diagnostics.
+/// Value constraints attach this contract to whole scalar/tensor operands; authored
+/// dtype bounds still constrain primitive precision parameters only.
+pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
+    use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
+    match name {
+        "mean" | "softmax" | "div" | "matmul" | "layer_norm" | "exp" | "log" | "sin" | "cos"
+        | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+        | "reduce_window_mean" => Some(ActiveFloat),
+        // [05-OP-64], [05-OP-47] and truncating division.
+        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
+        // and the arithmetic rows of spec/04 section 5.4.
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
+        | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
+        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min" => Some(ActiveNumeric),
+        _ => None,
+    }
+}
+
+fn operand_value_restrictions(
+    name: &str,
+    operands: &[TypeVar],
+) -> Vec<(TypeVar, TypeVarRestriction)> {
+    operand_dtype_family(name)
+        .map(|family| {
+            operands
+                .iter()
+                .map(|var| (*var, family.for_value()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
 pub fn builtin_env() -> (Env, VarGen) {
     let mut env = Env::new();
@@ -2072,7 +2107,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -2089,7 +2124,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -2123,7 +2158,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2175,7 +2210,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let epsilon = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, t3, epsilon],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2, t3, epsilon]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2197,7 +2232,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2213,7 +2248,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2235,7 +2270,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             tvars: vec![input, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2336,7 +2371,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2366,7 +2401,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2640,7 +2675,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
     // §2.3.1 reduce_window family. Fallback HM scheme is
-    // `&tensor[D, p] -> List[int32] -> List[int32] -> tensor[D', p]`;
+    // `&tensor[D, p] -> List[int64] -> List[int64] -> tensor[D', p]`;
     // the actual shape contract (output rank = input rank, trailing
     // axis extents derived from the window/stride formula) is enforced
     // by the dedicated `infer_reduce_window_app` arm in `infer.rs`,

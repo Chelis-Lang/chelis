@@ -33,6 +33,13 @@ pub enum TypeVarRestriction {
     /// [`TypeVarRestriction::ActiveInt`]. `bool` and `string` are excluded,
     /// as are the §1.1.1 reserved spellings.
     ActiveNumeric,
+    /// An operation argument is a scalar or tensor with float precision.
+    /// This is a value constraint, not the surface `Float` type-argument bound.
+    FloatValue,
+    /// An operation argument is a scalar or tensor with signed integer precision.
+    IntValue,
+    /// An operation argument is a scalar or tensor with numeric precision.
+    NumericValue,
 }
 
 impl TypeVarRestriction {
@@ -40,9 +47,9 @@ impl TypeVarRestriction {
     /// Surf surface spell it.
     pub fn family_name(self) -> &'static str {
         match self {
-            TypeVarRestriction::ActiveFloat => "Float",
-            TypeVarRestriction::ActiveInt => "Int",
-            TypeVarRestriction::ActiveNumeric => "Numeric",
+            TypeVarRestriction::ActiveFloat | TypeVarRestriction::FloatValue => "Float",
+            TypeVarRestriction::ActiveInt | TypeVarRestriction::IntValue => "Int",
+            TypeVarRestriction::ActiveNumeric | TypeVarRestriction::NumericValue => "Numeric",
         }
     }
 
@@ -53,6 +60,9 @@ impl TypeVarRestriction {
             TypeVarRestriction::ActiveFloat => "the active float dtypes",
             TypeVarRestriction::ActiveInt => "the active signed integer dtypes",
             TypeVarRestriction::ActiveNumeric => "the active numeric dtypes",
+            TypeVarRestriction::FloatValue => "float scalars or tensors",
+            TypeVarRestriction::IntValue => "signed integer scalars or tensors",
+            TypeVarRestriction::NumericValue => "numeric scalars or tensors",
         }
     }
 
@@ -64,10 +74,33 @@ impl TypeVarRestriction {
     /// `ActiveNumeric`: it admits `f8e4m3` so that rejection sites can
     /// describe it, and a bound must not admit a dtype §1.1 does not.
     pub fn admits(self, prim: Prim) -> bool {
-        match self {
+        match self.precision_family() {
             TypeVarRestriction::ActiveFloat => prim.is_float(),
             TypeVarRestriction::ActiveInt => prim.is_integer(),
             TypeVarRestriction::ActiveNumeric => prim.is_float() || prim.is_integer(),
+            _ => unreachable!("precision_family returns a primitive dtype family"),
+        }
+    }
+
+    pub(crate) fn is_value_constraint(self) -> bool {
+        matches!(self, Self::FloatValue | Self::IntValue | Self::NumericValue)
+    }
+
+    pub(crate) fn precision_family(self) -> Self {
+        match self {
+            Self::FloatValue => Self::ActiveFloat,
+            Self::IntValue => Self::ActiveInt,
+            Self::NumericValue => Self::ActiveNumeric,
+            family => family,
+        }
+    }
+
+    pub(crate) fn for_value(self) -> Self {
+        match self.precision_family() {
+            Self::ActiveFloat => Self::FloatValue,
+            Self::ActiveInt => Self::IntValue,
+            Self::ActiveNumeric => Self::NumericValue,
+            _ => unreachable!("precision_family returns a primitive dtype family"),
         }
     }
 
@@ -79,14 +112,22 @@ impl TypeVarRestriction {
     /// only empty case is `Float` against `Int`.
     pub fn intersect(self, other: TypeVarRestriction) -> Option<TypeVarRestriction> {
         use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
-        match (self, other) {
+        let family = match (self.precision_family(), other.precision_family()) {
             (ActiveFloat, ActiveFloat) => Some(ActiveFloat),
             (ActiveInt, ActiveInt) => Some(ActiveInt),
             (ActiveNumeric, ActiveNumeric) => Some(ActiveNumeric),
             (ActiveNumeric, ActiveFloat) | (ActiveFloat, ActiveNumeric) => Some(ActiveFloat),
             (ActiveNumeric, ActiveInt) | (ActiveInt, ActiveNumeric) => Some(ActiveInt),
             (ActiveFloat, ActiveInt) | (ActiveInt, ActiveFloat) => None,
-        }
+            _ => unreachable!("precision_family returns a primitive dtype family"),
+        }?;
+        Some(
+            if self.is_value_constraint() && other.is_value_constraint() {
+                family.for_value()
+            } else {
+                family
+            },
+        )
     }
 }
 

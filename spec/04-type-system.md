@@ -756,6 +756,14 @@ Standard Algorithm W with extensions for tensor types. The flow:
 > dimensions remain distinct, and they unify only when an ordinary body
 > constraint requires equality.
 
+An operation restriction on an inferred scalar-or-tensor operand constrains
+its numeric dtype; it does not turn a dtype-family bound into a family of
+tensor types. An authored `p: Float`, for example, still admits only float
+primitive types, never `tensor[..., f32]`. Restrictions transported by
+function values retain that distinction. A failing transported restriction
+is a `PrecisionMismatch` naming the required family and offending type under
+[04-DTYPE-2], rather than requiring the original operation's body or name.
+
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
 one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
@@ -904,6 +912,62 @@ an argument instead of reading the top-level binding.
 > the initiating eager value. Values imported from an already-checked library
 > are available before the current unit and do not participate in this
 > source-position comparison.
+
+#### 3.1.5 Explicit generic operation contracts
+
+An operation's static admission requirements determine which operand types it
+accepts and any required relationship between its operand and result types.
+They include dtype-family restrictions and collection-constructor requirements.
+They are distinct from value-dependent conditions for which the operation's
+specification requires a runtime check.
+
+> **[04-INF-9]** A newly authored generic function SHALL declare a type
+> contract sufficient for every operation in its body. The body SHALL be
+> checked for every instantiation admitted by that contract, using each
+> operation's ordinary typing rule. A requirement not entailed by the
+> declared contract is a declaration error, not an inferred restriction that
+> silently strengthens the contract. Omitting a signature or using signature
+> holes SHALL NOT authorize generalizing unresolved operation-admission
+> requirements into an implicit constrained generic contract. This rule
+> applies to named functions and anonymous function abstractions, including
+> local functions and functions that escape through results or higher-order
+> values. Ordinary local inference and monomorphic obligation replay remain
+> governed by [04-INF-1] and [04-INF-5]; unconstrained polymorphism remains
+> admissible. An authored named binder remains rigid under [04-INF-6], even
+> when a local call supplies a concrete argument.
+>
+> An already-checked function value retains its contract when aliased,
+> instantiated, generalized, passed or returned, placed in an aggregate,
+> imported, or serialized and restored as checked metadata. These operations
+> SHALL NOT erase its restrictions or require its body to be available for
+> validation. A newly authored wrapper SHALL itself meet this rule; merely
+> aliasing an existing function does not require redeclaring its contract.
+> A builtin function value carries the contract of its governing operation
+> specification. Calls SHALL satisfy the callee's checked contract, including
+> in recursive and indirect calls, without reconstructing admission
+> requirements by inspecting the callee's body.
+
+For example, a generic function applying `mean` to `tensor[3, p]` requires
+`p:Float`; a bare `p` or `p:Numeric` admits types that the operation rejects.
+A generic length function accepting `List[a]` can leave `a` unconstrained:
+the `List` constructor supplies the admission information that `len` needs.
+In contrast, `def size(x) = len(x)` cannot become an implicitly constrained
+generic function; a later top-level call with a list does not repair the
+declaration. Neither does a signature promising `a -> int64` for arbitrary
+`a`. An unannotated local lambda applying `len` may still bind monomorphically
+to a list at its first application within the enclosing declaration under
+[04-INF-1]. The identity function needs no operation-admission restriction
+and may generalize without an annotation.
+
+Insufficient dtype-family admission is a `PrecisionMismatch`. Other
+insufficient static operation-admission contracts retain the diagnostic kind
+required by the operation's specification, or use `TypeMismatch` when that
+specification assigns no more specific kind.
+The declaration diagnostic identifies the function or anonymous abstraction,
+the insufficient operand type or binder, and the required restriction.
+These declaration checks do not replace the runtime checks required by an
+operation's value-dependent extent or value semantics.
+
 
 ### 3.2 Inference Rules
 
@@ -2179,9 +2243,10 @@ is a monomorphization bug, not user error.
 
 Every polymorphic call supplies a concrete precision before the backend
 boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
-calls and to a polymorphic call's instantiation. An inadmissible
-instantiation is a `PrecisionMismatch` at the call site with a citation to
-the governing section.
+calls and to generic definitions under [04-INF-9]. A polymorphic call's
+instantiation satisfies the checked contract, including its dtype-family
+bounds under [04-DTYPE-2]. An inadmissible instantiation is a
+`PrecisionMismatch` at the call site with a citation to the governing section.
 
 ### 5.9 Dtype-Family Bounds
 
@@ -2223,6 +2288,11 @@ signature declares a name, that signature's binder list carries the bounds for
 that declaration, and a bound written in the same declaration's `def` binder
 list is a declaration error. A `def` with no standalone signature carries its
 bounds in its own binder list.
+
+[04-INF-9] requires a generic body's necessary dtype-family restriction to
+follow from this declared contract. Applying a float-only operation does not
+infer a `Float` bound on an otherwise unbounded or more broadly bounded
+authored binder, nor publish such a bound from an unannotated abstraction.
 
 A public stdlib signature whose `[05-OP-35]` registry domain is exactly one of
 these families declares that family as a bound. That registry writes its domains

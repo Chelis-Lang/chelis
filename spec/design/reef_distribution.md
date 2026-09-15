@@ -61,7 +61,7 @@ not designed in this round.
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
 CHB decoding consumes the complete input and re-encodes to the same canonical
-bytes. CHB format 2 begins with the `CHELCHB\0` magic and an explicit little-
+bytes. CHB format 4 begins with the `CHELCHB\0` magic and an explicit little-
 endian format version; predecessor and unknown-version layouts are rejected
 rather than interpreted through bincode field coincidence. Each exported
 function carries a canonical `type_variable_restrictions` ledger keyed to the
@@ -70,6 +70,10 @@ uses schema `format_version: 2` and the same ledger, so the machine-readable
 authoring ABI and the installable CHB describe the same constrained scheme.
 The ledger is derived from the checker Scheme by structural traversal across
 separate type, dimension, and rank namespaces.
+Its operation-value domains retain scalar-or-tensor operand restrictions
+separately from the primitive-only authored dtype bounds (spec/04 §3.1).
+The format bump rejects predecessor readers/writers rather than dropping
+those checked requirements.
 
 Decoding rejects appended bytes, truncation, malformed field encodings,
 noncanonical metadata ordering, duplicate module/export/dependency entries,

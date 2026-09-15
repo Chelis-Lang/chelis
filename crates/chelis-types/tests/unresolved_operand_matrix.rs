@@ -604,6 +604,20 @@ struct Cell {
     diagnostic: &'static str,
 }
 
+fn assert_family_error(errors: &[CheckError], family: &str, dtype: &str) {
+    assert!(
+        errors.iter().any(|error| matches!(
+            error.kind,
+            chelis_types::errors::CheckErrorKind::PrecisionMismatch
+        ) && error.message.contains(&format!("dtype family `{family}`"))
+            && error
+                .message
+                .contains(&format!("cannot be instantiated at `{dtype}`"))),
+        "{}",
+        summary(errors)
+    );
+}
+
 fn run_cell(cell: &Cell) {
     let Cell {
         route,
@@ -629,12 +643,28 @@ fn run_cell(cell: &Cell) {
     let late = check(late_invalid).expect_err(&format!(
         "{route}: an invalid call over a late-bound operand must be rejected"
     ));
-    assert!(
-        late.iter().any(|e| e.message.contains(diagnostic)),
-        "{route}: the late-bound rejection must carry the SAME diagnostic as the resolved one \
+    if matches!(*route, "add" | "mean" | "sqrt" | "softmax" | "shl" | "shr") {
+        assert_family_error(
+            &late,
+            match *route {
+                "add" => "Numeric",
+                "shl" | "shr" => "Int",
+                _ => "Float",
+            },
+            match *route {
+                "add" => "bool",
+                "shl" | "shr" => "f32",
+                _ => "int32",
+            },
+        );
+    } else {
+        assert!(
+            late.iter().any(|e| e.message.contains(diagnostic)),
+            "{route}: the late-bound rejection must carry the SAME diagnostic as the resolved one \
          ({diagnostic:?}), got:\n{}",
-        summary(&late)
-    );
+            summary(&late)
+        );
+    }
 
     // NEGATIVE TWIN, and the one that matters for blast radius: suspending the
     // call must not reject the correct program.
@@ -910,6 +940,28 @@ fn run_dtype_cell(row: &DtypeCell) {
     // same kind, same message. Measured equal on all eleven routes.
     let eager = check(row.cell.resolved_invalid).expect_err("checked by run_cell");
     let late = check(row.cell.late_invalid).expect_err("checked by run_cell");
+    if matches!(
+        row.cell.route,
+        "sqrt" | "add" | "mean" | "softmax" | "shl" | "shr"
+    ) {
+        // The operation's checked family now travels with the inferred lambda.
+        // Its use owns the error; no body replay recreates the direct spelling.
+        assert_eq!(late.len(), 1, "{}", summary(&late));
+        assert_family_error(
+            &late,
+            match row.cell.route {
+                "add" => "Numeric",
+                "shl" | "shr" => "Int",
+                _ => "Float",
+            },
+            match row.cell.route {
+                "add" => "bool",
+                "shl" | "shr" => "f32",
+                _ => "int32",
+            },
+        );
+        return;
+    }
     assert_eq!(
         summary(&eager),
         summary(&late),
@@ -1065,17 +1117,11 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 
 /// The dtype half of the per-route-kind acceptance boundary.
 ///
-/// A dtype-admissibility validator's operand is not required to carry a shape,
-/// so a lambda that is never applied keeps its unconstrained result and is
-/// accepted in silence, exactly as the collection, host and string routes are.
-/// The validation is not lost: it runs at each binding instead, which is the
-/// cell the table above asserts.
-///
-/// DISPOSITION LOCK: every program here was accepted on `6dbbbf2bc` and must
-/// stay accepted. It is the cell that took the standard library out when a
-/// first attempt at this repair rejected an operand that never binds.
+/// New unresolved Float/Int requirements cannot become implicit generic
+/// contracts. Concrete body inference and operations outside this family
+/// mechanism retain their previous disposition; do not reject all unused lambdas.
 #[test]
-fn a_never_bound_dtype_operand_is_accepted() {
+fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
     for (route, program) in [
         (
             "sqrt",
@@ -1094,6 +1140,24 @@ fn a_never_bound_dtype_operand_is_accepted() {
             "def f() -> int32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
+        if matches!(route, "sqrt" | "mod" | "shl") {
+            let family = if route == "sqrt" { "Float" } else { "Int" };
+            let parameter = if route == "sqrt" { "f32" } else { "int32" };
+            let errors = check(program).expect_err("a new family requirement cannot escape");
+            assert!(
+                errors.iter().any(|error| {
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
+                    ) && error.message.contains(family)
+                }),
+                "{}",
+                summary(&errors)
+            );
+            check(&program.replace("fn (t)", &format!("fn (t: {parameter})")))
+                .expect("the explicit concrete contract admits the operation");
+            continue;
+        }
         check(program).unwrap_or_else(|e| {
             panic!(
                 "{route}: a dtype operand that never binds must be accepted, not reported:\n{}",
@@ -1238,27 +1302,15 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
     }
 }
 
-/// chelis#1805: a tensor operand whose PRECISION resolves after the route runs.
-///
-/// [04-INF-1] keeps a declared precision variable polymorphic, so
-/// `def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)` is a legitimate
-/// declaration and the defect is an INSTANTIATION at a dtype the family
-/// excludes. `validate.rs::check_app_for_poly_op_constraint` already enforced
-/// that, and already rejected `g(y)` for a `y` the enclosing definition
-/// declares. It gave up whenever the argument's precision was not readable off
-/// an annotation or that parameter scope, which is the hole: the three
-/// spellings below reached the backend and the compiled C lane printed `f = 2`
-/// for a true 2.333.
-///
-/// REGRESSION TEST, every rejecting row: each was measured ACCEPTED at score 1
-/// on `0820ee28e`, with the `f = 2` C output recorded on that head. DISPOSITION
-/// LOCK for the two accepting rows, measured accepted there and here: they are
-/// what keeps the repair from becoming a declaration-time bound.
+/// Late precision instantiations retain their declared Float restriction.
+/// The original unbounded witnesses were accepted on `0820ee28e` and printed
+/// an integer-truncated mean. Under §3.1 they fail at their definition; these
+/// bounded counterparts isolate restriction transport at the call site.
+/// Historical test identities remain stable for the class oracle.
 #[test]
 fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
-    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
-    const INT_TEXT: &str = "mean on operand precision `int32` is not admitted per the \
-                            chelis#724 capability decision";
+    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const INT_TEXT: &str = "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`";
 
     for (label, program) in [
         (
@@ -1298,7 +1350,7 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
     // instantiation. Rejecting either is the over-rejection chelis#1805's
     // design proposed and this repair declined; `separate_sig_sdpa_checks_clean`
     // in `issue_773_arg_error_sibling_checking` is the program that settles it.
-    check(HELPER).expect("an unbounded precision binder is a legitimate declaration");
+    check(HELPER).expect("a sufficiently bounded precision binder remains polymorphic");
     check(&format!(
         "{HELPER}f = g(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
     ))
@@ -1310,22 +1362,10 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
     .expect("the same tuple projection at f32 is admitted");
 }
 
-/// chelis#1805: the operand's constructor is known, its precision binds one
-/// application later, and the decision is DEFERRED rather than taken at the
-/// `mean` node.
-///
-/// `id_dt` gives `mean` a `tensor[3, ?p]` whose precision the lambda's own
-/// application binds afterwards. Rejecting at the `mean` node would refuse the
-/// float call below, which is legal; admitting for good is chelis#1805. The
-/// ledger entry waits on the precision and the replay decides against the bound
-/// one, which is why the integer call gets the ordinary CONCRETE diagnostic.
-///
-/// This is the half no call-site pass can reach: the lambda has no name for
-/// `check_app_for_poly_op_constraint` to key on.
-///
-/// REGRESSION TEST for the integer half, measured ACCEPTED at score 1 on
-/// `0820ee28e`. DISPOSITION LOCK for the float half, measured accepted there and
-/// here: it is what proves the repair defers instead of rejecting eagerly.
+/// The operand's tensor constructor is known before its precision binds.
+/// An inferred lambda operand keeps the Float requirement from mean; ordinary
+/// application unification admits the float call and rejects the integer one.
+/// No precision replay ledger or named-callee body lookup is involved.
 #[test]
 fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
     const HELPER: &str = "def id_dt[p](x: tensor[3, p]) -> tensor[3, p] = x\n";
@@ -1337,8 +1377,7 @@ fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
     .expect_err("a precision that binds to int32 one application later must be rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
-            "mean on operand precision `int32` is not admitted per the chelis#724 \
-             capability decision"
+            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`"
         )),
         "the discharged rejection names the BOUND dtype, not the binder:\n{}",
         summary(&errors)
@@ -1416,71 +1455,25 @@ fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
     );
 }
 
-/// chelis#1805 across the family-policy routes, and the shape it must NOT touch.
-///
-/// A family policy is one stated over `Prim::is_float()` or
-/// `Prim::is_integer()`: exactly the policies a `[p: Float]` or `[p: Int]` bound
-/// satisfies. `add` is not one (it admits every numeric dtype) and must keep
-/// accepting an unbounded binder at any instantiation, or the repair would
-/// reject the dtype-polymorphic helpers the standard library is written from.
-///
-/// The `integer`/`float` qualifier words in the `div` and `trunc_div` rows are
-/// asserted deliberately: the refactor that gave every family text one
-/// implementation had to keep them on a concrete dtype and drop them for a
-/// precision variable, and only a concrete row can prove the first half.
-///
-/// REGRESSION TEST for every rejecting row: each was measured ACCEPTED at score
-/// 1 on `0820ee28e`. DISPOSITION LOCK for the two accepting rows.
+/// Float and Int operations reject instantiations outside their authored
+/// contract; Numeric arithmetic continues to admit both integer and float
+/// dtypes. Direct concrete calls retain their existing diagnostics.
 #[test]
 fn every_family_policy_route_rejects_an_inadmissible_instantiation() {
-    for (body, elements, needle) in [
-        (
-            "sqrt(x)",
-            "1i32, 4i32, 9i32",
-            "sqrt on operand precision `int32` is not admitted per \
-             spec/04-type-system.md \u{a7}5.4",
-        ),
-        (
-            "div(x, x)",
-            "1i32, 4i32, 9i32",
-            "div on integer operand precision `int32` is not admitted per \
-             spec/05-risc-primitives.md \u{a7}2.1",
-        ),
-        (
-            "trunc_div(x, x)",
-            "1.0f32, 4.0f32, 9.0f32",
-            "trunc_div on float operand precision `f32` is not admitted \
-             per spec/05-risc-primitives.md \u{a7}2.1",
-        ),
-        (
-            "softmax(x, 0i32)",
-            "1i32, 2i32, 4i32",
-            "softmax on operand precision `int32` is not admitted per \
-             spec/04-type-system.md \u{a7}5.4",
-        ),
+    for (body, elements, family, dtype) in [
+        ("sqrt(x)", "1i32, 4i32, 9i32", "Float", "int32"),
+        ("div(x, x)", "1i32, 4i32, 9i32", "Float", "int32"),
+        ("trunc_div(x, x)", "1.0f32, 4.0f32, 9.0f32", "Int", "f32"),
+        ("softmax(x, 0i32)", "1i32, 2i32, 4i32", "Float", "int32"),
     ] {
         let program = format!(
-            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
-             f = g(to_tensor([{elements}]))\n"
+            "def g[p: {family}](x: tensor[3, p]) -> tensor[3, p] = {body}\nf = g(to_tensor([{elements}]))\n"
         );
-        let Err(errors) = check(&program) else {
-            panic!("`{body}` must reject its inadmissible instantiation");
-        };
-        assert!(
-            errors.iter().any(|e| e.message.contains(needle)),
-            "`{body}` must reject with its own text:\n{}",
-            summary(&errors)
-        );
+        let errors = check(&program).expect_err("inadmissible instantiation");
+        assert_family_error(&errors, family, dtype);
     }
-
-    // NOT a family policy: `add` admits every numeric dtype, so an integer
-    // instantiation is well typed and must not be rejected.
-    check(
-        "def g[p](x: tensor[3, p]) -> tensor[3, p] = add(x, x)\n\
-         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
-    )
-    .expect("an operation with no family policy admits an integer instantiation");
-    // A concrete float operand is untouched by all of this.
+    check("def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = add(x, x)\nf = g(to_tensor([1i32, 2i32, 4i32]))\n")
+        .expect("Numeric admits integer arithmetic");
     check("def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n")
         .expect("a concrete float operand is still accepted");
 }
@@ -1504,11 +1497,11 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     const FAMILY: &str = "type variable bounded by dtype family `Float` (the active float dtypes) \
          cannot be instantiated at `int32`";
 
-    check("def g[p](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
+    check("def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
         .expect("the signature's own bound makes the declaration well typed");
 
     let errors = check(
-        "def g[p](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
+        "def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
          def f() -> tensor[3, int32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
     )
     .expect_err("the integer instantiation must be rejected");
@@ -1519,13 +1512,13 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     );
 
     check(
-        "def g[p](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
+        "def g[p: Float](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
          test_assert_close_tensor(a, b, tol, \"l\")\n",
     )
     .expect("the signature's own bound makes the declaration well typed");
 
     let errors = check(
-        "def g[p](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
+        "def g[p: Float](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
          test_assert_close_tensor(a, b, tol, \"l\")\n\
          def test_call() -> unit ! { Test } = \
          g(&to_tensor([1i32, 2i32, 4i32]), &to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
@@ -1553,7 +1546,7 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
 /// compiled C lane printing `f = 2` for a true 2.3333333.
 #[test]
 fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
-    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
 
     check(&format!(
         "{HELPER}t = to_tensor([1i32, 2i32, 4i32])\n\
@@ -1572,8 +1565,7 @@ fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
     .expect_err("the local int32 binding is what `g` receives, so the program is rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
-            "mean on operand precision `int32` is not admitted per the chelis#724 \
-             capability decision"
+            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`"
         )),
         "the rejection must name the LOCAL binding's dtype:\n{}",
         summary(&errors)
@@ -1584,7 +1576,7 @@ fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
 /// The two dtype orders catch false acceptance as well as false rejection.
 #[test]
 fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
-    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
     for (first, second, rejects) in [
         ("[1.0f32, 2.0f32, 4.0f32]", "[1i32, 2i32, 4i32]", false),
         ("[1i32, 2i32, 4i32]", "[1.0f32, 2.0f32, 4.0f32]", true),
@@ -1605,7 +1597,7 @@ fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
                 assert!(
                     errors.iter().any(|error| error
                         .message
-                        .contains("mean on operand precision `int32` is not admitted")),
+                        .contains("type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`")),
                     "{}",
                     summary(&errors)
                 );
@@ -1616,16 +1608,9 @@ fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
     }
 }
 
-/// chelis#1805: bool arithmetic reached through an unbounded precision binder.
-///
-/// `BOOL_REJECTED_ARITH_OPS` is not a family policy, so nothing in this repair
-/// decides it, but the argument reader feeds the pre-existing restricted-op
-/// walk, which already covers those five operations. The narrowing is therefore
-/// real and had no assertion, which is how it could regress silently while
-/// chelis#1937 stayed open against a repaired witness.
-///
-/// REGRESSION TEST, every row: all five were measured ACCEPTED at score 1 on
-/// `0820ee28e`, and the first is chelis#1937's verbatim witness.
+/// Numeric arithmetic excludes bool through its checked scheme. The original
+/// unbounded forms were accepted on `0820ee28e`; the bounded forms below
+/// isolate the call-site rejection and its integer positive control.
 #[test]
 fn bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation() {
     for (op, body) in [
@@ -1636,107 +1621,69 @@ fn bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation(
         ("floor_div", "floor_div(x, x)"),
     ] {
         let program = format!(
-            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
+            "def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
              def f() -> tensor[3, bool] = g(to_tensor([true, false, true]))\n"
         );
         let Err(errors) = check(&program) else {
             panic!("`{op}` on a bool instantiation must be rejected");
         };
-        assert!(
-            errors.iter().any(|e| e.message.contains(&format!(
-                "{op} on bool operands is not admitted per the chelis#726 capability decision"
-            ))),
-            "`{op}` must reject with the chelis#726 text:\n{}",
-            summary(&errors)
-        );
+        assert_family_error(&errors, "Numeric", "bool");
         check(&format!(
-            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
+            "def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
              def f() -> tensor[3, int32] = g(to_tensor([1i32, 2i32, 4i32]))\n"
         ))
         .expect("the same arithmetic at int32 is admitted");
     }
 }
 
-/// The argument spellings chelis#1805's reader does NOT resolve, DISPOSITION
-/// LOCKS so the residue is loud in the suite rather than silent.
-///
-/// The covered set is stated by construction: an argument whose precision the
-/// reader resolves, reaching a restricted operation in the callee's own body
-/// EXPRESSION. Each row below falls outside one half of that and needs a
-/// mechanism this pull request does not add. All five were measured on
-/// `0820ee28e` accepting at score 1 and printing `f = 2` on the compiled C lane
-/// for a true 2.3333333, and all five still do.
-///
-/// A failure here means the owning issue was fixed.
+/// Former body-reader gaps now carry restrictions through ordinary checking:
+/// higher-order values, a transitive wrapper, an identity argument, a local
+/// lambda, and an ADT field. Each has an invalid integer and valid float case.
+/// The original unbounded witnesses accepted on `0820ee28e` and printed a
+/// truncated C mean; the CLI target also requires those originals to fail.
 #[test]
 fn the_spellings_the_argument_reader_does_not_resolve_remain_unreached() {
-    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
-
-    // chelis#1940: the helper reached as a function VALUE. It never appears in
-    // callee position, so the call-site pass has nothing to key on.
-    check(&format!(
-        "{HELPER}def apply_it(fn_arg: (tensor[3, int32]) -> tensor[int32], y: tensor[3, int32]) \
-         -> tensor[int32] = fn_arg(y)\n\
-         f = apply_it(g, to_tensor([1i32, 2i32, 4i32]))\n"
-    ))
-    .expect("chelis#1940: a helper passed as a value is not reached");
-
-    // chelis#1941: the substitution does not cross a second polymorphic def,
-    // whether the second one wraps the call or supplies the argument.
-    check(&format!(
-        "{HELPER}def mid[p](x: tensor[3, p]) -> tensor[p] = g(x)\n\
-         f = mid(to_tensor([1i32, 2i32, 4i32]))\n"
-    ))
-    .expect("chelis#1941: a two-def polymorphic chain is not reached");
-    check(&format!(
-        "{HELPER}def id2[q](y: tensor[3, q]) -> tensor[3, q] = y\n\
-         f = g(id2(to_tensor([1i32, 2i32, 4i32])))\n"
-    ))
-    .expect("chelis#1941: a callee whose declared result is a bare binder is not reached");
-
-    // chelis#1805: the restricted operation sits in a local lambda, so the
-    // callee's parameter never reaches it by name and the body walk's
-    // parameter-to-precision map does not apply.
-    check(
-        "def g[p](x: tensor[3, p]) -> tensor[p] = {\n  \
-         h = fn (t) -> mean(t, 0i32)\n  h(x)\n}\n\
-         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
-    )
-    .expect("chelis#1805: a restricted op inside a local lambda is not reached");
-
-    // chelis#1805: an ADT field argument. The reader can see the target's
-    // declared type is an ADT by name, and the field's own type lives in a
-    // declaration registry this pass does not hold.
-    check(&format!(
-        "type Box =\n  | Box {{ t: tensor[3, int32] }}\n\n\
-         {HELPER}def pick(b: Box) -> tensor[int32] = g(b.t)\n\
-         f = pick(Box {{ t: to_tensor([1i32, 2i32, 4i32]) }})\n"
-    ))
-    .expect("chelis#1805: an ADT field argument is not reached");
+    // Historical identity retained for the class oracle. Every former residual
+    // is now a rejection, paired with the same bounded program at f32.
+    for (dtype, values, accepts) in [
+        ("int32", "[1i32, 2i32, 4i32]", false),
+        ("f32", "[1.0f32, 2.0f32, 4.0f32]", true),
+    ] {
+        let helper = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+        for program in [
+            format!(
+                "{helper}def apply_it(fn_arg: tensor[3, {dtype}] -> tensor[{dtype}], y: tensor[3, {dtype}]) -> tensor[{dtype}] = fn_arg(y)\nf = apply_it(g, to_tensor({values}))\n"
+            ),
+            format!(
+                "{helper}def mid[p: Float](x: tensor[3, p]) -> tensor[p] = g(x)\nf = mid(to_tensor({values}))\n"
+            ),
+            format!(
+                "{helper}def id2[q](y: tensor[3, q]) -> tensor[3, q] = y\nf = g(id2(to_tensor({values})))\n"
+            ),
+            format!(
+                "def g[p: Float](x: tensor[3, p]) -> tensor[p] = {{\n h = fn (t) -> mean(t, 0i32)\n h(x)\n}}\nf = g(to_tensor({values}))\n"
+            ),
+            format!(
+                "type Box =\n | Box {{ t: tensor[3, {dtype}] }}\n{helper}def pick(b: Box) -> tensor[{dtype}] = g(b.t)\nf = pick(Box {{ t: to_tensor({values}) }})\n"
+            ),
+        ] {
+            let result = check(&program);
+            if accepts {
+                result.unwrap_or_else(|errors| panic!("{program}\n{}", summary(&errors)));
+            } else {
+                let errors = result.expect_err("checked restrictions survive every former gap");
+                assert_family_error(&errors, "Float", dtype);
+            }
+        }
+    }
 }
 
-/// Round 1 P2-1: this pull request NARROWS acceptance on the empty tensor
-/// literal, and the narrowing was neither recorded nor covered.
-///
-/// A shape- and dtype-preserving route ties its result to its operand, so a
-/// declaration that names the result determines the operand as well. The call
-/// is suspended while the operand is still a variable, the declaration binds
-/// it, and the replay then consults the dtype policy against the bound type.
-/// The three programs below were MEASURED accepted at score 1 on `6dbbbf2bc`
-/// and are rejected here.
-///
-/// This is why the sibling above is a bounded residual rather than a blanket
-/// one, and it strengthens `Closes #1512` rather than qualifying it: an empty
-/// literal under a reducing route keeps its hole, an empty literal under a
-/// preserving route does not.
-///
-/// REGRESSION TEST, every assertion. The earlier spelling of this file asserted
-/// the `softmax` row inside the chelis#1805 lock with a mechanism sentence that
-/// was false ("signature unification binds it before the validator runs";
-/// unification did not bind it, and the base accepts the program).
+/// An empty literal whose dtype is determined by the declared result must
+/// satisfy the operation's family. The restriction travels on the operand,
+/// without replaying a precision validator or inspecting the callee's body.
 #[test]
 fn an_empty_literal_the_declared_result_determines_is_now_validated() {
-    for (route, program, diagnostic) in [
+    for (route, program, _diagnostic) in [
         (
             "softmax",
             "def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n",
@@ -1756,10 +1703,10 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
         let errors = check(program).expect_err(&format!(
             "{route}: an empty literal the declaration determines must now be validated"
         ));
-        assert!(
-            errors.iter().any(|e| e.message.contains(diagnostic)),
-            "{route}: the narrowed rejection must name the dtype policy, got:\n{}",
-            summary(&errors)
+        assert_family_error(
+            &errors,
+            if route == "add" { "Numeric" } else { "Float" },
+            if route == "add" { "bool" } else { "int32" },
         );
     }
 
@@ -2320,18 +2267,12 @@ f=g(to_tensor([1i32, 2i32, 4i32]))
             ("f32", "[1.0f32, 2.0f32, 4.0f32]", false),
         ] {
             let program = format!(
-                "def g[p](x: tensor[3, p]) -> tensor[p] = {body}\nf = g(to_tensor({values}))\n"
+                "def g[p: Float](x: tensor[3, p]) -> tensor[p] = {body}\nf = g(to_tensor({values}))\n"
             );
             let result = check(&program);
             if rejects {
                 let errors = result.expect_err("the captured parameter still carries int32");
-                assert!(
-                    errors.iter().any(|e| e
-                        .message
-                        .contains(&format!("mean on operand precision `{dtype}`"))),
-                    "{}",
-                    summary(&errors)
-                );
+                assert_family_error(&errors, "Float", dtype);
             } else {
                 result.expect("the captured float parameter remains admissible");
             }
@@ -2371,25 +2312,19 @@ fn every_family_route_checks_concrete_helper_instantiations() {
         } else {
             "tensor[3, p]"
         };
+        let family = if op == "trunc_div" { "Int" } else { "Float" };
         for (values, float) in [
             ("[1i32, 2i32, 4i32]", false),
             ("[1.0f32, 2.0f32, 4.0f32]", true),
         ] {
             let program = format!(
-                "def g[p](x: tensor[3, p]) -> {result_type} = {body}\nf = g(to_tensor({values}))\n"
+                "def g[p: {family}](x: tensor[3, p]) -> {result_type} = {body}\nf = g(to_tensor({values}))\n"
             );
             let result = check(&program);
             if float == (op == "trunc_div") {
                 let errors =
                     result.expect_err(&format!("{op}: inadmissible concrete instantiation"));
-                assert!(
-                    errors.iter().any(|e| matches!(
-                        e.kind,
-                        chelis_types::errors::CheckErrorKind::PrecisionMismatch
-                    ) && e.message.contains(op)),
-                    "{op}: {}",
-                    summary(&errors)
-                );
+                assert_family_error(&errors, family, if float { "f32" } else { "int32" });
             } else {
                 result.unwrap_or_else(|errors| panic!("{op}: {}", summary(&errors)));
             }

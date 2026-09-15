@@ -16,6 +16,10 @@
 //! are marked `#[ignore = "WS-A9 follow-up"]` so a future agent can
 //! pick them up without the regression-flip noise.
 //!
+//! The findings below are historical. Generic numeric fixtures now declare
+//! sufficient dtype bounds under [04-DTYPE-2]; call sites check those contracts
+//! without reopening callee bodies. Direct-operation diagnostic controls remain.
+//!
 //! Findings (each test name maps back here):
 //!
 //! 1. polymorphic_linear_silently_accepts_integer_call_site:
@@ -173,7 +177,7 @@ fn polymorphic_linear_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_int.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -188,11 +192,8 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
         write_file(&path, &src);
         let json = run_check(&path);
         let errs = errors(&json);
-        // WS-A8: cross-row enforcement now fires at the polymorphic
-        // call site. spec/04-type-system.md §5.7.2 forbids integer
-        // matmul; the body's `matmul(x, w)` reaches an integer
-        // operand precision when `forward` is instantiated at any
-        // INTEGER_DTYPE, and the validator rejects.
+        // The checked Float contract rejects integer instantiations;
+        // the caller need not inspect the body's matmul operation.
         assert!(
             !errs.is_empty(),
             "WS-A8: polymorphic forward+matmul instantiated at \
@@ -207,14 +208,12 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
         );
         let messages = error_messages(&json);
         assert!(
-            messages.iter().any(|m| m.contains("5.7.2")),
-            "WS-A8: rejection for `{dtype}` must cite spec section \
-             5.7.2; got messages {messages:?}"
+            messages.iter().any(|m| m.contains("dtype family `Float`")),
+            "rejection must name the checked Float contract: {messages:?}"
         );
         assert!(
-            messages.iter().any(|m| m.contains("matmul")),
-            "WS-A8: rejection for `{dtype}` must name the matmul op; \
-             got messages {messages:?}"
+            messages.iter().any(|m| m.contains(&format!("`{dtype}`"))),
+            "rejection must name the offending dtype: {messages:?}"
         );
     }
 }
@@ -228,7 +227,7 @@ fn polymorphic_linear_accepts_float_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_float.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
@@ -262,7 +261,7 @@ fn polymorphic_attention_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("attn_int.ch");
         let src = format!(
-            r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+            r#"sig sdpa[p: Float]: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {{
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -294,9 +293,8 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("5.7.2") || m.contains("5.4")),
-            "WS-A8: rejection for `{dtype}` must cite \u{00a7}5.7.2 or \
-             \u{00a7}5.4; got messages {messages:?}"
+                .any(|m| m.contains("dtype family `Float`") && m.contains(&format!("`{dtype}`"))),
+            "rejection must name the checked family and offending dtype: {messages:?}"
         );
     }
 }
@@ -315,13 +313,12 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
 fn polymorphic_div_wrapper_rejects_integer_call_site() {
     // chelis#178: integer `div` is no longer admitted. A polymorphic
     // `div` wrapper instantiated at an integer dtype must reject at
-    // the call site with a §2.1 citation pointing at the integer
-    // division ops.
+    // the call site against the checked Float contract.
     for dtype in INTEGER_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_div: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r#"sig my_div[p: Float]: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_div(a, b) = div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_div(x, y)
 "#
@@ -338,10 +335,9 @@ def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = m
         let messages = error_messages(&json);
         assert!(
             messages.iter().any(|m| {
-                m.contains("div") && (m.contains("floor_div") || m.contains("trunc_div"))
+                m.contains("dtype family `Float`") && m.contains(&format!("`{dtype}`"))
             }),
-            "chelis#178: rejection of `div({dtype})` wrapper must name \
-             `div` and point at `floor_div` / `trunc_div`; got {messages:?}"
+            "rejection must name the checked family and offending dtype: {messages:?}"
         );
     }
 }
@@ -355,7 +351,7 @@ fn polymorphic_floor_div_wrapper_accepts_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("floor_div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_fd: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r#"sig my_fd[p: Numeric]: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_fd(a, b) = floor_div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_fd(x, y)
 "#
@@ -380,7 +376,7 @@ fn polymorphic_trunc_div_wrapper_accepts_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("trunc_div_wrapper_int.ch");
         let src = format!(
-            r#"sig my_td: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
+            r#"sig my_td[p: Int]: tensor[4, p] -> tensor[4, p] -> tensor[4, p]
 def my_td(a, b) = trunc_div(a, b)
 def call(x: tensor[4, {dtype}], y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_td(x, y)
 "#
@@ -403,7 +399,7 @@ fn polymorphic_recip_wrapper_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("recip_wrapper_int.ch");
         let src = format!(
-            r#"sig my_recip: tensor[4, p] -> tensor[4, p]
+            r#"sig my_recip[p: Float]: tensor[4, p] -> tensor[4, p]
 def my_recip(x) = recip(x)
 def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
 "#
@@ -421,9 +417,8 @@ def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("5.4") && m.contains("recip")),
-            "PR #176 red-team: rejection of recip(`{dtype}`) wrapper \
-             must cite \u{00a7}5.4 and name `recip`; got {messages:?}"
+                .any(|m| m.contains("dtype family `Float`") && m.contains(&format!("`{dtype}`"))),
+            "rejection must name the checked family and offending dtype: {messages:?}"
         );
     }
 }
@@ -613,7 +608,7 @@ fn finding_4_wsa6_fresh_hashmap_breaks_matmul_def_quantifier() {
     let path = dir.path().join("a6_mm.ch");
     write_file(
         &path,
-        r#"def mm[a, b, c, p](x: &tensor[a, b, p], y: &tensor[b, c, p]) -> tensor[a, c, p] = matmul(x, y)
+        r#"def mm[a, b, c, p: Float](x: &tensor[a, b, p], y: &tensor[b, c, p]) -> tensor[a, c, p] = matmul(x, y)
 def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm(x, y)
 "#,
     );
@@ -641,7 +636,7 @@ fn finding_4_workaround_sig_plus_bare_def_works() {
     let path = dir.path().join("a6_workaround.ch");
     write_file(
         &path,
-        r#"sig mm: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+        r#"sig mm[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def mm(x, y) = matmul(x, y)
 def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm(x, y)
 "#,
@@ -663,7 +658,7 @@ fn finding_4_def_quantifier_with_add_does_not_trigger_bug() {
     let path = dir.path().join("a6_add.ch");
     write_file(
         &path,
-        r#"def add_t[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
+        r#"def add_t[n, p: Numeric](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
 def call(x: &tensor[3, f32], y: &tensor[3, f32]) -> tensor[3, f32] = add_t(x, y)
 "#,
     );
@@ -839,7 +834,7 @@ fn rt3a_narrowing_still_surfaces_through_generalized_stdlib_shape() {
     let path = dir.path().join("narrow.ch");
     write_file(
         &path,
-        r#"sig add_t: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
+        r#"sig add_t[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
 def add_t(a, b) = add(a, b)
 def call(x: &tensor[3, f32], y: &tensor[3, bf16]) -> tensor[3, f32] = {
   z = add_t(x, y)
