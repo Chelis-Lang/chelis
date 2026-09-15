@@ -16,12 +16,12 @@ SKILL_COMMANDS = (
     f"{PYTHON} -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation",
     "cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity",
 )
-
-
 def assert_hosted_coverage(test, workflow, nightly):
     jobs = workflow["jobs"]
     docs = jobs["docs"]
-    test.assertNotIn("if", docs)
+    test.assertEqual(docs.get("needs"), ["changes"])
+    test.assertEqual(docs.get("if"), "${{ !cancelled() }}")
+    test.assertNotIn("docs_only", docs.get("if", ""))
     test.assertFalse(docs.get("continue-on-error", False))
     for command in SKILL_COMMANDS:
         steps = [step for step in docs["steps"] if step.get("run") == command]
@@ -122,8 +122,16 @@ class HostedCoverageTests(unittest.TestCase):
                         assert_hosted_coverage(self, workflow, self.nightly)
 
     def test_docs_checks_cannot_be_skipped_or_made_nonblocking(self):
-        for key, value in (("if", "false"), ("continue-on-error", True)):
-            with self.subTest(key=key):
+        for key, value in (
+            ("if", "false"),
+            (
+                "if",
+                "${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}",
+            ),
+            ("needs", []),
+            ("continue-on-error", True),
+        ):
+            with self.subTest(key=key, value=value):
                 workflow = copy.deepcopy(self.workflow)
                 workflow["jobs"]["docs"][key] = value
                 with self.assertRaises(AssertionError):

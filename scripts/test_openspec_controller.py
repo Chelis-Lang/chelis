@@ -391,11 +391,11 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
         On this branch `ci.yml` carries a workflow-level
         `workflow_dispatch`, so several required contexts COULD be produced
         without a pull request; on `origin/main` it does not, and none of
-        them can. Either way `conformance.yml` has only `push: [main]` and
-        `pull_request`, and `changelog.yml` on the default branch has only
-        `pull_request`. One unreachable context is enough -- protection
-        requires all nine -- so a `GITHUB_TOKEN`-opened pull request can
-        never go green here.
+        them can. Changelog and acknowledgement require `pull_request`;
+        retarget validation requires `pull_request` or
+        `pull_request_target`. A `GITHUB_TOKEN`-opened pull request raises
+        neither PR event. One unreachable context is enough -- protection
+        requires all ten -- so that pull request can never go green here.
         """
         jobs = self.workflow_triggers()
         unreachable = []
@@ -408,7 +408,7 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
                 # producer cannot leave this test vacuously green.
                 continue
             found += 1
-            other = set(triggers) - {"pull_request"}
+            other = set(triggers) - {"pull_request", "pull_request_target"}
             if "push" in other:
                 branches = (triggers.get("push") or {}).get("branches") or []
                 if branches == ["main"]:
@@ -417,14 +417,20 @@ class EventSuppressionEvidenceTests(unittest.TestCase):
                 unreachable.append(context)
         self.assertGreaterEqual(
             found,
-            4,
+            3,
             "too few required-context producers were found to measure anything; "
             "the workflow set changed and this evidence test needs revisiting",
         )
         self.assertIn(
-            "Hull Conformance Gate (Linux)",
+            "PR Contract Acknowledgements",
             unreachable,
-            "the conformance gate became reachable without a pull request; "
+            "the acknowledgement check became reachable without a pull request; "
+            "re-measure the prerequisite before relaxing the documentation",
+        )
+        self.assertIn(
+            "PR Base Retarget Validation",
+            unreachable,
+            "the retarget check became reachable without a pull request; "
             "re-measure the prerequisite before relaxing the documentation",
         )
 

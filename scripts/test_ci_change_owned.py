@@ -62,9 +62,18 @@ def config_text(
     standing: tuple[str, str] = ("p", "smoke"),
     target_exclusion: tuple[str, str] = ("p", "heavy"),
     test_exclusion: tuple[str, str, str] = ("p", "smoke", "slow_case"),
+    manual_only_target: tuple[str, str] | None = None,
     path_rule: str = "scripts/",
 ) -> str:
     owner = "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+    manual = ""
+    if manual_only_target is not None:
+        manual = f"""
+[[manual_only_target]]
+package = {json.dumps(manual_only_target[0])}
+name = {json.dumps(manual_only_target[1])}
+{owner}
+"""
     return f"""version = 2
 
 [[standing_target]]
@@ -81,6 +90,7 @@ package = {json.dumps(test_exclusion[0])}
 target = {json.dumps(test_exclusion[1])}
 name = {json.dumps(test_exclusion[2])}
 {owner}
+{manual}
 
 [[path_rule]]
 prefix = {json.dumps(path_rule)}
@@ -126,14 +136,18 @@ def load_config(content: str | None = None) -> owned.Config:
 
 
 class SchemaTests(unittest.TestCase):
-    def test_strict_schema_reads_all_four_row_kinds(self) -> None:
-        config = load_config()
+    def test_strict_schema_reads_all_five_row_kinds(self) -> None:
+        config = load_config(config_text(manual_only_target=("q", "smoke")))
         self.assertEqual(config.version, 2)
         self.assertEqual(config.standing_targets, (owned.Identity("p", "smoke"),))
         self.assertEqual(tuple(config.target_exclusions), (owned.Identity("p", "heavy"),))
         self.assertEqual(
             tuple(config.test_exclusions),
             (owned.TestIdentity("p", "smoke", "slow_case"),),
+        )
+        self.assertEqual(
+            tuple(config.manual_only_targets),
+            (owned.Identity("q", "smoke"),),
         )
         self.assertEqual(config.path_rules[0].prefix, "scripts/")
 
@@ -143,6 +157,10 @@ class SchemaTests(unittest.TestCase):
             valid.replace("version = 2", "version = 1", 1),
             valid + "\nunknown = true\n",
             valid + '\n[[standing_target]]\npackage = "p"\nname = "smoke"\n',
+            config_text(manual_only_target=("q", "smoke"))
+            + '\n[[manual_only_target]]\npackage = "q"\nname = "smoke"\n'
+            + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+            + "\n",
             valid + f'\n[[path_rule]]\nprefix = "scripts/"\ndisposition = "owner"\n'
             + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
             + "\n",
@@ -171,6 +189,18 @@ class SchemaTests(unittest.TestCase):
             (config_text(standing=("missing", "smoke")), "package"),
             (config_text(standing=("p", "missing")), "target"),
             (config_text(test_exclusion=("p", "smoke", "missing_case")), "test"),
+            (
+                config_text(manual_only_target=("missing", "smoke")),
+                "manual-only package",
+            ),
+            (
+                config_text(manual_only_target=("p", "missing")),
+                "manual-only target",
+            ),
+            (
+                config_text(manual_only_target=("p", "gated")),
+                "manual-only target is not default-feature eligible",
+            ),
             (config_text(path_rule="missing/"), "path rule"),
         ]
         for content, message in cases:
@@ -209,7 +239,19 @@ class SchemaTests(unittest.TestCase):
             target_exclusion=("p", "heavy"),
             test_exclusion=("p", "heavy", "heavy_case"),
         )
-        for content in (standing_excluded, test_under_excluded):
+        manual_standing = config_text(manual_only_target=("p", "smoke"))
+        manual_excluded = config_text(manual_only_target=("p", "heavy"))
+        manual_test_excluded = config_text(
+            manual_only_target=("p", "smoke"),
+            test_exclusion=("p", "smoke", "slow_case"),
+        )
+        for content in (
+            standing_excluded,
+            test_under_excluded,
+            manual_standing,
+            manual_excluded,
+            manual_test_excluded,
+        ):
             with self.subTest(content=content):
                 with self.assertRaises(ValueError):
                     load_config(content)
@@ -224,6 +266,21 @@ class SchemaTests(unittest.TestCase):
         } <= set(config.standing_targets))
         self.assertEqual(len(config.target_exclusions), 3)
         self.assertEqual(len(config.test_exclusions), 6)
+        self.assertEqual(
+            set(config.manual_only_targets),
+            {
+                owned.Identity(
+                    "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
+                )
+            },
+        )
+        manual_owner = config.manual_only_targets[
+            owned.Identity("chelis-cli", "issue_1417_stdlib_dtype_family_bounds")
+        ]
+        self.assertEqual(
+            (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
+            ("ci.yml", "change-owned-shard", "chelis#1824"),
+        )
         for owner in (
             *config.target_exclusions.values(),
             *config.test_exclusions.values(),
@@ -276,6 +333,19 @@ class SchemaTests(unittest.TestCase):
         by_path = {rule.prefix: rule for rule in config.path_rules}
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
+        for path in (
+            ".github/workflows/conformance.yml",
+            ".github/workflows/pr-base-retarget.yml",
+            "scripts/ci_retarget_validation.py",
+            "scripts/test_ci_retarget_validation.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
 
     def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
         from scripts import bump_compiler_pins as bump
@@ -407,6 +477,7 @@ class PlanningTests(unittest.TestCase):
         *,
         base: dict | None = None,
         candidate: dict | None = None,
+        config: owned.Config | None = None,
         tracked: set[str] | None = None,
     ) -> dict:
         sources = fixture_sources()
@@ -417,7 +488,7 @@ class PlanningTests(unittest.TestCase):
             records=records,
             base_metadata=base or fixture_metadata(),
             candidate_metadata=candidate or fixture_metadata(),
-            config=load_config(),
+            config=config or load_config(),
             tracked_paths=tracked or (set(sources) | {"scripts/tool.py"}),
             source_reader=sources.__getitem__,
         )
@@ -435,6 +506,25 @@ class PlanningTests(unittest.TestCase):
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
         owned.verify_plan_digest(plan)
+
+    def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")],
+            config=load_config(config_text(manual_only_target=("q", "smoke"))),
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        self.assertEqual(
+            plan["manual_only_targets"],
+            [{"identity": "q::smoke", "owner": OWNER}],
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["execution_mode"],
+            "ignored-only",
+        )
+        mutated = copy.deepcopy(plan)
+        mutated["manual_only_targets"] = []
+        with self.assertRaises(ValueError):
+            owned.verify_plan_digest(mutated)
 
     def test_mixed_code_and_new_prose_use_the_existing_docs_only_disposition(self) -> None:
         for path in ("changelog.d/new-fix.fixed.md", "docs/new-page.md",
@@ -793,6 +883,17 @@ class ShardingAndExecutionTests(unittest.TestCase):
         self.assertIn("--locked", p_command)
         self.assertNotIn("-E", q_command)
 
+        manual = owned.target_command(
+            q,
+            config.test_exclusions,
+            list_only=False,
+            manual_only=True,
+        )
+        self.assertEqual(
+            manual[manual.index("--run-ignored") + 1],
+            "all",
+        )
+
     def _plan(self, *, lane: str = "change-owned") -> dict:
         lane_key = owned.LANE_KEYS[lane]
         identity = owned.Identity("p", "smoke")
@@ -814,6 +915,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 [identity.canonical] if lane_key == "package_expansion" else []
             ),
             "standing_targets": [],
+            "manual_only_targets": [],
             "target_exclusions": [],
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
@@ -881,6 +983,41 @@ class ShardingAndExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "malformed filter match"):
             owned._listing_tests(listing, identity, {})
 
+    def test_manual_only_listing_selects_ignored_tests_and_rejects_active_ones(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                "p::smoke": {
+                    "testcases": {
+                        "ignored_case": {
+                            "ignored": True,
+                            "filter-match": {"status": "matches"},
+                        }
+                    }
+                }
+            }
+        }
+        self.assertEqual(
+            owned._listing_tests(
+                listing,
+                identity,
+                {},
+                manual_only=True,
+            ),
+            ["p::smoke::ignored_case"],
+        )
+        listing["rust-suites"]["p::smoke"]["testcases"]["active_case"] = {
+            "ignored": False,
+            "filter-match": {"status": "matches"},
+        }
+        with self.assertRaisesRegex(ValueError, "has active tests"):
+            owned._listing_tests(
+                listing,
+                identity,
+                {},
+                manual_only=True,
+            )
+
     def test_nonempty_shard_builds_products_once_before_target_commands(self) -> None:
         plan = self._plan()
         identity = owned.Identity("p", "smoke")
@@ -945,6 +1082,67 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 {"commands.json", "timings.json", "test-list.json", "junit.xml"},
             )
             self.assertEqual(len(owned.load_receipts(output)), 1)
+
+    def test_manual_only_target_executes_the_complete_ignored_suite(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan()
+        plan["manual_only_targets"] = [
+            {"identity": identity.canonical, "owner": OWNER}
+        ]
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1:3] == ["nextest", "list"]:
+                    payload = {
+                        "rust-suites": {
+                            identity.canonical: {
+                                "testcases": {
+                                    "ignored_case": {
+                                        "ignored": True,
+                                        "filter-match": {"status": "matches"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return mock.Mock(
+                        stdout=json.dumps(payload), stderr="", returncode=0
+                    )
+                if command[1:3] == ["nextest", "run"]:
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    junit.write_text(
+                        '<testsuite><testcase name="ignored_case"/></testsuite>'
+                    )
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with (
+                mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                mock.patch.object(owned, "_commit", return_value="b" * 40),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+
+        self.assertTrue(receipt["success"])
+        self.assertEqual(receipt["selected_tests"], ["p::smoke::ignored_case"])
+        self.assertEqual(receipt["executed_tests"], ["p::smoke::ignored_case"])
+        for command in calls[1:]:
+            self.assertEqual(
+                command[command.index("--run-ignored") + 1],
+                "all",
+            )
 
     def test_product_build_failure_writes_receipt_and_skips_targets(self) -> None:
         plan = self._plan()
@@ -1173,6 +1371,7 @@ class ReportTests(unittest.TestCase):
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],
             "standing_targets": [],
+            "manual_only_targets": [],
             "target_exclusions": [{"identity": "p::heavy", "owner": OWNER}],
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
@@ -1267,6 +1466,7 @@ class ReportTests(unittest.TestCase):
         owned.attach_receipt_digest(receipts[0])
         summary = owned.summarize_package_expansion(self.plan, receipts[:-1])
         self.assertFalse(summary["observed_success"])
+        self.assertFalse(summary["success"])
         self.assertFalse(summary["required"])
         self.assertTrue(summary["failures"])
 
@@ -1306,7 +1506,7 @@ class ReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sidecar digest"):
                 owned.load_receipts(root)
 
-    def test_informational_cli_records_malformed_receipts_and_returns_zero(self) -> None:
+    def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
         self.plan["package_expansion"] = ["p::default_gated"]
         self.plan["eligible_targets"].append("p::default_gated")
         self.plan["shards"]["package_expansion"] = owned.shard_map(
@@ -1335,7 +1535,8 @@ class ReportTests(unittest.TestCase):
                 ]
             )
             report = json.loads((output / "report.json").read_text())
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
+        self.assertFalse(report["success"])
         self.assertFalse(report["observed_success"])
         self.assertTrue(report["failures"])
 

@@ -55,11 +55,13 @@ from a reader). The disagreement costs reviewer visibility, never soundness: no
 shape of it admits an unacknowledged change, because a line the parser does not
 read is a file that goes unacknowledged and fails.
 
-``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
-pull request. Without it the oracle reports the changed contract files and the
-exact lines the body must carry, then exits 0, so a local run is a checklist
-rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
-it can never be read as "nothing changed".
+``--require-acknowledgement`` is this oracle's local enforcing mode. The
+dedicated ``PR Contract Acknowledgements`` check applies the same grammar and
+change report through ``phase4b_change_report.py``; the Docs job runs this full
+oracle independently. Without the flag the oracle reports the changed contract
+files and the exact lines the body must carry, then exits 0, so a local run is a
+checklist rather than a gate. An unresolvable merge base fails the enforcing
+mode loudly; it can never be read as "nothing changed".
 
 The acknowledgement gate first replaced whole-file SHA-256 digests. That table made two pull
 requests that edited *different* contract files conflict on adjacent lines of
@@ -90,6 +92,11 @@ from phase4b_contract_text import (
 from phase4b_change_report import (
     acknowledgement_line, changed_contracts, identity_acknowledgement_violations,
     resolve_comparison,
+)
+from phase4b_acknowledgements import (
+    ACKNOWLEDGEMENT_KEY,
+    acknowledgement_identity,
+    parse_acknowledgements,
 )
 
 
@@ -766,107 +773,7 @@ def validate_op_manifests(
 # Frozen-contract acknowledgement gate (the additive-contradiction leg)
 # --------------------------------------------------------------------------
 
-ACKNOWLEDGEMENT_KEY = "Frozen-contract-change:"
 DEFAULT_BASE_REF = "origin/main"
-
-# The exact accepted line. No leading whitespace, exactly one space after the
-# colon, and one closed file/atom/region address.
-ACKNOWLEDGEMENT_LINE = re.compile(
-    r"^Frozen-contract-change: (?P<path>\S.*)$"
-)
-# A line that is trying to be an acknowledgement and failing. Leading
-# whitespace, a Markdown list bullet, a blockquote marker, or any casing of the
-# key all land here so the author is told the canonical spelling instead of
-# silently losing the acknowledgement.
-ACKNOWLEDGEMENT_NEAR_MISS = re.compile(
-    r"^[\s>]*(?:[-*+]\s+)?frozen[-_ ]?contract[-_ ]?change\s*:",
-    re.IGNORECASE,
-)
-# CommonMark fence tracking. The opening run's character and length are both
-# part of the contract: a `~~~` run never closes a ``` block, and a closing run
-# must be at least as long as the one that opened it. One boolean would let a
-# line that renders as code still acknowledge a change.
-FENCE_LINE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
-# A repo-relative POSIX path. The character class excludes every glob
-# metacharacter, the backslash, and whitespace; the segment rule excludes an
-# absolute path, an empty segment, and `.`/`..`.
-ACKNOWLEDGEMENT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-
-
-def acknowledgement_identity(value: str) -> tuple[str, str]:
-    """Parse the closed file/atom/region address grammar."""
-    if value.startswith("atom:"):
-        identity = value[5:]
-        if re.fullmatch(r"(?:04|05)-[A-Z]+-[1-9][0-9]*", identity):
-            return "atom", identity
-    elif value.startswith("region:"):
-        try:
-            identity = json.loads(value[7:])
-        except (ValueError, TypeError):
-            identity = None
-        if (isinstance(identity, str) and identity.strip()
-                and all(ord(char) >= 32 and ord(char) != 127 for char in identity)):
-            return "region", identity
-    elif ACKNOWLEDGEMENT_PATH.fullmatch(value) and all(
-        segment not in {".", ".."} for segment in value.split("/")
-    ):
-        return "file", value
-    label = "identity" if value.startswith(("atom:", "region:")) else "path"
-    raise OracleError(
-        f"malformed frozen contract acknowledgement {label} {value!r}: expected a "
-        "repo-relative POSIX path, atom:04/05-ID-N, or region:<JSON string>"
-    )
-
-
-def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
-    """Return ``(paths, errors)`` parsed from an acknowledgement document.
-
-    ``body`` is normally a pull request body. Lines inside fenced code blocks
-    are ignored so a body can quote the grammar without acknowledging anything.
-    A fence that is never closed is an error rather than a silent swallow of
-    every line after it.
-    """
-
-    paths: list[str] = []
-    errors: list[str] = []
-    open_fence: str | None = None
-    for raw in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        line = raw.rstrip()
-        fence = FENCE_LINE.match(line)
-        if fence is not None:
-            run = fence.group("fence")
-            if open_fence is None:
-                open_fence = run
-                continue
-            if run[0] == open_fence[0] and len(run) >= len(open_fence):
-                open_fence = None
-            continue
-        if open_fence is not None:
-            continue
-        match = ACKNOWLEDGEMENT_LINE.match(line)
-        if match is None:
-            if ACKNOWLEDGEMENT_NEAR_MISS.match(line):
-                errors.append(
-                    f"malformed frozen contract acknowledgement {line!r}: the "
-                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <address>' "
-                    "at the start of a line, outside a code fence"
-                )
-            continue
-        candidate = match.group("path")
-        try:
-            acknowledgement_identity(candidate)
-        except OracleError as error:
-            errors.append(str(error))
-            continue
-        paths.append(candidate)
-    if open_fence is not None:
-        errors.append(
-            f"unclosed {open_fence!r} code fence in the acknowledgement "
-            "document: every line after it was ignored, so an acknowledgement "
-            "there would be lost"
-        )
-    return paths, errors
-
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
@@ -1003,7 +910,7 @@ def validate_frozen_contract_changes(
         return [
             f"frozen contract acknowledgement: {error}",
             "frozen contract acknowledgement: change detection skipped "
-            "(advisory mode); CI runs --require-acknowledgement and will fail "
+            "(advisory mode); the dedicated PR acknowledgement check fails "
             "on an unreadable base",
         ]
 
@@ -3364,7 +3271,9 @@ def validate_schema_and_consumers(
             (
                 "An unacknowledged\nchange and an acknowledgement naming an "
                 "unchanged file both fail\n`--require-acknowledgement`, which "
-                "is the mode CI runs on a pull request.",
+                "the dedicated `PR Contract Acknowledgements`\ncheck applies "
+                "through `phase4b_change_report.py`. The full Phase 4B oracle "
+                "runs\nindependently in Docs.",
                 "Phase 4B acknowledgement enforcing mode",
             ),
             (
@@ -3880,9 +3789,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "fail on an unacknowledged contract change, a stale or malformed "
-            "acknowledgement, or an unresolvable merge base. CI passes this on "
-            "pull request events; without it the acknowledgement leg reports "
-            "and exits 0."
+            "acknowledgement, or an unresolvable merge base. This is the local "
+            "full-oracle equivalent of the dedicated PR acknowledgement "
+            "check; without it the acknowledgement leg reports and exits 0."
         ),
     )
     return parser

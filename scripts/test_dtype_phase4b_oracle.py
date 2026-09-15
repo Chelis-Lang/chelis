@@ -167,8 +167,10 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/design/dtype_semantics.md"),
             "An unacknowledged\nchange and an acknowledgement naming an "
-            "unchanged file both fail\n`--require-acknowledgement`, which is "
-            "the mode CI runs on a pull request.",
+            "unchanged file both fail\n`--require-acknowledgement`, which the "
+            "dedicated `PR Contract Acknowledgements`\ncheck applies through "
+            "`phase4b_change_report.py`. The full Phase 4B oracle runs\n"
+            "independently in Docs.",
             "An unacknowledged change fails `--require-acknowledgement`; an "
             "acknowledgement naming an unchanged file is tolerated.",
         )

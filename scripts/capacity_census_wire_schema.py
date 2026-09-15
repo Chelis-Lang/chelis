@@ -233,6 +233,94 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
     return cases
 
 
+def diagnostic_cases():
+    """Actual producer omission, exact report values, and consumer admission."""
+    cases = []
+    fields = sorted(
+        (
+            "kind",
+            "message",
+            "severity",
+            "expected",
+            "got",
+            "suggestions",
+            "span",
+            "deep_path",
+            "span_id",
+        )
+    )
+    for value in (0.5, -0.0):
+        wire = {
+            "kind": "unsupported_feature",
+            "message": "unsupported: a non-literal window list for `reduce_window_max` on the "
+            "compiled-backend lowering of `reduce_window_*` (lowering); unimplemented "
+            "chelis#1058: window and stride lists must be integer literals for the compiled "
+            "lane today; a runtime-parameterized window previously lowered to a silent no-op; "
+            "chelis#1058 owns compiled runtime-list support at source span `surf:86..89`",
+            "severity": value,
+            "expected": "literal window",
+            "got": "runtime window",
+            "suggestions": ["use literals"],
+            "span": {"span": "range", "offset": 9007199254740993, "len": 0},
+            "deep_path": {"def_qualified_name": "f", "path": "0.1"},
+            "span_id": "projection-witness",
+        }
+        bits = struct.pack(">d", value).hex()
+        for codec in ("construct", "json"):
+            expected = {"wire": wire, "severity_bits": bits}
+            if codec == "construct":
+                expected.update(
+                    internal_identity=True,
+                    envelope_matches=True,
+                    producer_schema_fields=fields,
+                    consumer_schema_fields=fields,
+                )
+            cases.append(
+                CodecCase(
+                    f"Diagnostic/{codec}/{value}",
+                    "report",
+                    "Diagnostic",
+                    codec,
+                    canonical(value if codec == "construct" else wire),
+                    expected,
+                )
+            )
+    for value in (-0.1, 1.1):
+        for codec in ("construct", "json"):
+            request = (
+                value
+                if codec == "construct"
+                else {
+                    "kind": "unsupported_feature",
+                    "message": "invalid",
+                    "severity": value,
+                }
+            )
+            cases.append(
+                CodecCase(
+                    f"Diagnostic/{codec}/reject-{value}",
+                    "report",
+                    "Diagnostic",
+                    codec,
+                    canonical(request),
+                    None,
+                    "finite f64 in [0,1]",
+                )
+            )
+    cases.append(
+        CodecCase(
+            "Diagnostic/json/missing-severity",
+            "report",
+            "Diagnostic",
+            "json",
+            '{"kind":"unsupported_feature","message":"invalid"}',
+            None,
+            "missing field `severity`",
+        )
+    )
+    return cases
+
+
 def report_cases():
     cases = []
 
@@ -408,6 +496,184 @@ class _SchemaShapeGraph(_CodecShapeGraph):
         crate, item_id = self.locations[identity]
         self._definition(crate, item_id, identity)
         return ("reference", identity, arguments)
+
+    def _diagnostic_codec(self, crate, item, identity, direction):
+        """Bind both actual derive implementations to this exact report owner."""
+        body = item["inner"].get("struct")
+        _require(
+            body is not None and not self._parameters(body) and not self._serde(item),
+            "diagnostic declaration changed",
+        )
+        codec = self._serde_implementations(
+            crate, body, set(), _SCHEMA_SOURCE, frozenset({direction})
+        )
+        schema = []
+        for impl_id in body.get("impls", []):
+            implementation = self._item(crate, impl_id)
+            inner = implementation.get("inner", {}).get("impl", {})
+            trait = inner.get("trait")
+            if not trait:
+                continue
+            path = self.documents[crate]["paths"].get(str(trait["id"]), {}).get("path")
+            is_schema = path == ["schemars", "JsonSchema"]
+            is_serde = path in [
+                [owner, module, name]
+                for owner in ("serde", "serde_core")
+                for module, name in (("ser", "Serialize"), ("de", "Deserialize"))
+            ] or path in [["serde", "Serialize"], ["serde", "Deserialize"]]
+            if not is_schema and not is_serde:
+                continue
+            receiver, arguments = self._nominal(crate, inner.get("for", {}))
+            _require(
+                receiver == identity
+                and arguments
+                in (None, {"angle_bracketed": {"args": [], "constraints": []}}),
+                "diagnostic codec receiver changed",
+            )
+            methods = tuple(
+                self._item(crate, method) for method in inner.get("items", [])
+            )
+            expected = (
+                {"schema_name", "schema_id", "json_schema"}
+                if is_schema
+                else {direction.lower()}
+            )
+            _require(
+                len(methods) == len(expected)
+                and {method.get("name") for method in methods} == expected
+                and all("function" in method.get("inner", {}) for method in methods),
+                "diagnostic codec methods changed",
+            )
+            if is_schema:
+                _require(
+                    "#[automatically_derived]" in _attributes(implementation)
+                    and not inner.get("blanket_impl")
+                    and not inner.get("is_negative")
+                    and not inner.get("is_synthetic")
+                    and all(
+                        (value.get("span") or {}).get("filename") == _SCHEMA_SOURCE
+                        for value in (implementation, *methods)
+                    ),
+                    "diagnostic schema implementation provenance changed",
+                )
+                schema.append(
+                    (
+                        "schemars::JsonSchema",
+                        _SCHEMA_SOURCE,
+                        tuple(method["name"] for method in methods),
+                    )
+                )
+        _require(
+            len(schema) == 1, "missing or duplicate diagnostic schema implementation"
+        )
+        return (codec, tuple(schema))
+
+    def _diagnostic_definition(self, crate, item_id, identity):
+        item = self._item(crate, item_id)
+        codec = self._diagnostic_codec(crate, item, identity, "Serialize")
+        plain = item["inner"]["struct"]["kind"].get("plain")
+        _require(
+            plain is not None and not plain["has_stripped_fields"],
+            "diagnostic fields are missing or stripped",
+        )
+        fields = [self._item(crate, field) for field in plain["fields"]]
+        sidecars = [field for field in fields if field.get("name") == "unsupported"]
+        _require(
+            len(sidecars) == 1, "diagnostic requires its exact off-wire identity field"
+        )
+        sidecar = sidecars[0]
+        _require(
+            sidecar.get("visibility") == "crate"
+            and (sidecar.get("span") or {}).get("filename") == _SCHEMA_SOURCE
+            and set(_attributes(sidecar)) == {"#[serde(skip)]", "#[schemars(skip)]"},
+            "diagnostic off-wire field visibility or omission changed",
+        )
+        ty = sidecar.get("inner", {}).get("struct_field", {})
+        nominal_chain = []
+        for expected in ("core::option::Option", "alloc::boxed::Box"):
+            nominal, arguments = self._nominal(crate, ty)
+            _require(
+                nominal == expected
+                and isinstance(arguments, dict)
+                and set(arguments) == {"angle_bracketed"},
+                "diagnostic off-wire container changed",
+            )
+            arguments = arguments["angle_bracketed"]
+            _require(
+                not arguments.get("constraints")
+                and len(arguments.get("args", [])) == 1
+                and set(arguments["args"][0]) == {"type"},
+                "diagnostic off-wire container arguments changed",
+            )
+            nominal_chain.append(nominal)
+            ty = arguments["args"][0]["type"]
+        nominal, arguments = self._nominal(crate, ty)
+        _require(
+            nominal == "chelis_types::unsupported::Unsupported"
+            and arguments
+            in (None, {"angle_bracketed": {"args": [], "constraints": []}}),
+            "diagnostic off-wire payload changed",
+        )
+        owner, payload_id, _ = self._resolve(crate, ty["resolved_path"]["id"])
+        payload = self._item(owner, payload_id).get("inner", {}).get("struct")
+        _require(
+            payload is not None and not self._has_serde(owner, payload),
+            "diagnostic off-wire payload requires its non-serde defining artifact",
+        )
+        nominal_chain.append(nominal)
+        self.definitions[identity] = None
+        edges = []
+        members = []
+        for field in fields:
+            if field is sidecar:
+                continue
+            name = field.get("name")
+            _require(
+                name and name not in {member[0] for member in members},
+                "missing or duplicate diagnostic field",
+            )
+            options = self._serde(field)
+            resolved = self._type(crate, field["inner"]["struct_field"], {})
+            self._validate_field_serde(options, resolved)
+            edges.append(Edge(identity + "." + name, resolved, options))
+            members.append((name, options))
+        consumer_identity = _SCHEMA + "WireDiagnostic"
+        self._schema_reference(consumer_identity)
+        consumer = self.definitions[consumer_identity]
+        consumer_owner, consumer_id = self.locations[consumer_identity]
+        consumer_codec = self._diagnostic_codec(
+            consumer_owner,
+            self._item(consumer_owner, consumer_id),
+            consumer_identity,
+            "Deserialize",
+        )
+        _require(
+            tuple((edge.path.rsplit(".", 1)[-1], edge.type) for edge in edges)
+            == tuple(
+                (edge.path.rsplit(".", 1)[-1], edge.type) for edge in consumer.edges
+            ),
+            "diagnostic producer and decoder fields disagree",
+        )
+        self.definitions[identity] = Definition(
+            identity,
+            "struct",
+            (),
+            (),
+            (
+                ("", (), ("plain", tuple(members))),
+                (
+                    "off-wire-derived-field",
+                    "unsupported",
+                    tuple(nominal_chain),
+                    "crate",
+                    ("serde(skip)", "schemars(skip)"),
+                    codec,
+                    consumer_codec,
+                ),
+            ),
+            tuple(edges),
+            "schema-codec:" + canonical(codec),
+        )
 
     def _artifact_definition(self, crate, item_id, identity):
         item = self._item(crate, item_id)
@@ -1056,6 +1322,8 @@ class _SchemaShapeGraph(_CodecShapeGraph):
     def _definition(self, crate, item_id, identity):
         if identity in self.definitions:
             return
+        if identity == _SCHEMA + "Diagnostic":
+            return self._diagnostic_definition(crate, item_id, identity)
         if identity in {
             _ARTIFACT + "ArtifactAbiVersion",
             _ARTIFACT + "CompiledArtifactManifest",
@@ -1438,6 +1706,7 @@ def verify_schema_codecs(root: Path, target: Path) -> VerifiedSchemaCodecs:
 
         cases = (
             schema_cases(vocabulary, graph.orders[_WIRE + "BinaryScalarWire"])
+            + diagnostic_cases()
             + report_cases()
             + envelope_cases()
             + dag_cases()

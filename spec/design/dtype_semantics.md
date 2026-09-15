@@ -1510,6 +1510,21 @@ Removing a required tag, changing a codec or width, adding a numeric field, or
 relocating a field invalidates the old admission until the new artifact satisfies
 the contract. Regenerating an identity or baseline never supplies that authority.
 
+The `Diagnostic` producer has one explicit off-wire projection: its private
+`unsupported` identity is excluded by both its derived serde encoder and its
+derived JSON schema. The wire adapter binds the compiler-derived field's exact
+`Option<Box<Unsupported>>` identity, crate visibility, omission attributes,
+defining artifact, and encoder/schema method provenance. It compares every
+published field with the independent `WireDiagnostic` decoder and executes a
+production unsupported diagnostic through serialization, generated schema, and
+consumer decode. That projection remains in the graph's codec identity; it does
+not classify the internal payload as nonnumeric or import its storage graph into
+the serialized graph. Numeric fields under conditional omission remain reachable,
+generic numeric `serde(skip)` remains rejected, and a missing defining artifact
+for a serialized import remains an error. The adapter's mutation controls reject
+changed omission, payload, visibility, codec provenance, and producer/consumer
+field disagreement ([#2048](https://github.com/Chelis-Lang/chelis/issues/2048)).
+
 Role-specific constructors or domain types should make validated reconstruction
 explicit. A raw wire DTO may exist before validation; it is not yet a checked IR
 reference, a measured-source witness, or checked runtime metadata. Admission
@@ -2592,9 +2607,9 @@ reinterpret either.
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
 atom identities and region boundaries, the frozen-contract acknowledgement
-gate, phase naming, and generated rejection-registry agreement. The committed
-report names each changed atom and region, including owned registry text, and
-requires its exact acknowledgement in addition to the changed-file line.
+report contract, phase naming, and generated rejection-registry agreement. The
+committed report names each changed atom and region, including owned registry
+text, and requires its exact acknowledgement in addition to the changed-file line.
 Required-literal anchors and their mutations remain independent checks.
 Roadmap and current-state documents retain their required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
@@ -2615,9 +2630,10 @@ one line per changed file, no leading whitespace, exactly one space after the
 colon, a repo-relative path with no glob and no `.`/`..` segment, and nothing
 after the path; lines inside fenced code blocks are ignored. An unacknowledged
 change and an acknowledgement naming an unchanged file both fail
-`--require-acknowledgement`, which is the mode CI runs on a pull request. A
-local run without that flag lists the changed contract files and the lines the
-body needs, then exits 0.
+`--require-acknowledgement`, which the dedicated `PR Contract Acknowledgements`
+check applies through `phase4b_change_report.py`. The full Phase 4B oracle runs
+independently in Docs. A local oracle run without that flag lists the changed
+contract files and the lines the body needs, then exits 0.
 
 Atom and region addresses use `Frozen-contract-change: atom:05-OP-33` and
 `Frozen-contract-change: region:"exact region label"`. Missing, duplicate,
