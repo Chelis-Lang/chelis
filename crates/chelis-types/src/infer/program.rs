@@ -87,6 +87,9 @@ fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
         && left.tvar_restrictions == right.tvar_restrictions
         && left.dvars == right.dvars
         && left.rvars == right.rvars
+        // chelis#1654: an obligation is part of the scheme, so two schemes
+        // that differ only there are not the same scheme.
+        && left.constraints == right.constraints
         && left.body == right.body
 }
 

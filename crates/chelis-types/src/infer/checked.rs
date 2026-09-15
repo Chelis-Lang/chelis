@@ -1383,14 +1383,20 @@ impl InferenceProduct {
                 // can be derived at all, which is the acceptance boundary the
                 // shape-computed builtins have carried since chelis#1489.
                 //
+                DeferredShapeRule::PostApp { func_name, .. }
+                    if matches!(func_name.as_str(), "len" | "index" | "append" | "concat") =>
+                {
+                    func_name
+                }
                 DeferredShapeRule::PostApp { .. } => continue,
             };
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!(
-                    "unresolved `{operation}` shape obligation at declaration boundary: \
+                    "unresolved `{operation}` shape obligation in `{}` at declaration boundary: \
                      add an outer-constructor parameter annotation or apply the lambda before \
-                     the declaration boundary"
+                     the declaration boundary",
+                    declaration.unwrap_or("<anonymous>")
                 ),
                 vec![
                     "A result annotation does not determine an unresolved parameter constructor; top-level declarations do not borrow binding sites from later declarations"

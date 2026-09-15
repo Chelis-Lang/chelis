@@ -40,6 +40,11 @@ struct GroupCtx {
 struct MemberSnapshot {
     tvars: Vec<TypeVar>,
     tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
+    /// chelis#1654: part of the snapshot because it is part of the scheme's
+    /// identity. A member that acquired a collection obligation while its
+    /// group was inferred has NOT been left unchanged, and comparing only the
+    /// quantifiers and the body would report that it had.
+    constraints: Vec<crate::types::CollectionConstraint>,
     body: Type,
     /// Whether the member's `def` authored explicit type binders (`[a]`).
     /// Authored parameters take the strict caller's-own-instantiation rule;
@@ -99,6 +104,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             MemberSnapshot {
                 tvars: scheme.tvars.clone(),
                 tvar_restrictions: scheme.tvar_restrictions.clone(),
+                constraints: scheme.constraints.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
             },
@@ -195,6 +201,7 @@ pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
         };
         snapshot.tvars == scheme.tvars
             && snapshot.tvar_restrictions == scheme.tvar_restrictions
+            && snapshot.constraints == scheme.constraints
             && snapshot.body == scheme.body
     })
 }

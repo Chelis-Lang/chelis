@@ -5040,6 +5040,7 @@ def hidden(x: f32) -> f32 = x
         kind: SymbolKind::Value,
         type_repr: public.type_repr,
         type_variable_restrictions: public.type_variable_restrictions,
+        collection_obligations: public.collection_obligations,
         effects: public.effects,
         has_body: true,
     });

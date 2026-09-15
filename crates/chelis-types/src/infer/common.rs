@@ -2289,6 +2289,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             "uniform_like".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![template, low, high],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2318,6 +2319,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             helper.to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![tensor],
                 tvar_restrictions: vec![],
                 dvars: vec![],

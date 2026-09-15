@@ -1,6 +1,6 @@
 use chelis_shell::{
-    PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol, SymbolKind,
-    TypeVariableDomain, TypeVariableRestriction, read_shell, write_shell,
+    CollectionObligation, PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol,
+    SymbolKind, TypeVariableDomain, TypeVariableRestriction, read_shell, write_shell,
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
@@ -5622,7 +5622,10 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// Public JSON schema format. Version 2 adds exact quantified type-variable
 /// domain restrictions and is intentionally not compatible with version 1.
-pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 2;
+/// Version 3 (chelis#1654) adds `collection_obligations`, without which two
+/// exports that accept different programs describe themselves identically;
+/// it is likewise not compatible with version 2.
+pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 3;
 
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
@@ -5648,6 +5651,8 @@ pub struct FunctionSchema {
     pub name: String,
     pub type_repr: Option<String>,
     pub type_variable_restrictions: Vec<TypeVariableRestriction>,
+    /// chelis#1654: the collection obligations this export owes at every use.
+    pub collection_obligations: Vec<CollectionObligation>,
     pub effects: Vec<String>,
     pub has_body: bool,
 }
@@ -5713,6 +5718,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                         name: export_name.clone(),
                         type_repr: signature.type_repr,
                         type_variable_restrictions: signature.type_variable_restrictions,
+                        collection_obligations: signature.collection_obligations,
                         effects,
                         has_body,
                     });
@@ -7990,6 +7996,7 @@ mod shell_type_variable_canonicalization_tests {
     #[test]
     fn scheme_restrictions_follow_structural_alpha_renaming_across_namespaces() {
         let first = Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(9), TypeVar(42)],
             tvar_restrictions: vec![
                 (TypeVar(42), TypeVarRestriction::ActiveFloat),
@@ -8000,6 +8007,7 @@ mod shell_type_variable_canonicalization_tests {
             body: representative_type(9, 42, 9, 9),
         };
         let second = Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(701), TypeVar(3)],
             tvar_restrictions: vec![
                 (TypeVar(701), TypeVarRestriction::ActiveFloat),
@@ -8038,6 +8046,7 @@ mod shell_type_variable_canonicalization_tests {
     fn unrestricted_and_monomorphic_schemes_emit_an_empty_ledger() {
         for scheme in [
             Scheme {
+                constraints: vec![],
                 tvars: vec![TypeVar(33)],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -8061,6 +8070,7 @@ mod shell_type_variable_canonicalization_tests {
     #[test]
     fn restriction_for_a_variable_absent_from_the_body_is_rejected() {
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(5)],
             tvar_restrictions: vec![(TypeVar(5), TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
@@ -8073,12 +8083,137 @@ mod shell_type_variable_canonicalization_tests {
             "checker scheme restricts type variable ?5 absent from its body"
         );
     }
+
+    /// chelis#1654, positive. Checked builtin contracts use the same
+    /// alpha-canonical identities as the exported function type.
+    #[test]
+    fn alpha_equivalent_obligated_schemes_canonicalize_identically() {
+        use chelis_types::types::CollectionConstraint;
+
+        fn checked_len(element: u32) -> Scheme {
+            Scheme {
+                tvars: vec![TypeVar(element)],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                constraints: vec![CollectionConstraint::Len {
+                    operand: Type::Var(TypeVar(element)),
+                    result: Type::Prim(chelis_types::types::Prim::Int64),
+                }],
+                body: Type::Fn(
+                    vec![Type::Var(TypeVar(element))],
+                    Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+                ),
+            }
+        }
+
+        let first = canonical_shell_scheme(&checked_len(9)).expect("first canonicalizes");
+        let second = canonical_shell_scheme(&checked_len(701)).expect("second canonicalizes");
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .collection_obligations
+                .iter()
+                .map(|obligation| (
+                    obligation.builtin(),
+                    obligation
+                        .types()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                "len",
+                vec!["(t-var {} t0)".to_string(), "(t-prim {} int64)".to_string()]
+            )]
+        );
+    }
+
+    #[test]
+    fn hidden_collection_contract_variables_are_rejected() {
+        use chelis_types::types::CollectionConstraint;
+
+        let scheme = Scheme {
+            tvars: vec![TypeVar(0), TypeVar(1)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![CollectionConstraint::Len {
+                operand: Type::Var(TypeVar(1)),
+                result: Type::Prim(chelis_types::types::Prim::Int64),
+            }],
+            body: Type::Fn(
+                vec![Type::Var(TypeVar(0))],
+                Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+            ),
+        };
+
+        assert_eq!(
+            canonical_shell_scheme(&scheme).unwrap_err(),
+            "checker scheme collection contract names type variable ?1 absent from its body"
+        );
+    }
+
+    /// chelis#1654, negative. The collision this closes: same body, different
+    /// obligation. An unconstrained export keeps publishing no obligations and
+    /// must not be rejected.
+    #[test]
+    fn a_changed_obligation_changes_the_exported_identity() {
+        use chelis_types::types::CollectionConstraint;
+
+        let body = Type::Fn(
+            vec![Type::Var(TypeVar(4))],
+            Box::new(Type::Prim(chelis_types::types::Prim::Int64)),
+        );
+        let obligated = |constraint: CollectionConstraint| Scheme {
+            tvars: vec![TypeVar(4)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![constraint],
+            body: body.clone(),
+        };
+
+        let on_list = canonical_shell_scheme(&obligated(CollectionConstraint::Len {
+            operand: Type::Var(TypeVar(4)),
+            result: Type::Prim(chelis_types::types::Prim::Int64),
+        }))
+        .expect("the len-obligated scheme canonicalizes");
+        let on_index = canonical_shell_scheme(&obligated(CollectionConstraint::Index {
+            list: Type::Var(TypeVar(4)),
+            index: Type::Prim(chelis_types::types::Prim::Int64),
+            result: Type::Prim(chelis_types::types::Prim::Int64),
+        }))
+        .expect("the index-obligated scheme canonicalizes");
+        let unconstrained = canonical_shell_scheme(&Scheme {
+            tvars: vec![TypeVar(4)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![],
+            body: body.clone(),
+        })
+        .expect("an unconstrained export still canonicalizes");
+
+        assert_eq!(on_list.type_repr, on_index.type_repr);
+        assert_eq!(on_list.type_repr, unconstrained.type_repr);
+        assert_ne!(on_list, on_index);
+        assert_ne!(on_list, unconstrained);
+        assert!(
+            unconstrained.collection_obligations.is_empty(),
+            "an unconstrained export must publish no obligations"
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CanonicalExportedType {
     type_repr: Option<String>,
     type_variable_restrictions: Vec<TypeVariableRestriction>,
+    /// Checked collection relations, alpha-renamed with the same renamer as
+    /// `type_repr`.
+    collection_obligations: Vec<CollectionObligation>,
 }
 
 fn exported_function_type(
@@ -8098,9 +8233,33 @@ fn exported_function_type(
             .map(canonical_shell_type_repr)
             .or_else(authored_fallback),
         type_variable_restrictions: Vec::new(),
+        collection_obligations: Vec::new(),
     })
 }
 
+/// Canonical, alpha-invariant published identity of one exported scheme.
+///
+/// chelis#1654: the obligations are part of that identity. Two schemes with
+/// the same body and different collection obligations accept different
+/// programs, so canonicalizing (and therefore digesting) them identically
+/// would let a package be replaced by one that type-checks different callers.
+/// They are emitted as precise Deep type representations rather than a tag, a
+/// `Debug` rendering, or a hash: the `concat` rule equates its two element
+/// types with its result, and only the types carry that equation; a hash
+/// carries no source meaning a consumer could read back.
+///
+/// One renamer spans the body and obligations so every carried variable has
+/// the signature's canonical identity. A relation naming a variable absent
+/// from the body is rejected: [04-INF-9] does not permit a newly authored
+/// hidden predicate.
+///
+/// The obligations are visited in an order that does not depend on variable
+/// identity: each is first canonicalized on its own, and that self-contained
+/// rendering is the sort key. Two alpha-equivalent schemes therefore visit
+/// their obligations in the same order and produce the same global numbering.
+/// Obligations that are alpha-equal in isolation but distinct in the scheme
+/// (`len(?a)` and `len(?b)`) tie, and the tie is broken by the scheme's own
+/// order, which is the order the checker's ledger recorded them in.
 fn canonical_shell_scheme(
     scheme: &chelis_types::types::Scheme,
 ) -> Result<CanonicalExportedType, String> {
@@ -8109,6 +8268,71 @@ fn canonical_shell_scheme(
 
     let mut renamer = SchemeVariableRenamer::default();
     let canonical_body = renamer.rewrite_type(&scheme.body);
+    let body_tvars = chelis_types::env::free_tvars(&scheme.body)
+        .into_iter()
+        .collect::<UnordSet<_>>();
+    let body_dvars = chelis_types::env::free_dvars(&scheme.body)
+        .into_iter()
+        .collect::<UnordSet<_>>();
+    let body_rvars = chelis_types::env::free_rvars(&scheme.body)
+        .into_iter()
+        .collect::<UnordSet<_>>();
+    for constraint in &scheme.constraints {
+        for carried in constraint.carried_types() {
+            for variable in chelis_types::env::free_tvars(carried) {
+                if !body_tvars.contains(&variable) {
+                    return Err(format!(
+                        "checker scheme collection contract names type variable ?{} absent from its body",
+                        variable.0
+                    ));
+                }
+            }
+            for variable in chelis_types::env::free_dvars(carried) {
+                if !body_dvars.contains(&variable) {
+                    return Err(format!(
+                        "checker scheme collection contract names dimension variable d{} absent from its body",
+                        variable.0
+                    ));
+                }
+            }
+            for variable in chelis_types::env::free_rvars(carried) {
+                if !body_rvars.contains(&variable) {
+                    return Err(format!(
+                        "checker scheme collection contract names rank variable r{} absent from its body",
+                        variable.0
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut ordered = scheme
+        .constraints
+        .iter()
+        .enumerate()
+        .map(|(position, constraint)| {
+            // A renamer local to this obligation: the key must describe the
+            // obligation's shape, not where its variables happen to sit in
+            // the scheme's global numbering.
+            let mut local = SchemeVariableRenamer::default();
+            let local = render_collection_obligation(constraint, &mut local);
+            let key = (
+                local.builtin(),
+                local
+                    .types()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            );
+            (key, position, constraint)
+        })
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let collection_obligations = ordered
+        .into_iter()
+        .map(|(_, _, constraint)| render_collection_obligation(constraint, &mut renamer))
+        .collect::<Vec<_>>();
+
     let quantified = scheme.tvars.iter().copied().collect::<UnordSet<_>>();
     let mut seen = UnordSet::new();
     let mut restrictions = Vec::with_capacity(scheme.tvar_restrictions.len());
@@ -8158,7 +8382,54 @@ fn canonical_shell_scheme(
             .into_iter()
             .map(|(_, restriction)| restriction)
             .collect(),
+        collection_obligations,
     })
+}
+
+/// Preserve the rule's fixed fields and the shared scheme variable names.
+fn render_collection_obligation(
+    constraint: &chelis_types::types::CollectionConstraint,
+    renamer: &mut SchemeVariableRenamer,
+) -> CollectionObligation {
+    use chelis_types::infer::type_to_deep_expr;
+    use chelis_types::types::CollectionConstraint;
+
+    let mut render = |ty| {
+        let canonical = type_to_deep_expr(&renamer.rewrite_type(ty));
+        // A new per-type renamer would collapse every variable to t0.
+        chelis_deep::printer::print_canonical(std::slice::from_ref(&canonical))
+            .trim()
+            .to_string()
+    };
+    match constraint {
+        CollectionConstraint::Len { operand, result } => CollectionObligation::Len {
+            operand: render(operand),
+            result: render(result),
+        },
+        CollectionConstraint::Index {
+            list,
+            index,
+            result,
+        } => CollectionObligation::Index {
+            list: render(list),
+            index: render(index),
+            result: render(result),
+        },
+        CollectionConstraint::Append {
+            list,
+            value,
+            result,
+        } => CollectionObligation::Append {
+            list: render(list),
+            value: render(value),
+            result: render(result),
+        },
+        CollectionConstraint::Concat { lhs, rhs, result } => CollectionObligation::Concat {
+            lhs: render(lhs),
+            rhs: render(rhs),
+            result: render(result),
+        },
+    }
 }
 
 #[derive(Default)]
@@ -8288,6 +8559,7 @@ fn build_shell_package(
                         .map(canonical_shell_type_repr)
                         .or_else(|| sig_type_repr(module, name)),
                     type_variable_restrictions: Vec::new(),
+                    collection_obligations: Vec::new(),
                 }
             };
             let effects = symbol_effects(module, name);
@@ -8297,6 +8569,7 @@ fn build_shell_package(
                 kind,
                 type_repr: signature.type_repr,
                 type_variable_restrictions: signature.type_variable_restrictions,
+                collection_obligations: signature.collection_obligations,
                 effects,
                 has_body,
             });

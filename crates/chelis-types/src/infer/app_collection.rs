@@ -22,6 +22,122 @@ pub(super) fn collection_helper_type_error(
     )
 }
 
+/// Decide a transported checked collection contract against settled operands.
+///
+/// Scheme instantiation installs the relation on the deferred-operand ledger.
+/// Application consumes it; binding an operand discharges it here, and a
+/// multi-operand relation re-suspends until its next operand settles.
+///
+/// The eager arms in `app_post.rs` do NOT delegate here. They decide their
+/// settled cases themselves, against the call site's syntactic element list,
+/// which this has no access to -- see the tensor `concat` note below. The two
+/// implementations therefore coexist, and the eager one is better informed.
+///
+/// `Ok(Some(result))` is the type the rule produces, which the caller unifies
+/// into whatever the call already published. `Ok(None)` means an operand is
+/// still undecided -- a variable, or an error witness whose diagnostic is
+/// already owned upstream -- and the caller suspends or suppresses. `Err` is
+/// the rule's own rejection text.
+///
+/// The tensor `concat` overload is decided here without the call site's
+/// syntactic element list, so its extents are wildcards. That is honest for a
+/// transported decision.
+pub(crate) fn decide_collection_constraint(
+    constraint: &CollectionConstraint,
+    subst: &mut Subst,
+) -> Result<Option<Type>, String> {
+    let applied = constraint.map_types(|ty| subst.apply(ty));
+    if applied
+        .operands()
+        .iter()
+        .any(|ty| matches!(ty, Type::Error(_)))
+    {
+        return Ok(None);
+    }
+    if applied
+        .operands()
+        .iter()
+        .any(|ty| matches!(ty, Type::Var(_)))
+    {
+        return Ok(None);
+    }
+    match &applied {
+        CollectionConstraint::Len { operand, .. } => match operand {
+            Type::Adt(name, _) if name == "List" || name == "Dict" => {
+                Ok(Some(Type::Prim(Prim::Int64)))
+            }
+            other => Err(format!("len expects List or Dict input, got {other}")),
+        },
+        CollectionConstraint::Index { list, index, .. } => {
+            match index {
+                Type::Prim(prec) if prec.is_integer() => {}
+                other => return Err(format!("index expects integer index, got {other}")),
+            }
+            match list {
+                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                    Ok(Some(args[0].clone()))
+                }
+                other => Err(format!("index expects List input, got {other}")),
+            }
+        }
+        CollectionConstraint::Append { list, value, .. } => match list {
+            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                if let Err(te) = unify(&args[0], value, subst) {
+                    // Name the rule. A bare unification message reads as a
+                    // precision mismatch between two types the source never
+                    // mentions together, and the eager arms all name the
+                    // builtin they rejected for.
+                    return Err(format!(
+                        "append expects a value of the list's element type, got {list} and {value}; {}",
+                        te.message
+                    ));
+                }
+                Ok(Some(Type::Adt(
+                    "List".to_string(),
+                    vec![subst.apply(&args[0])],
+                )))
+            }
+            other => Err(format!("append expects List input, got {other}")),
+        },
+        CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
+            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                if lhs_name == "List"
+                    && rhs_name == "List"
+                    && lhs_args.len() == 1
+                    && rhs_args.len() == 1 =>
+            {
+                // The element equation, not just `(List, List)` membership:
+                // `concat(List[f32], List[int64])` satisfies membership and
+                // violates the rule.
+                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
+                    return Err(format!(
+                        "concat expects matching List inputs, got {lhs} and {rhs}; {}",
+                        te.message
+                    ));
+                }
+                Ok(Some(Type::Adt(
+                    "List".to_string(),
+                    vec![subst.apply(&lhs_args[0])],
+                )))
+            }
+            (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
+                if lhs_name == "List" && lhs_args.len() == 1 =>
+            {
+                tensor_concat_result_type(
+                    &lhs_args[0],
+                    None,
+                    ConcatListInfo::BindingLen(None),
+                    subst,
+                )
+                .map(Some)
+            }
+            (lhs, rhs) => Err(format!(
+                "concat expects matching List inputs, got {lhs} and {rhs}"
+            )),
+        },
+    }
+}
+
 /// How the concat arm can see the list's elements (chelis#594).
 pub(super) enum ConcatListInfo {
     /// A literal `Cons` chain at the call site: each element's full dim

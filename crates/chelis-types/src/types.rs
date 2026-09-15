@@ -683,6 +683,134 @@ impl fmt::Display for EffectSet {
     }
 }
 
+/// The checked operand/result relation of a first-class collection operation.
+///
+/// Builtin schemes own these contracts. Aliasing, higher-order passage,
+/// import, and serialization retain them; applying the value consumes and
+/// decides them. A newly authored wrapper does not create one from its body
+/// because [04-INF-9] requires an explicit sufficient parameter contract.
+///
+/// Each variant holds the route's operands and its result in FIXED fields.
+/// A rule tag plus an operand vector would describe `(List, List)` membership
+/// and lose the equations the rule also imposes -- that `concat`'s two lists
+/// share an element type and that its result is a list at that same type --
+/// so a mixed-element call, or one whose result was annotated to something
+/// the rule never produces, would satisfy the carried constraint.
+///
+/// The carried types are ordinary types, so [`crate::env::Env::instantiate`]'s
+/// renaming substitution rewrites any dimension or rank variable they mention
+/// exactly as it rewrites the scheme body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CollectionConstraint {
+    /// `len(operand) -> int64`: the operand is a `List` or a `Dict`.
+    Len { operand: Type, result: Type },
+    /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is an
+    /// integer, and `result` is `e`.
+    Index {
+        list: Type,
+        index: Type,
+        result: Type,
+    },
+    /// `append(list, value) -> result`: `list` is a `List[e]`, `value` is an
+    /// `e`, and `result` is `List[e]`.
+    Append {
+        list: Type,
+        value: Type,
+        result: Type,
+    },
+    /// `concat(lhs, rhs) -> result`, both spec/04 §4.5.4 overloads: two
+    /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `int32`
+    /// axis giving a tensor.
+    Concat { lhs: Type, rhs: Type, result: Type },
+}
+
+impl CollectionConstraint {
+    /// The builtin this constraint belongs to, for diagnostics.
+    pub fn builtin(&self) -> &'static str {
+        match self {
+            Self::Len { .. } => "len",
+            Self::Index { .. } => "index",
+            Self::Append { .. } => "append",
+            Self::Concat { .. } => "concat",
+        }
+    }
+
+    /// The operand positions, in the order the rule reads them. The result is
+    /// deliberately absent: an unresolved RESULT is what the rule computes,
+    /// not what it waits on.
+    pub fn operands(&self) -> Vec<&Type> {
+        match self {
+            Self::Len { operand, .. } => vec![operand],
+            Self::Index { list, index, .. } => vec![list, index],
+            Self::Append { list, value, .. } => vec![list, value],
+            Self::Concat { lhs, rhs, .. } => vec![lhs, rhs],
+        }
+    }
+
+    /// Every type this constraint carries, operands and result alike. Used to
+    /// decide which variables a pending constraint keeps monomorphic.
+    pub fn carried_types(&self) -> Vec<&Type> {
+        match self {
+            Self::Len { operand, result } => vec![operand, result],
+            Self::Index {
+                list,
+                index,
+                result,
+            } => vec![list, index, result],
+            Self::Append {
+                list,
+                value,
+                result,
+            } => vec![list, value, result],
+            Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
+        }
+    }
+
+    /// The result the suspended call already handed its consumer.
+    pub fn result(&self) -> &Type {
+        match self {
+            Self::Len { result, .. }
+            | Self::Index { result, .. }
+            | Self::Append { result, .. }
+            | Self::Concat { result, .. } => result,
+        }
+    }
+
+    /// Rewrite every carried type with `f`. Instantiation passes the
+    /// quantifier renaming; discharge passes the current substitution.
+    pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
+        match self {
+            Self::Len { operand, result } => Self::Len {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::Index {
+                list,
+                index,
+                result,
+            } => Self::Index {
+                list: f(list),
+                index: f(index),
+                result: f(result),
+            },
+            Self::Append {
+                list,
+                value,
+                result,
+            } => Self::Append {
+                list: f(list),
+                value: f(value),
+                result: f(result),
+            },
+            Self::Concat { lhs, rhs, result } => Self::Concat {
+                lhs: f(lhs),
+                rhs: f(rhs),
+                result: f(result),
+            },
+        }
+    }
+}
+
 /// A polymorphic type scheme: ∀ tvars, dvars. body
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
@@ -695,6 +823,15 @@ pub struct Scheme {
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
     pub rvars: Vec<RankVar>,
+    /// Checked collection-operation relations transported by this function
+    /// value and renamed at each instantiation. Usually empty.
+    ///
+    /// Deliberately NOT `#[serde(default)]`. A default would let a scheme
+    /// persisted before this field existed decode as unconstrained and erase a
+    /// checked function value's contract on the reuse path. A payload without
+    /// this field must fail to decode; the TypeEnv format version makes that
+    /// an obsolete-snapshot error.
+    pub constraints: Vec<CollectionConstraint>,
     pub body: Type,
 }
 
@@ -706,6 +843,7 @@ impl Scheme {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
+            constraints: vec![],
             body: ty,
         }
     }

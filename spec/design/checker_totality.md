@@ -3776,6 +3776,81 @@ is closed.
 
 ---
 
+### Checked collection-operation transport (chelis#1654)
+
+[04-INF-9] controls this slice. A newly authored generic wrapper may not publish
+a collection admission predicate inferred from its body: `def size(x) = len(x)`
+and an authored `a -> int64` signature both fail at their declaration boundary.
+An explicit `List[a]` or `Dict[k, v]` parameter supplies the constructor
+information the operation requires. [04-INF-1] still permits a local
+unannotated lambda to settle monomorphically at its first application.
+
+An already-checked function value is different. The checked contracts of
+`len`, `index`, `append`, and `concat` survive aliases, instantiation,
+higher-order passage and return, aggregates, recursive and indirect calls,
+imports, and serialized checker metadata. Calls decide those transported
+contracts without inspecting the callee body.
+
+#### Mechanism
+
+1. `CollectionConstraint` records each checked builtin's fixed operand/result
+   relation. `len`, `index`, `append`, and `concat` all carry the result
+   equations their ordinary rules impose. These are checked operation
+   contracts, not user-authored §5.9 dtype bounds.
+2. `Scheme::constraints` transports those relations with the same quantified
+   variables as the function type. `Env::instantiate_scheme` performs the one
+   renaming and re-installs the relation on the existing deferred-operand
+   ledger. All relation variables must occur in the callable type; there is no
+   connected hidden-intermediate graph.
+3. Aliasing, returning, aggregating, or passing a function value leaves its
+   relation transportable. Applying it consumes the relation. If a consumed
+   operand remains generic, the ledger pins it against generalization and the
+   declaration boundary reports the missing collection contract. Thus transport
+   does not become body-inferred wrapper publication. Projecting or returning a
+   result that no longer contains the function-bearing subvalue removes its
+   detached transport entry.
+4. Direct syntactic calls keep `app_post.rs`'s operation-specific rules and
+   diagnostics. The scheme copy is discarded for that call. Indirect calls use
+   `decide_collection_constraint`; result reconciliation and multi-operand
+   re-suspension remain inside unification.
+5. Persisted checker and package identities include the relation. TypeEnv
+   format 3 follows #2071's format 2, CHB format 5 follows #2071's format 4,
+   and Reef schema format 3 follows schema format 2. Predecessors are rejected
+   rather than decoded as unconstrained. Canonical package relations share the
+   function type's alpha-renamed variables and reject hidden variables.
+
+This mechanism is the collection constructor/result-relation specialization of
+the general operation-admission design already recorded in §C3.1 and
+[04-INF-9]. It adds no collection-only generalization exception and does not
+alter PP7, PP9, runtime-extent guards, or unrelated deferred operation rules.
+
+#### Required acceptance
+
+The acceptance set is:
+
+```text
+cargo nextest run -p chelis-types --test issue_1654_generic_collection_constraints --no-fail-fast
+cargo nextest run -p chelis-cli --test issue_1654_generic_collection_cli --no-fail-fast
+```
+
+```text
+cargo check -p chelis-reef --tests
+cargo nextest run -p chelis-reef --lib --no-fail-fast
+cargo nextest run -p chelis-reef --test scheme_restriction_schema --no-fail-fast
+```
+
+Every case must reach both checker APIs. CLI cases must assert the verdict,
+error kind, and score, not merely a nonzero command exit.
+The negatives cover declaration rejection plus invalid direct, alias,
+higher-order, aggregate, recursive, imported, and serialized uses. Positive
+controls cover explicit `List`/`Dict` contracts, both `concat` relations, and
+transport of already-checked values. #1506 remains a regression lock; #1537's
+PP9 shared-driver/pass-set work is separate and is not implied by paired
+checker-ingress coverage here. #1639's alias diagnostic-identity work is also
+separate.
+
+---
+
 # Part IV - bookkeeping
 
 ## I1. Interlocks

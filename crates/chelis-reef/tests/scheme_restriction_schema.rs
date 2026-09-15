@@ -36,12 +36,13 @@ module_prefix = "Restriction"
     write(
         &root.join("src/main.ch"),
         r#"module Restriction.Main
-export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded)
+export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded, measure)
 def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[p](value: &tensor[n, p]) -> &tensor[n, p] = value
 def integer_identity(value: int32) -> int32 = value
 def int_bounded[q: Int](value: q) -> q = value
 def numeric_bounded[q: Numeric](value: q) -> q = value
+measure = len
 "#,
     );
     (directory, root)
@@ -73,7 +74,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let schema = package_schema(&root).expect("schema package must check");
     let schema_json = serde_json::to_value(schema).expect("schema must serialize");
 
-    assert_eq!(schema_json["format_version"], 2);
+    assert_eq!(schema_json["format_version"], 3);
     assert_eq!(
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
@@ -95,6 +96,15 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             "{name} must not acquire a restriction"
         );
     }
+    assert_eq!(
+        exported(&schema_json, "measure", "functions")["collection_obligations"],
+        serde_json::json!([{
+            "len": {
+                "operand": "(t-var {} t0)",
+                "result": "(t-var {} t1)"
+            }
+        }])
+    );
     let mut missing_required_field = schema_json.clone();
     missing_required_field["modules"][0]["functions"][0]
         .as_object_mut()
@@ -102,7 +112,16 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         .remove("type_variable_restrictions");
     assert!(
         serde_json::from_value::<PackageSchema>(missing_required_field).is_err(),
-        "schema v2 consumers must not silently default a missing restriction ledger"
+        "schema v3 consumers must not silently default a missing restriction ledger"
+    );
+    let mut missing_collection_ledger = schema_json.clone();
+    missing_collection_ledger["modules"][0]["functions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("collection_obligations");
+    assert!(
+        serde_json::from_value::<PackageSchema>(missing_collection_ledger).is_err(),
+        "schema v3 consumers must not silently default a missing collection ledger"
     );
 
     let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
@@ -110,7 +129,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 4);
+    assert_eq!(shell_json["format_version"], 5);
     assert_eq!(
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()
@@ -132,4 +151,13 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             "{name} must not acquire a restriction"
         );
     }
+    assert_eq!(
+        exported(&shell_json, "measure", "exports")["collection_obligations"],
+        serde_json::json!([{
+            "len": {
+                "operand": "(t-var {} t0)",
+                "result": "(t-var {} t1)"
+            }
+        }])
+    );
 }

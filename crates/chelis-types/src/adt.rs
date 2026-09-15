@@ -326,6 +326,7 @@ impl AdtRegistry {
                 (
                     variant.name.clone(),
                     Scheme {
+                        constraints: vec![],
                         tvars: all_tvars.clone(),
                         tvar_restrictions: vec![],
                         dvars: all_dvars.clone(),

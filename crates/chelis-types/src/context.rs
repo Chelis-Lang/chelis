@@ -116,7 +116,10 @@ pub struct TypeEnv {
 // Source-free snapshots are faithful transports from a trusted checker
 // producer, not independently re-proved programs. Structural validation does
 // not establish completeness of a maliciously edited label summary.
-const TYPE_ENV_FORMAT_VERSION: u32 = 2;
+// v2 added #2071's type-variable restrictions. v3 adds checked collection
+// relations to `Scheme`; reading an older snapshot as an empty relation list
+// would change which indirect calls are admitted.
+const TYPE_ENV_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -507,5 +510,17 @@ mod tests {
             &mut float_trial,
         )
         .expect("round-tripped restriction must accept f32");
+    }
+
+    #[test]
+    fn type_env_rejects_the_pre_collection_contract_version() {
+        let mut encoded = bincode::serialize(&TypeEnv::empty()).expect("TypeEnv serializes");
+        encoded[..4].copy_from_slice(&2_u32.to_le_bytes());
+        let error = bincode::deserialize::<TypeEnv>(&encoded)
+            .expect_err("TypeEnv v2 must not decode as an unconstrained v3 snapshot");
+        assert!(
+            error.to_string().contains("obsolete TypeEnv format"),
+            "unexpected predecessor-version diagnostic: {error}"
+        );
     }
 }

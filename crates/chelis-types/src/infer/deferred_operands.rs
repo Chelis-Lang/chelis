@@ -45,6 +45,14 @@ pub(super) fn validate_deferred_tensor_operands(
     declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    // chelis#1654: obligations an instantiation re-installed with every
+    // operand already settled. Decided FIRST: the decision can record a
+    // failure (drained just below) and can re-suspend on an operand that is a
+    // variable again (caught by the never-resolved sweep at the end), so this
+    // is the only ordering where neither outcome is lost.
+    for constraint in subst.take_settled_collection_obligations() {
+        crate::unify::discharge_collection_constraint(&constraint, true, subst);
+    }
     for failure in subst.take_operand_gate_failures() {
         match failure {
             OperandGateFailure::Decision { error } => errors.push(error),

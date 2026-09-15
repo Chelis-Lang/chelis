@@ -5,7 +5,11 @@ use std::fs;
 use std::path::Path;
 
 pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
-pub const SHELL_FORMAT_VERSION: u32 = 4;
+// v4 carries #2071's authored and operation-value type-variable domains. v5
+// adds checked collection-operation relations. Positional bincode cannot read
+// either change as an absent field without changing the programs an export
+// admits, so both require exact version rejection.
+pub const SHELL_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -39,8 +43,64 @@ pub struct ShellSymbol {
     /// never a representation.
     pub type_repr: Option<String>,
     pub type_variable_restrictions: Vec<TypeVariableRestriction>,
+    /// Checked collection-operation relations carried by this function value.
+    /// Every canonical variable must also occur in `type_repr`; newly authored
+    /// wrappers may not publish hidden body-inferred predicates ([04-INF-9]).
+    pub collection_obligations: Vec<CollectionObligation>,
     pub effects: Vec<String>,
     pub has_body: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CollectionObligation {
+    Len {
+        operand: String,
+        result: String,
+    },
+    Index {
+        list: String,
+        index: String,
+        result: String,
+    },
+    Append {
+        list: String,
+        value: String,
+        result: String,
+    },
+    Concat {
+        lhs: String,
+        rhs: String,
+        result: String,
+    },
+}
+
+impl CollectionObligation {
+    pub fn builtin(&self) -> &'static str {
+        match self {
+            Self::Len { .. } => "len",
+            Self::Index { .. } => "index",
+            Self::Append { .. } => "append",
+            Self::Concat { .. } => "concat",
+        }
+    }
+
+    pub fn types(&self) -> Vec<&str> {
+        match self {
+            Self::Len { operand, result } => vec![operand, result],
+            Self::Index {
+                list,
+                index,
+                result,
+            } => vec![list, index, result],
+            Self::Append {
+                list,
+                value,
+                result,
+            } => vec![list, value, result],
+            Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
+        }
+    }
 }
 
 /// A canonical quantified-type-variable domain carried across public package
@@ -165,8 +225,8 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
         )?;
         for symbol in &module.exports {
             validate_nonempty_trimmed("export name", &symbol.name)?;
-            let type_variables = match &symbol.type_repr {
-                Some(type_repr) => Some(canonical_type_variables(type_repr)?),
+            let variables = match &symbol.type_repr {
+                Some(type_repr) => Some(canonical_variables(type_repr, true)?),
                 None if symbol.kind == SymbolKind::Value => {
                     return Err(validation_error(&format!(
                         "value export `{}` in module `{}` requires a type representation",
@@ -188,14 +248,55 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
                     symbol.name, module.module
                 )));
             }
-            if let Some(type_variables) = type_variables {
+            if !symbol.collection_obligations.is_empty() && symbol.type_repr.is_none() {
+                return Err(validation_error(&format!(
+                    "export `{}` in module `{}` carries collection obligations without a type representation",
+                    symbol.name, module.module
+                )));
+            }
+            if let Some(variables) = variables {
                 for restriction in &symbol.type_variable_restrictions {
                     let index = canonical_type_variable_index(&restriction.variable)?;
-                    if !type_variables.contains(&index) {
+                    if !variables.types.contains(&index) {
                         return Err(validation_error(&format!(
                             "export `{}` in module `{}` restricts `{}` but that canonical variable is absent from its type representation",
                             symbol.name, module.module, restriction.variable
                         )));
+                    }
+                }
+                for obligation in &symbol.collection_obligations {
+                    for carried in obligation.types() {
+                        let carried_variables = canonical_variables(carried, false)?;
+                        for index in carried_variables.types {
+                            if !variables.types.contains(&index) {
+                                return Err(validation_error(&format!(
+                                    "export `{}` in module `{}` carries a `{}` contract variable `t{index}` absent from its type representation",
+                                    symbol.name,
+                                    module.module,
+                                    obligation.builtin(),
+                                )));
+                            }
+                        }
+                        for index in carried_variables.dimensions {
+                            if !variables.dimensions.contains(&index) {
+                                return Err(validation_error(&format!(
+                                    "export `{}` in module `{}` carries a `{}` contract variable `d{index}` absent from its type representation",
+                                    symbol.name,
+                                    module.module,
+                                    obligation.builtin(),
+                                )));
+                            }
+                        }
+                        for index in carried_variables.ranks {
+                            if !variables.ranks.contains(&index) {
+                                return Err(validation_error(&format!(
+                                    "export `{}` in module `{}` carries a `{}` contract variable `r{index}` absent from its type representation",
+                                    symbol.name,
+                                    module.module,
+                                    obligation.builtin(),
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -269,28 +370,44 @@ fn canonical_type_variable_index(value: &str) -> Result<u32, bincode::Error> {
     })
 }
 
-fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::Error> {
+#[derive(Default)]
+struct CanonicalVariables {
+    types: BTreeSet<u32>,
+    dimensions: BTreeSet<u32>,
+    ranks: BTreeSet<u32>,
+}
+
+fn canonical_variables(
+    type_repr: &str,
+    require_contiguous: bool,
+) -> Result<CanonicalVariables, bincode::Error> {
     let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
         validation_error(&format!("type representation is not valid Deep: {error}"))
     })?;
 
     fn visit(
         expr: &chelis_deep::Expr,
-        variables: &mut BTreeSet<u32>,
+        variables: &mut CanonicalVariables,
     ) -> Result<(), bincode::Error> {
         use chelis_deep::{Atom, DeepTag, Expr};
 
         match expr {
             Expr::Atom(..) => {}
             Expr::Node(node, _) => {
-                if node.tag() == DeepTag::TVar {
+                let namespace = match node.tag() {
+                    DeepTag::TVar => Some(("t-var", &mut variables.types, "t")),
+                    DeepTag::DVar => Some(("d-var", &mut variables.dimensions, "d")),
+                    DeepTag::DRank => Some(("d-rank", &mut variables.ranks, "r")),
+                    _ => None,
+                };
+                if let Some((tag, namespace, prefix)) = namespace {
                     let Some(Expr::Atom(Atom::Name(name), _)) = node.children_slice().first()
                     else {
-                        return Err(validation_error(
-                            "t-var type representation is missing its canonical identity",
-                        ));
+                        return Err(validation_error(&format!(
+                            "{tag} type representation is missing its canonical identity"
+                        )));
                     };
-                    variables.insert(canonical_type_variable_index(name)?);
+                    namespace.insert(canonical_variable_index(name, prefix, tag)?);
                 }
                 for child in node.children_slice() {
                     visit(child, variables)?;
@@ -309,16 +426,43 @@ fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::E
         Ok(())
     }
 
-    let mut variables = BTreeSet::new();
+    let mut variables = CanonicalVariables::default();
     visit(&expression, &mut variables)?;
-    for (expected, actual) in variables.iter().copied().enumerate() {
-        if actual != expected as u32 {
-            return Err(validation_error(
-                "type representation variables must be contiguous from `t0`",
-            ));
+    if require_contiguous {
+        for (namespace, prefix, indices) in [
+            ("type", "t", &variables.types),
+            ("dimension", "d", &variables.dimensions),
+            ("rank", "r", &variables.ranks),
+        ] {
+            for (expected, actual) in indices.iter().copied().enumerate() {
+                if actual != expected as u32 {
+                    return Err(validation_error(&format!(
+                        "type representation {namespace} variables must be contiguous from `{prefix}0`"
+                    )));
+                }
+            }
         }
     }
     Ok(variables)
+}
+
+fn canonical_variable_index(value: &str, prefix: &str, tag: &str) -> Result<u32, bincode::Error> {
+    let Some(index) = value.strip_prefix(prefix) else {
+        return Err(validation_error(&format!(
+            "{tag} identities must use canonical `{prefix}<index>` spelling"
+        )));
+    };
+    if index.is_empty()
+        || !index.bytes().all(|byte| byte.is_ascii_digit())
+        || (index.len() > 1 && index.starts_with('0'))
+    {
+        return Err(validation_error(&format!(
+            "{tag} identities must use canonical `{prefix}<index>` spelling"
+        )));
+    }
+    index
+        .parse()
+        .map_err(|_| validation_error(&format!("{tag} identity index exceeds the u32 range")))
 }
 
 fn validate_compiler_pin(pin: &str) -> Result<(), bincode::Error> {
@@ -401,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v3_envelope() {
+    fn shell_encoding_has_an_explicit_v5_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -409,8 +553,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        // v4 carries operation-value domains separately from authored dtype bounds.
-        assert_eq!(SHELL_FORMAT_VERSION, 4);
+        assert_eq!(SHELL_FORMAT_VERSION, 5);
     }
 
     #[test]
@@ -434,8 +577,89 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 4"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 5"
         );
+    }
+
+    #[test]
+    fn shell_decode_rejects_the_pre_collection_contract_version() {
+        let mut bytes = encode_shell(&fixture_shell()).expect("encode shell");
+        bytes[8..12].copy_from_slice(&4_u32.to_le_bytes());
+
+        let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 4 is unsupported; expected 5"
+        );
+    }
+
+    #[test]
+    fn checked_collection_contracts_round_trip_and_change_identity() {
+        let mut obligated = fixture_shell();
+        let symbol = &mut obligated.modules[0].exports[0];
+        symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+        symbol.collection_obligations = vec![CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-var {} t1)".into(),
+        }];
+
+        let encoded = encode_shell(&obligated).expect("checked contract encodes");
+        assert_eq!(decode_shell(&encoded).unwrap(), obligated);
+        assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+    }
+
+    #[test]
+    fn checked_collection_contracts_reject_hidden_or_malformed_variables() {
+        let mut hidden = fixture_shell();
+        hidden.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-prim {} int64)".into(),
+        }];
+        assert!(
+            validate_shell(&hidden)
+                .unwrap_err()
+                .to_string()
+                .contains("absent from its type representation")
+        );
+
+        let mut malformed = fixture_shell();
+        malformed.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
+            operand: "List[t0]".into(),
+            result: "(t-prim {} int64)".into(),
+        }];
+        assert!(
+            validate_shell(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("not valid Deep")
+        );
+
+        for (operand, variable) in [
+            (
+                "(t-tensor {} (d-var {} d1) (d-rank {} r0) (t-prim {} f32))",
+                "`d1`",
+            ),
+            (
+                "(t-tensor {} (d-var {} d0) (d-rank {} r1) (t-prim {} f32))",
+                "`r1`",
+            ),
+        ] {
+            let mut hidden_shape = fixture_shell();
+            let symbol = &mut hidden_shape.modules[0].exports[0];
+            symbol.type_repr = Some(
+                "(t-fn {} (t-tensor {} (d-var {} d0) (d-rank {} r0) (t-prim {} f32)) (t-prim {} int64))"
+                    .into(),
+            );
+            symbol.collection_obligations = vec![CollectionObligation::Len {
+                operand: operand.into(),
+                result: "(t-prim {} int64)".into(),
+            }];
+            let error = validate_shell(&hidden_shape).unwrap_err();
+            assert!(
+                error.to_string().contains(variable),
+                "unexpected hidden-variable diagnostic: {error}"
+            );
+        }
     }
 
     #[test]
@@ -627,6 +851,7 @@ mod tests {
                     kind: SymbolKind::Value,
                     type_repr: Some("(t-fn {} (t-prim {} f32) (t-prim {} f32))".to_string()),
                     type_variable_restrictions: Vec::new(),
+                    collection_obligations: Vec::new(),
                     effects: Vec::new(),
                     has_body: true,
                 }],

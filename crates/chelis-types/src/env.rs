@@ -711,6 +711,16 @@ impl Env {
             }
             tvar_mapping.push((tv, fresh));
         }
+        // chelis#1654: renaming the quantifiers is exactly what turns a
+        // scheme-level obligation into one this USE owes, so it is done here,
+        // in the one instantiation mechanism, for the reason stated above:
+        // a second copy of this loop that dropped the obligations would
+        // compile, and the only symptom would be a program that should have
+        // been rejected type-checking.
+        //
+        // The renaming is applied AFTER the dimension and rank quantifiers are
+        // inserted below, so a constraint whose carried type mentions one gets
+        // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
         for &dv in &scheme.dvars {
             // Mint the variable directly rather than destructuring
@@ -726,6 +736,26 @@ impl Env {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
+        }
+        for constraint in &scheme.constraints {
+            let renamed = constraint.map_types(|ty| subst.apply(ty));
+            match crate::unify::pending_collection_var(&renamed, inference_subst) {
+                Some(pending) => inference_subst.record_deferred_tensor_operand(
+                    pending,
+                    crate::unify::DeferredOperandGate::Collection {
+                        constraint: renamed,
+                        transport: true,
+                    },
+                ),
+                // An obligation whose operands are all settled by the renaming
+                // alone -- one over a quantifier the body pins to a concrete
+                // type -- has no variable to key a ledger entry on. It is NOT
+                // dropped: this instantiation still owes it. It is queued for
+                // the per-def reporting pass, which holds a `&mut Subst` and
+                // decides it through the one discharge body, so a rejection
+                // becomes a diagnostic instead of an accepted program.
+                None => inference_subst.record_settled_collection_obligation(renamed),
+            }
         }
         (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
     }
@@ -785,11 +815,15 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        let level_scheme = self.generalize_by_levels(ty, subst);
+        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let sweep_scheme = self.generalize_by_sweep(ty, subst);
+                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst);
+                assert_eq!(
+                    level_scheme.constraints, sweep_scheme.constraints,
+                    "level-based collection obligations diverged from the reference environment sweep"
+                );
                 assert_eq!(
                     level_scheme.tvars, sweep_scheme.tvars,
                     "level-based type quantifiers diverged from the reference environment sweep"
@@ -812,10 +846,71 @@ impl Env {
                 );
             }
         });
+        // Transport contracts this scheme now owns have moved off the
+        // per-declaration operand ledger. Each later instantiation installs a
+        // fresh renamed copy.
+        //
+        // The exact key/contract pairs come back from the split. Removing by
+        // key alone could erase a different relation that happens to wait on
+        // the same aliased variable but is not owned by this value.
+        if !ledger_removals.is_empty() {
+            subst.take_collection_gates(&ledger_removals);
+        }
         level_scheme
     }
 
-    fn generalize_by_levels(&self, ty: &Type, subst: &Subst) -> Scheme {
+    /// chelis#1654: split the pending collection constraints into the ones
+    /// this generalization quantifies and the variables the rest must keep
+    /// monomorphic.
+    ///
+    /// Only relations already owned by a checked function value reach this
+    /// split. Their complete variable footprint must be visible in the value's
+    /// type; there are no hidden intermediate variables and no body-inferred
+    /// relation graph. A consumed application gate is excluded by
+    /// `pending_collection_gates` and pinned by `pending_gate_result_vars`.
+    fn collection_constraints_to_quantify(
+        body_variables: &[TypeVar],
+        body_candidates: &[TypeVar],
+        subst: &Subst,
+    ) -> CollectionQuantification {
+        let mut split = CollectionQuantification::default();
+        let pending = subst.pending_collection_gates();
+        if pending.is_empty() {
+            return split;
+        }
+        let visible = body_variables.iter().copied().collect::<UnordSet<_>>();
+        let candidates = body_candidates.iter().copied().collect::<UnordSet<_>>();
+        for (waiting_on, constraint) in pending {
+            let mut footprint = UnordSet::default();
+            footprint.insert(waiting_on);
+            for carried in constraint.carried_types() {
+                footprint.extend(free_tvars(carried));
+            }
+            let footprint = footprint.into_sorted();
+            if footprint.iter().all(|var| candidates.contains(var)) {
+                split.ledger_removals.push((waiting_on, constraint.clone()));
+                if !split.constraints.contains(&constraint) {
+                    split.constraints.push(constraint);
+                }
+            } else if footprint.iter().all(|var| !visible.contains(var)) {
+                // The expression discarded the function-bearing subvalue:
+                // `(len, 1).1` and `ignore(len)` must not leave the detached
+                // contract behind to reject an unrelated result.
+                split.ledger_removals.push((waiting_on, constraint));
+            } else {
+                split
+                    .pinned
+                    .extend(footprint.into_iter().filter(|var| candidates.contains(var)));
+            }
+        }
+        split
+    }
+
+    fn generalize_by_levels(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+    ) -> (Scheme, Vec<(TypeVar, CollectionConstraint)>) {
         let ty = subst.apply(ty);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
@@ -826,18 +921,25 @@ impl Env {
         // `Subst::pending_gate_result_vars`. Levels cannot see that tie -- it
         // lives in the gate ledger, not in any unification.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
-        let tvars = ty_tvars
-            .into_iter()
-            .filter(|v| {
-                subst.level_of_tvar(*v) > level
-                        // spec/04 §3.1.1: a variable minted for an in-group
-                        // recursive instantiation stays monomorphic while its
-                        // group is inferred, so a let-bound alias of a group
-                        // member cannot smuggle in polymorphic recursion.
-                        && !crate::infer::recursion::tvar_pinned(*v)
-                        && !pending_t.contains(v)
-            })
+        // spec/04 §3.1.1: a variable minted for an in-group recursive
+        // instantiation stays monomorphic while its group is inferred, so a
+        // let-bound alias of a group member cannot smuggle in polymorphic
+        // recursion.
+        let generalizable = |v: TypeVar| {
+            subst.level_of_tvar(v) > level
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+        };
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Move only already-checked transport contracts whose complete
+        // variable footprint belongs to this generalized function value.
+        let split = Self::collection_constraints_to_quantify(&ty_tvars, &tvars, subst);
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -846,23 +948,27 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: ty_dvars
-                .into_iter()
-                .filter(|v| {
-                    subst.level_of_dvar(*v) > level
-                        && !pending_d.contains(v)
-                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                })
-                .collect(),
-            rvars: ty_rvars
-                .into_iter()
-                .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: ty_dvars
+                    .into_iter()
+                    .filter(|v| {
+                        subst.level_of_dvar(*v) > level
+                            && !pending_d.contains(v)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: ty_rvars
+                    .into_iter()
+                    .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
 
     /// The pre-#1207 environment-sweep implementation, kept as the reference
@@ -879,7 +985,11 @@ impl Env {
     /// either here would make the oracle disagree with a correct production
     /// path. Keep the two sets of exclusions in step.
     #[cfg(feature = "generalize-sweep-oracle")]
-    fn generalize_by_sweep(&self, ty: &Type, subst: &Subst) -> Scheme {
+    fn generalize_by_sweep(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+    ) -> (Scheme, Vec<(TypeVar, CollectionConstraint)>) {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
@@ -887,14 +997,21 @@ impl Env {
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
-        let tvars = free_tvars(&ty)
-            .into_iter()
-            .filter(|v| {
-                !env_tvars.contains(v)
-                    && !crate::infer::recursion::tvar_pinned(*v)
-                    && !pending_t.contains(v)
-            })
+        let generalizable = |v: TypeVar| {
+            !env_tvars.contains(&v)
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+        };
+        let ty_tvars = free_tvars(&ty);
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Mirror the checked-contract split in the reference generalizer.
+        let split = Self::collection_constraints_to_quantify(&ty_tvars, &tvars, subst);
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -903,24 +1020,42 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: free_dvars(&ty)
-                .into_iter()
-                .filter(|v| {
-                    !env_dvars.contains(v)
-                        && !pending_d.contains(v)
-                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                })
-                .collect(),
-            rvars: free_rvars(&ty)
-                .into_iter()
-                .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: free_dvars(&ty)
+                    .into_iter()
+                    .filter(|v| {
+                        !env_dvars.contains(v)
+                            && !pending_d.contains(v)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: free_rvars(&ty)
+                    .into_iter()
+                    .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
+}
+
+/// chelis#1654: what one generalization decided about the pending collection
+/// obligations. See [`Env::collection_constraints_to_quantify`].
+#[derive(Default)]
+struct CollectionQuantification {
+    /// Obligations this scheme now owns, in ledger order.
+    constraints: Vec<CollectionConstraint>,
+    /// Exact ledger entries either moved into the scheme or discarded with a
+    /// function-bearing subvalue no longer visible in the generalized type.
+    ledger_removals: Vec<(TypeVar, CollectionConstraint)>,
+    /// Body variables that must stay monomorphic because an obligation this
+    /// scheme does NOT own still carries them.
+    pinned: UnordSet<TypeVar>,
 }
 
 /// True when `ty` contains a tensor whose shape carries the named
@@ -1170,6 +1305,7 @@ mod tests {
     /// distinguishable from the correct one.
     fn restricted_scheme() -> Scheme {
         Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
             dvars: vec![DimVar(3), DimVar(4)],
@@ -1389,6 +1525,7 @@ mod tests {
         let quantified_dim = DimVar(20);
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1424,6 +1561,7 @@ mod tests {
         let outer_dim = DimVar(22);
         let outer_rank = RankVar(32);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1464,6 +1602,7 @@ mod tests {
         let target_dim = DimVar(51);
         let target_rank = RankVar(61);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],

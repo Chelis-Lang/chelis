@@ -731,11 +731,21 @@ fn infer_app_inner(
         }
     }
 
+    let direct_collection_builtin = matches!(
+        func_name.as_deref(),
+        Some("len" | "index" | "append" | "concat")
+    );
+    if direct_collection_builtin {
+        subst.discard_direct_collection_contract(&func_ty);
+    }
     let ret_tv =
         match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
             Ok(ret_ty) => ret_ty,
             Err(rejected) => return rejected,
         };
+    if !direct_collection_builtin {
+        subst.consume_collection_contracts_in_arguments(&arg_tys);
+    }
     absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
     // chelis#1512: watch whether the eager pass rejects this call. A
     // route can suspend on one operand and then reject on another in
