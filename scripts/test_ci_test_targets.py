@@ -43,11 +43,16 @@ def shared_metadata():
     return data
 
 
-def write_junit(root, binaries):
+def write_junit(root, binaries, *, skipped=None):
+    skipped = skipped or set()
     document = ET.Element("testsuites")
     for binary in binaries:
         suite = ET.SubElement(document, "testsuite", name=binary)
-        ET.SubElement(suite, "testcase", name="positive", classname=binary)
+        case = ET.SubElement(
+            suite, "testcase", name="positive", classname=binary
+        )
+        if binary in skipped:
+            ET.SubElement(case, "skipped")
     path = root / "target/nextest/ci-fast/junit.xml"
     path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(document).write(path)
@@ -252,6 +257,53 @@ class TargetSelectionTests(unittest.TestCase):
                 coverage["selected_tests"],
             )
             targets.ci_change_owned.verify_standing_coverage_digest(coverage)
+
+    def test_standing_receipt_rejects_a_skipped_selected_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".config").mkdir()
+            (root / ".config/ci-test-targets.toml").write_text(
+                'version = 2\n[[standing_target]]\n'
+                'package = "p"\nname = "smoke"\n'
+            )
+
+            def run(command, **kwargs):
+                payload = (
+                    metadata() if command[1] == "metadata" else listing()
+                )
+                if command[1:3] == ["nextest", "run"]:
+                    write_junit(
+                        root,
+                        listing()["rust-suites"],
+                        skipped={"p::smoke"},
+                    )
+                return mock.Mock(
+                    stdout=json.dumps(payload), returncode=0
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"CARGO_TARGET_DIR": str(root / "target")},
+                ),
+                mock.patch.object(
+                    targets.subprocess, "run", side_effect=run
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "skipped rather than executed"
+                ),
+            ):
+                targets.run(root, candidate_sha="b" * 40)
+            coverage = json.loads(
+                (root / "target/ci-fast/coverage.json").read_text()
+            )
+            self.assertFalse(coverage["success"])
+            self.assertEqual(coverage["executed_targets"], [])
+            self.assertEqual(coverage["executed_tests"], [])
+            self.assertIn(
+                "skipped rather than executed",
+                " ".join(coverage["failures"]),
+            )
 
     def test_group_receipts_preserve_junit_commands_and_timings_and_reject_missing_junit(self):
         for missing in (False, True):

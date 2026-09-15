@@ -1739,6 +1739,7 @@ def _junit_tests_for_group(
             )
         if not name:
             raise ValueError(f"JUnit testcase has no name: {path}")
+        require_executed_junit_case(case, path)
         observed_targets.add(classname)
         tests.append(f"{classname}::{name}")
     if len(tests) != len(set(tests)):
@@ -1823,8 +1824,23 @@ def _junit_tests(path: Path, identity: Identity) -> list[str]:
         name = case.get("name")
         if not name:
             raise ValueError(f"JUnit testcase has no name: {path}")
+        require_executed_junit_case(case, path)
         tests.append(f"{identity.canonical}::{name}")
     return sorted(tests)
+
+
+def require_executed_junit_case(case: ET.Element, path: Path) -> None:
+    """Reject a selected test that nextest reported as skipped."""
+    if case.find("skipped") is not None:
+        classname = case.get("classname")
+        name = case.get("name")
+        identity = "::".join(
+            value for value in (classname, name) if value
+        ) or "<unknown>"
+        raise ValueError(
+            f"JUnit testcase was skipped rather than executed: "
+            f"{identity} ({path})"
+        )
 
 
 def _write_junit(path: Path, suite_documents: Sequence[Path]) -> None:

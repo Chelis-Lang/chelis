@@ -43,6 +43,15 @@ def _assert_empty_shard_skips_preparation(
                 step.get("if"),
                 "steps.shard-selection.outputs.has_targets == 'true'",
             )
+    executor = next(
+        step
+        for step in job["steps"]
+        if "scripts/ci_change_owned.py run-shard" in step.get("run", "")
+    )
+    test.assertEqual(
+        executor.get("if"),
+        "steps.shard-selection.outputs.has_targets == 'true'",
+    )
 
 
 def assert_change_owned_topology(
@@ -389,6 +398,28 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                 assert_change_owned_topology(
                     self,
                     mutated if job_id == "change-owned-shard" else self.workflow,
+                    mutated if job_id == "package-expansion-shard"
+                    else self.expansion_workflow,
+                )
+
+    def test_empty_shards_cannot_enter_the_executor(self) -> None:
+        for workflow, job_id in (
+            (self.workflow, "change-owned-shard"),
+            (self.expansion_workflow, "package-expansion-shard"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            executor = next(
+                step
+                for step in mutated["jobs"][job_id]["steps"]
+                if "scripts/ci_change_owned.py run-shard"
+                in step.get("run", "")
+            )
+            executor.pop("if")
+            with self.subTest(job=job_id), self.assertRaises(AssertionError):
+                assert_change_owned_topology(
+                    self,
+                    mutated if job_id == "change-owned-shard"
+                    else self.workflow,
                     mutated if job_id == "package-expansion-shard"
                     else self.expansion_workflow,
                 )

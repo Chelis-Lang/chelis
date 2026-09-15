@@ -974,8 +974,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
             if owned.shard_for(owned.Identity("p", f"z{index}"))
             == owned.shard_for(identity)
         )
-        for missing in (False, True):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+        for outcome in ("complete", "missing", "skipped"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "target"
                 plan = self._plan(lane="package-expansion")
@@ -1015,11 +1015,20 @@ class ShardingAndExecutionTests(unittest.TestCase):
                         )
                     junit = target / "nextest/ci-full/junit.xml"
                     junit.parent.mkdir(parents=True, exist_ok=True)
-                    cases = [
-                        f'<testcase name="fast_case" classname="p::{name}"/>'
-                        for name in names
-                        if not (missing and name == sibling.target)
-                    ]
+                    cases = []
+                    for name in names:
+                        if outcome == "missing" and name == sibling.target:
+                            continue
+                        skipped = (
+                            "<skipped/>"
+                            if outcome == "skipped"
+                            and name == sibling.target
+                            else ""
+                        )
+                        cases.append(
+                            f'<testcase name="fast_case" '
+                            f'classname="p::{name}">{skipped}</testcase>'
+                        )
                     junit.write_text(
                         "<testsuite>" + "".join(cases) + "</testsuite>"
                     )
@@ -1051,14 +1060,20 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     receipt["selected_targets"],
                     sorted([identity.canonical, sibling.canonical]),
                 )
-                self.assertEqual(receipt["success"], not missing)
-                if missing:
+                self.assertEqual(
+                    receipt["success"], outcome == "complete"
+                )
+                if outcome != "complete":
                     self.assertNotIn(
                         sibling.canonical,
                         receipt["executed_targets"],
                     )
                     self.assertIn(
-                        "incomplete",
+                        (
+                            "skipped rather than executed"
+                            if outcome == "skipped"
+                            else "incomplete"
+                        ),
                         " ".join(receipt["failures"]),
                     )
                 else:

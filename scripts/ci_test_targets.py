@@ -146,6 +146,7 @@ def junit_integration_tests(
             raise ValueError(
                 f"standing JUnit testcase has no name for {classname}"
             )
+        ci_change_owned.require_executed_junit_case(case, path)
         tests.append(f"{classname}::{name}")
     if len(tests) != len(set(tests)):
         raise ValueError("standing JUnit contains duplicate integration tests")
