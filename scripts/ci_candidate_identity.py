@@ -83,7 +83,17 @@ def _changed_paths(
 ) -> list[str]:
     raw = _run(
         repository_path,
-        ["git", "diff", "--name-only", "-z", base_sha, head_sha],
+        [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            base_sha,
+            head_sha,
+        ],
     )
     paths = [
         item.decode("utf-8")

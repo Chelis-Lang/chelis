@@ -12,7 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from scripts import ci_candidate_identity as identity
 from scripts import ci_candidate_receipt as receipt
 from scripts import ci_contract_paths
-from scripts.test_ci_candidate_identity import CandidateRepository
+from scripts.test_ci_candidate_identity import CandidateRepository, git
 
 
 def artifact(payload: dict[str, object]) -> bytes:
@@ -285,6 +285,66 @@ class CandidateReceiptTests(unittest.TestCase):
                 list(ci_contract_paths.CI_CONTRACT_EXACT_PATHS)
             ),
         )
+
+    def test_renamed_ci_script_records_both_paths_and_blocks_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            git(repository, "init", "-b", "main")
+            git(repository, "config", "user.name", "CI Test")
+            git(repository, "config", "user.email", "ci@example.invalid")
+            script = repository / "scripts" / "ci_guard.py"
+            script.parent.mkdir()
+            script.write_text("print('guard')\n")
+            git(repository, "add", "scripts/ci_guard.py")
+            git(repository, "commit", "-m", "root")
+
+            git(repository, "switch", "-c", "feature")
+            (repository / "notes").mkdir()
+            git(
+                repository,
+                "mv",
+                "scripts/ci_guard.py",
+                "notes/guard.py",
+            )
+            git(repository, "commit", "-m", "move guard")
+            head_sha = git(repository, "rev-parse", "HEAD")
+
+            git(repository, "switch", "main")
+            (repository / "base.txt").write_text("base\n")
+            git(repository, "add", "base.txt")
+            git(repository, "commit", "-m", "advance base")
+            base_sha = git(repository, "rev-parse", "HEAD")
+            git(
+                repository,
+                "merge",
+                "--no-ff",
+                "feature",
+                "-m",
+                "synthetic candidate",
+            )
+            candidate_sha = git(repository, "rev-parse", "HEAD")
+
+            candidate = identity.build_identity(
+                repository_path=repository,
+                repository="Chelis-Lang/chelis",
+                workflow_file="ci.yml",
+                run_id=101,
+                run_attempt=1,
+                pr_number=2098,
+                head_sha=head_sha,
+                base_ref="main",
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+            )
+
+            self.assertEqual(
+                candidate["changed_paths"],
+                ["notes/guard.py", "scripts/ci_guard.py"],
+            )
+            self.assertEqual(
+                receipt.reuse_eligibility(candidate["changed_paths"]),
+                (False, ["scripts/ci_guard.py"]),
+            )
 
     def test_withholds_receipt_when_latest_required_check_is_not_green(self) -> None:
         responses = copy.deepcopy(self.fixture.responses)
