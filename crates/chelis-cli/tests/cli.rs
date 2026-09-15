@@ -8219,12 +8219,13 @@ fn check_accepts_direct_top_level_grad_and_vmap_targets() {
 fn check_fences_non_direct_transform_targets() {
     let cases = [
         (
-            "grad_local_alias",
+            "grad_chained_local_alias",
             "def relay(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
              def loss(f: tensor[2, f32]) -> tensor[f32] = sum(relay(f), 0i32)\n\
              out = {\n\
                g = loss\n\
-               grad(g)(to_tensor([1.0f32, 2.0f32]))\n\
+               h = g\n\
+               grad(h)(to_tensor([1.0f32, 2.0f32]))\n\
              }\n",
             "grad",
         ),
@@ -8241,6 +8242,15 @@ fn check_fences_non_direct_transform_targets() {
             "vmap_inline_lambda",
             "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
                vmap(fn (v) -> sum(v, 0i32))(t)\n",
+            "vmap",
+        ),
+        (
+            "vmap_local_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = reduce\n\
+               vmap(mapped)(t)\n\
+             }\n",
             "vmap",
         ),
     ];

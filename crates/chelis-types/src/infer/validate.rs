@@ -211,7 +211,8 @@ fn direct_unshadowed_top_level_function(
     stamped_parts(expr).is_some_and(|(tag, _, children)| {
         tag == DeepTag::Var
             && children.first().and_then(symbol_name).is_some_and(|name| {
-                top_level_functions.contains(name) && !lexical_scope.local_names.contains(name)
+                (top_level_functions.contains(name) && !lexical_scope.local_names.contains(name))
+                    || lexical_scope.direct_function_aliases.contains(name)
             })
     })
 }
