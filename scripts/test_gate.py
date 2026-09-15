@@ -602,6 +602,7 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py lint-and-unit",
+        "python3 scripts/gate.py targeted-units",
     ),
     "ci-fast": (
         # `clang` is the chelis#893 Phase 0 oracle's C/Objective-C front end
@@ -823,7 +824,7 @@ class StageUnionTests(unittest.TestCase):
     def test_stage_order_covers_every_stage(self):
         self.assertEqual(
             set(gate.STAGE_ORDER),
-            set(gate.STAGES) - {"ci-fast"},
+            set(gate.STAGES) - {"ci-fast", "targeted-units"},
             "STAGE_ORDER lists full/manual stages, excluding the hosted fast subset",
         )
         self.assertEqual(
@@ -843,6 +844,20 @@ class StageUnionTests(unittest.TestCase):
     def test_lint_stage_does_not_repeat_the_workspace_build(self):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
+
+    def test_targeted_rebase_units_exclude_integration_targets(self):
+        self.assertEqual(
+            gate.selected_stage_commands(
+                "targeted-units",
+                tests_only=False,
+                support_only=False,
+                partition=None,
+            ),
+            [gate.NEXTEST_TARGETED_UNITS],
+        )
+        self.assertIn("--lib", gate.NEXTEST_TARGETED_UNITS)
+        self.assertIn("--bins", gate.NEXTEST_TARGETED_UNITS)
+        self.assertNotIn("--tests", gate.NEXTEST_TARGETED_UNITS)
 
     def test_integration_partition_selects_only_the_nextest_command(self):
         commands = gate.selected_stage_commands(
@@ -2090,6 +2105,7 @@ class CiParityTests(unittest.TestCase):
         # runtime-representation stage has a worker of its own.
         text = CI_YML.read_text()
         self.assertIn("scripts/gate.py lint-and-unit", text)
+        self.assertIn("scripts/gate.py targeted-units", text)
         self.assertIn(
             "scripts/gate.py ci-fast",
             text,

@@ -62,15 +62,17 @@ target is unchanged, the base advanced strictly forward, the new head contains
 that base, and the current synthetic candidate is exact. The complete
 incremental validation delta runs from the prior receipt's synthetic candidate
 to the current one, covering both conflict resolution and any target advance
-included in that frozen candidate. `event.before..event.after` remains the head-rewrite record
-for review. A docs-only delta takes the cheap docs and contract lane. A code
-delta reruns combined-candidate lint/unit and base-sensitive checks plus every
-required change-owned and package-targeted test selected for the affected
-paths. CI-policy changes, retargets, missing receipts, non-forward updates,
-unmapped paths, and uncertain history run full CI. Every required context still
-reports on the new head. Patch changes and path overlap are reported so the
-standing reviewer can inspect the resolution; they do not alone force
-unrelated work to rerun.
+included in that frozen candidate. `event.before..event.after` remains the
+head-rewrite record for review. The cheap docs lane requires both the PR patch
+and that complete delta to be documentation-only. A code-bearing patch or delta
+reruns combined-candidate lint, every default-feature Rust library/binary unit,
+Python units, and base-sensitive checks plus every required change-owned and
+package-targeted test selected for the affected paths. The trusted verifier
+applies the planner's static mapping before fan-out; CI-policy changes,
+retargets, missing receipts, non-forward updates, unmapped paths, and uncertain
+history run full CI. Every required context still reports on the new head.
+Patch changes and path overlap are reported so the standing reviewer can
+inspect the resolution; they do not alone force unrelated work to rerun.
 
 ## Final package-expansion dispatch
 

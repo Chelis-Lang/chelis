@@ -191,16 +191,18 @@ obligations.
   current synthetic candidate. The validation delta is the prior receipt's synthetic
   candidate through the current synthetic candidate, so it includes the conflict
   resolution and every target advance included in that frozen candidate;
-  `event.before..event.after` remains the head-rewrite record for review. A docs-only
-  delta runs the cheap contract preflight, acknowledgements/changelog checks, Docs, and
-  inexpensive metadata checks. A code delta runs the base-sensitive required checks,
-  combined-candidate lint/unit checks, and all change-owned and package-targeted tests
-  selected for the affected paths. A CI-policy delta, missing or ineligible receipt,
-  retarget, non-forward update, candidate mismatch, unmapped path, or uncertain history
-  runs full CI. Every required context still reports on the new head. Path overlap and
-  patch-identity changes are recorded for review, not treated as proof that all prior
-  evidence is unusable. The standing reviewer inspects any hand-resolved intersection;
-  use a fresh round only under the review rules above.
+  `event.before..event.after` remains the head-rewrite record for review. The cheap
+  docs lane requires both the PR patch and the complete delta to be documentation-only.
+  A code-bearing patch or delta runs the base-sensitive required checks,
+  combined-candidate lint, every default-feature Rust library/binary unit, Python
+  units, and all change-owned and package-targeted tests selected for the affected
+  paths. Before fan-out, the trusted verifier applies the planner's static package and
+  path-rule mapping to every delta path. A CI-policy delta, missing or ineligible
+  receipt, retarget, non-forward update, candidate mismatch, unmapped path, or
+  uncertain history runs full CI. Every required context still reports on the new
+  head. Path overlap and patch-identity changes are recorded for review, not treated as
+  proof that all prior evidence is unusable. The standing reviewer inspects any
+  hand-resolved intersection; use a fresh round only under the review rules above.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for

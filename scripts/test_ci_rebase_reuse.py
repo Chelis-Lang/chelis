@@ -28,8 +28,9 @@ class RebaseRepository:
         self,
         *,
         delta_path: str = "docs/rebase.md",
+        feature_path: str = "crates/fixture/src/feature.rs",
         overlap: bool = False,
-        overlap_path: str = "shared.txt",
+        overlap_path: str = "crates/fixture/src/shared.rs",
         literal_conflict: bool = False,
     ) -> None:
         if literal_conflict and not overlap:
@@ -39,12 +40,26 @@ class RebaseRepository:
         git(self.path, "init", "-b", "main")
         git(self.path, "config", "user.name", "CI Test")
         git(self.path, "config", "user.email", "ci@example.invalid")
+        (self.path / "crates/fixture/src").mkdir(parents=True)
+        (self.path / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "3"\nmembers = ["crates/fixture"]\n'
+        )
+        (self.path / "crates/fixture/Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2024"\n'
+        )
+        self.feature_path = feature_path
         shared = self.path / overlap_path
         shared.parent.mkdir(parents=True, exist_ok=True)
         shared.write_text(
             "first\nmiddle one\nmiddle two\nlast\n"
         )
-        git(self.path, "add", overlap_path)
+        git(
+            self.path,
+            "add",
+            "Cargo.toml",
+            "crates/fixture/Cargo.toml",
+            overlap_path,
+        )
         git(self.path, "commit", "-m", "root")
         self.root_sha = git(self.path, "rev-parse", "HEAD")
 
@@ -60,8 +75,10 @@ class RebaseRepository:
             )
             git(self.path, "add", overlap_path)
         else:
-            (self.path / "feature.txt").write_text("candidate\n")
-            git(self.path, "add", "feature.txt")
+            feature = self.path / feature_path
+            feature.parent.mkdir(parents=True, exist_ok=True)
+            feature.write_text("candidate\n")
+            git(self.path, "add", feature_path)
         git(self.path, "commit", "-m", "feature")
         self.old_head_sha = git(self.path, "rev-parse", "HEAD")
 
@@ -248,13 +265,16 @@ class RebaseRepository:
 
 class RebaseReuseTests(unittest.TestCase):
     def test_docs_only_clean_rebase_reuses_prior_evidence(self) -> None:
-        repository = RebaseRepository()
+        repository = RebaseRepository(feature_path="docs/feature.md")
         self.addCleanup(repository.close)
 
         decision = repository.evaluate()
 
         self.assertEqual(decision["lane"], "docs")
-        self.assertEqual(decision["reason"], "trusted docs-only rebase delta")
+        self.assertEqual(
+            decision["reason"],
+            "trusted docs-only rebase of a docs-only patch",
+        )
         self.assertEqual(decision["before_sha"], repository.old_head_sha)
         self.assertEqual(decision["head_sha"], repository.new_head_sha)
         self.assertEqual(decision["delta_paths"], ["docs/rebase.md"])
@@ -268,9 +288,20 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["prior_receipt_run_id"], 202)
         self.assertFalse(decision["ci_contract_changed"])
 
+    def test_docs_delta_with_candidate_added_consumer_requires_code_lane(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(decision["delta_paths"], ["docs/rebase.md"])
+        self.assertFalse(decision["prior_patch_docs_only"])
+        self.assertFalse(decision["current_patch_docs_only"])
+
     def test_disjoint_code_delta_uses_targeted_lane(self) -> None:
         repository = RebaseRepository(
-            delta_path="crates/chelis-types/src/rebase_delta.rs"
+            delta_path="crates/fixture/src/rebase_delta.rs"
         )
         self.addCleanup(repository.close)
 
@@ -279,16 +310,16 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "targeted")
         self.assertEqual(
             decision["reason"],
-            "trusted code rebase delta",
+            "trusted rebase of a code-bearing patch or delta",
         )
         self.assertEqual(
             decision["delta_paths"],
-            ["crates/chelis-types/src/rebase_delta.rs"],
+            ["crates/fixture/src/rebase_delta.rs"],
         )
         self.assertFalse(decision["ci_contract_changed"])
 
     def test_target_may_advance_again_after_the_rebase(self) -> None:
-        repository = RebaseRepository()
+        repository = RebaseRepository(feature_path="docs/feature.md")
         self.addCleanup(repository.close)
         repository.advance_target_after_rebase()
 
@@ -320,7 +351,7 @@ class RebaseReuseTests(unittest.TestCase):
             )
 
     def test_live_base_movement_does_not_rebind_the_frozen_candidate(self) -> None:
-        repository = RebaseRepository()
+        repository = RebaseRepository(feature_path="docs/feature.md")
         self.addCleanup(repository.close)
         repository.advance_live_target_without_rebuilding_candidate()
 
@@ -398,8 +429,8 @@ class RebaseReuseTests(unittest.TestCase):
         repository = RebaseRepository()
         self.addCleanup(repository.close)
         git(repository.path, "switch", "rebased-feature")
-        (repository.path / "feature.txt").write_text("changed candidate\n")
-        git(repository.path, "add", "feature.txt")
+        (repository.path / repository.feature_path).write_text("changed candidate\n")
+        git(repository.path, "add", repository.feature_path)
         git(repository.path, "commit", "-m", "change candidate")
         repository.new_head_sha = git(repository.path, "rev-parse", "HEAD")
         git(repository.path, "switch", "-C", "changed-candidate", repository.new_base_sha)
@@ -418,7 +449,7 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "targeted")
         self.assertFalse(decision["patch_identity_unchanged"])
         self.assertTrue(decision["standing_review_required"])
-        self.assertIn("feature.txt", decision["delta_paths"])
+        self.assertIn(repository.feature_path, decision["delta_paths"])
 
     def test_same_file_overlap_uses_incremental_delta_coverage(self) -> None:
         repository = RebaseRepository(overlap=True)
@@ -427,9 +458,24 @@ class RebaseReuseTests(unittest.TestCase):
         decision = repository.evaluate()
 
         self.assertEqual(decision["lane"], "targeted")
-        self.assertEqual(decision["overlap_paths"], ["shared.txt"])
+        self.assertEqual(
+            decision["overlap_paths"],
+            ["crates/fixture/src/shared.rs"],
+        )
         self.assertFalse(decision["patch_identity_unchanged"])
         self.assertTrue(decision["standing_review_required"])
+
+    def test_unmapped_rebase_delta_falls_back_to_full_before_planning(self) -> None:
+        repository = RebaseRepository(delta_path="brand-new-root/file.txt")
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertEqual(
+            decision["reason"],
+            "rebase delta contains a path without a trusted test mapping",
+        )
 
     def test_literal_docs_conflict_uses_docs_delta_and_standing_review(self) -> None:
         repository = RebaseRepository(

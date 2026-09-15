@@ -79,22 +79,25 @@ retarget after the receipt, and a receipt marked eligible for reuse. It records
 patch-identity changes and path overlap for review. The complete validation
 delta runs from the receipt's prior synthetic candidate to the current
 synthetic candidate, so it includes both the conflict resolution and target
-movement included in that frozen candidate; `event.before..event.after` remains the exact
-head-rewrite record. A CI-policy delta, stale or missing receipt, retarget,
-non-forward update, candidate mismatch, unmapped path, or uncertain history
-falls back to full CI. No pull-request workflow can issue its own trusted
-receipt.
+movement included in that frozen candidate; `event.before..event.after` remains
+the exact head-rewrite record. Before selecting an incremental lane, the trusted
+verifier applies the planner's static package/path-rule classification to every
+delta path. A CI-policy delta, stale or missing receipt, retarget, non-forward
+update, candidate mismatch, unmapped path, or uncertain history falls back to
+full CI. No pull-request workflow can issue its own trusted receipt.
 
-An accepted docs-only rebase delta runs the cheap contract preflight, PR
-acknowledgements, changelog policy, Docs, and inexpensive metadata paths. An
-accepted code delta reruns combined-candidate Rust policy/compile and Python
-unit evidence plus base-sensitive Hull, SMT, backend, documentation and metadata
-checks, and makes the change-owned planner execute all change-owned and
-package-targeted coverage selected between the prior and current synthetic
-candidates. This includes same-file and same-line conflict resolutions and
-target movement after the rebase. Required contexts still report on the
-rewritten head; reuse short-circuits only the standing integration and
-final-expansion work whose trusted evidence remains applicable.
+The cheap docs lane requires both the prior/current PR patch and the complete
+rebase delta to be documentation-only. It runs the contract preflight, PR
+acknowledgements, changelog policy, Docs, and inexpensive metadata paths. A
+code-bearing patch or delta reruns combined-candidate Rust policy/compile,
+every default-feature Rust library/binary unit, and Python unit evidence plus
+base-sensitive Hull, SMT, backend, documentation and metadata checks, and makes
+the change-owned planner execute all change-owned and package-targeted coverage
+selected between the prior and current synthetic candidates. This includes
+same-file and same-line conflict resolutions and target movement after the
+rebase. Required contexts still report on the rewritten head; reuse
+short-circuits only the standing integration and final-expansion work whose
+trusted evidence remains applicable.
 The collector issues receipts only for ordinary `pull_request` candidates. A
 base-retarget candidate is validated by trusted dispatch and coordinator paths
 that the receipt schema does not model, so its absent receipt remains a

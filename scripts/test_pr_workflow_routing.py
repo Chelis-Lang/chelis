@@ -262,6 +262,29 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
             "needs.changes.outputs.rebase_lane == 'targeted'",
             workflow["jobs"][job_id]["if"],
         )
+    rust_policy = workflow["jobs"]["lint-rust"]
+    nextest = next(
+        step
+        for step in rust_policy["steps"]
+        if step.get("name") == "Install cargo-nextest for targeted Rust units"
+    )
+    test.assertEqual(
+        nextest["if"],
+        "needs.changes.outputs.rebase_lane == 'targeted'",
+    )
+    targeted_units = next(
+        step
+        for step in rust_policy["steps"]
+        if step.get("name") == "Run Rust units for targeted rebase"
+    )
+    test.assertEqual(
+        targeted_units["if"],
+        "needs.changes.outputs.rebase_lane == 'targeted'",
+    )
+    test.assertEqual(
+        targeted_units["run"],
+        "python3 scripts/gate.py targeted-units",
+    )
     for job_id in (
         "diagnostic-kind-oracle",
         "backend-sanitizers",

@@ -11,19 +11,23 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import subprocess
 import sys
+import tomllib
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
 if __package__:
     from . import ci_candidate_identity as identity
     from . import ci_candidate_receipt as candidate_receipt
+    from . import ci_change_owned
     from .ci_detect_docs_only import is_docs_only
 else:
     import ci_candidate_identity as identity
     import ci_candidate_receipt as candidate_receipt
+    import ci_change_owned
     from ci_detect_docs_only import is_docs_only
 
 
@@ -35,6 +39,7 @@ RECEIPT_FILENAME = "receipt.json"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 PASSING_CONCLUSIONS = frozenset({"success"})
+TRUSTED_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReuseError(RuntimeError):
@@ -169,6 +174,80 @@ def _changed_paths(
     if len(paths) != len(set(paths)):
         raise ReuseError("rebase delta contains duplicate changed paths")
     return paths
+
+
+def _workspace_packages_at(
+    repository_path: Path, commit: str
+) -> tuple[ci_change_owned.PackageInfo, ...]:
+    try:
+        root_manifest = tomllib.loads(
+            _git(repository_path, "show", f"{commit}:Cargo.toml").stdout.decode(
+                "utf-8"
+            )
+        )
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ReuseError(f"cannot read workspace manifest at {commit}") from error
+    workspace = _mapping(root_manifest.get("workspace"), "workspace manifest")
+    members = workspace.get("members")
+    if (
+        not isinstance(members, list)
+        or not members
+        or any(not isinstance(member, str) or not member for member in members)
+        or len(members) != len(set(members))
+    ):
+        raise ReuseError("workspace members must be unique nonempty paths")
+    packages: list[ci_change_owned.PackageInfo] = []
+    for index, member in enumerate(members):
+        if (
+            member.startswith("/")
+            or member.endswith("/")
+            or "\\" in member
+            or any(character in member for character in "*?[]")
+        ):
+            raise ReuseError(f"workspace member is not an exact path: {member!r}")
+        parts = PurePosixPath(member).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise ReuseError(f"workspace member is not a safe path: {member!r}")
+        manifest = f"{member}/Cargo.toml"
+        present = _git(
+            repository_path,
+            "cat-file",
+            "-e",
+            f"{commit}:{manifest}",
+            check=False,
+        )
+        if present.returncode != 0:
+            raise ReuseError(f"workspace member has no manifest: {member!r}")
+        packages.append(ci_change_owned.PackageInfo(f"member-{index}", member))
+    return tuple(packages)
+
+
+def _unmapped_delta_paths(
+    repository_path: Path,
+    *,
+    prior_candidate: str,
+    current_candidate: str,
+    delta_paths: Sequence[str],
+) -> list[str]:
+    config = ci_change_owned.read_config(
+        TRUSTED_ROOT / ".config/ci-test-targets.toml"
+    )
+    packages = tuple(
+        sorted(
+            set(
+                _workspace_packages_at(repository_path, prior_candidate)
+                + _workspace_packages_at(repository_path, current_candidate)
+            ),
+            key=lambda package: (package.root, package.name),
+        )
+    )
+    covered = {"package", "docs", "rule"}
+    return [
+        path
+        for path in delta_paths
+        if ci_change_owned.static_path_classification(path, packages, config)[0]
+        not in covered
+    ]
 
 
 def _candidate_parents(repository_path: Path, candidate_sha: str) -> list[str]:
@@ -421,6 +500,23 @@ def evaluate_rebase(
             "prior trusted receipt has malformed changed paths",
             prior_receipt_run_id=prior_run_id,
         )
+    try:
+        unmapped_paths = _unmapped_delta_paths(
+            repository_path,
+            prior_candidate=prior_candidate,
+            current_candidate=candidate_sha,
+            delta_paths=delta_paths,
+        )
+    except (OSError, ReuseError, ValueError):
+        return fallback(
+            "trusted test mapping could not classify the rebase delta",
+            prior_receipt_run_id=prior_run_id,
+        )
+    if unmapped_paths:
+        return fallback(
+            "rebase delta contains a path without a trusted test mapping",
+            prior_receipt_run_id=prior_run_id,
+        )
     base_delta_paths = _changed_paths(repository_path, prior_base, base_sha)
     overlap_paths = sorted(
         set(base_delta_paths)
@@ -435,11 +531,19 @@ def evaluate_rebase(
     patch_identity_unchanged = all(
         current[key] == prior_receipt.get(key) for key in exact_patch_fields
     )
-    lane = "docs" if is_docs_only(delta_paths) else "targeted"
+    prior_patch_docs_only = is_docs_only(prior_paths)
+    current_patch_docs_only = is_docs_only(current["changed_paths"])
+    lane = (
+        "docs"
+        if is_docs_only(delta_paths)
+        and prior_patch_docs_only
+        and current_patch_docs_only
+        else "targeted"
+    )
     reason = (
-        "trusted docs-only rebase delta"
+        "trusted docs-only rebase of a docs-only patch"
         if lane == "docs"
-        else "trusted code rebase delta"
+        else "trusted rebase of a code-bearing patch or delta"
     )
     return {
         "schema": SCHEMA,
@@ -453,6 +557,8 @@ def evaluate_rebase(
         "delta_paths": delta_paths,
         "base_delta_paths": base_delta_paths,
         "overlap_paths": overlap_paths,
+        "prior_patch_docs_only": prior_patch_docs_only,
+        "current_patch_docs_only": current_patch_docs_only,
         "patch_identity_unchanged": patch_identity_unchanged,
         "standing_review_required": bool(
             overlap_paths or not patch_identity_unchanged

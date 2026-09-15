@@ -437,6 +437,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install cargo-nextest for targeted Rust units
+        if: needs.changes.outputs.rebase_lane == 'targeted'
+        uses: taiki-e/install-action@nextest
+
       # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` so the
       # `chelis-python` link step finds the project-pinned interpreter
       # on every developer's machine. CI runners don't ship a `.venv/`
@@ -475,6 +479,10 @@ jobs:
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
         run: python3 scripts/gate.py lint-and-unit
+
+      - name: Run Rust units for targeted rebase
+        if: needs.changes.outputs.rebase_lane == 'targeted'
+        run: python3 scripts/gate.py targeted-units
 
   script-unit:
     name: Script and Python Unit Tests (Linux)

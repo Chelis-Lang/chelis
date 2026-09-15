@@ -618,6 +618,29 @@ def _matching_packages(path: str, packages: Sequence[PackageInfo]) -> list[str]:
     return matches
 
 
+def static_path_classification(
+    path: str,
+    packages: Sequence[PackageInfo],
+    config: Config,
+) -> tuple[str, list[str], list[PathRule]]:
+    """Return the planner's non-target disposition for one changed path."""
+    package_matches = sorted(set(_matching_packages(path, packages)))
+    matching_rules = [rule for rule in config.path_rules if rule.matches(path)]
+    if len(package_matches) > 1:
+        return "ambiguous_package", package_matches, matching_rules
+    if package_matches:
+        return "package", package_matches, matching_rules
+    if not matching_rules and is_docs_only([path]):
+        return "docs", package_matches, matching_rules
+    if len(matching_rules) == 1:
+        return "rule", package_matches, matching_rules
+    return (
+        "ambiguous_rule" if matching_rules else "unclassified",
+        package_matches,
+        matching_rules,
+    )
+
+
 def _target_at_path(
     path: str, targets: Mapping[Identity, TargetInfo]
 ) -> list[Identity]:
@@ -821,15 +844,16 @@ def make_plan(
             )
             continue
 
-        package_matches = sorted(
-            set(_matching_packages(path, base_packages))
-            | set(_matching_packages(path, candidate_packages))
+        classification, package_matches, matching_rules = static_path_classification(
+            path,
+            (*base_packages, *candidate_packages),
+            config,
         )
-        if len(package_matches) > 1:
+        if classification == "ambiguous_package":
             raise ValueError(
                 f"ambiguous package path {path!r}: matches {package_matches}"
             )
-        if package_matches:
+        if classification == "package":
             package = package_matches[0]
             if package in candidate_package_names:
                 selected_packages.add(package)
@@ -846,12 +870,13 @@ def make_plan(
             )
             continue
 
-        matching_rules = [rule for rule in config.path_rules if rule.matches(path)]
-        if not matching_rules and is_docs_only([path]):
+        if classification == "docs":
             dispositions.append({"path": path, "status": status, "kind": "docs_only"})
             continue
-        if len(matching_rules) != 1:
-            qualifier = "ambiguous" if matching_rules else "unclassified"
+        if classification != "rule":
+            qualifier = (
+                "ambiguous" if classification == "ambiguous_rule" else "unclassified"
+            )
             raise ValueError(f"{qualifier} changed path: {path}")
         rule = matching_rules[0]
         disposition: dict[str, Any] = {
