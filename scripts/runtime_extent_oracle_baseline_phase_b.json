@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "7f023a7b3b11c627c1296e0ec351f11f33563be485a08f2ad25719c695f2f544",
+  "corpus_sha256": "069acf21c9a1a2364fd5da121958cdaac9b1c95c41a52e207522624284b3ce56",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -307,6 +307,42 @@
       "baseline": "lane_divergent",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval"
+    },
+    {
+      "id": "entry.indirect.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.repeated_binder.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals"
+    },
+    {
+      "id": "entry.indirect.repeated_binder.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals"
+    },
+    {
+      "id": "entry.indirect.transport.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization"
+    },
+    {
+      "id": "entry.indirect.transport.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization"
     },
     {
       "id": "entry.inline_callback.literal.c",

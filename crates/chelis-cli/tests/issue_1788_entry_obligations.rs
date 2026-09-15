@@ -273,6 +273,83 @@ fn check_beta_entry(
     }
 }
 
+fn check_indirect_entry(source: &str, succeeds: bool, argument_effects: usize) {
+    for c in [false, true] {
+        let output = run(source, c);
+        let rendered = text(&output);
+        assert_eq!(output.status.success(), succeeds, "C={c}: {rendered}");
+        assert_eq!(
+            rendered.matches("argument-ran").count(),
+            argument_effects,
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("body-ran").count(),
+            usize::from(succeeds),
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("following-ran").count(),
+            usize::from(succeeds),
+            "C={c}: {rendered}"
+        );
+        if succeeds {
+            assert!(
+                rendered.lines().any(|line| line == "out = 7"),
+                "C={c}: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "numeric trap: domain in load at int64"),
+                "C={c}: {rendered}"
+            );
+            assert!(!rendered.contains("out = 7"), "C={c}: {rendered}");
+        }
+    }
+}
+
+fn indirect_literal_source(extent: usize) -> String {
+    format!(
+        "{BETA_OPAQUE}def broad(x: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke(f: (tensor[2, f32]) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = f(x)\nout = {{\n result = invoke(broad, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        beta_actual(extent)
+    )
+}
+
+#[test]
+fn indirect_callable_keeps_formal_literal_entry_boundary() {
+    check_indirect_entry(&indirect_literal_source(3), false, 1);
+    check_indirect_entry(&indirect_literal_source(2), true, 1);
+}
+
+fn indirect_alias_wrapper_source(extent: usize) -> String {
+    format!(
+        "{BETA_OPAQUE}type Fixed = tensor[2, f32]\ndef broad(x: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_any(f: (tensor[*, f32]) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = f(x)\ndef forward(f: (Fixed) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = invoke_any(f, x)\nout = {{\n local = fn (value: tensor[*, f32]) -> broad(value)\n result = forward(local, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        beta_actual(extent)
+    )
+}
+
+#[test]
+fn indirect_callable_contract_survives_alias_local_and_wrapper_specialization() {
+    check_indirect_entry(&indirect_alias_wrapper_source(3), false, 1);
+    check_indirect_entry(&indirect_alias_wrapper_source(2), true, 1);
+}
+
+fn indirect_repeated_binder_source(second_extent: usize) -> String {
+    format!(
+        "{BETA_OPAQUE}def broad_pair(x: tensor[*, f32], y: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_pair(f: (tensor[seq, f32] -> tensor[seq, f32] -> int64), x: tensor[*, f32], y: tensor[*, f32]) -> int64 ! {{ IO }} = f(x, y)\nout = {{\n result = invoke_pair(broad_pair, {}, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        beta_actual(2),
+        beta_actual(second_extent)
+    )
+}
+
+#[test]
+fn indirect_callable_keeps_formal_repeated_binder_and_eager_actuals() {
+    check_indirect_entry(&indirect_repeated_binder_source(3), false, 2);
+    check_indirect_entry(&indirect_repeated_binder_source(2), true, 2);
+}
+
 #[test]
 fn beta_reduced_callbacks_keep_literal_entry_and_eager_actuals() {
     for extent in [2, 3] {

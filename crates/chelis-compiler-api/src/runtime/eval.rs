@@ -383,6 +383,105 @@ fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
     }
 }
 
+fn check_signature_entry_plan(
+    entry_plan: &chelis_ir::host::SignatureEntryPlan,
+    entry_shapes: &[&[usize]],
+) -> Result<(), String> {
+    let read = |(node, axis): (NodeId, usize)| {
+        let RiscOp::Load { name } = &entry_plan
+            .observations()
+            .get(node)
+            .expect("entry observation")
+            .op
+        else {
+            unreachable!("signature observation")
+        };
+        (name.as_str(), axis, entry_shapes[node.0][axis])
+    };
+    for guard in entry_plan.guards() {
+        use chelis_ir::axis_sources::EntryExtentGuard;
+        let (left, right, context) = match guard {
+            EntryExtentGuard::Named {
+                claim,
+                canonical,
+                observed,
+            } => {
+                let (first, first_axis, left) = read(*canonical);
+                let (later, later_axis, right) = read(*observed);
+                (
+                    left,
+                    right,
+                    format!(
+                        "extent `{claim}`: {first} axis {first_axis} = {left}, \
+                         {later} axis {later_axis} = {right}"
+                    ),
+                )
+            }
+            EntryExtentGuard::Literal { required, observed } => {
+                let (parameter, axis, right) = read(*observed);
+                (
+                    *required,
+                    right,
+                    format!(
+                        "extent `{required}`: claimed = {required}, \
+                         {parameter} axis {axis} = {right}"
+                    ),
+                )
+            }
+        };
+        if left != right {
+            return Err(format!("{context}\nnumeric trap: domain in load at int64"));
+        }
+    }
+    Ok(())
+}
+
+fn check_callable_invocation_contract(
+    contract: &Expr,
+    args: &[RuntimeValue],
+) -> Result<(), String> {
+    let Some((_, params)) = checked_function_children(contract).and_then(<[Expr]>::split_last)
+    else {
+        return Ok(());
+    };
+    let mut entry_inputs = Vec::new();
+    let mut entry_shapes: Vec<&[usize]> = Vec::new();
+    for (index, (declared, arg)) in params.iter().zip(args).enumerate() {
+        let RuntimeValue::Tensor(tensor) = arg else {
+            continue;
+        };
+        let ty = match chelis_ir::host_type_state::decode_host_type(declared).ok() {
+            Some(chelis_ir::HostTypeTerm::Tensor(ty)) => Some(ty),
+            Some(chelis_ir::HostTypeTerm::PolymorphicTensor(_)) => declared_tensor_type_for_shape(
+                declared,
+                &tensor.value.shape,
+                tensor.precision,
+                true,
+            )
+            .ok(),
+            _ => None,
+        };
+        let Some(ty) = ty else {
+            continue;
+        };
+        let parameter = format!("arg{index}");
+        if ty.dims.len() != tensor.value.shape.len() {
+            return Err(format!(
+                "input `{parameter}` expected rank {}, got {}",
+                ty.dims.len(),
+                tensor.value.shape.len()
+            ));
+        }
+        entry_inputs.push(chelis_ir::host::HostTensorInput {
+            name: parameter,
+            ty,
+        });
+        entry_shapes.push(&tensor.value.shape);
+    }
+    let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
+    check_signature_entry_plan(&entry_plan, &entry_shapes)
+}
+
 fn render_shape(shape: &[usize]) -> String {
     let dimensions = shape
         .iter()
@@ -1358,6 +1457,7 @@ impl<'a> EvalContext<'a> {
             checked_signature: get_meta(list)
                 .and_then(|meta| meta.ty())
                 .map(|ty| ty.expression().clone()),
+            invocation_contracts: Box::default(),
             body,
             // Named declarations are initialized in an empty lexical frame;
             // an anonymous fn must retain every actual local shadow.
@@ -1914,11 +2014,22 @@ impl<'a> EvalContext<'a> {
                 param_types,
                 return_type,
                 checked_signature,
+                invocation_contracts,
                 body,
                 env,
                 precision_env,
                 def_name,
             } => {
+                if params.len() != args.len() {
+                    return Err(format!(
+                        "closure expected {} args, got {}",
+                        params.len(),
+                        args.len()
+                    ));
+                }
+                for contract in invocation_contracts.iter() {
+                    check_callable_invocation_contract(contract, &args)?;
+                }
                 // chelis#1277 B2h: a def the C lane lowers as a kernel is
                 // applied through that kernel, so eval runs the DAG C emits
                 // for it and the runtime-extent classes and guards derived
@@ -1938,13 +2049,6 @@ impl<'a> EvalContext<'a> {
                     self.binding_types = saved_types;
                     self.precision_bindings = saved_precisions;
                     return result;
-                }
-                if params.len() != args.len() {
-                    return Err(format!(
-                        "closure expected {} args, got {}",
-                        params.len(),
-                        args.len()
-                    ));
                 }
                 let saved = self.bindings.clone();
                 let saved_types = std::mem::take(&mut self.binding_types);
@@ -1969,7 +2073,7 @@ impl<'a> EvalContext<'a> {
                         .and_then(|children| children.split_last())
                         .map(|(_, params)| params);
                     let mut entry_inputs = Vec::new();
-                    let mut entry_shapes = Vec::new();
+                    let mut entry_shapes: Vec<&[usize]> = Vec::new();
                     for (index, arg) in args.iter().enumerate() {
                         let RuntimeValue::Tensor(tensor) = arg else {
                             continue;
@@ -2022,52 +2126,7 @@ impl<'a> EvalContext<'a> {
                         entry_shapes.push(&tensor.value.shape);
                     }
                     let entry_plan = chelis_ir::host::SignatureEntryPlan::new(entry_inputs);
-                    let read = |(node, axis): (NodeId, usize)| {
-                        let RiscOp::Load { name } = &entry_plan
-                            .observations()
-                            .get(node)
-                            .expect("entry observation")
-                            .op
-                        else {
-                            unreachable!("signature observation")
-                        };
-                        (name.as_str(), axis, entry_shapes[node.0][axis])
-                    };
-                    for guard in entry_plan.guards() {
-                        use chelis_ir::axis_sources::EntryExtentGuard;
-                        let (left, right, context) = match guard {
-                            EntryExtentGuard::Named {
-                                claim,
-                                canonical,
-                                observed,
-                            } => {
-                                let (first, first_axis, left) = read(*canonical);
-                                let (later, later_axis, right) = read(*observed);
-                                (
-                                    left,
-                                    right,
-                                    format!(
-                                        "extent `{claim}`: {first} axis {first_axis} = {left}, {later} axis {later_axis} = {right}"
-                                    ),
-                                )
-                            }
-                            EntryExtentGuard::Literal { required, observed } => {
-                                let (parameter, axis, right) = read(*observed);
-                                (
-                                    *required,
-                                    right,
-                                    format!(
-                                        "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {right}"
-                                    ),
-                                )
-                            }
-                        };
-                        if left != right {
-                            return Err(format!(
-                                "{context}\nnumeric trap: domain in load at int64"
-                            ));
-                        }
-                    }
+                    check_signature_entry_plan(&entry_plan, &entry_shapes)?;
                     let caller_precisions = saved_precisions.clone();
                     let mut call_precisions = UnordMap::new();
                     for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
@@ -2140,12 +2199,30 @@ impl<'a> EvalContext<'a> {
                         // this, an Int64-tagged `to_tensor` literal flows into an
                         // int8-typed param and the arithmetic runs at the wrong
                         // width (the chelis#718 eval-tensor cell).
-                        let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                        let mut arg = match (declared.as_ref().and_then(declared_tensor_prim), arg)
+                        {
                             (Some(prim), RuntimeValue::Tensor(tensor)) => {
                                 RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
                             }
                             (_, arg) => arg,
                         };
+                        let callable_contract = checked_params
+                            .and_then(|params| params.get(index))
+                            .or(declared.as_ref());
+                        if callable_contract.is_some_and(|contract| {
+                            tagged_expr_children(contract)
+                                .is_some_and(|(tag, _)| tag == DeepTag::TFn)
+                        }) && let RuntimeValue::Closure {
+                            invocation_contracts,
+                            ..
+                        } = &mut arg
+                        {
+                            // This parameter is a new adapter around any
+                            // contracts the supplied closure already carries,
+                            // so its entry runs first at the eventual call.
+                            invocation_contracts
+                                .insert(0, callable_contract.expect("checked above").clone());
+                        }
                         self.binding_types.insert(param.clone(), declared);
                         self.bindings.insert(param, arg);
                     }

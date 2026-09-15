@@ -22,8 +22,8 @@ use chelis_vocab::EffectKind;
 
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
-    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
-    HostTypeDecodeError, HostTypeTerm, decode_host_type,
+    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
+    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -11219,6 +11219,7 @@ struct RetainedHostInvocation<'a> {
     params: &'a [HostParam],
     body: &'a Expr,
     entry: SignatureEntryPlan,
+    callable_entries: Vec<Option<SignatureEntryPlan>>,
     name: Option<&'a str>,
 }
 
@@ -11233,13 +11234,290 @@ impl<'a> RetainedHostInvocation<'a> {
                 ty: ty.clone(),
             })
         }));
+        let callable_entries = params
+            .iter()
+            .map(|param| {
+                let HostTypeTerm::Fn(param_tys, _) = &param.ty else {
+                    return None;
+                };
+                let entry = SignatureEntryPlan::new(param_tys.iter().enumerate().filter_map(
+                    |(index, ty)| {
+                        let HostTypeTerm::Tensor(ty) = ty else {
+                            return None;
+                        };
+                        Some(HostTensorInput {
+                            name: format!("arg{index}"),
+                            ty: ty.clone(),
+                        })
+                    },
+                ));
+                (!entry.guards().is_empty()).then_some(entry)
+            })
+            .collect();
         Self {
             params,
             body,
             entry,
+            callable_entries,
             name: None,
         }
     }
+
+    fn has_entry_obligations(&self) -> bool {
+        !self.entry.guards().is_empty() || self.callable_entries.iter().any(Option::is_some)
+    }
+}
+
+fn typed_host_syntax_node(
+    tag: DeepTag,
+    metadata: Metadata,
+    children: Vec<Expr>,
+    span: chelis_deep::Span,
+) -> Expr {
+    let mut elements = vec![Expr::Atom(Atom::Tag(tag), span), Expr::Map(metadata, span)];
+    elements.extend(children);
+    Expr::List(List { elements }, span)
+}
+
+fn host_precision_syntax(precision: &HostPrecisionTerm, span: chelis_deep::Span) -> Option<Expr> {
+    let name = match precision {
+        HostPrecisionTerm::Concrete(precision) => precision.name(),
+        HostPrecisionTerm::Variable(name) => name,
+    };
+    let tag = match precision {
+        HostPrecisionTerm::Concrete(_) => DeepTag::TPrim,
+        HostPrecisionTerm::Variable(_) => DeepTag::TVar,
+    };
+    Some(typed_host_syntax_node(
+        tag,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        span,
+    ))
+}
+
+fn host_dim_syntax(dim: &DimInfo, span: chelis_deep::Span) -> Option<Expr> {
+    match dim {
+        DimInfo::Named(name, _) => Some(typed_host_syntax_node(
+            DeepTag::DName,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.clone()), span)],
+            span,
+        )),
+        DimInfo::Lit(value) => Some(typed_host_syntax_node(
+            DeepTag::DLit,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Int(i64::try_from(*value).ok()?), span)],
+            span,
+        )),
+    }
+}
+
+fn host_shape_slot_syntax(slot: &HostShapeSlot, span: chelis_deep::Span) -> Option<Expr> {
+    match slot {
+        HostShapeSlot::Dim(dim) => host_dim_syntax(dim, span),
+        HostShapeSlot::RankVariable(name) => Some(typed_host_syntax_node(
+            DeepTag::DRank,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.clone()), span)],
+            span,
+        )),
+    }
+}
+
+fn host_adt_syntax(
+    name: &str,
+    args: impl IntoIterator<Item = Expr>,
+    span: chelis_deep::Span,
+) -> Expr {
+    let mut children = vec![Expr::Atom(Atom::Name(name.to_string()), span)];
+    children.extend(args);
+    typed_host_syntax_node(DeepTag::TAdt, Metadata::default(), children, span)
+}
+
+fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> {
+    match ty {
+        HostTypeTerm::Scalar(precision) => host_precision_syntax(precision, span),
+        HostTypeTerm::Fn(params, ret) => {
+            let mut children = params
+                .iter()
+                .map(|param| host_type_syntax(param, span))
+                .collect::<Option<Vec<_>>>()?;
+            children.push(host_type_syntax(ret, span)?);
+            Some(typed_host_syntax_node(
+                DeepTag::TFn,
+                Metadata::default(),
+                children,
+                span,
+            ))
+        }
+        HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
+            name,
+            args.iter()
+                .map(|arg| host_type_syntax(arg, span))
+                .collect::<Option<Vec<_>>>()?,
+            span,
+        )),
+        HostTypeTerm::List(inner) => Some(host_adt_syntax(
+            "List",
+            [host_type_syntax(inner, span)?],
+            span,
+        )),
+        HostTypeTerm::Dict(key, value) => Some(host_adt_syntax(
+            "Dict",
+            [host_type_syntax(key, span)?, host_type_syntax(value, span)?],
+            span,
+        )),
+        HostTypeTerm::Tuple(items) => Some(typed_host_syntax_node(
+            DeepTag::TTuple,
+            Metadata::default(),
+            items
+                .iter()
+                .map(|item| host_type_syntax(item, span))
+                .collect::<Option<Vec<_>>>()?,
+            span,
+        )),
+        HostTypeTerm::Tensor(tensor) => {
+            let mut children = tensor
+                .dims
+                .iter()
+                .map(|dim| host_dim_syntax(dim, span))
+                .collect::<Option<Vec<_>>>()?;
+            children.push(host_precision_syntax(
+                &HostPrecisionTerm::Concrete(tensor.precision),
+                span,
+            )?);
+            Some(typed_host_syntax_node(
+                DeepTag::TTensor,
+                Metadata::default(),
+                children,
+                span,
+            ))
+        }
+        HostTypeTerm::PolymorphicTensor(tensor) => {
+            let mut children = match &tensor.shape {
+                HostShapeTerm::Concrete(dims) => dims
+                    .iter()
+                    .map(|dim| host_dim_syntax(dim, span))
+                    .collect::<Option<Vec<_>>>()?,
+                HostShapeTerm::Polymorphic(slots) => slots
+                    .iter()
+                    .map(|slot| host_shape_slot_syntax(slot, span))
+                    .collect::<Option<Vec<_>>>()?,
+            };
+            children.push(host_precision_syntax(&tensor.precision, span)?);
+            Some(typed_host_syntax_node(
+                DeepTag::TTensor,
+                Metadata::default(),
+                children,
+                span,
+            ))
+        }
+        HostTypeTerm::Option(inner) => Some(host_adt_syntax(
+            "Option",
+            [host_type_syntax(inner, span)?],
+            span,
+        )),
+        HostTypeTerm::MappedFile => Some(host_adt_syntax("MappedFile", [], span)),
+        HostTypeTerm::Unit => Some(typed_host_syntax_node(
+            DeepTag::TUnit,
+            Metadata::default(),
+            Vec::new(),
+            span,
+        )),
+        HostTypeTerm::TypeVariable(name) => Some(typed_host_syntax_node(
+            DeepTag::TVar,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.clone()), span)],
+            span,
+        )),
+        HostTypeTerm::InferenceVariable(_) | HostTypeTerm::Never => None,
+    }
+}
+
+/// Reify a higher-order formal's entry contract around its supplied callable.
+///
+/// The actual stays the adapter body's callee, so its own declaration still
+/// governs its body. The adapter carries the formal type which specialization
+/// would otherwise erase; ordinary inline-invocation lowering then evaluates
+/// payload actuals once, executes this formal entry plan, and only then calls
+/// the supplied function. A formal with no executable entry obligation needs
+/// no adapter.
+fn retain_callable_entry_contract(
+    actual: &Expr,
+    formal: &HostTypeTerm,
+    entry: &SignatureEntryPlan,
+    formal_index: usize,
+    reserved: &mut UnordSet<String>,
+    span: chelis_deep::Span,
+) -> Expr {
+    let HostTypeTerm::Fn(param_tys, _) = formal else {
+        return actual.clone();
+    };
+    let mut param_names = Vec::with_capacity(param_tys.len());
+    for param_index in 0..param_tys.len() {
+        let mut serial = 0;
+        let name = loop {
+            let candidate = if serial == 0 {
+                format!("arg{param_index}")
+            } else {
+                format!("__chelis_indirect_arg_{formal_index}_{param_index}_{serial}")
+            };
+            if reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+            serial += 1;
+        };
+        param_names.push(name);
+    }
+    if entry.guards().is_empty() {
+        return actual.clone();
+    }
+
+    let declarations = param_names
+        .iter()
+        .zip(param_tys)
+        .map(|(name, ty)| {
+            let type_syntax = host_type_syntax(ty, span);
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name(name.clone()), span),
+                        Expr::Map(callable_type_metadata(type_syntax.as_ref()), span),
+                    ],
+                },
+                span,
+            )
+        })
+        .collect();
+    let params = typed_host_syntax_node(DeepTag::Params, Metadata::default(), declarations, span);
+    let mut call_children = vec![actual.clone()];
+    call_children.extend(param_names.iter().zip(param_tys).map(|(name, ty)| {
+        let type_syntax = host_type_syntax(ty, span);
+        typed_host_syntax_node(
+            DeepTag::Var,
+            callable_type_metadata(type_syntax.as_ref()),
+            vec![Expr::Atom(Atom::Name(name.clone()), span)],
+            span,
+        )
+    }));
+    let ret_syntax = match formal {
+        HostTypeTerm::Fn(_, ret) => host_type_syntax(ret, span),
+        _ => None,
+    };
+    let body = typed_host_syntax_node(
+        DeepTag::App,
+        callable_type_metadata(ret_syntax.as_ref()),
+        call_children,
+        span,
+    );
+    let fn_syntax = host_type_syntax(formal, span);
+    typed_host_syntax_node(
+        DeepTag::Fn,
+        callable_type_metadata(fn_syntax.as_ref()),
+        vec![params, body],
+        span,
+    )
 }
 
 /// Executable beta reduction first retains actual evaluation and the lambda's
@@ -11333,7 +11611,7 @@ fn lower_guarded_host_invocation(
         return Ok(None);
     };
     let mut invocation = RetainedHostInvocation::new(&signature.params, &signature.body_expr);
-    if invocation.entry.guards().is_empty() {
+    if !invocation.has_entry_obligations() {
         return Ok(None);
     }
     invocation.name = Some(name);
@@ -11349,7 +11627,8 @@ fn lower_guarded_host_invocation(
 }
 
 /// Evaluate payload actuals once in caller order, then execute the complete
-/// entry plan before the substituted body. Callable actuals remain syntax.
+/// entry plan before the substituted body. Callable actuals remain syntax,
+/// wrapped in their formal checked adapter when that formal owns entry guards.
 fn lower_retained_host_invocation(
     expr: &Expr,
     invocation: RetainedHostInvocation<'_>,
@@ -11390,7 +11669,26 @@ fn lower_retained_host_invocation(
     let mut local_scope = scope.clone();
     let mut bindings = Vec::new();
     let mut observations = Vec::new();
-    for (index, (arg, formal)) in args.iter().zip(invocation.params).enumerate() {
+    for (index, ((arg, formal), callable_entry)) in args
+        .iter()
+        .zip(invocation.params)
+        .zip(&invocation.callable_entries)
+        .enumerate()
+    {
+        if let Some(callable_entry) = callable_entry {
+            substitutions.insert(
+                formal.name.clone(),
+                retain_callable_entry_contract(
+                    arg,
+                    &formal.ty,
+                    callable_entry,
+                    index,
+                    &mut reserved,
+                    *span,
+                ),
+            );
+            continue;
+        }
         if matches!(formal.ty, HostTypeTerm::Fn(..)) {
             substitutions.insert(formal.name.clone(), arg.clone());
             continue;

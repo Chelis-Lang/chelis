@@ -1497,6 +1497,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
         ),
+        # #1788 round-2 baseline 46bdc8a5: substituting a broader callable
+        # actual erased the narrower formal's invocation-entry contract on
+        # both host lanes. The three receipts separate one literal witness
+        # from transport through aliases/local callables/wrappers and from a
+        # multi-argument repeated binder. Each also checks eager argument
+        # evaluation and excludes body/later effects on failure.
+        _row(
+            "entry.indirect.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transport.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.transport.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
         _row(
             "grad.wrt_tensor.single.dead_forward.eval",
             "silent_unguarded",

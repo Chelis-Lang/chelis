@@ -185,6 +185,11 @@ pub enum RuntimeValue {
         /// The checked function type retains renamed precision binders used
         /// by body metadata, alongside the signature's declared names.
         checked_signature: Option<Expr>,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary. These execute before this closure's own
+        /// entry so a broader supplied callable cannot erase a narrower
+        /// invocation contract.
+        invocation_contracts: Box<Vec<Expr>>,
         body: Expr,
         env: UnordMap<String, RuntimeValue>,
         /// Lexically captured concrete precision variables. A call derives a
@@ -754,6 +759,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,
@@ -763,6 +769,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,
