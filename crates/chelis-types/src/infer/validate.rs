@@ -14,6 +14,7 @@ pub(super) fn validate_ir_program(
 ) {
     top_level_references.report_initialization_errors(errors);
     detect_trivial_non_terminating_fns(exprs, errors);
+    validate_core_transform_fragment(exprs, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);
@@ -42,6 +43,231 @@ pub(super) fn validate_ir_program(
             errors,
         );
     }
+}
+
+/// Launch-core transforms are deliberately a smaller acceptance surface than
+/// the timeless transform language contract.  Until callable provenance is
+/// carried through aliases and shadowing closures, a direct variable target
+/// must resolve to an unshadowed top-level function. `grad` keeps its existing
+/// direct-inline-lambda path; `vmap` fences that path because its parameter can
+/// be checked against the unsliced operand. This keeps the checker from
+/// certifying a program whose evaluator could select a different callable or
+/// whose inline-vmap parameter could have the wrong rank (#1887, #1952,
+/// #1954).
+///
+/// The walk is lexical rather than type-directed.  A local `loss` with the
+/// same function type as a top-level `loss` is exactly the #1954 hazard, so
+/// looking only at `Type::Fn` would recreate the silent global fallback.  The
+/// normative transformation semantics remain in spec/06; the release
+/// supported-fragment document records this temporary admission fence.
+fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
+    let top_level_functions = collect_top_level_function_names(exprs);
+    let lexical_scope = CoreTransformScope::default();
+    for expr in top_level_decl_items(exprs) {
+        walk_core_transform_targets(expr, &top_level_functions, &lexical_scope, errors);
+    }
+}
+
+#[derive(Clone, Default)]
+struct CoreTransformScope {
+    local_names: UnordSet<String>,
+    direct_function_aliases: UnordSet<String>,
+}
+
+impl CoreTransformScope {
+    fn bind_local(&mut self, name: String, aliases_top_level_function: bool) {
+        self.direct_function_aliases.remove(&name);
+        if aliases_top_level_function {
+            self.direct_function_aliases.insert(name.clone());
+        }
+        self.local_names.insert(name);
+    }
+}
+
+fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for expr in top_level_decl_items(exprs) {
+        let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = children.first().and_then(symbol_name) else {
+            continue;
+        };
+        if children
+            .get(1)
+            .and_then(stamped_parts)
+            .is_some_and(|(tag, _, _)| tag == DeepTag::Fn)
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+fn walk_core_transform_targets(
+    expr: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    lexical_scope: &CoreTransformScope,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("walk_core_transform_targets", expr);
+    if let deep::Expr::MetaExpr(meta, _) = expr {
+        walk_core_transform_targets(&meta.expr, top_level_functions, lexical_scope, errors);
+        return;
+    }
+    let Some((tag, _, children)) = stamped_parts(expr) else {
+        return;
+    };
+    match tag {
+        DeepTag::Def => {
+            if let Some(body) = children.get(1) {
+                walk_core_transform_targets(body, top_level_functions, lexical_scope, errors);
+            }
+        }
+        DeepTag::Fn => {
+            let mut scoped = lexical_scope.clone();
+            if let Some(params) = children.first()
+                && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
+            {
+                for param in params {
+                    if let Some(name) = param_name_for_refs(param) {
+                        scoped.bind_local(name, false);
+                    }
+                }
+            }
+            if let Some(body) = children.get(1) {
+                walk_core_transform_targets(body, top_level_functions, &scoped, errors);
+            }
+        }
+        DeepTag::Let => {
+            let Some(binding) = children.first() else {
+                return;
+            };
+            let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(binding) else {
+                for child in children {
+                    walk_core_transform_targets(child, top_level_functions, lexical_scope, errors);
+                }
+                return;
+            };
+            if let Some(value) = bind_children.get(1) {
+                walk_core_transform_targets(value, top_level_functions, lexical_scope, errors);
+            }
+            let mut scoped = lexical_scope.clone();
+            if let Some(name) = bind_children.first().and_then(symbol_name) {
+                let aliases_top_level_function = bind_children.get(1).is_some_and(|value| {
+                    direct_unshadowed_top_level_function(value, top_level_functions, lexical_scope)
+                });
+                scoped.bind_local(name.to_string(), aliases_top_level_function);
+            }
+            if let Some(body) = children.get(1) {
+                walk_core_transform_targets(body, top_level_functions, &scoped, errors);
+            }
+        }
+        DeepTag::Match => {
+            if let Some(scrutinee) = children.first() {
+                walk_core_transform_targets(scrutinee, top_level_functions, lexical_scope, errors);
+            }
+            for arm in children.iter().skip(1) {
+                let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
+                    walk_core_transform_targets(arm, top_level_functions, lexical_scope, errors);
+                    continue;
+                };
+                let mut scoped = lexical_scope.clone();
+                if let Some(pattern) = arm_children.first() {
+                    for name in pattern_names_for_signature(pattern).to_sorted() {
+                        scoped.bind_local(name.clone(), false);
+                    }
+                }
+                for child in arm_children.iter().skip(1) {
+                    walk_core_transform_targets(child, top_level_functions, &scoped, errors);
+                }
+            }
+        }
+        DeepTag::Grad | DeepTag::Vmap => {
+            validate_core_transform_target(
+                tag,
+                children.first(),
+                top_level_functions,
+                lexical_scope,
+                errors,
+            );
+            for child in children {
+                walk_core_transform_targets(child, top_level_functions, lexical_scope, errors);
+            }
+        }
+        _ => {
+            for child in children {
+                walk_core_transform_targets(child, top_level_functions, lexical_scope, errors);
+            }
+        }
+    }
+}
+
+fn direct_unshadowed_top_level_function(
+    expr: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    lexical_scope: &CoreTransformScope,
+) -> bool {
+    stamped_parts(expr).is_some_and(|(tag, _, children)| {
+        tag == DeepTag::Var
+            && children.first().and_then(symbol_name).is_some_and(|name| {
+                top_level_functions.contains(name) && !lexical_scope.local_names.contains(name)
+            })
+    })
+}
+
+fn validate_core_transform_target(
+    tag: DeepTag,
+    target: Option<&deep::Expr>,
+    top_level_functions: &UnordSet<String>,
+    lexical_scope: &CoreTransformScope,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let target_parts = target.and_then(stamped_parts);
+    let name = target_parts.and_then(|(target_tag, _, children)| {
+        (target_tag == DeepTag::Var)
+            .then(|| children.first().and_then(symbol_name))
+            .flatten()
+    });
+    let inline_lambda = target_parts.is_some_and(|(target_tag, _, _)| target_tag == DeepTag::Fn);
+    let shadows_top_level = name.is_some_and(|name| {
+        top_level_functions.contains(name) && lexical_scope.local_names.contains(name)
+    });
+    let aliases_top_level_function =
+        name.is_some_and(|name| lexical_scope.direct_function_aliases.contains(name));
+
+    let requires_fence = match tag {
+        // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
+        // path. The P1 hazards are aliases and a local binder choosing a
+        // same-named global declaration, both represented as `var`.
+        DeepTag::Grad => shadows_top_level || aliases_top_level_function,
+        // #1887 is specifically an inline lambda receiving the unsliced
+        // operand. Local aliases get the same direct-name fence as `grad`.
+        DeepTag::Vmap => inline_lambda || shadows_top_level || aliases_top_level_function,
+        _ => unreachable!("only transform tags call this validator"),
+    };
+    if !requires_fence {
+        return;
+    }
+
+    let transform = match tag {
+        DeepTag::Grad => "grad",
+        DeepTag::Vmap => "vmap",
+        _ => unreachable!("only transform tags call this validator"),
+    };
+    errors.push(CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        format!(
+            "the core transform fragment rejects this `{transform}` target: local aliases \
+             and shadowing bindings must be direct, unshadowed top-level function \
+             declarations, and `vmap` does not admit inline lambdas yet \
+             (chelis#1887, #1952, #1954)"
+        ),
+        vec![
+            format!("Define a top-level function and write `{transform}(that_function)`."),
+            "The rejected callable form is outside the Chelis 0.19 core fragment.".to_string(),
+        ],
+    ));
 }
 
 /// Detect fn defs whose body is a direct self-call with no conditional
