@@ -5659,7 +5659,8 @@ impl<'de> Deserialize<'de> for PackageSchema {
         }
         for module in &wire.modules {
             for function in &module.functions {
-                chelis_shell::validate_collection_obligation_ledger(
+                chelis_shell::validate_collection_obligations_for_type_repr(
+                    function.type_repr.as_deref(),
                     &function.collection_obligations,
                 )
                 .map_err(|message| {

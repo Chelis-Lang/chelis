@@ -203,6 +203,92 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         );
     }
 
+    let hidden = "(t-var {} t99)";
+    let t0 = "(t-var {} t0)";
+    let t1 = "(t-var {} t1)";
+    for (label, obligation) in [
+        (
+            "len operand",
+            serde_json::json!({"len": {"operand": hidden, "result": t1}}),
+        ),
+        (
+            "len result",
+            serde_json::json!({"len": {"operand": t0, "result": hidden}}),
+        ),
+        (
+            "index list",
+            serde_json::json!({"index": {"list": hidden, "index": t1, "result": t0}}),
+        ),
+        (
+            "index index",
+            serde_json::json!({"index": {"list": t0, "index": hidden, "result": t1}}),
+        ),
+        (
+            "index result",
+            serde_json::json!({"index": {"list": t0, "index": t1, "result": hidden}}),
+        ),
+        (
+            "append list",
+            serde_json::json!({"append": {"list": hidden, "value": t1, "result": t0}}),
+        ),
+        (
+            "append value",
+            serde_json::json!({"append": {"list": t0, "value": hidden, "result": t0}}),
+        ),
+        (
+            "append result",
+            serde_json::json!({"append": {"list": t0, "value": t1, "result": hidden}}),
+        ),
+        (
+            "concat lhs",
+            serde_json::json!({"concat": {"lhs": hidden, "rhs": t1, "result": t0}}),
+        ),
+        (
+            "concat rhs",
+            serde_json::json!({"concat": {"lhs": t0, "rhs": hidden, "result": t0}}),
+        ),
+        (
+            "concat result",
+            serde_json::json!({"concat": {"lhs": t0, "rhs": t1, "result": hidden}}),
+        ),
+    ] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["collection_obligations"] = serde_json::json!([obligation]);
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("a hidden collection-contract variable must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("absent from its type representation"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
+
+    for (label, type_repr) in [("malformed", "not Deep"), ("nonfunction", "(t-var {} t0)")] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["type_repr"] = type_repr.into();
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("collection obligations require a valid callable type");
+        assert!(
+            error.to_string().contains("function type representation"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
+
     let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
         .expect("schema package must build");
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");

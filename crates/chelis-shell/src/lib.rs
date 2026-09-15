@@ -227,13 +227,16 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
         )?;
         for symbol in &module.exports {
             validate_nonempty_trimmed("export name", &symbol.name)?;
-            validate_collection_obligation_order(
-                &format!(
-                    "collection obligations for export `{}` in module `{}`",
-                    symbol.name, module.module
-                ),
+            validate_collection_obligations_for_type_repr(
+                symbol.type_repr.as_deref(),
                 &symbol.collection_obligations,
-            )?;
+            )
+            .map_err(|message| {
+                validation_error(&format!(
+                    "collection obligations for export `{}` in module `{}` {message}",
+                    symbol.name, module.module
+                ))
+            })?;
             let variables = match &symbol.type_repr {
                 Some(type_repr) => Some(canonical_variables(type_repr, true)?),
                 None if symbol.kind == SymbolKind::Value => {
@@ -257,12 +260,6 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
                     symbol.name, module.module
                 )));
             }
-            if !symbol.collection_obligations.is_empty() && symbol.type_repr.is_none() {
-                return Err(validation_error(&format!(
-                    "export `{}` in module `{}` carries collection obligations without a type representation",
-                    symbol.name, module.module
-                )));
-            }
             if let Some(variables) = variables {
                 for restriction in &symbol.type_variable_restrictions {
                     let index = canonical_type_variable_index(&restriction.variable)?;
@@ -271,41 +268,6 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
                             "export `{}` in module `{}` restricts `{}` but that canonical variable is absent from its type representation",
                             symbol.name, module.module, restriction.variable
                         )));
-                    }
-                }
-                for obligation in &symbol.collection_obligations {
-                    for carried in obligation.types() {
-                        let carried_variables = canonical_variables(carried, false)?;
-                        for index in carried_variables.types {
-                            if !variables.types.contains(&index) {
-                                return Err(validation_error(&format!(
-                                    "export `{}` in module `{}` carries a `{}` contract variable `t{index}` absent from its type representation",
-                                    symbol.name,
-                                    module.module,
-                                    obligation.builtin(),
-                                )));
-                            }
-                        }
-                        for index in carried_variables.dimensions {
-                            if !variables.dimensions.contains(&index) {
-                                return Err(validation_error(&format!(
-                                    "export `{}` in module `{}` carries a `{}` contract variable `d{index}` absent from its type representation",
-                                    symbol.name,
-                                    module.module,
-                                    obligation.builtin(),
-                                )));
-                            }
-                        }
-                        for index in carried_variables.ranks {
-                            if !variables.ranks.contains(&index) {
-                                return Err(validation_error(&format!(
-                                    "export `{}` in module `{}` carries a `{}` contract variable `r{index}` absent from its type representation",
-                                    symbol.name,
-                                    module.module,
-                                    obligation.builtin(),
-                                )));
-                            }
-                        }
                     }
                 }
             }
@@ -504,12 +466,56 @@ fn validate_strict_order<'a>(
     Ok(())
 }
 
-fn validate_collection_obligation_order(
-    label: &str,
+/// Validate one published collection-contract ledger against its callable
+/// type representation.
+///
+/// Both CHB validation and public Reef-schema deserialization use this
+/// boundary so canonical Deep parsing, ledger identity, and carried-variable
+/// membership cannot drift between package formats.
+pub fn validate_collection_obligations_for_type_repr(
+    type_repr: Option<&str>,
     obligations: &[CollectionObligation],
-) -> Result<(), bincode::Error> {
-    validate_collection_obligation_ledger(obligations)
-        .map_err(|message| validation_error(&format!("{label} {message}")))
+) -> Result<(), String> {
+    if obligations.is_empty() {
+        return Ok(());
+    }
+
+    validate_collection_obligation_ledger(obligations)?;
+    let type_repr =
+        type_repr.ok_or_else(|| "require a function type representation".to_string())?;
+    let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
+        format!("require a function type representation that is valid Deep: {error}")
+    })?;
+    if !matches!(
+        &expression,
+        chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::TFn
+    ) {
+        return Err("require a function type representation".to_string());
+    }
+
+    let variables =
+        canonical_variables(type_repr, true).map_err(|error| validation_message(&error))?;
+    for obligation in obligations {
+        for carried in obligation.types() {
+            let carried_variables =
+                canonical_variables(carried, false).map_err(|error| validation_message(&error))?;
+            for (prefix, carried_indices, declared_indices) in [
+                ("t", &carried_variables.types, &variables.types),
+                ("d", &carried_variables.dimensions, &variables.dimensions),
+                ("r", &carried_variables.ranks, &variables.ranks),
+            ] {
+                for index in carried_indices {
+                    if !declared_indices.contains(index) {
+                        return Err(format!(
+                            "contain a `{}` contract variable `{prefix}{index}` absent from its type representation",
+                            obligation.builtin()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate the canonical identity of one published collection-contract
@@ -555,6 +561,14 @@ fn validation_error(message: &str) -> bincode::Error {
     Box::new(bincode::ErrorKind::Custom(format!(
         "invalid shell envelope: {message}"
     )))
+}
+
+fn validation_message(error: &bincode::Error) -> String {
+    let rendered = error.to_string();
+    rendered
+        .strip_prefix("invalid shell envelope: ")
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 #[cfg(test)]
