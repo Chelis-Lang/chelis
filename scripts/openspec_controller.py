@@ -34,11 +34,11 @@ WHY THE PULL REQUEST NEEDS ITS OWN CREDENTIAL
 A pull request created with `GITHUB_TOKEN` does not raise a `pull_request`
 event, so it does not start the workflows whose jobs are this repository's
 required status checks. Measured against the repository's own workflow
-files: `conformance.yml` runs only on `push: [main]` and `pull_request`,
-and `changelog.yml` on the default branch has only `pull_request`, so
-`Hull Conformance Gate (Linux)` and `Changelog` can never appear. Since
-protection requires all nine contexts, such a pull request could never go
-green.
+files: `changelog.yml` and the acknowledgement workflow require a
+`pull_request` event, while the retarget receipt requires `pull_request` or
+`pull_request_target`. None of those events is raised for a pull request
+created with `GITHUB_TOKEN`. Since protection requires all ten contexts, such
+a pull request could never go green.
 
 So the create call -- and only the create call -- uses a short-lived
 installation token, which the workflow mints from the GitHub App this
@@ -144,6 +144,7 @@ REQUIRED_CONTEXTS_FOR_EVIDENCE = (
     "Hull Conformance Gate (Linux)",
     "Changelog",
     "PR Contract Acknowledgements",
+    "PR Base Retarget Validation",
 )
 
 PULL_BODY = """Automated OpenSpec document submission.
