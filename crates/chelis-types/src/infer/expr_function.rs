@@ -80,6 +80,45 @@ pub(super) fn infer_fn(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
+/// Whether an annotated `def` parameter is an independent contract or a
+/// structurally verified copy of its adjacent signature slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DefParameterAnnotationOwnership {
+    Independent,
+    VerifiedSignatureCopies,
+}
+
+/// Classify generated property copies from their raw Deep syntax.
+///
+/// Source spans are deliberately excluded, while semantic metadata remains
+/// part of equality. Any malformed or noncanonical carrier stays independent.
+pub(super) fn classify_property_parameter_annotations(
+    body: &deep::Expr,
+    declared_param_types: &[deep::Expr],
+) -> DefParameterAnnotationOwnership {
+    let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(body) else {
+        return DefParameterAnnotationOwnership::Independent;
+    };
+    let Some(params) = fn_children.first().and_then(canonical_parameter_elements) else {
+        return DefParameterAnnotationOwnership::Independent;
+    };
+    if params.len() != declared_param_types.len() {
+        return DefParameterAnnotationOwnership::Independent;
+    }
+    if params
+        .iter()
+        .zip(declared_param_types)
+        .all(|(param, declared)| {
+            parameter_type_syntax(param)
+                .is_some_and(|annotation| same_deep_syntax(annotation, declared))
+        })
+    {
+        DefParameterAnnotationOwnership::VerifiedSignatureCopies
+    } else {
+        DefParameterAnnotationOwnership::Independent
+    }
+}
+
 /// WS-A7: infer a `def`'s body when a declared signature is available, seeding
 /// any bare-arg parameters of an outer `(fn ...)` body with the declared
 /// signature's param types. This eliminates the bare-arg + sig-with-borrows
@@ -94,7 +133,7 @@ pub(super) fn infer_fn(
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
     decl_ty: &Type,
-    property_parameter_annotations_are_copies: bool,
+    parameter_annotation_ownership: DefParameterAnnotationOwnership,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -124,12 +163,14 @@ pub(super) fn infer_def_body_with_sig(
         };
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = if property_parameter_annotations_are_copies {
+    let params = if parameter_annotation_ownership
+        == DefParameterAnnotationOwnership::VerifiedSignatureCopies
+    {
         // Surf properties retain typed `property_quantifiers`, and Deep
         // requires the copied fn parameter carrier to match them. The adjacent
-        // defsig is the semantic type owner, exactly as for an ordinary
-        // inline-typed def; resolving the copied carrier again would report
-        // one authored quantifier twice.
+        // defsig is the semantic type owner only after the raw parameter type
+        // syntax has been verified equal to its signature slot. Resolving that
+        // verified copy again would report one authored quantifier twice.
         extract_param_names(&kids[0])
             .into_iter()
             .map(|name| (name, None))
@@ -187,13 +228,86 @@ pub(super) fn infer_def_body_with_sig(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
+fn canonical_parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => Some(children(list)),
+        _ => None,
+    }
+}
+
+fn parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => Some(children(list)),
+        deep::Expr::List(list, _) => Some(list.elements.as_slice()),
+        deep::Expr::BareList(elements, _) => Some(elements.as_slice()),
+        _ => None,
+    }
+}
+
+fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|value| value.expression()),
+        deep::Expr::List(list, _) => list.elements.get(1).and_then(|meta| {
+            let deep::Expr::Map(meta, _) = meta else {
+                return None;
+            };
+            meta.ty().map(|value| value.expression())
+        }),
+        deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
+            let deep::Expr::Map(meta, _) = meta else {
+                return None;
+            };
+            meta.ty().map(|value| value.expression())
+        }),
+        _ => None,
+    }
+}
+
+fn same_deep_syntax(left: &deep::Expr, right: &deep::Expr) -> bool {
+    stack_guard!("same_deep_syntax", left, false);
+    if let (
+        Some((left_tag, left_meta, left_children)),
+        Some((right_tag, right_meta, right_children)),
+    ) = (stamped_parts(left), stamped_parts(right))
+    {
+        return left_tag == right_tag
+            && left_meta == right_meta
+            && left_children.len() == right_children.len()
+            && left_children
+                .iter()
+                .zip(right_children)
+                .all(|(left, right)| same_deep_syntax(left, right));
+    }
+    match (left, right) {
+        (deep::Expr::Atom(left, _), deep::Expr::Atom(right, _)) => left == right,
+        (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => left == right,
+        (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
+            left.metadata == right.metadata && same_deep_syntax(&left.expr, &right.expr)
+        }
+        (deep::Expr::BareList(left, _), deep::Expr::BareList(right, _)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_deep_syntax(left, right))
+        }
+        (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
+            left.elements.len() == right.elements.len()
+                && left
+                    .elements
+                    .iter()
+                    .zip(&right.elements)
+                    .all(|(left, right)| same_deep_syntax(left, right))
+        }
+        _ => false,
+    }
+}
+
 fn extract_param_names(expr: &deep::Expr) -> Vec<String> {
-    let elems = match expr {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
-        deep::Expr::List(list, _) => list.elements.as_slice(),
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => return Vec::new(),
+    let Some(elems) = parameter_elements(expr) else {
+        return Vec::new();
     };
     elems
         .iter()
@@ -223,12 +337,8 @@ pub(super) fn extract_params(
     errors: &mut DiagnosticSink<'_>,
     binder_mode: BinderMode<'_>,
 ) -> Vec<(String, Option<Type>)> {
-    let elems = match expr {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
-        deep::Expr::List(list, _) => list.elements.as_slice(),
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => return vec![],
+    let Some(elems) = parameter_elements(expr) else {
+        return Vec::new();
     };
     let mut resolver = DeepTypeResolver::new(
         TypeUseSite::Annotation,

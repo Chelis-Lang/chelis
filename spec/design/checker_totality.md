@@ -140,9 +140,13 @@ The current implementation has one explicit ownership chain:
    remain independent, even when their source ranges or display labels
    coincide (chelis#1527). No diagnostic strings, spans, private source tokens,
    or post-inference deduplication decide ownership. Property quantifiers retain
-   the typed copies required by the Deep metadata contract, but an adjacent
-   generated `defsig` remains their one semantic diagnostic owner. The canonical
-   form survives Deep print/parse and direct `chelis_surf::TypeExpr` Serde.
+   the typed copies required by the Deep metadata contract. The checker treats
+   those parameter annotations as generated copies only after their complete
+   Deep type syntax matches the adjacent `defsig` slots structurally, ignoring
+   node spans but retaining semantic metadata. A disagreement remains an
+   independently checked annotation constraint. For a verified copy, the
+   `defsig` is the one semantic diagnostic owner. The canonical form survives
+   Deep print/parse and direct `chelis_surf::TypeExpr` Serde.
    The compiler API's separate structured `surf_ast` wire continues to carry a
    string precision field. Surf §0.1 and Deep §6.3.2 own the corresponding
    resugar and normalization contracts.

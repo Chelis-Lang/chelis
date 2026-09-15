@@ -2657,14 +2657,24 @@ pub(super) fn infer_top_level(
         let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
-            let property_parameter_annotations_are_copies = declaration_meta
+            let property_has_quantifier_carriers = declaration_meta
                 .chelis_role()
                 .is_some_and(|role| role.value() == "property")
                 && declaration_meta.property_quantifiers().is_some();
+            let parameter_annotation_ownership = if property_has_quantifier_carriers {
+                declared_signatures.get(&name).map_or(
+                    DefParameterAnnotationOwnership::Independent,
+                    |signature| {
+                        classify_property_parameter_annotations(&kids[1], &signature.param_types)
+                    },
+                )
+            } else {
+                DefParameterAnnotationOwnership::Independent
+            };
             let inferred = infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
-                property_parameter_annotations_are_copies,
+                parameter_annotation_ownership,
                 &mut body_env,
                 vg,
                 subst,

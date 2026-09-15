@@ -61,6 +61,27 @@ fn check(source: &str) -> (bool, CheckOutput, String) {
     (output.status.success(), report, canonical)
 }
 
+fn check_deep(source: &str) -> (bool, CheckOutput) {
+    let temp = tempdir().expect("create fixture directory");
+    let path = temp.path().join("main.dp");
+    fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("find CLI")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("run checker");
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "parse check report: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.success(), report)
+}
+
 fn assert_rejected_sites(source: &str, names: &[&str]) {
     let (success, report, canonical) = check(source);
     assert!(!success, "reserved types must fail: {report:?}");
@@ -88,9 +109,9 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
     }
 }
 
-fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
+fn prove_file(source: &str, extension: &str) -> (i32, Vec<serde_json::Value>) {
     let temp = tempdir().expect("create fixture directory");
-    let path = temp.path().join("main.ch");
+    let path = temp.path().join(format!("main.{extension}"));
     fs::write(&path, source).expect("write fixture");
     let output = Command::cargo_bin("chelis")
         .expect("find CLI")
@@ -112,6 +133,24 @@ fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
         })
         .collect();
     (output.status.code().unwrap_or(-1), records)
+}
+
+fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
+    prove_file(source, "ch")
+}
+
+fn hand_authored_deep_property(signature_type: &str, parameter_type: &str) -> String {
+    format!(
+        "(defsig {{}} classify \
+           (t-fn {{}} (t-prim {{}} {signature_type}) (t-prim {{}} bool)))\n\
+         (def {{chelis_role: \"property\", property_source_kind: \"user\", \
+                property_quantifiers: \
+                  (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})), \
+                property_preconditions: (tuple {{}})}} \
+           classify \
+           (fn {{}} (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})) \
+             (lit {{}} true)))\n"
+    )
 }
 
 #[test]
@@ -184,6 +223,56 @@ fn property_quantifier_reserved_types_produce_one_prove_check_diagnostic() {
             );
         }
     }
+}
+
+#[test]
+fn hand_authored_deep_property_conflict_rejects_check_and_prove() {
+    let source = hand_authored_deep_property("f64", "f32");
+    let (success, report) = check_deep(&source);
+    assert!(!success, "{report:?}");
+    assert!(report.score < 1.0, "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].kind, DiagnosticKind::TypeMismatch);
+    assert!(
+        report.errors[0].message.contains("f32") && report.errors[0].message.contains("f64"),
+        "{report:?}"
+    );
+
+    let (code, records) = prove_file(&source, "dp");
+    assert_eq!(code, 3, "{records:#?}");
+    let check_errors = records
+        .iter()
+        .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+        .collect::<Vec<_>>();
+    assert_eq!(check_errors.len(), 1, "{records:#?}");
+    let diagnostics = check_errors[0]["diagnostics"]
+        .as_array()
+        .expect("prove check error carries diagnostics");
+    assert_eq!(diagnostics.len(), 1, "{records:#?}");
+    assert!(
+        diagnostics[0]
+            .as_str()
+            .is_some_and(|text| text.contains("f32") && text.contains("f64")),
+        "{records:#?}"
+    );
+}
+
+#[test]
+fn matching_hand_authored_deep_property_checks_cleanly() {
+    let source = hand_authored_deep_property("f32", "f32");
+    let (success, report) = check_deep(&source);
+    assert!(success, "{report:?}");
+    assert_eq!(report.score, 1.0, "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+
+    let (code, records) = prove_file(&source, "dp");
+    assert_ne!(code, 3, "{records:#?}");
+    assert!(
+        !records
+            .iter()
+            .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+        "{records:#?}"
+    );
 }
 
 #[test]

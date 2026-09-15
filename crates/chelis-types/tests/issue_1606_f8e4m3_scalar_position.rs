@@ -27,6 +27,24 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     .into_exprs()
 }
 
+fn hand_authored_deep_property(
+    signature_type: &str,
+    parameter_type: &str,
+) -> Vec<chelis_deep::Expr> {
+    chelis_deep::parse_and_stamp_file(&format!(
+        "(defsig {{}} classify \
+           (t-fn {{}} (t-prim {{}} {signature_type}) (t-prim {{}} bool)))\n\
+         (def {{chelis_role: \"property\", property_source_kind: \"user\", \
+                property_quantifiers: \
+                  (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})), \
+                property_preconditions: (tuple {{}})}} \
+           classify \
+           (fn {{}} (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})) \
+             (lit {{}} true)))"
+    ))
+    .expect("valid hand-authored Deep property")
+}
+
 fn assert_rejected(src: &str, position: &str) {
     for name in ["f8e4m3", "f8e5m2"] {
         let source = src.replace("f8e4m3", name);
@@ -158,6 +176,44 @@ fn property_quantifier_reserved_types_have_one_semantic_diagnostic_owner() {
                 &[name],
             );
         }
+    }
+}
+
+#[test]
+fn hand_authored_property_parameter_contract_remains_independent_from_defsig() {
+    let program = hand_authored_deep_property("f64", "f32");
+    for (entry, result) in [
+        ("ir", check_ir_program(&program)),
+        ("typed", check_typed_program(&program)),
+    ] {
+        let report = result.expect_err("the authored f32 parameter must conflict with defsig f64");
+        assert_eq!(report.errors.len(), 1, "{entry}: {:?}", report.errors);
+        assert!(
+            matches!(
+                report.errors[0].kind,
+                chelis_types::errors::CheckErrorKind::TypeMismatch
+            ),
+            "{entry}: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors[0].message.contains("f32") && report.errors[0].message.contains("f64"),
+            "{entry}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn matching_hand_authored_property_parameter_contract_remains_valid() {
+    let program = hand_authored_deep_property("f32", "f32");
+    for (entry, result) in [
+        ("ir", check_ir_program(&program)),
+        ("typed", check_typed_program(&program)),
+    ] {
+        result.unwrap_or_else(|report| {
+            panic!("{entry}: matching authored property contracts must pass: {report:?}")
+        });
     }
 }
 
