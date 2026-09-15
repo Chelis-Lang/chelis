@@ -1684,6 +1684,32 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
+    )
+}
+
+pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        execution,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
@@ -1708,6 +1734,32 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
+    )
+}
+
+pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        execution,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
@@ -1740,6 +1792,40 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            trace: Some(collector.clone()),
+        },
+    )?;
+    Ok((plan, collector.finish_helper()))
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<
+    (
+        crate::evaluation::EvaluationPlan,
+        crate::lowering_trace::HelperLoweringTrace,
+    ),
+    LowerDiagnostic,
+> {
+    let collector = crate::lowering_trace::Collector::new_execution_helper();
+    let plan = try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        execution,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
             trace: Some(collector.clone()),
         },
     )?;
@@ -1942,6 +2028,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
                 resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+                literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
                 #[cfg(feature = "lowering-trace")]
                 trace: None,
             },
@@ -1997,6 +2084,32 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             counter: random_counter,
         },
         authored_signature,
+        LiteralResultClaimOwnership::Legacy,
+        #[cfg(feature = "lowering-trace")]
+        None,
+    )
+}
+
+pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+    authored_signature: bool,
+) -> Result<(Dag, u64), LowerDiagnostic> {
+    try_lower_subexpr_program_with_ordered_inputs_impl(
+        expr,
+        scoped_bindings,
+        context,
+        result_claim,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
+        authored_signature,
+        LiteralResultClaimOwnership::AuthoredTensorHelper,
         #[cfg(feature = "lowering-trace")]
         None,
     )
@@ -2023,6 +2136,34 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
             counter: random_counter,
         },
         authored_signature,
+        LiteralResultClaimOwnership::Legacy,
+        Some(collector.clone()),
+    )?;
+    Ok((dag, random_counter, collector.finish_helper()))
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+    authored_signature: bool,
+) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
+    let collector = crate::lowering_trace::Collector::new_helper();
+    let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
+        expr,
+        scoped_bindings,
+        context,
+        result_claim,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
+        authored_signature,
+        LiteralResultClaimOwnership::AuthoredTensorHelper,
         Some(collector.clone()),
     )?;
     Ok((dag, random_counter, collector.finish_helper()))
@@ -2035,6 +2176,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     authored_signature: bool,
+    literal_result_claim_ownership: LiteralResultClaimOwnership,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
@@ -2060,6 +2202,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
                 include_list_controls: false,
                 authored_signature,
                 resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+                literal_result_claim_ownership,
                 #[cfg(feature = "lowering-trace")]
                 trace,
             },
@@ -2069,13 +2212,35 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     }))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StagedHostRegionLoweringOptions {
+    random: Option<crate::host::RandomLoweringState>,
+    literal_result_claim_ownership: LiteralResultClaimOwnership,
+}
+
+impl StagedHostRegionLoweringOptions {
+    pub(crate) fn for_declaration(
+        random: Option<crate::host::RandomLoweringState>,
+        transfer_literal_result_claims: bool,
+    ) -> Self {
+        Self {
+            random,
+            literal_result_claim_ownership: if transfer_literal_result_claims {
+                LiteralResultClaimOwnership::AuthoredTensorHelper
+            } else {
+                LiteralResultClaimOwnership::Legacy
+            },
+        }
+    }
+}
+
 pub(crate) fn try_lower_staged_host_region(
     expr: &Expr,
     params: &[crate::host::HostParam],
     program: &crate::host::HostLoweringSession<'_>,
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
-    random: Option<crate::host::RandomLoweringState>,
+    options: StagedHostRegionLoweringOptions,
     mut execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<
     crate::host::staged::StagingAttempt<(Dag, crate::host::staged::HostStagedPlan)>,
@@ -2092,7 +2257,8 @@ pub(crate) fn try_lower_staged_host_region(
         );
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
-        ctx.random_seed = random.and_then(|state| state.seed);
+        ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
+        ctx.random_seed = options.random.and_then(|state| state.seed);
         if execution_out.is_some() {
             ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(ctx.random_seed));
         }
@@ -2197,8 +2363,15 @@ struct SubexprLoweringOptions {
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
     resource_policy: crate::evaluation::ResourcePolicy,
+    literal_result_claim_ownership: LiteralResultClaimOwnership,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::Collector>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiteralResultClaimOwnership {
+    Legacy,
+    AuthoredTensorHelper,
 }
 
 fn lower_subexpr_program_inner_impl(
@@ -2214,6 +2387,7 @@ fn lower_subexpr_program_inner_impl(
         include_list_controls,
         authored_signature,
         resource_policy,
+        literal_result_claim_ownership,
         #[cfg(feature = "lowering-trace")]
         trace,
     } = options;
@@ -2230,6 +2404,7 @@ fn lower_subexpr_program_inner_impl(
     ctx.random_seed = random.seed;
     ctx.random_counter = random.counter;
     ctx.resource_policy = resource_policy;
+    ctx.literal_result_claim_ownership = literal_result_claim_ownership;
     if execution_out.is_some() {
         ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(random.seed));
     }
@@ -6260,6 +6435,10 @@ struct LowerCtx<'program> {
     /// Two such parameters sharing a spelling is a name collision, not a
     /// claim, so those activations mint none.
     signature_is_authored: bool,
+    /// Only a successful authored tensor-helper extraction transfers literal
+    /// result obligations into `LiteralResultClaim` tokens. Every other
+    /// lowering entry retains the pre-transfer literal carriers.
+    literal_result_claim_ownership: LiteralResultClaimOwnership,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -6413,6 +6592,7 @@ impl<'program> LowerCtx<'program> {
             signature_witnesses: Vec::new(),
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -7489,6 +7669,20 @@ impl<'program> LowerCtx<'program> {
                 let required = if matches!(dim, DimInfo::Named(_, _)) {
                     self.capture_result_claim(required, label.clone(), axis)
                 } else {
+                    required
+                };
+                Some((axis, label, required, matches!(dim, DimInfo::Lit(_))))
+            })
+            .collect::<Vec<_>>();
+        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
+        let start = self.invocation_witnesses.len();
+        for (axis, label, required, literal) in requirements {
+            if let Some(mut id) = result.as_single_node() {
+                if literal
+                    && self.literal_result_claim_ownership
+                        == LiteralResultClaimOwnership::AuthoredTensorHelper
+                    && self.literal_result_token_owner_is_admitted(id, axis)
+                {
                     let value = match &self.dag.get(required).expect("literal requirement").op {
                         RiscOp::Const { value } => *value,
                         _ => unreachable!("literal requirements are freshly allocated constants"),
@@ -7501,22 +7695,6 @@ impl<'program> LowerCtx<'program> {
                             requirements: vec![value],
                             claims: Vec::new(),
                         };
-                    required
-                };
-                Some((axis, label, required))
-            })
-            .collect::<Vec<_>>();
-        let mut result = self.lower_expr_unclaimed(expr, claim.filter(|_| function));
-        let start = self.invocation_witnesses.len();
-        for (axis, label, required) in requirements {
-            if let Some(mut id) = result.as_single_node() {
-                if matches!(
-                    self.dag.get(required).expect("claim token").op,
-                    RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                        ..
-                    }
-                ) {
                     if id.0 <= required.0 {
                         let ty = self
                             .dag
@@ -7540,6 +7718,53 @@ impl<'program> LowerCtx<'program> {
             }
         }
         self.retain_invocation_witnesses(result, start)
+    }
+
+    /// Transferred claims preserve the existing local-site admission policy.
+    /// In particular, a non-unit `stride` is still unadmitted: installing a
+    /// declaration token must not manufacture a new realized-extent guard for
+    /// an op-computed source that C2.5 deliberately excludes.
+    fn literal_result_token_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
+        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis) {
+            Some(crate::axis_sources::AxisSource::OpComputed { axis, .. }) => {
+                self.dag.get(id).is_some_and(|node| {
+                    crate::axis_sources::op_computed_axis_extent(&node.op, *axis).is_some()
+                })
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn owns_literal_result_claim_axis(&self, id: NodeId, axis: usize) -> bool {
+        let mut current = id;
+        loop {
+            let Some(owner) = self.dag.get(current) else {
+                return false;
+            };
+            if owner.shape_deps.iter().any(|dependency| {
+                matches!(
+                    self.dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: RtAxis::Lit(claimed_axis),
+                        ..
+                    }) if usize::try_from(*claimed_axis).ok() == Some(axis)
+                )
+            }) {
+                return true;
+            }
+            if !matches!(
+                owner.op,
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            ) {
+                return false;
+            }
+            let Some(input) = owner.inputs.first() else {
+                return false;
+            };
+            current = *input;
+        }
     }
 
     fn lower_expr_unclaimed(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
@@ -8848,6 +9073,10 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        // This ordinary-grad subcontext lowers called declarations as private
+        // pure helpers. Their literal result tokens must survive into zero or
+        // unused cotangents; vmap-grad has its own continuation boundary.
+        subctx.literal_result_claim_ownership = LiteralResultClaimOwnership::AuthoredTensorHelper;
         #[cfg(feature = "lowering-trace")]
         {
             subctx.trace = self
@@ -14636,11 +14865,23 @@ impl<'program> LowerCtx<'program> {
             // Literal result metadata retains its existing guard path.
             // Named requirements retain graph identity independently of shape.
             let resolved = match dim {
-                // Every caller lowers this exact declaration through
-                // lower_expr_with_claim before refining its checked result view.
-                // Its fresh literal tokens already own the guards; re-stamping
-                // the axis here would install another, provenance-losing check.
-                DimInfo::Lit(_) => None,
+                DimInfo::Lit(_)
+                    if self.literal_result_claim_ownership
+                        == LiteralResultClaimOwnership::AuthoredTensorHelper
+                        && self.owns_literal_result_claim_axis(id, axis) =>
+                {
+                    // This exact helper lowering installed the declaration's
+                    // token before lowering the body. Re-stamping would create
+                    // a second, provenance-losing obligation.
+                    None
+                }
+                DimInfo::Lit(required) => {
+                    if self.preserve_literal_result_axis(id, axis, *required) {
+                        Some(dim.clone())
+                    } else {
+                        self.preserve_op_computed_result_axis(id, axis, *required)
+                    }
+                }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     // The equality is carried by exact entry witnesses or by
                     // lower_expr_with_claim's captured producer requirement.
@@ -14847,6 +15088,123 @@ impl<'program> LowerCtx<'program> {
         };
         self.dag.node_mut(id).expect("result").output_type.dims[axis] =
             DimInfo::Named(name.clone(), known_extent);
+    }
+
+    /// Retain a legacy literal result obligation on the operation that
+    /// introduces its extent, including through shape-preserving wrappers.
+    fn preserve_op_computed_result_axis(
+        &mut self,
+        id: NodeId,
+        axis: usize,
+        required: usize,
+    ) -> Option<DimInfo> {
+        let (origin, computed) = crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
+        let node = self.dag.get(origin)?;
+        crate::axis_sources::op_computed_axis_extent(&node.op, computed)?;
+        let declared = DimInfo::Lit(required);
+        if origin != id && !self.stamp_op_computed_origin(origin, computed, &declared) {
+            return None;
+        }
+        Some(declared)
+    }
+
+    /// Stamp a legacy op-computed origin only when its existing dimension is
+    /// compiler-owned. A user-spelled name remains a distinct claim.
+    fn stamp_op_computed_origin(
+        &mut self,
+        origin: NodeId,
+        axis: usize,
+        declared: &DimInfo,
+    ) -> bool {
+        let Some(existing) = self
+            .dag
+            .get(origin)
+            .and_then(|node| node.output_type.dims.get(axis))
+        else {
+            return false;
+        };
+        if existing == declared {
+            return true;
+        }
+        match existing {
+            DimInfo::Lit(_) => {}
+            DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
+            DimInfo::Named(_, _) => return false,
+        }
+        self.dag
+            .node_mut(origin)
+            .expect("op-computed origin")
+            .output_type
+            .dims[axis] = declared.clone();
+        true
+    }
+
+    /// Preserve the pre-transfer literal carrier on the witness that observes
+    /// the produced extent.
+    fn preserve_literal_result_axis(&mut self, id: NodeId, axis: usize, required: usize) -> bool {
+        let Some(witness) = self.axis_literal_witness(id, axis) else {
+            return false;
+        };
+        if self.literal_result_claim_is_entailed(witness, required) {
+            return true;
+        }
+        let required = chelis_types::scalar_from_i64(
+            "load",
+            Prim::Int64,
+            i64::try_from(required).expect("checked extent fits int64"),
+        )
+        .expect("int64 extent literal");
+        if let RiscOp::ExtentWitness { requirements, .. } =
+            &mut self.dag.node_mut(witness).expect("witness").op
+            && !requirements.contains(&required)
+        {
+            requirements.push(required);
+        }
+        true
+    }
+
+    /// A named equality already performs this literal comparison when its
+    /// partner's extent is graph-fixed to the required value.
+    fn literal_result_claim_is_entailed(&self, witness: NodeId, required: usize) -> bool {
+        self.named_claim_partners(witness)
+            .into_iter()
+            .any(|partner| self.graph_fixed_witness_extent(partner) == Some(required))
+    }
+
+    fn named_claim_partners(&self, witness: NodeId) -> Vec<NodeId> {
+        let own = self
+            .dag
+            .get(witness)
+            .into_iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::ExtentWitness { claims, .. } => Some(
+                    claims
+                        .iter()
+                        .zip(node.inputs.iter().skip(1))
+                        .map(|(_, requirement)| *requirement)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        if !own.is_empty() {
+            return own;
+        }
+        self.dag
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                    return None;
+                };
+                claims
+                    .iter()
+                    .zip(node.inputs.iter().skip(1))
+                    .any(|(_, requirement)| *requirement == witness)
+                    .then_some(node.id)
+            })
+            .collect()
     }
 
     /// The graph-fixed extent a named claim's declaring witness observes.

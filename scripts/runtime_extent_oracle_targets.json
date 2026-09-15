@@ -829,6 +829,7 @@
         "host_emit::entry::tests::dominating_signature_discharges_the_exact_helper_comparison",
         "host_emit::entry::tests::every_helper_call_must_be_dominated_before_a_check_is_removed",
         "host_emit::entry::tests::helper_projection_removes_only_discharged_checks_and_keeps_standalone_entry",
+        "host_emit::entry::tests::lowered_mixed_result_claim_delegates_the_following_rows_guard",
         "host_emit::entry::tests::shadowing_a_witness_keeps_the_helper_check",
         "host_emit::entry::tests::unused_canonical_witness_discharges_other_pairs_transitively"
       ],

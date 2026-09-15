@@ -528,7 +528,7 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 23.
+    // bincode encodes a u32 little-endian; bump the low byte well past 24.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -538,8 +538,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 23, "the running binary expects format version 23");
-            assert_ne!(stored, 23, "the forged version must differ from 23");
+            assert_eq!(expected, 24, "the running binary expects format version 24");
+            assert_ne!(stored, 24, "the forged version must differ from 24");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
