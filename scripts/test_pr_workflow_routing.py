@@ -111,6 +111,8 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         {"contents": "read", "pull-requests": "read"},
     )
     test.assertIn("candidate_sha", changes["outputs"])
+    test.assertIn("candidate_preflight", changes["outputs"])
+    test.assertIn("ci_contract_changed", changes["outputs"])
     checkout = next(
         step
         for step in changes["steps"]
@@ -135,11 +137,44 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertLess(
         changes["steps"].index(checkout), changes["steps"].index(validation)
     )
+    lifecycle = next(
+        step
+        for step in changes["steps"]
+        if "ci_candidate_lifecycle.py" in step.get("run", "")
+    )
+    test.assertTrue(lifecycle["continue-on-error"])
+    test.assertIn("gh api", lifecycle["run"])
+    test.assertIn("--current-pr", lifecycle["run"])
+    contract = next(
+        step
+        for step in changes["steps"]
+        if "scripts.test_ci_candidate_lifecycle" in step.get("run", "")
+    )
+    test.assertEqual(
+        contract["if"],
+        "steps.detect.outputs.ci_contract_changed == 'true'",
+    )
+    test.assertTrue(contract["continue-on-error"])
+    test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
+    test.assertIn("scripts.test_gate.CiParityTests", contract["run"])
+    record = next(
+        step
+        for step in changes["steps"]
+        if step.get("id") == "candidate-preflight"
+    )
+    test.assertIn("candidate_preflight=", record["run"])
+    docs = workflow["jobs"]["docs"]
+    test.assertIn("candidate_preflight", str(docs["steps"]))
 
     for job_id, required_name in REQUIRED_IMPLEMENTATION_JOBS.items():
         job = workflow["jobs"][job_id]
         test.assertIn("changes", job["needs"])
         test.assertEqual(job["name"], required_name)
+        if job_id in {"backend-sanitizers", "smt-build"}:
+            test.assertIn(
+                "needs.changes.outputs.candidate_preflight != 'failure'",
+                job["if"],
+            )
 
     test.assertNotIn("package-expansion-shard", workflow["jobs"])
     test.assertNotIn("package-expansion-summary", workflow["jobs"])
@@ -207,8 +242,15 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     )
     changes = workflow["jobs"]["changes"]
     test.assertIn("candidate_sha", changes["outputs"])
+    test.assertIn("candidate_preflight", changes["outputs"])
     test.assertIn("ci_validate_pr_candidate.py", str(changes))
+    test.assertIn("ci_candidate_lifecycle.py", str(changes))
+    test.assertIn("scripts.test_ci_candidate_lifecycle", str(changes))
     conformance = workflow["jobs"]["conformance"]
+    test.assertIn(
+        "needs.changes.outputs.candidate_preflight != 'failure'",
+        conformance["if"],
+    )
     checkout = next(
         step for step in conformance["steps"]
         if step.get("uses", "").startswith("actions/checkout@")
@@ -333,6 +375,11 @@ def assert_author_contract(test: unittest.TestCase) -> None:
         test.assertIn("incomplete coverage", text)
         test.assertIn("base", text)
         test.assertIn("fresh", text)
+        test.assertIn("initial review candidate", text)
+        test.assertIn("one consolidated repair candidate", text)
+        test.assertIn("Candidate-base-update:", text)
+        test.assertIn("Candidate-history-rewrite:", text)
+        test.assertIn("before the first push", text)
     guide = documents[AUTHOR_GUIDE]
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)

@@ -7,6 +7,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 
 | Owner | Cadence | Coverage |
 |---|---|---|
+| `ci.yml` / `conformance.yml` candidate preflight | Every PR implementation event; CI-contract tests only when their path classifier fires | Rejects undeclared base merges, base-changing rebases and other history rewrites; runs bootstrap-light workflow/routing tests before expensive build fan-out |
 | `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` change-owned shards and report | PR and trusted exact-candidate workflow dispatch, with the existing docs-only skip | Every default-enabled integration target added or directly modified by the candidate, or its exact reviewed alternative owner; four deterministic shards with a 20-minute limit each |
 | `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
@@ -23,6 +24,24 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 The Linux workspace worker passes `--ignore-default-filter` and deliberately includes the PR selection. Only `chelis-compiler-api::capacity_census_wire` and `chelis-python::capacity_census_bindings` are excluded: the dtype worker executes both. The generalization worker uses the same census exclusions; census authority is checked on the default-feature configuration. Executable listing set-math proves that workspace plus dtype still covers every non-ignored test in the unfiltered corpus, with none in neither selection and no census test in both. The two selections do overlap elsewhere: the dtype oracle also owns several non-census binaries.
 
 The regular candidate planner runs for pull requests and trusted exact-candidate workflow dispatches. It requires the checked-out synthetic merge commit to have exactly two parents and requires the event head to be `HEAD^2`. Its rename-aware NUL-delimited diff assigns every changed path one final disposition. Package roots map through Cargo metadata, reviewed shared paths map through `path_rule` rows, and unknown, stale, duplicate, or ambiguous mappings fail planning. Added targets and targets whose exact candidate `src_path` changed enter the required change-owned set. Other eligible targets in selected packages enter the disjoint package-expansion set, which is executed only by the explicit final-candidate dispatch. A push to `main` does not derive a test selection from the just-merged diff.
+
+The candidate preflight classifies each `synchronize` event before toolchain
+setup. An ordinary descendant push is a review repair. A merge whose non-first
+parent is in the target history is a base merge; a rewritten series whose merge
+base advances is a base rebase; another non-descendant update is a history
+rewrite. Base updates require one exact
+`Candidate-base-update: <head> <reason>` PR-body line, and other rewrites require
+`Candidate-history-rewrite: <head> <reason>`. The declaration records necessity;
+it does not replace review of a conflict resolution or approval for a force
+push. A force-pushed-away old head that Git can no longer inspect fails closed
+unless the current head has the explicit history-rewrite declaration.
+
+The same first-stage classifier identifies changes to workflows, workflow
+actions, CI ownership, CI scripts and tests, `AGENTS.md`, this document, and the
+PR-author guide. Those changes run the cheap routing, lifecycle, change-owned
+topology and hosted-coverage unit suites in the detector job. A failure is
+recorded as `candidate_preflight=failure`; expensive CI and Hull jobs suppress
+their build work, while the always-running required Docs context fails closed.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 
@@ -68,7 +87,9 @@ step reads the digested plan. A plan-proven empty shard writes its successful
 zero-target/zero-test receipt immediately and skips the build environment.
 Nonempty shards retain the post-cache plan download and normal executor.
 
-Package expansion uses a separate manually dispatched four-shard worker pool.
+Package expansion uses a separate manually dispatched four-shard worker pool
+after the review rounds settle the intended content; intermediate review
+candidates do not dispatch it.
 The dispatcher accepts an open pull request number and an exact expected head
 SHA, validates both before planning, and rejects stale candidates. Its failures,
 missing shards, exclusions, and timing-budget overruns are recorded by `Manual
@@ -78,7 +99,9 @@ content, agents start it alongside the final required implementation checks;
 there is no dependency between their verdicts. Inspect both before merging and
 record the reviewed SHA and run link. A content change, hand-resolved conflict,
 base-changing rebase, or base-branch retarget requires a fresh dispatch because
-it changes the synthetic candidate. Do not rebase a ready pull request merely
+it changes the synthetic candidate. In particular, a base-changing rebase after
+expansion must rerun `PR Package Expansion`; rebasing before the first push
+creates no expansion evidence to invalidate. Do not rebase a ready pull request merely
 because `main` advanced: if the exact reviewed head still merges safely,
 preserve it and its evidence. Introduced failures are resolved; inherited
 failures and incomplete coverage are named explicitly. Nightly JUnit reports

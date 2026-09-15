@@ -66,6 +66,8 @@ jobs:
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      ci_contract_changed: ${{ steps.detect.outputs.ci_contract_changed }}
+      candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
     steps:
       - name: Checkout trusted retarget validator
         if: github.event_name == 'workflow_dispatch'
@@ -116,6 +118,9 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
@@ -128,6 +133,64 @@ jobs:
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
+      - name: Validate candidate lifecycle
+        id: candidate-lifecycle
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          args=(--event "$GITHUB_EVENT_PATH")
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            current_pr="$RUNNER_TEMP/current-pr.json"
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
+            args+=(--current-pr "$current_pr")
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ] &&
+             [ "$ACTION" = "synchronize" ]; then
+            git fetch origin "$BEFORE" "$HEAD" "$BASE" 2>/dev/null || true
+          fi
+          python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
+
+      - name: Install uv for CI contract preflight
+        if: steps.detect.outputs.ci_contract_changed == 'true'
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Validate changed CI contracts before Hull build
+        id: ci-contract
+        if: steps.detect.outputs.ci_contract_changed == 'true'
+        continue-on-error: true
+        working-directory: candidate
+        run: >-
+          uv run --managed-python --python 3.11 --no-project
+          --with PyYAML==6.0.3 python -m unittest
+          scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_detect_docs_only
+          scripts.test_pr_workflow_routing
+          scripts.test_change_owned_workflow
+          scripts.test_hosted_validation
+          scripts.test_gate.DocsOnlySkipTests
+          scripts.test_gate.CiParityTests
+
+      - name: Record candidate preflight verdict
+        id: candidate-preflight
+        if: always()
+        run: |
+          lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          contract="${{ steps.ci-contract.outcome }}"
+          verdict=success
+          if [ "$lifecycle" = "failure" ] || [ "$contract" = "failure" ]; then
+            verdict=failure
+          fi
+          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
+          echo "candidate lifecycle=$lifecycle, CI contract=$contract, verdict=$verdict"
+
   conformance:
     name: Hull Conformance Gate (Linux)
     runs-on: ubuntu-latest
@@ -135,7 +198,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight != 'failure' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

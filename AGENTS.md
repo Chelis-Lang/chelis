@@ -163,15 +163,35 @@ obligations.
   coordination dispatches fresh compiler and Hull workflows against the exact new
   synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
   checks before proceeding.
+- Candidate lifecycle follows review rounds rather than a one-push ideal. Immediately
+  before the first push, fetch the actual target and rebase onto it unless the branch is
+  already based there, then publish the initial review candidate after its focused
+  checks and `--fast` gate. A review round may produce one consolidated repair
+  candidate containing all findings then known from that round; do not publish one
+  candidate per finding or while another known repair remains. The reviewer that
+  reported a blocking finding verifies that repair while CI runs. A clean reviewed
+  head becomes final by designation: review verification, finalization, and
+  PR-description edits do not require another commit.
+- Once a pull request exists, every base merge or base-changing rebase must be necessary
+  under [Worktree And Branch Discipline](#worktree-and-branch-discipline). Before
+  publishing it, add exactly one head-bound line to the PR body:
+  `Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>`.
+  Any other force-pushed history rewrite uses
+  `Candidate-history-rewrite: <new-head-sha> <specific approved reason>` and does not
+  replace the separate force-push approval requirement. The cheap candidate preflight
+  rejects missing, duplicate, stale-head, and empty reasons before build fan-out. If it
+  rejects an already-pushed head, repair the body and rerun that same workflow; do not
+  manufacture another candidate change merely to satisfy the guard.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
   them; merge only after both the required checks and the expansion report have been
-  inspected. Record the reviewed SHA and run link in the pull request. A content change,
-  hand-resolved conflict, base-changing rebase, or base-branch retarget creates a new
-  synthetic candidate and requires a fresh dispatch. Do not create that invalidation
-  merely to refresh a branch after `origin/main` advances: when GitHub can merge the
-  exact reviewed head safely, preserve that head and its evidence as
+  inspected. Intermediate review candidates do not run expansion. Record the reviewed
+  SHA and run link in the pull request. A content change, hand-resolved conflict,
+  base-changing rebase, or base-branch retarget creates a new synthetic candidate and
+  requires a fresh dispatch. Do not create that invalidation merely to refresh a branch
+  after `origin/main` advances: when GitHub can merge the exact reviewed head safely,
+  preserve that head and its evidence as
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
@@ -768,6 +788,10 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
+- Before the first push for a new pull request, fetch its actual target branch and
+  rebase onto the fetched tip unless the branch is already based there. Resolve and
+  validate that integration before any hosted evidence exists. This preparation rule
+  does not authorize later refresh rebases after a review candidate has been published.
 - When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
   merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
   and inspect the prospective merge result with `git merge-tree` or an equivalent
