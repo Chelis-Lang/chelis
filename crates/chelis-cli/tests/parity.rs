@@ -57,6 +57,40 @@
 //! initial landing (forcing `tensor_trace_value` to return `sum + 1.0`
 //! causes `tensor_structural_ops` parity to fail with a precise
 //! line/element diff).
+//!
+//! # Independent result controls (chelis#1351)
+//!
+//! Equal output proves agreement on this corpus, not correctness. A defect
+//! shared by both implementations can pass this comparison, as chelis#1349 did.
+//! `issue_1351_structural_axis_independent_oracle` supplies independent
+//! [05-OP-33] expectations for `diagonal` and `trace` on its declared cases.
+//! It compares each implementation with those expectations separately.
+//!
+//! Source-mutation receipt, 2026-09-14, at `07590f629b5687f018e0814260818d59372a614f`:
+//!
+//! - Eval only: read zero for the second diagonal axis. Both tests failed.
+//!   The independent test named the eval result.
+//! - C only: apply the same edit in `chelis_tensor_diagonal`. Both tests failed.
+//!   The independent test named the native result.
+//! - Both implementations: apply both edits. `parity_tensor_structural_ops`
+//!   passed, while the independent test rejected the shared wrong answer.
+//! - Reference only: add one to each expected diagonal element. Three
+//!   hand-computed controls and the execution test failed.
+//!
+//! The runtime came from each current Cargo artifact record, in a dedicated
+//! directory. The changed runtime had a different recorded archive digest.
+//! These probes rebuilt and executed actual code. They did not replace output
+//! strings in the comparator. All temporary mutations were restored.
+//!
+//! The paired command selected `parity_tensor_structural_ops` and
+//! `structural_axis_lanes_match_independent_op33_expectations` from the
+//! `parity` and `issue_1351_structural_axis_independent_oracle` targets with
+//! `cargo nextest run -p chelis-cli --no-fail-fast`. The reference-only probe
+//! ran all seven tests in the independent target. Final positive results are
+//! recorded in the PR receipt.
+//!
+//! This supplement covers its structural-operation cases only. It does not
+//! prove arithmetic reduction order, result dtypes, or other operations.
 
 use assert_cmd::Command;
 use chelis_types::agreement::compare_exact_observations;

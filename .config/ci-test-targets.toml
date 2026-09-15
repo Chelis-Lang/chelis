@@ -290,6 +290,12 @@ name = "test_command_smoke"
 package = "chelis-cli"
 name = "parity"
 
+# chelis#1351: [05-OP-33] expectations that neither lane computes, checked
+# against eval and against the compiled C lane separately.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1351_structural_axis_independent_oracle"
+
 [[standing_target]]
 package = "chelis-cli"
 name = "parity_corpus_contract"
