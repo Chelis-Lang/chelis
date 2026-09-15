@@ -42,10 +42,13 @@ previously required declaration cannot preserve a green required context.
 
 The same first-stage classifier identifies changes to workflows, workflow
 actions, CI ownership, CI scripts and tests, `AGENTS.md`, this document, and the
-PR-author guide. Those changes run the cheap routing, lifecycle, change-owned
-topology and hosted-coverage unit suites in the detector job. A failure is
-recorded as `candidate_preflight=failure`; expensive CI and Hull jobs suppress
-their build work, while the always-running required Docs context fails closed.
+PR-author guide. A workflow-native bootstrap applies the same conservative path
+boundary independently, so narrowing the candidate-controlled classifier still
+runs its contract tests. Those changes run the cheap routing, lifecycle,
+change-owned topology and hosted-coverage unit suites in the detector job. A
+failure is recorded as `candidate_preflight=failure`; expensive CI and Hull
+build work is suppressed, while the required Docs and Hull contexts run a cheap
+failure step rather than reporting skipped success.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 

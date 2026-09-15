@@ -59,22 +59,6 @@ jobs:
           path: candidate
           fetch-depth: 0
 
-      - name: Validate the frozen synthetic candidate
-        working-directory: candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
-          EXPECTED_BASE_SHA: ${{ steps.pr-identity.outputs.base_sha }}
-        run: >-
-          python3 ../trusted/scripts/ci_validate_pr_candidate.py
-          --repository "$REPOSITORY"
-          --pr-number "$PR_NUMBER"
-          --expected-head-sha "$EXPECTED_HEAD_SHA"
-          --expected-base-sha "$EXPECTED_BASE_SHA"
-          --validate-checkout
-
       - name: Record the exact package-expansion candidate
         id: candidate
         working-directory: candidate

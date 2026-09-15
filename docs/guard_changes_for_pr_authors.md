@@ -45,6 +45,9 @@ The candidate preflight rejects a missing, duplicate, empty, or stale-head
 declaration before expensive CI starts. A PR-body edit does not restart compiler
 CI. If the declaration was omitted, add it and rerun the failed workflow on the
 same head rather than creating another candidate change.
+Workflow-native path selection independently forces the CI-contract suite when
+the candidate detector is itself under change. A failed or unavailable preflight
+suppresses expensive work but fails the required Docs and Hull contexts.
 
 A rebase does not by itself require a fresh round. If its hand-resolved
 intersection stays within files and mechanisms the standing reviewer already

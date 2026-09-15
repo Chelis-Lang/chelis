@@ -179,7 +179,10 @@ obligations.
   Any other force-pushed history rewrite uses
   `Candidate-history-rewrite: <new-head-sha> <specific approved reason>` and does not
   replace the separate force-push approval requirement. The cheap candidate preflight
-  rejects missing, duplicate, stale-head, and empty reasons before build fan-out. If it
+  rejects missing, duplicate, stale-head, and empty reasons before build fan-out.
+  Workflow-native path selection independently forces the CI-contract tests when their
+  candidate-controlled detector is under change. A failed or unavailable preflight
+  suppresses expensive work but must fail the required Docs and Hull contexts. If it
   rejects an already-pushed head, repair the body and rerun that same workflow; do not
   manufacture another candidate change merely to satisfy the guard.
 - After reviews and repairs are complete and no further content change is planned,

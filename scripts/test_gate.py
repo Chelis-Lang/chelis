@@ -4139,6 +4139,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         expected = {
             "integration-plan": (
                 "${{ !cancelled() && github.event_name != 'push' && "
+                "needs.changes.outputs.candidate_preflight == 'success' && "
                 "(needs.changes.result != 'success' || "
                 "needs.changes.outputs.docs_only != 'true') }}"
             ),

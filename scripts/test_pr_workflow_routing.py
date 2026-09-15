@@ -38,6 +38,21 @@ PREFLIGHT_GATED_JOBS = {
     "test-telemetry",
     "backend-sanitizers",
 }
+BOOTSTRAP_CONTRACT_MARKERS = {
+    ".github/actions/*",
+    ".github/workflows/*",
+    ".config/ci-test-targets.toml",
+    "AGENTS.md",
+    "agent-skills/redteam-exec/SKILL.md",
+    "docs/ci_validation.md",
+    "docs/guard_changes_for_pr_authors.md",
+    "scripts/gate.py",
+    "scripts/ci_*",
+    "scripts/test_ci_*",
+    "scripts/test_change_owned_workflow.py",
+    "scripts/test_hosted_validation.py",
+    "scripts/test_pr_workflow_routing.py",
+}
 PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
     "content change",
     "hand-resolved conflict",
@@ -127,7 +142,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertIn("candidate_sha", changes["outputs"])
     test.assertIn("candidate_preflight", changes["outputs"])
-    test.assertIn("ci_contract_changed", changes["outputs"])
+    test.assertEqual(
+        changes["outputs"]["ci_contract_changed"],
+        "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
+    )
     checkout = next(
         step
         for step in changes["steps"]
@@ -167,10 +185,6 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         for step in changes["steps"]
         if "scripts.test_ci_candidate_lifecycle" in step.get("run", "")
     )
-    test.assertEqual(
-        contract["if"],
-        "steps.detect.outputs.ci_contract_changed == 'true'",
-    )
     test.assertTrue(contract["continue-on-error"])
     test.assertIn("scripts.test_check_agent_skills", contract["run"])
     test.assertIn("scripts.test_ci_change_owned", contract["run"])
@@ -178,15 +192,29 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("scripts.test_regenerate_conformance_assets", contract["run"])
     test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
     test.assertIn("scripts.test_gate.CiParityTests", contract["run"])
+    test.assertIn(
+        "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
+        contract["if"],
+    )
+    bootstrap = next(
+        step
+        for step in changes["steps"]
+        if step.get("id") == "ci-contract-bootstrap"
+    )
+    test.assertEqual(bootstrap["if"], "always()")
+    for marker in BOOTSTRAP_CONTRACT_MARKERS:
+        test.assertIn(marker, bootstrap["run"])
     record = next(
         step
         for step in changes["steps"]
         if step.get("id") == "candidate-preflight"
     )
     test.assertIn("candidate_preflight=", record["run"])
+    test.assertIn("ci_contract_changed=", record["run"])
     test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
+    test.assertIn('if [ "$detected_contract" = "true" ]', record["run"])
+    test.assertIn('[ "$bootstrap_contract" = "true" ]', record["run"])
     test.assertIn('if [ "$contract_changed" = "true" ]', record["run"])
-    test.assertIn('elif [ "$contract_changed" != "false" ]', record["run"])
     docs = workflow["jobs"]["docs"]
     test.assertIn("candidate_preflight", str(docs["steps"]))
     for job_id in PREFLIGHT_GATED_JOBS:
@@ -272,14 +300,40 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     changes = workflow["jobs"]["changes"]
     test.assertIn("candidate_sha", changes["outputs"])
     test.assertIn("candidate_preflight", changes["outputs"])
+    test.assertEqual(
+        changes["outputs"]["ci_contract_changed"],
+        "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
+    )
     test.assertIn("ci_validate_pr_candidate.py", str(changes))
     test.assertIn("ci_candidate_lifecycle.py", str(changes))
     test.assertIn("scripts.test_ci_candidate_lifecycle", str(changes))
+    bootstrap = next(
+        step
+        for step in changes["steps"]
+        if step.get("id") == "ci-contract-bootstrap"
+    )
+    test.assertEqual(bootstrap["if"], "always()")
+    for marker in BOOTSTRAP_CONTRACT_MARKERS:
+        test.assertIn(marker, bootstrap["run"])
+    contract = next(
+        step for step in changes["steps"] if step.get("id") == "ci-contract"
+    )
+    test.assertIn(
+        "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
+        contract["if"],
+    )
     conformance = workflow["jobs"]["conformance"]
     test.assertIn(
-        "needs.changes.outputs.candidate_preflight == 'success'",
+        "needs.changes.outputs.candidate_preflight != 'success'",
         conformance["if"],
     )
+    preflight = conformance["steps"][0]
+    test.assertEqual(
+        preflight["name"],
+        "Require candidate lifecycle and CI contract preflight",
+    )
+    test.assertIn("CANDIDATE_PREFLIGHT", preflight["env"])
+    test.assertIn('!= "success"', preflight["run"])
     checkout = next(
         step for step in conformance["steps"]
         if step.get("uses", "").startswith("actions/checkout@")
@@ -350,6 +404,7 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertIn("refs/pull/", planner_text)
     test.assertIn("expected_head_sha", planner_text)
     test.assertIn("scripts/ci_validate_pr_candidate.py", planner_text)
+    test.assertNotIn("--expected-base-sha", planner_text)
     test.assertIn("--event-name", planner_text)
     test.assertIn("pull_request", planner_text)
     test.assertIn("--pr-head", planner_text)
@@ -393,14 +448,6 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     )
     test.assertIn("trusted/scripts/ci_validate_pr_candidate.py", identity["run"])
     test.assertIn("--github-output \"$GITHUB_OUTPUT\"", identity["run"])
-    frozen = next(
-        step
-        for step in planner_steps
-        if step.get("name") == "Validate the frozen synthetic candidate"
-    )
-    test.assertEqual(frozen["working-directory"], "candidate")
-    test.assertIn("--expected-base-sha", frozen["run"])
-    test.assertIn("--validate-checkout", frozen["run"])
 
     worker = jobs["package-expansion-shard"]
     test.assertEqual(worker["needs"], ["integration-plan"])
@@ -433,7 +480,7 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     workflow_text = str(workflow)
     test.assertEqual(
         workflow_text.count("scripts/ci_validate_pr_candidate.py"),
-        3,
+        2,
     )
     summary_checkout = next(
         step
@@ -486,6 +533,7 @@ def assert_author_contract(test: unittest.TestCase) -> None:
             "Later movement of the same target branch does not invalidate",
             text,
         )
+        test.assertIn("required Docs and Hull contexts", text)
     guide = documents[AUTHOR_GUIDE]
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)
@@ -525,6 +573,40 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             )
             with self.subTest(job=job_id), self.assertRaises(AssertionError):
                 assert_ci_metadata_routing(self, workflow)
+
+    def test_candidate_detector_cannot_disable_its_own_contract_suite(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            bootstrap = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "ci-contract-bootstrap"
+            )
+            bootstrap["run"] = bootstrap["run"].replace(
+                "scripts/ci_*", "scripts/no-ci-*", 1
+            )
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_ci_and_hull_share_the_same_bootstrap_path_boundary(self) -> None:
+        workflows = [
+            yaml.safe_load(path.read_text()) for path in (CI, HULL)
+        ]
+        bootstrap_runs = []
+        for workflow in workflows:
+            bootstrap_runs.append(
+                next(
+                    step
+                    for step in workflow["jobs"]["changes"]["steps"]
+                    if step.get("id") == "ci-contract-bootstrap"
+                )["run"]
+            )
+        self.assertEqual(bootstrap_runs[0], bootstrap_runs[1])
 
     def test_author_contract_requires_each_explicit_invalidation_class(self) -> None:
         originals = {
