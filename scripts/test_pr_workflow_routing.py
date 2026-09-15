@@ -275,7 +275,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
     test.assertIn("--workflow-file ci.yml", identity["run"])
-    test.assertIn("github.event.pull_request.base.sha", identity["run"])
+    test.assertNotIn("--base-sha", identity["run"])
+    test.assertNotIn(
+        "github.event.pull_request.base.sha", identity["run"]
+    )
     upload = next(
         step
         for step in changes["steps"]
@@ -505,6 +508,10 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertEqual(identity["working-directory"], "candidate")
     test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
     test.assertIn("--workflow-file conformance.yml", identity["run"])
+    test.assertNotIn("--base-sha", identity["run"])
+    test.assertNotIn(
+        "github.event.pull_request.base.sha", identity["run"]
+    )
     upload = next(
         step
         for step in changes["steps"]

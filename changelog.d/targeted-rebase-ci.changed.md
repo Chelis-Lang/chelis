@@ -6,3 +6,5 @@ package-targeted test. Exact Cargo target ownership is checked before fan-out;
 ambiguous targets, changed inputs owned by reused standing evidence, CI-policy
 changes, retargets, unmapped paths, or uncertain updates fall back to full CI
 even when the PR patch is documentation-only.
+Candidate receipts now bind the checked-out merge's actual base parent, so a
+target advance after event creation does not make otherwise valid CI fail.

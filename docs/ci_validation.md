@@ -52,12 +52,15 @@ build work is suppressed, while the required Docs and Hull contexts run a cheap
 failure step rather than reporting skipped success.
 
 CI and Hull each publish an immutable identity for the synthetic candidate they
-checked out. The identity records the exact two parents, and describes the PR
-patch from `merge-base(base, head)..head`; using `base..head` would incorrectly
-count unrelated target-branch advances as pull-request changes. It also records
-the stable patch id, an exact normalized-diff digest that retains added and
-removed bytes, and the changed paths and their digest. These producer artifacts
-are candidate-controlled inputs, not receipts.
+checked out. The checked-out candidate's first parent is the authoritative
+target snapshot, even when `main` advances after GitHub creates the event
+payload; its second parent must still equal the event's exact PR head. The
+identity records those exact two parents and describes the PR patch from
+`merge-base(base, head)..head`; using `base..head` would incorrectly count
+unrelated target-branch advances as pull-request changes. It also records the
+stable patch id, an exact normalized-diff digest that retains added and removed
+bytes, and the changed paths and their digest. These producer artifacts are
+candidate-controlled inputs, not receipts.
 
 The default branch's `workflow_run` collector fetches the named Git objects
 without checking out or executing pull-request content and recomputes every

@@ -176,7 +176,7 @@ def build_identity(
     pr_number: int,
     head_sha: str,
     base_ref: str,
-    base_sha: str,
+    base_sha: str | None,
     candidate_sha: str,
 ) -> dict[str, object]:
     repository_path = Path(repository_path)
@@ -192,7 +192,6 @@ def build_identity(
     run_attempt = _positive_integer("run_attempt", run_attempt)
     pr_number = _positive_integer("pr_number", pr_number)
     head_sha = _full_sha("head_sha", head_sha)
-    base_sha = _full_sha("base_sha", base_sha)
     candidate_sha = _full_sha("candidate_sha", candidate_sha)
 
     resolved_candidate = _git(
@@ -201,12 +200,25 @@ def build_identity(
     if resolved_candidate != candidate_sha:
         raise IdentityError("candidate_sha did not resolve to itself")
     parents = _commit_parents(repository_path, candidate_sha)
-    expected_parents = [base_sha, head_sha]
-    if parents != expected_parents:
+    if len(parents) != 2:
         raise IdentityError(
-            "candidate parents do not match the event base and pull request head: "
-            f"expected {expected_parents}, observed {parents}"
+            "candidate must have exactly two parents: "
+            f"observed {parents}"
         )
+    observed_base_sha, observed_head_sha = parents
+    if observed_head_sha != head_sha:
+        raise IdentityError(
+            "candidate head parent does not match the pull request head: "
+            f"expected {head_sha}, observed {observed_head_sha}"
+        )
+    if base_sha is not None:
+        expected_base_sha = _full_sha("base_sha", base_sha)
+        if observed_base_sha != expected_base_sha:
+            raise IdentityError(
+                "candidate base parent does not match the expected base: "
+                f"expected {expected_base_sha}, observed {observed_base_sha}"
+            )
+    base_sha = observed_base_sha
 
     patch_base_sha = _git(
         repository_path, "merge-base", base_sha, head_sha
@@ -226,7 +238,7 @@ def build_identity(
         "base_sha": base_sha,
         "patch_base_sha": patch_base_sha,
         "candidate_sha": candidate_sha,
-        "candidate_parents": expected_parents,
+        "candidate_parents": parents,
         "patch_id": _patch_id(repository_path, patch_base_sha, head_sha),
         "patch_digest": _patch_digest(
             repository_path, patch_base_sha, head_sha
@@ -252,7 +264,13 @@ def main() -> int:
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--base-ref", required=True)
-    parser.add_argument("--base-sha", required=True)
+    parser.add_argument(
+        "--base-sha",
+        help=(
+            "optional expected base SHA; when omitted, the synthetic "
+            "candidate's first parent is authoritative"
+        ),
+    )
     parser.add_argument("--candidate-sha")
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()

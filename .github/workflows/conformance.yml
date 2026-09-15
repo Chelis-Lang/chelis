@@ -353,7 +353,6 @@ jobs:
           --pr-number "${{ github.event.pull_request.number }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
           --base-ref "${{ github.event.pull_request.base.ref }}"
-          --base-sha "${{ github.event.pull_request.base.sha }}"
           --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
           --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
 

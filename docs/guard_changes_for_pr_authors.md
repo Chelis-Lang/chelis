@@ -77,6 +77,10 @@ job. The fail-closed full lane overrides the ordinary docs-only skip. Every
 required context still reports on the new head.
 Patch changes and path overlap are reported so the standing reviewer can
 inspect the resolution; they do not alone force unrelated work to rerun.
+If the target advances after GitHub creates a pull-request event, CI binds the
+actual checked-out synthetic candidate rather than failing against the stale
+event-base SHA. The candidate must still have exactly two parents and its second
+parent must be the event's exact PR head.
 
 ## Final package-expansion dispatch
 

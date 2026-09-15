@@ -206,6 +206,10 @@ obligations.
   Path overlap and patch-identity changes are recorded for review, not treated as proof
   that all prior evidence is unusable. The standing reviewer inspects any hand-resolved
   intersection; use a fresh round only under the review rules above.
+- CI and Hull bind the synthetic candidate they actually checked out. Its first parent
+  is the authoritative target snapshot when the target advances after GitHub creates
+  the event payload; its second parent must still be the event's exact pull-request
+  head. A stale event-base SHA alone must not invalidate that tested candidate.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
