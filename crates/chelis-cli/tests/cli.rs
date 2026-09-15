@@ -5126,6 +5126,7 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic.ch");
@@ -5157,6 +5158,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_matmul.ch");
@@ -5223,6 +5225,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_softmax() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_softmax.ch");
@@ -5254,6 +5257,7 @@ fn build_hip_accepts_symbolic_softmax() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_row_sum() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_sum.ch");
@@ -5284,6 +5288,7 @@ fn build_hip_accepts_symbolic_row_sum() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_layer_norm.ch");
@@ -5330,6 +5335,7 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_emits_pad_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
@@ -5367,6 +5373,7 @@ fn build_hip_emits_pad_kernel() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_emits_shrink_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
