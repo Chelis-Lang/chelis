@@ -144,6 +144,39 @@ class DiagnosticKindChangeTests(unittest.TestCase):
         self.assertTrue(m.diagnostic_kind_changed([]))
 
 
+class CiContractChangeTests(unittest.TestCase):
+    def test_workflow_scripts_and_policy_docs_trigger_preflight(self):
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/actions/free-disk-space/action.yml",
+            ".config/ci-test-targets.toml",
+            "agent-skills/redteam-exec/SKILL.md",
+            "scripts/gate.py",
+            "scripts/ci_change_owned.py",
+            "scripts/test_ci_candidate_lifecycle.py",
+            "scripts/test_pr_workflow_routing.py",
+            "scripts/test_change_owned_workflow.py",
+            "scripts/test_hosted_validation.py",
+            "scripts/test_gate.py",
+            "AGENTS.md",
+            "docs/ci_validation.md",
+            "docs/guard_changes_for_pr_authors.md",
+            "spec/design/guard_artifact_proposal_assessment.md",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(m.ci_contract_changed([path]))
+
+    def test_unrelated_code_and_prose_do_not_trigger_preflight(self):
+        self.assertFalse(
+            m.ci_contract_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.ci_contract_changed([]))
+
+
 class EmitTests(unittest.TestCase):
     def test_emit_writes_github_output_and_stdout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -153,12 +186,13 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True, False)
+                    m._emit(True, False, True)
                 self.assertEqual(
                     buf.getvalue().splitlines(),
                     [
                         "docs_only=true",
                         "diagnostic_kind_changed=false",
+                        "ci_contract_changed=true",
                     ],
                 )
                 with open(out_path, encoding="utf-8") as fh:
@@ -167,6 +201,7 @@ class EmitTests(unittest.TestCase):
                         [
                             "docs_only=true",
                             "diagnostic_kind_changed=false",
+                            "ci_contract_changed=true",
                         ],
                     )
             finally:
@@ -180,12 +215,13 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False, True)
+                m._emit(False, True, False)
             self.assertEqual(
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=false",
                     "diagnostic_kind_changed=true",
+                    "ci_contract_changed=false",
                 ],
             )
         finally:
@@ -208,6 +244,7 @@ class MainTests(unittest.TestCase):
                 [
                     "docs_only=true",
                     "diagnostic_kind_changed=false",
+                    "ci_contract_changed=false",
                 ],
             )
         finally:

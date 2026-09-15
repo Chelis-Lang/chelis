@@ -46,6 +46,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: read
 
 env:
@@ -66,6 +67,8 @@ jobs:
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
+      candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
     steps:
       - name: Checkout trusted retarget validator
         if: github.event_name == 'workflow_dispatch'
@@ -116,6 +119,9 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
@@ -126,7 +132,125 @@ jobs:
           fi
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
+            | tee "$RUNNER_TEMP/candidate-changed-paths.txt" \
             | python3 scripts/ci_detect_docs_only.py
+
+      - name: Validate candidate lifecycle
+        id: candidate-lifecycle
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          args=(--event "$GITHUB_EVENT_PATH")
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            current_pr="$RUNNER_TEMP/current-pr.json"
+            timeline="$RUNNER_TEMP/pr-timeline.json"
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
+            base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
+            git fetch --no-tags origin "refs/heads/$base_ref"
+            target_tip=$(git rev-parse FETCH_HEAD)
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
+            args+=(
+              --current-pr "$current_pr"
+              --target-tip "$target_tip"
+              --timeline "$timeline"
+            )
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ] &&
+             [ "$ACTION" = "synchronize" ]; then
+            git fetch origin "$BEFORE" "$HEAD" "$target_tip" 2>/dev/null || true
+          fi
+          python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
+
+      - name: Bootstrap CI contract preflight selection
+        id: ci-contract-bootstrap
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          paths="$RUNNER_TEMP/candidate-changed-paths.txt"
+          changed=false
+          if [ ! -s "$paths" ]; then
+            changed=true
+          else
+            while IFS= read -r path; do
+              case "$path" in
+                .github/actions/*|.github/workflows/*|.config/ci-test-targets.toml|AGENTS.md|agent-skills/redteam-exec/SKILL.md|docs/ci_validation.md|docs/guard_changes_for_pr_authors.md|spec/design/guard_artifact_proposal_assessment.md|scripts/gate.py|scripts/ci_*|scripts/test_ci_*|scripts/test_change_owned_workflow.py|scripts/test_hosted_validation.py|scripts/test_pr_workflow_routing.py|scripts/test_gate.py)
+                  changed=true
+                  break
+                  ;;
+              esac
+            done < "$paths"
+          fi
+          echo "ci_contract_changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv for CI contract preflight
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Validate changed CI contracts before Hull build
+        id: ci-contract
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}
+        continue-on-error: true
+        working-directory: candidate
+        run: >-
+          uv run --managed-python --python 3.11 --no-project
+          --with PyYAML==6.0.3 python -m unittest
+          scripts.test_check_agent_skills
+          scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_change_owned
+          scripts.test_ci_detect_docs_only
+          scripts.test_ci_validate_pr_candidate
+          scripts.test_pr_workflow_routing
+          scripts.test_change_owned_workflow
+          scripts.test_hosted_validation
+          scripts.test_regenerate_conformance_assets
+          scripts.test_gate.DocsOnlySkipTests
+          scripts.test_gate.CiParityTests
+          scripts.test_gate.RejectionAuthorityPrBoundaryTests
+
+      - name: Record candidate preflight verdict
+        id: candidate-preflight
+        if: always()
+        run: |
+          lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          contract="${{ steps.ci-contract.outcome }}"
+          detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
+          bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
+          contract_changed=unknown
+          if [ "$detected_contract" = "true" ] ||
+             [ "$bootstrap_contract" = "true" ]; then
+            contract_changed=true
+          elif [ "$detected_contract" = "false" ] &&
+               [ "$bootstrap_contract" = "false" ]; then
+            contract_changed=false
+          fi
+          verdict=success
+          if [ "$lifecycle" != "success" ]; then
+            verdict=failure
+          elif [ "$contract_changed" = "true" ]; then
+            if [ "$contract" != "success" ]; then
+              verdict=failure
+            fi
+          elif [ "$contract_changed" != "false" ]; then
+            verdict=failure
+          fi
+          echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
+          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
+          echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
 
   conformance:
     name: Hull Conformance Gate (Linux)
@@ -135,7 +259,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.
@@ -147,6 +271,15 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
+      - name: Require candidate lifecycle and CI contract preflight
+        env:
+          CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
+        run: |
+          if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
+            echo "candidate preflight failed; expensive Hull CI was suppressed" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}

@@ -15,11 +15,52 @@ CI selects additional checks automatically. A passing fast gate does not certify
 all compiler behavior or replace a named acceptance command required by the
 owning design.
 
+## Candidate lifecycle
+
+Immediately before the first push, fetch the actual target and rebase onto it
+unless the branch is already based there. Run focused checks and
+`python3 scripts/gate.py --fast`, then publish the initial review candidate.
+Each review round may produce one consolidated repair candidate containing
+every finding currently known from that round.
+Reviewer verification happens on that repaired head while CI runs; it does not
+require a separate verification commit. A clean reviewed head becomes final by
+designation rather than by another push.
+
+After the pull request exists, do not merge or rebase the target branch merely
+because it advanced. If a real conflict, unsafe prospective merge, or identified
+semantic overlap requires a base update, put exactly one line for the new local
+head in the PR body before pushing:
+
+```text
+Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>
+```
+
+An approved force-pushed rewrite that does not move onto a newer base uses:
+
+```text
+Candidate-history-rewrite: <new-head-sha> <specific approved reason>
+```
+
+The candidate preflight rejects a missing, duplicate, empty, or stale-head
+declaration before expensive CI starts. A PR-body edit does not restart compiler
+CI. If the declaration was omitted, add it and rerun the failed workflow on the
+same head rather than creating another candidate change.
+Workflow-native path selection independently forces the CI-contract suite when
+the candidate detector is itself under change. A failed or unavailable preflight
+suppresses expensive work but fails the required Docs and Hull contexts.
+
+A rebase does not by itself require a fresh round. If its hand-resolved
+intersection stays within files and mechanisms the standing reviewer already
+read, send only that intersection back for focused verification, including
+semantic conflict resolution. Use a fresh round when the rebase introduces a
+new mechanism, touches files that reviewer did not read, or materially broadens
+the reviewed surface.
+
 ## Final package-expansion dispatch
 
 After review findings are resolved and no further content change is planned,
-dispatch `PR Package Expansion` with the pull request number and exact head
-SHA. Do not serialize it behind the final required implementation checks: run
+dispatch `PR Package Expansion` with the pull request number and exact head SHA.
+Do not serialize it behind the final required implementation checks: run
 both at the same time, then inspect both before merging.
 
 ```sh
@@ -30,18 +71,24 @@ gh workflow run pr-package-expansion.yml --ref main \
   -f expected_head_sha="$head"
 ```
 
-The workflow rejects a closed pull request, a malformed SHA, or a head that no
-longer equals `expected_head_sha`. Inspect the `Manual Package Expansion
-Summary`, then record the reviewed SHA and run link in the pull request. Resolve
-failures introduced by the candidate. Record inherited failures and missing,
-timed-out or otherwise incomplete coverage explicitly; a summary without
-complete successful receipts is not evidence that the selected tests passed.
-A content change, hand-resolved conflict, base-changing rebase, or base-branch
-retarget requires a fresh package-expansion dispatch because the workflow
-validates the exact synthetic candidate. Do not rebase a ready pull request
-merely to refresh it after `main` advances. If GitHub can safely merge the exact
-reviewed head, preserve that head and its existing evidence; inspect the
-prospective merge as described in
+The workflow rejects a closed pull request, a malformed SHA, a head that no
+longer equals `expected_head_sha`, or a target-branch retarget. Its planner
+freezes the exact synthetic merge SHA and target branch name used by every
+worker and the summary. Later movement of the same target branch does not
+invalidate that frozen candidate. Inspect the `Manual Package Expansion
+Summary`, then record the reviewed SHA and run link in the pull request.
+Resolve failures introduced by the candidate. Record inherited failures and
+missing, timed-out or otherwise incomplete coverage explicitly; a summary
+without complete successful receipts is not evidence that the selected tests
+passed.
+A review round does not run package expansion merely because it exists.
+Intermediate review candidates use required CI; expansion starts once on the
+settled reviewed head. A content change, hand-resolved conflict, base-changing
+rebase, or base-branch retarget requires a fresh package-expansion dispatch
+because the workflow validates the exact synthetic candidate. Do not rebase a
+ready pull request merely to refresh it after `main` advances. If GitHub can
+safely merge the exact reviewed head, preserve that head and its existing
+evidence; inspect the prospective merge as described in
 [Worktree And Branch Discipline](../AGENTS.md#worktree-and-branch-discipline).
 A base-branch retarget still requires the fresh coordinated implementation
 validation described below.

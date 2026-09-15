@@ -30,11 +30,27 @@ def _nested_sha(payload: Mapping[str, Any], key: str) -> str:
     return value
 
 
+def _nested_ref(payload: Mapping[str, Any], key: str) -> str:
+    nested = payload.get(key)
+    if not isinstance(nested, dict):
+        raise ValueError(f"pull request payload requires {key}.ref")
+    value = nested.get("ref")
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.startswith("/")
+        or value.endswith("/")
+    ):
+        raise ValueError(f"pull request payload requires a valid {key}.ref")
+    return value
+
+
 def validate_candidate(
     payload: Mapping[str, Any],
     *,
     expected_head_sha: str,
     expected_base_sha: str | None = None,
+    expected_base_ref: str | None = None,
     plan: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Return the current ``(head, base)`` after fail-closed validation."""
@@ -62,6 +78,19 @@ def validate_candidate(
             raise ValueError(
                 f"stale base: expected {expected_base_sha}, current base is {base}"
             )
+    if expected_base_ref is not None:
+        if (
+            not expected_base_ref
+            or expected_base_ref.startswith("/")
+            or expected_base_ref.endswith("/")
+        ):
+            raise ValueError("expected_base_ref must be a nonempty branch name")
+        base_ref = _nested_ref(payload, "base")
+        if base_ref != expected_base_ref:
+            raise ValueError(
+                f"base retarget: expected {expected_base_ref}, current base is "
+                f"{base_ref}"
+            )
 
     if plan is not None:
         ci_change_owned.verify_plan_digest(plan)
@@ -70,10 +99,6 @@ def validate_candidate(
         if plan["event_pr_head"] != head:
             raise ValueError(
                 f"plan head {plan['event_pr_head']} does not equal current head {head}"
-            )
-        if plan["base_sha"] != base:
-            raise ValueError(
-                f"stale base: planned {plan['base_sha']}, current base is {base}"
             )
     return head, base
 
@@ -129,8 +154,11 @@ def run(
     pr_number: int,
     expected_head_sha: str,
     expected_base_sha: str | None = None,
+    expected_base_ref: str | None = None,
+    checkout_base_sha: str | None = None,
     validate_checkout_parents: bool = False,
     plan_path: Path | None = None,
+    github_output: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[str, str]:
     if type(pr_number) is not int or pr_number <= 0:
@@ -154,6 +182,7 @@ def run(
         raise ValueError(f"invalid pull request JSON: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError("pull request JSON must be an object")
+    base_ref = _nested_ref(payload, "base") if github_output is not None else None
 
     plan = None
     if plan_path is not None:
@@ -162,18 +191,32 @@ def run(
         payload,
         expected_head_sha=expected_head_sha,
         expected_base_sha=expected_base_sha,
+        expected_base_ref=expected_base_ref,
         plan=plan,
     )
     if validate_checkout_parents:
-        if expected_base_sha is None:
+        checkout_base = checkout_base_sha or expected_base_sha
+        if checkout_base is None:
             raise ValueError(
-                "--validate-checkout requires --expected-base-sha"
+                "--validate-checkout requires --checkout-base-sha or "
+                "--expected-base-sha"
             )
-        validate_checkout(
+        candidate_sha = validate_checkout(
             expected_head_sha=head,
-            expected_base_sha=expected_base_sha,
+            expected_base_sha=checkout_base,
             runner=runner,
         )
+        if plan is not None and plan["candidate_sha"] != candidate_sha:
+            raise ValueError(
+                f"plan candidate {plan['candidate_sha']} does not equal "
+                f"checked-out candidate {candidate_sha}"
+            )
+    if github_output is not None:
+        assert base_ref is not None
+        with github_output.open("a", encoding="utf-8") as output:
+            output.write(f"pr_head_sha={head}\n")
+            output.write(f"base_sha={base}\n")
+            output.write(f"base_ref={base_ref}\n")
     return head, base
 
 
@@ -183,8 +226,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pr-number", required=True, type=int)
     parser.add_argument("--expected-head-sha", required=True)
     parser.add_argument("--expected-base-sha")
+    parser.add_argument("--expected-base-ref")
+    parser.add_argument("--checkout-base-sha")
     parser.add_argument("--validate-checkout", action="store_true")
     parser.add_argument("--plan", type=Path)
+    parser.add_argument("--github-output", type=Path)
     return parser
 
 
@@ -195,12 +241,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         pr_number=args.pr_number,
         expected_head_sha=args.expected_head_sha,
         expected_base_sha=args.expected_base_sha,
+        expected_base_ref=args.expected_base_ref,
+        checkout_base_sha=args.checkout_base_sha,
         validate_checkout_parents=args.validate_checkout,
         plan_path=args.plan,
+        github_output=args.github_output,
     )
     scope = "head"
     if args.expected_base_sha is not None:
         scope = "head and base"
+    elif args.expected_base_ref is not None:
+        scope = "head and base branch"
     if args.validate_checkout:
         scope += " and synthetic merge parents"
     print(

@@ -712,12 +712,30 @@ reason = "the planner executor and report implementation is directly covered by 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_candidate_lifecycle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates candidate update classification and persistent declarations"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_ci_change_owned.py"
 disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the planner executor and report mutation suite runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_lifecycle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes candidate lifecycle graph and acknowledgement controls"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

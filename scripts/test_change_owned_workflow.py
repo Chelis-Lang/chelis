@@ -16,6 +16,7 @@ SHARDS = [0, 1, 2, 3]
 PR_ONLY_JOB_IF = {
     "integration-plan": (
         "${{ !cancelled() && github.event_name != 'push' && "
+        "needs.changes.outputs.candidate_preflight == 'success' && "
         "(needs.changes.result != 'success' || "
         "needs.changes.outputs.docs_only != 'true') }}"
     ),
@@ -199,6 +200,8 @@ def assert_change_owned_topology(
     test.assertNotIn("package-expansion", str(stable))
 
     expansion_jobs = expansion_workflow["jobs"]
+    planner = expansion_jobs["integration-plan"]
+    test.assertEqual(set(planner["outputs"]), {"base_ref", "candidate_sha"})
     expansion = expansion_jobs["package-expansion-shard"]
     test.assertEqual(
         expansion["needs"], ["integration-plan"]
@@ -214,6 +217,15 @@ def assert_change_owned_topology(
         "integration-package-expansion-${{ matrix.shard }}", str(expansion)
     )
     _assert_empty_shard_skips_preparation(test, expansion)
+    expansion_checkout = next(
+        step
+        for step in expansion["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    test.assertEqual(
+        expansion_checkout["with"]["ref"],
+        "${{ needs.integration-plan.outputs.candidate_sha }}",
+    )
 
     summary = expansion_jobs["package-expansion-summary"]
     test.assertEqual(
@@ -234,12 +246,12 @@ def assert_change_owned_topology(
     trusted_checkout, candidate_checkout = summary_checkouts
     test.assertEqual(
         trusted_checkout.get("with", {}).get("ref"),
-        "${{ github.event.repository.default_branch }}",
+        "${{ github.sha }}",
     )
     test.assertEqual(trusted_checkout.get("with", {}).get("path"), "trusted")
     test.assertEqual(
         candidate_checkout.get("with", {}).get("ref"),
-        "refs/pull/${{ inputs.pr_number }}/merge",
+        "${{ needs.integration-plan.outputs.candidate_sha }}",
     )
     test.assertEqual(candidate_checkout.get("with", {}).get("path"), "candidate")
     test.assertEqual(candidate_checkout.get("with", {}).get("fetch-depth"), 0)
@@ -257,10 +269,12 @@ def assert_change_owned_topology(
         ".venv/bin/python scripts/ci_change_owned.py report",
         summary_step["run"],
     )
-    test.assertIn("--expected-base-sha", summary_step["run"])
+    test.assertIn("--expected-base-ref", summary_step["run"])
+    test.assertIn("--checkout-base-sha", summary_step["run"])
+    test.assertNotIn("--expected-base-sha", summary_step["run"])
     test.assertIn("--validate-checkout", summary_step["run"])
     candidate_validation = summary_step["run"].split("report_status=0", 1)[0]
-    test.assertNotIn("--plan ", candidate_validation)
+    test.assertIn("--plan target/integration-change/plan.json", candidate_validation)
     venv_step = next(
         step
         for step in summary["steps"]

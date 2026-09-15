@@ -28,29 +28,43 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      base_ref: ${{ steps.pr-identity.outputs.base_ref }}
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
       - name: Checkout trusted candidate validator
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
+          path: trusted
 
       - name: Validate the requested pull request head
+        id: pr-identity
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
-        run: >-
-          python3 scripts/ci_validate_pr_candidate.py
-          --repository "$REPOSITORY"
-          --pr-number "$PR_NUMBER"
-          --expected-head-sha "$EXPECTED_HEAD_SHA"
+        run: |
+          python3 trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "$REPOSITORY" \
+            --pr-number "$PR_NUMBER" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Checkout the requested pull request merge candidate
         uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ inputs.pr_number }}/merge
+          path: candidate
           fetch-depth: 0
+
+      - name: Record the exact package-expansion candidate
+        id: candidate
+        working-directory: candidate
+        run: |
+          candidate_sha=$(git rev-parse HEAD)
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -59,9 +73,11 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv
+        working-directory: candidate
         run: uv venv --python 3.11
 
       - name: Derive the exact package-expansion plan
+        working-directory: candidate
         env:
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
         run: >-
@@ -74,7 +90,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: integration-change-plan
-          path: target/integration-change/plan.json
+          path: candidate/target/integration-change/plan.json
           if-no-files-found: error
           retention-days: 14
 
@@ -96,7 +112,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: refs/pull/${{ inputs.pr_number }}/merge
+          ref: ${{ needs.integration-plan.outputs.candidate_sha }}
+          fetch-depth: 0
 
       - name: Download integration change plan for shard selection
         uses: actions/download-artifact@v7
@@ -188,13 +205,13 @@ jobs:
       - name: Checkout trusted candidate validator
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
           path: trusted
 
       - name: Checkout the requested pull request merge candidate
         uses: actions/checkout@v6
         with:
-          ref: refs/pull/${{ inputs.pr_number }}/merge
+          ref: ${{ needs.integration-plan.outputs.candidate_sha }}
           path: candidate
           fetch-depth: 0
 
@@ -228,6 +245,7 @@ jobs:
           PLANNER_RESULT: ${{ needs.integration-plan.result }}
           EXPANSION_RESULT: ${{ needs.package-expansion-shard.result }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_BASE_REF: ${{ needs.integration-plan.outputs.base_ref }}
         run: |
           mkdir -p target/integration-change/package-expansion-summary
           if [ -f target/integration-change/plan.json ]; then
@@ -240,7 +258,9 @@ jobs:
                 --repository "$REPOSITORY" \
                 --pr-number "$PR_NUMBER" \
                 --expected-head-sha "$EXPECTED_HEAD_SHA" \
-                --expected-base-sha "$expected_base_sha" \
+                --expected-base-ref "$EXPECTED_BASE_REF" \
+                --checkout-base-sha "$expected_base_sha" \
+                --plan target/integration-change/plan.json \
                 --validate-checkout 2>&1
             ) || candidate_status=$?
             report_status=0

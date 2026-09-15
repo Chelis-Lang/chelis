@@ -163,15 +163,41 @@ obligations.
   coordination dispatches fresh compiler and Hull workflows against the exact new
   synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
   checks before proceeding.
+- Candidate lifecycle follows review rounds rather than a one-push ideal. Immediately
+  before the first push, fetch the actual target and rebase onto it unless the branch is
+  already based there, then publish the initial review candidate after its focused
+  checks and `--fast` gate. A review round may produce one consolidated repair
+  candidate containing all findings then known from that round; do not publish one
+  candidate per finding or while another known repair remains. The reviewer that
+  reported a blocking finding verifies that repair while CI runs. A clean reviewed
+  head becomes final by designation: review verification, finalization, and
+  PR-description edits do not require another commit.
+- Once a pull request exists, every base merge or base-changing rebase must be necessary
+  under [Worktree And Branch Discipline](#worktree-and-branch-discipline). Before
+  publishing it, add exactly one head-bound line to the PR body:
+  `Candidate-base-update: <new-head-sha> <specific conflict or semantic reason>`.
+  Any other force-pushed history rewrite uses
+  `Candidate-history-rewrite: <new-head-sha> <specific approved reason>` and does not
+  replace the separate force-push approval requirement. The cheap candidate preflight
+  rejects missing, duplicate, stale-head, and empty reasons before build fan-out.
+  Workflow-native path selection independently forces the CI-contract tests when their
+  candidate-controlled detector is under change. A failed or unavailable preflight
+  suppresses expensive work but must fail the required Docs and Hull contexts. If it
+  rejects an already-pushed head, repair the body and rerun that same workflow; do not
+  manufacture another candidate change merely to satisfy the guard.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
   them; merge only after both the required checks and the expansion report have been
-  inspected. Record the reviewed SHA and run link in the pull request. A content change,
-  hand-resolved conflict, base-changing rebase, or base-branch retarget creates a new
-  synthetic candidate and requires a fresh dispatch. Do not create that invalidation
-  merely to refresh a branch after `origin/main` advances: when GitHub can merge the
-  exact reviewed head safely, preserve that head and its evidence as
+  inspected. Intermediate review candidates do not run expansion. The planner freezes
+  the exact synthetic merge SHA and target branch name used by every shard and the
+  summary. Later movement of the same target branch does not invalidate that frozen
+  candidate; a changed head or target-branch retarget does. Record the reviewed SHA and
+  run link in the pull request. A content change, hand-resolved conflict, base-changing
+  rebase, or base-branch retarget creates a new synthetic candidate and requires a
+  fresh dispatch. Do not create that invalidation merely to refresh a branch after
+  `origin/main` advances: when GitHub can merge the exact reviewed head safely, preserve
+  that head and its evidence as
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
@@ -199,14 +225,16 @@ obligations.
   unavailable"; that record closes the finding, and the end-of-pull-request round, when
   one is owed, re-checks it.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
-  fixes, and textual changes do not inherently merit another round. A rebase whose
-  overlap with your work is significant, either in changed lines or in semantics, may
-  merit a fresh round on the intersection. A rebase that only picks up an atom clearly
-  consistent with, or irrelevant to, the files you are working on does not, and neither
-  does one whose only hand-resolved conflicts are generated or digest lines that the
-  owning script resolves (see
-  [Worktree And Branch Discipline](#worktree-and-branch-discipline)). Use your best
-  judgement.
+  fixes, and textual changes do not inherently merit another round. A rebase does not
+  by itself require a fresh round. When its hand-resolved intersection stays within
+  files and mechanisms the standing reviewer already read, send that intersection to
+  the standing reviewer for focused verification, including semantic conflict
+  resolution. Use a fresh round only when the rebase introduces a new mechanism,
+  touches files that reviewer did not read, or materially broadens the reviewed
+  surface. A rebase that only picks up an atom clearly consistent with, or irrelevant
+  to, the reviewed files needs neither, and neither does one whose only hand-resolved
+  conflicts are generated or digest lines that the owning script resolves (see
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline)).
 - A non-major finding does not block merge, but if you are already rebasing or fixing
   something else, fold in the other relevant issues reviewers raised.
 - Repairs under this gate may correct, remove, or narrow the pull request's existing
@@ -768,6 +796,10 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
+- Before the first push for a new pull request, fetch its actual target branch and
+  rebase onto the fetched tip unless the branch is already based there. Resolve and
+  validate that integration before any hosted evidence exists. This preparation rule
+  does not authorize later refresh rebases after a review candidate has been published.
 - When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
   merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
   and inspect the prospective merge result with `git merge-tree` or an equivalent
@@ -776,11 +808,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
   evidence. Rebase only when that result differs, is unsafe or unclear, or another
   identified semantic or structural issue requires a changed head.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
-  before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
-  result for a non-documentation change or the focused documentation checks for a
-  docs-only change. A content-preserving rebase may retain supporting local evidence;
-  record that its covered head differs, and require CI on the new head. Never
-  force-push a red gate. Obtain approval, then use an exact-head
+  before any history rewrite is published. When the hand-resolved intersection is
+  inside the standing reviewer's prior files and mechanisms, that reviewer inspects
+  the intersection; the rebase does not automatically consume a fresh round. Run
+  `python3 scripts/gate.py --fast` on the result for a non-documentation change or the
+  focused documentation checks for a docs-only change. A content-preserving rebase may
+  retain supporting local evidence; record that its covered head differs, and require
+  CI on the new head. Never force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated registry lines:
   regenerate `rejection_registry_generated.rs` with

@@ -17,13 +17,20 @@ from scripts import ci_validate_pr_candidate as candidate
 HEAD = "a" * 40
 BASE = "b" * 40
 MERGE = "c" * 40
+BASE_REF = "main"
 
 
-def payload(*, state: str = "open", head: str = HEAD, base: str = BASE) -> dict:
+def payload(
+    *,
+    state: str = "open",
+    head: str = HEAD,
+    base: str = BASE,
+    base_ref: str = BASE_REF,
+) -> dict:
     return {
         "state": state,
         "head": {"sha": head},
-        "base": {"sha": base},
+        "base": {"sha": base, "ref": base_ref},
     }
 
 
@@ -67,6 +74,7 @@ class CandidateValidationTests(unittest.TestCase):
                 payload(),
                 expected_head_sha=HEAD,
                 expected_base_sha=BASE,
+                expected_base_ref=BASE_REF,
             ),
             (HEAD, BASE),
         )
@@ -108,15 +116,37 @@ class CandidateValidationTests(unittest.TestCase):
                     expected_base_sha=expected,
                 )
 
-    def test_final_validation_rejects_stale_base_head_and_tampered_plan(self) -> None:
-        stale_base = copy.deepcopy(plan())
+    def test_expected_base_ref_detects_retarget_without_binding_tip(self) -> None:
+        self.assertEqual(
+            candidate.validate_candidate(
+                payload(base="d" * 40),
+                expected_head_sha=HEAD,
+                expected_base_ref=BASE_REF,
+            ),
+            (HEAD, "d" * 40),
+        )
+        for expected, message in (
+            ("", "expected_base_ref"),
+            ("release", "base retarget"),
+        ):
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                candidate.validate_candidate(
+                    payload(),
+                    expected_head_sha=HEAD,
+                    expected_base_ref=expected,
+                )
+
+    def test_final_validation_allows_same_target_advance_but_rejects_head_and_tampering(
+        self,
+    ) -> None:
         stale_head = copy.deepcopy(plan())
         stale_head["event_pr_head"] = "d" * 40
         owned.attach_plan_digest(stale_head)
         tampered = copy.deepcopy(plan())
         tampered["base_sha"] = "d" * 40
         for label, pr, planned, message in (
-            ("base", payload(base="d" * 40), stale_base, "stale base"),
             ("head", payload(), stale_head, "plan head"),
             ("digest", payload(), tampered, "plan digest mismatch"),
         ):
@@ -128,6 +158,15 @@ class CandidateValidationTests(unittest.TestCase):
                     expected_head_sha=HEAD,
                     plan=planned,
                 )
+        self.assertEqual(
+            candidate.validate_candidate(
+                payload(base="d" * 40),
+                expected_head_sha=HEAD,
+                expected_base_ref=BASE_REF,
+                plan=plan(),
+            ),
+            (HEAD, "d" * 40),
+        )
 
     def test_cli_fetches_one_pr_payload_and_validates_optional_plan(self) -> None:
         runner = mock.Mock(
@@ -137,15 +176,29 @@ class CandidateValidationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             plan_path = Path(tmp) / "plan.json"
+            github_output = Path(tmp) / "github-output"
             plan_path.write_bytes(owned.canonical_json(plan()))
             result = candidate.run(
                 repository="Chelis-Lang/chelis",
                 pr_number=2071,
                 expected_head_sha=HEAD,
+                expected_base_ref=BASE_REF,
+                github_output=github_output,
                 plan_path=plan_path,
                 runner=runner,
             )
+            output_lines = github_output.read_text(
+                encoding="utf-8"
+            ).splitlines()
         self.assertEqual(result, (HEAD, BASE))
+        self.assertEqual(
+            output_lines,
+            [
+                f"pr_head_sha={HEAD}",
+                f"base_sha={BASE}",
+                f"base_ref={BASE_REF}",
+            ],
+        )
         runner.assert_called_once_with(
             [
                 "gh",
@@ -201,6 +254,59 @@ class CandidateValidationTests(unittest.TestCase):
                     ),
                 )
 
+    def test_cli_separates_live_base_ref_from_checked_out_base_parent(self) -> None:
+        runner = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["gh"], 0, json.dumps(payload(base="d" * 40)), ""
+                ),
+                subprocess.CompletedProcess(
+                    ["git"], 0, f"{MERGE} {BASE} {HEAD}\n", ""
+                ),
+            ]
+        )
+        self.assertEqual(
+            candidate.run(
+                repository="Chelis-Lang/chelis",
+                pr_number=2071,
+                expected_head_sha=HEAD,
+                expected_base_ref=BASE_REF,
+                checkout_base_sha=BASE,
+                validate_checkout_parents=True,
+                runner=runner,
+            ),
+            (HEAD, "d" * 40),
+        )
+
+    def test_checkout_must_equal_the_candidate_recorded_by_the_plan(self) -> None:
+        planned = plan()
+        planned["candidate_sha"] = "d" * 40
+        owned.attach_plan_digest(planned)
+        runner = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["gh"], 0, json.dumps(payload()), ""
+                ),
+                subprocess.CompletedProcess(
+                    ["git"], 0, f"{MERGE} {BASE} {HEAD}\n", ""
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(planned))
+            with self.assertRaisesRegex(ValueError, "plan candidate"):
+                candidate.run(
+                    repository="Chelis-Lang/chelis",
+                    pr_number=2071,
+                    expected_head_sha=HEAD,
+                    expected_base_ref=BASE_REF,
+                    checkout_base_sha=BASE,
+                    validate_checkout_parents=True,
+                    plan_path=plan_path,
+                    runner=runner,
+                )
+
     def test_cli_rejects_invalid_pr_number_and_gh_or_json_failure(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive integer"):
             candidate.run(
@@ -230,6 +336,7 @@ class CandidateValidationTests(unittest.TestCase):
                     repository="Chelis-Lang/chelis",
                     pr_number=2071,
                     expected_head_sha=HEAD,
+                    expected_base_ref=BASE_REF,
                     runner=runner,
                 )
 
