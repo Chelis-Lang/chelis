@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -204,7 +209,7 @@ class CanaryTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as directory,
                 patch.object(canary, "probe_expression", return_value="fixture"),
                 patch.object(
-                    canary, "run", side_effect=[STORE_PATH, before, "", "", after]
+                    canary, "run", side_effect=[STORE_PATH, before, "", "", "", after]
                 ) as run,
             ):
                 work = Path(directory)
@@ -220,11 +225,69 @@ class CanaryTests(unittest.TestCase):
                     self.assertIn(canary.PUBLIC_KEY, copied)
                     self.assertNotIn("--no-check-sigs", copied)
                     self.assertIn("require-sigs", copied)
+                    verified = run.call_args_list[4].args[0]
+                    self.assertEqual(
+                        verified,
+                        [
+                            str(canary.BIN / "nix"),
+                            "store",
+                            "verify",
+                            "--store",
+                            (work / "readback").as_uri(),
+                            "--sigs-needed",
+                            "1",
+                            "--option",
+                            "trusted-public-keys",
+                            canary.PUBLIC_KEY,
+                            "--option",
+                            "substituters",
+                            "",
+                            "--option",
+                            "secret-key-files",
+                            "",
+                            STORE_PATH,
+                        ],
+                    )
+                    self.assertTrue(receipt["signature_checked_by_nix"])
                 else:
                     with self.assertRaisesRegex(canary.ProbeError, "signature"):
                         canary.nix_probe(
                             "123-1-abc", canary.child_environment(work), work
                         )
+
+    def test_failed_signature_verification_cannot_emit_success(self):
+        signed = json.dumps(
+            {
+                STORE_PATH: {
+                    "narHash": NAR_HASH,
+                    "signatures": [canary.SIGNING_KEY + ":forged"],
+                }
+            }
+        )
+        operations = []
+
+        def run(_argv, _env, _cwd, operation, **_kwargs):
+            operations.append(operation)
+            if operation == "Nix build":
+                return STORE_PATH
+            if operation == "Nix signature verification":
+                raise canary.ProbeError(
+                    "The Nix signature verification command failed."
+                )
+            if "metadata" in operation:
+                return signed
+            return ""
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(canary, "probe_expression", return_value="fixture"),
+            patch.object(canary, "run", side_effect=run),
+        ):
+            work = Path(directory)
+            with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
+                canary.nix_probe("123-1-abc", canary.child_environment(work), work)
+        self.assertEqual(operations[-1], "Nix signature verification")
+        self.assertNotIn("Nix readback metadata", operations)
 
     def test_kache_orchestration_clears_local_state_and_rejects_altered_readback(self):
         for alter in (False, True):
@@ -347,6 +410,183 @@ class CanaryTests(unittest.TestCase):
             "secrets: inherit",
         ):
             self.assertNotIn(denied, workflow)
+
+
+@unittest.skipUnless(
+    shutil.which("nix") and shutil.which("nix-store"),
+    "The offline signature fixture requires local nix and nix-store executables.",
+)
+class NixSignatureTests(unittest.TestCase):
+    """Real signatures over a synthetic non-CA NAR. No build or remote cache."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="canary-signature-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.nix = str(Path(shutil.which("nix")).resolve())
+        self.nix_store = shutil.which("nix-store")
+        self.env = {
+            "PATH": os.defpath,
+            "HOME": str(self.root),
+            "TMPDIR": str(self.root),
+            "NIX_CONF_DIR": str(self.root / "config"),
+            "NIX_USER_CONF_FILES": "/dev/null",
+            "NIX_CONFIG": "experimental-features = nix-command\nsubstituters =\n",
+        }
+        (self.root / "config").mkdir()
+        payload = self.root / "payload"
+        payload.write_bytes(b"shared-runner-signature-fixture\n")
+        nar = self.command([self.nix_store, "--dump", str(payload)])
+        digest = hashlib.sha256(nar).digest()
+        self.nar_hash = "sha256-" + base64.b64encode(digest).decode()
+        self.cache = self.root / "cache"
+        (self.cache / "nar").mkdir(parents=True)
+        (self.cache / "nar/probe.nar").write_bytes(nar)
+        (self.cache / "nix-cache-info").write_text(
+            "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n"
+        )
+        self.info = self.cache / ("a" * 32 + ".narinfo")
+        self.unsigned = (
+            f"StorePath: {STORE_PATH}\nURL: nar/probe.nar\nCompression: none\n"
+            f"FileHash: sha256:{digest.hex()}\nFileSize: {len(nar)}\n"
+            f"NarHash: sha256:{digest.hex()}\nNarSize: {len(nar)}\nReferences: \n"
+        )
+        self.info.write_text(self.unsigned)
+        key = self.root / "fixture.key"
+        key.touch(mode=0o600)
+        key.write_bytes(
+            self.command(
+                [
+                    self.nix,
+                    "key",
+                    "generate-secret",
+                    "--key-name",
+                    canary.SIGNING_KEY,
+                ]
+            )
+        )
+        self.public_key = (
+            self.command(
+                [self.nix, "key", "convert-secret-to-public"],
+                input=key.read_bytes(),
+            )
+            .decode()
+            .strip()
+        )
+        self.command(
+            [
+                self.nix,
+                "store",
+                "sign",
+                "--store",
+                self.cache.as_uri(),
+                "--key-file",
+                str(key),
+                STORE_PATH,
+            ]
+        )
+        self.signed = self.info.read_text()
+        key.unlink()
+        self.operations = []
+        self.actual_run = canary.run
+
+    def command(self, argv, **kwargs):
+        result = subprocess.run(
+            argv,
+            env=self.env,
+            cwd=self.root,
+            capture_output=True,
+            timeout=20,
+            check=False,
+            **kwargs,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        return result.stdout
+
+    def exercise(self):
+        def run(argv, env, work, operation, **kwargs):
+            self.operations.append(operation)
+            if operation == "Nix build":
+                return STORE_PATH
+            if operation == "Nix metadata":
+                return json.dumps(
+                    {
+                        STORE_PATH: {
+                            "narHash": self.nar_hash,
+                            "signatures": [],
+                        }
+                    }
+                )
+            if operation == "Nix upload":
+                return ""
+            self.assertIn(
+                operation,
+                {
+                    "Nix readback",
+                    "Nix signature verification",
+                    "Nix readback metadata",
+                },
+            )
+            return self.actual_run(argv, env, work, operation, **kwargs)
+
+        work = self.root / "work"
+        work.mkdir()
+        with (
+            patch.object(canary, "BIN", Path(self.nix).parent),
+            patch.object(canary, "NIX_URL", self.cache.as_uri()),
+            patch.object(canary, "PUBLIC_KEY", self.public_key),
+            patch.object(canary, "probe_expression", return_value="fixture"),
+            patch.object(canary, "run", side_effect=run),
+        ):
+            return canary.nix_probe("123-1-abc", self.env, work)
+
+    def test_real_reviewed_signature_passes_before_receipt(self):
+        receipt = self.exercise()
+        self.assertTrue(receipt["signature_checked_by_nix"])
+        self.assertEqual(receipt["nar_hash"], self.nar_hash)
+        self.assertEqual(
+            self.operations[-2:],
+            [
+                "Nix signature verification",
+                "Nix readback metadata",
+            ],
+        )
+
+    def test_forged_signature_with_reviewed_name_is_rejected(self):
+        forged = base64.b64encode(b"A" * 64).decode()
+        self.info.write_text(self.unsigned + f"Sig: {canary.SIGNING_KEY}:{forged}\n")
+        with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
+            self.exercise()
+        self.assertEqual(self.operations[-1], "Nix signature verification")
+
+    def test_unsigned_readback_is_rejected_by_nix(self):
+        self.info.write_text(self.unsigned)
+        with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
+            self.exercise()
+        self.assertEqual(self.operations[-1], "Nix signature verification")
+
+    def test_valid_signature_from_another_key_is_rejected(self):
+        # The key name stays identical. The public key bytes alone differ.
+        other = self.command(
+            [
+                self.nix,
+                "key",
+                "generate-secret",
+                "--key-name",
+                canary.SIGNING_KEY,
+            ]
+        )
+        self.public_key = (
+            self.command(
+                [self.nix, "key", "convert-secret-to-public"],
+                input=other,
+            )
+            .decode()
+            .strip()
+        )
+        with self.assertRaisesRegex(canary.ProbeError, "signature verification"):
+            self.exercise()
+        self.assertEqual(self.operations[-1], "Nix signature verification")
 
 
 if __name__ == "__main__":

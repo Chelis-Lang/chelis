@@ -157,7 +157,7 @@ class NarRecord:
 
 def require_readback(before: NarRecord, after: NarRecord) -> None:
     require(before.nar_hash == after.nar_hash, "The Nix readback hash differs.")
-    # The Nix copy command checks the signature itself with the exact public key.
+    # Metadata is not signature proof. nix_probe requires Nix verification first.
     require(
         any(item.startswith(SIGNING_KEY + ":") for item in after.signatures),
         "The Nix readback lacks the reviewed signature.",
@@ -327,6 +327,30 @@ def nix_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         env,
         work,
         "Nix readback",
+    )
+    run(
+        [
+            str(BIN / "nix"),
+            "store",
+            "verify",
+            "--store",
+            store,
+            "--sigs-needed",
+            "1",
+            "--option",
+            "trusted-public-keys",
+            PUBLIC_KEY,
+            "--option",
+            "substituters",
+            "",
+            "--option",
+            "secret-key-files",
+            "",
+            path,
+        ],
+        env,
+        work,
+        "Nix signature verification",
     )
     after = NarRecord.parse(
         run(
@@ -507,12 +531,11 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
         require(entry_digests(cache) == before, "The restored cache bytes differ.")
         # Local-only compilation proves reuse of the pulled bytes, not a remote fallback.
         (work / "kache.toml").write_text(kache_config(local_only=True))
-        local_env = env
-        daemon = Daemon(local_env, project, work)
+        daemon = Daemon(env, project, work)
         daemon.start()
         run(
             [str(BIN / "cargo"), "build", "--offline", "--lib"],
-            local_env,
+            env,
             project,
             "second Rust build",
         )
@@ -528,7 +551,7 @@ def kache_probe(identity: str, env: dict[str, str], work: Path) -> dict:
                         "--root",
                         str(project),
                     ],
-                    local_env,
+                    env,
                     project,
                     "Kache report",
                     timeout=5,

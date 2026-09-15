@@ -12,7 +12,11 @@ The canary uses group `chelis-ci-trusted` and label `chelis-ci-warm-x64`. Existi
 
 The canary declares no App-key input and creates no AWS credential session. Its checkout token has only repository content-read permission and does not persist in Git configuration.
 
-The Nix probe uploads a new derivation with the member client. Readback enters a fresh file store with signature checks enabled and the reviewed public key.
+The Nix probe uploads a new derivation with the member client. Readback enters a fresh local binary cache.
+
+The probe runs `nix store verify --sigs-needed 1` against that cache with only the reviewed public key. It disables substitute sources and private-key files for this operation.
+
+The verifier must accept the signature before the probe emits a receipt. A successful copy or matching key-name prefix does not prove signature validity.
 
 The Kache probe builds an isolated Rust crate with a unique run marker. It uploads only that crate's entries and pulls them into an empty local cache.
 
@@ -22,11 +26,17 @@ The canary permits only the private cache endpoints. Its child environments excl
 
 Cleanup removes only probe-owned local state. No probe deletes remote objects. Bucket lifecycle rules own remote cleanup.
 
-A passing receipt must identify the actual run and source revision. It must also identify the existing EC2 and its current system closure. Failed commands, missing entries, altered bytes, absent signatures, or missing cache hits must fail the run.
+A passing receipt must identify the actual run and source revision. It must also identify the existing EC2 and its current system closure. Failed commands, missing entries, altered bytes, absent or invalid signatures, and missing cache hits must fail the run.
 
 ## Preparation oracle
 
 The local oracle is `.venv/bin/python -m unittest scripts.test_shared_runner_canary`. It includes positive and negative boundary and receipt tests.
+
+Four offline signature tests require local `nix` and `nix-store` executables. They skip explicitly when those tools are absent.
+
+The signature oracle is `.venv/bin/python -m unittest scripts.test_shared_runner_canary.NixSignatureTests`. It must pass all four tests without a skip before signature acceptance is claimed.
+
+That oracle generates a temporary test key and a synthetic archive outside the shared Nix store. It requires genuine signatures to pass and unsigned, forged, or wrong-key signatures to fail.
 
 Local fixtures do not establish live cache access. The deployed runner still needs the reviewed member client and organization admission policy.
 
@@ -43,9 +53,13 @@ The canary uses the host's Nix Python through a fresh uv-created environment. It
 
 ## Current state
 
-The local oracle passed all 13 tests. Ruff, actionlint, and Git whitespace checks passed.
+The repaired local oracle passed all 18 tests without a skip. Ruff and Git whitespace checks passed. The earlier actionlint result covers the unchanged workflow.
 
-The tests include simulated orchestration and negative readback cases. They do not prove live TLS, Nix signature verification, or actual Kache reuse.
+The offline signature cases used workstation Nix `2.34.8`. They first reproduced acceptance of a forged signature before the repair.
+
+Explicit Nix verification now rejects that input before receipt creation. The tests do not prove live TLS, the pinned host's Nix behavior, or actual Kache reuse.
+
+An off-main dispatch skips the workflow job. A skipped job has no acceptance receipt and cannot establish success.
 
 The workflow also runs this contract suite before its cache probe. It declares the existing custom runner label in `.github/actionlint.yaml`.
 
@@ -77,4 +91,4 @@ The initial source-publication approval covered commits and pushes from the prep
 
 Source publication does not establish a deployed runner or authorize an automatic canary dispatch.
 
-No dispatch, runner registration, or cache write formed part of the local oracle.
+No dispatch, runner registration, or remote cache write formed part of the local oracle.
