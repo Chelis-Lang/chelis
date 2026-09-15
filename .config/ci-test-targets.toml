@@ -937,6 +937,15 @@ reason = "CI cadence and stable dependency assertions run in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "gate stage definitions and command construction are exercised by the gate contract suite in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_gate.py"
 disposition = "owner"
 workflow = "ci.yml"

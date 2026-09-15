@@ -360,6 +360,7 @@ class SchemaTests(unittest.TestCase):
             "scripts/test_changelog.py",
             "scripts/test_ci_rebase_reuse.py",
             "scripts/test_ci_retarget_validation.py",
+            "scripts/gate.py",
         ):
             with self.subTest(path=path):
                 rule = by_path[path]
