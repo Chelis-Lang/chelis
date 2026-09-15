@@ -236,6 +236,10 @@ jobs:
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
           }
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            record_full "trusted exact-candidate dispatch"
+            exit 0
+          fi
           if [ "$EVENT_NAME" != "pull_request" ] ||
              [ "$ACTION" != "synchronize" ] ||
              [ "$LIFECYCLE" != "success" ]; then

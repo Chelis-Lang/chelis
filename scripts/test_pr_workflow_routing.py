@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -51,6 +54,46 @@ RECEIPT_TRIGGER_WORKFLOWS = {
 }
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
+
+
+def run_rebase_selector(
+    workflow: dict,
+    *,
+    event_name: str,
+    action: str,
+    lifecycle: str = "success",
+) -> dict[str, str]:
+    step = next(
+        step
+        for step in workflow["jobs"]["changes"]["steps"]
+        if step.get("id") == "rebase-reuse"
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "github-output"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "EVENT_NAME": event_name,
+                "ACTION": action,
+                "LIFECYCLE": lifecycle,
+                "BEFORE": "",
+                "GITHUB_OUTPUT": str(output),
+            }
+        )
+        subprocess.run(
+            ["bash", "-eu", "-o", "pipefail", "-c", step["run"]],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return dict(
+            line.split("=", 1)
+            for line in output.read_text().splitlines()
+            if "=" in line
+        )
 
 
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
@@ -839,6 +882,30 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         del acknowledgements["jobs"]["acknowledgements"]
         with self.assertRaises((AssertionError, KeyError)):
             assert_acknowledgement_workflow(self, acknowledgements)
+
+    def test_trusted_dispatch_is_full_while_ordinary_pr_updates_remain_docs_aware(
+        self,
+    ) -> None:
+        for workflow_path in (CI, HULL):
+            workflow = yaml.safe_load(workflow_path.read_text())
+            with self.subTest(workflow=workflow_path.name, event="dispatch"):
+                self.assertEqual(
+                    run_rebase_selector(
+                        workflow,
+                        event_name="workflow_dispatch",
+                        action="",
+                    )["rebase_lane"],
+                    "full",
+                )
+            with self.subTest(workflow=workflow_path.name, event="opened"):
+                self.assertEqual(
+                    run_rebase_selector(
+                        workflow,
+                        event_name="pull_request",
+                        action="opened",
+                    )["rebase_lane"],
+                    "ordinary",
+                )
 
     def test_metadata_edit_cannot_cancel_a_live_base_retarget(self) -> None:
         retarget = yaml.safe_load(RETARGET.read_text())
