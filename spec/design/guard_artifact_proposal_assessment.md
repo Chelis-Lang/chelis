@@ -696,13 +696,15 @@ The sequencing preconditions are now satisfied:
 2. the scheduled standing-liveness canary has workflow-registry and
    trigger-loop controls.
 
-Pull requests now run only the complete offline source/construction boundary
-inside the existing script worker. The standing nightly checks every
-source-derived row, including newly added and unchanged authorities. This
-removes a measured 10-14 minute network job whose successful runs commonly
-selected zero changed authorities, while preserving fail-closed scheduled
-exists/kind/open validation. The structured diagnostic migration and broader
-§C7.5 matrix remain separate.
+Pull requests now split the complete offline source/construction boundary
+across existing owners: `script-unit` checks privacy and source usage, while
+the always-running Docs Phase 4B oracle freshly derives compiler closure and
+generated-registry agreement. The standing nightly checks every source-derived
+row, including newly added and unchanged authorities. This removes a measured
+10-14 minute network job whose successful runs commonly selected zero changed
+authorities, while preserving fail-closed scheduled exists/kind/open
+validation. The structured diagnostic migration and broader §C7.5 matrix
+remain separate.
 
 The capacity-liveness adapter must read the final binding format already
 owned by the Rust binding guard: the three native tagged transports and the

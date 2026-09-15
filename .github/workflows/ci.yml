@@ -287,9 +287,10 @@ jobs:
       - name: Script unit tests (scripts/test_*.py)
         run: .venv/bin/python scripts/ci_script_tests.py pr
 
-      # Keep source discovery, generated registry agreement, and the
-      # construction boundary on the PR path without querying mutable GitHub
-      # issue state. The standing nightly owns exists/kind/open liveness.
+      # Keep the privacy and source-usage construction boundary in script-unit
+      # without querying mutable GitHub issue state. The always-running Docs
+      # Phase 4B oracle owns fresh compiler closure and generated agreement;
+      # the standing nightly owns exists/kind/open liveness.
       - name: Validate rejection authority construction boundary
         run: .venv/bin/python scripts/check_rejection_authority_boundary.py
 

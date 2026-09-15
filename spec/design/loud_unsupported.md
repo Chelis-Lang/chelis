@@ -433,12 +433,14 @@ REGISTRIES of what actually exists:
   directions, duplicate handling, and Rust byte agreement.
 - **A source-derived manifest is still self-authorizing with respect to live
   tracker state** - one change can cite a closed issue, a PR number, or a
-  nonexistent number and regenerate a structurally valid row. Pull requests
-  therefore run the complete offline construction boundary in `script-unit`:
-  production source discovery, compiler closure, generated-byte agreement,
-  registry membership, and citation syntax. They do not query mutable GitHub
-  state. Recent successful dedicated jobs spent 10-14 minutes re-deriving the
-  complete source manifest even when the changed-row selection was empty.
+  nonexistent number and regenerate a structurally valid row. Pull-request
+  validation therefore splits the complete offline construction boundary
+  across existing owners: `script-unit` checks privacy and source usage, while
+  the always-running Docs Phase 4B oracle freshly derives production/compiler
+  closure, generated-byte agreement, registry membership, and citation syntax.
+  Neither queries mutable GitHub state. Recent successful dedicated jobs spent
+  10-14 minutes re-deriving the complete source manifest even when the
+  changed-row selection was empty.
   GitHub issue state is project metadata rather than [05-UNS-5] semantic
   authority, so the daily/manual canary is the sole automated exists/kind/open
   owner. It runs
@@ -461,9 +463,10 @@ REGISTRIES of what actually exists:
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The PR `script-unit` job
-  runs the boundary checker. Cargo metadata supplies each production target's
-  package, name, kind, root, and required features; the compiler closure
-  requires matching non-test dep-info for every exact target identity.
+  runs the boundary checker. The Docs Phase 4B oracle uses Cargo metadata for
+  each production target's package, name, kind, root, and required features;
+  its compiler closure requires matching non-test dep-info for every exact
+  target identity.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's
@@ -1558,20 +1561,22 @@ probe corpus, not to this binder.
 
 ### C7.5 Offline admission and scheduled authority
 
-A named authority executes where its evidence is stable. Source discovery,
-generated registry agreement, and construction shape execute pre-merge in the
-ordinary script worker. Mutable GitHub issue state executes on the daily/manual
-standing canary and at release/red-team checkpoints; it is project metadata,
-not [05-UNS-5] semantic authority. Phase 4 therefore delivers both owners:
+A named authority executes where its evidence is stable. Privacy and source
+usage execute pre-merge in `script-unit`; fresh compiler closure and generated
+registry agreement execute in the always-running Docs Phase 4B oracle. Mutable
+GitHub issue state executes on the daily/manual standing canary and at
+release/red-team checkpoints; it is project metadata, not [05-UNS-5] semantic
+authority. Phase 4 therefore delivers both owners:
 
 1. **Offline, pre-merge, blocking - with the trigger loop closed.**
    Per §C7.3, discovery and manifest totality are unconditional PR tests:
    adding a consumer, member, root, citation, or exclusion cannot pass by
    avoiding a path filter. The `script-unit` worker executes
-   `check_rejection_authority_boundary.py` over fresh production discovery,
-   compiler closure, and generated registry agreement. The crate-scoped and
-   workspace vocabulary mutation legs retain their existing PR owners. This
-   half performs no GitHub issue lookup.
+   `check_rejection_authority_boundary.py` for privacy and source-usage checks.
+   The always-running Docs Phase 4B oracle freshly derives production/compiler
+   closure and generated registry agreement, including on docs-only numbered
+   spec changes. The crate-scoped and workspace vocabulary mutation legs retain
+   their existing PR owners. This half performs no GitHub issue lookup.
 2. **Scheduled full matrix, the drift canary.**
    `loud-unsupported-nightly.yml`: a cron workflow running
    `scripts/loud_unsupported_phase2_oracle.py` in full,
@@ -1611,8 +1616,9 @@ not [05-UNS-5] semantic authority. Phase 4 therefore delivers both owners:
    match on success, so a legacy or race-created duplicate cannot survive
    recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
    loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
-   and the capacity-census liveness sweep remain pending. Regular PRs run the
-   complete offline construction boundary under §C2.1. The capacity-liveness reader's
+   and the capacity-census liveness sweep remain pending. Regular PR validation
+   collectively runs the complete offline construction boundary under §C2.1.
+   The capacity-liveness reader's
    final-binding format repair is separate: native tagged transports and the
    [05-OP-45] shape operation need no issue lookup, and retired binding
    citations are rejected. That persisted-shape check supplies no current
@@ -2016,7 +2022,8 @@ tripwire, §C7, and census rows 24-25 and 27.
 5. **Census row 25's conversion** ([#958], the einsum default), the
    row shrinking with the fix per B1.
 6. **Both §C7.5 execution owners**: the offline construction and
-   discovery boundary in the PR `script-unit` worker, and
+   discovery boundary split across PR `script-unit` and the always-running
+   Docs Phase 4B oracle, and
    `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
@@ -2047,8 +2054,9 @@ with the ignore-ledger equality and the live-row probe-record
 existence check; the §C7.3 dual-source discovery scan; the
 `compiler_invariant!` guard-referent tier (every guard resolves in the
 selected test set or the atom registry); the execution-wiring
-assertions (the PR `script-unit` worker executes the offline rejection
-construction boundary; the nightly file exists, names both oracle runners,
+assertions (PR `script-unit` and the always-running Docs Phase 4B oracle
+jointly execute the offline rejection construction boundary; the nightly file
+exists, names both oracle runners,
 and appears in `NON_GATE_WORKFLOWS`; the mutation legs, changed-row
 manifest/exclusion structural validation, and scheduled full standing
 manifest/exclusion validation are executed by those jobs, not by this

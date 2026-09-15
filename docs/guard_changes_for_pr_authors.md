@@ -220,11 +220,13 @@ After changing a production `unimplemented_rejection!` citation, regenerate:
 ```
 
 Review that the issue is relevant to the missing implementation. PR validation
-checks complete source/compiler agreement and construction membership without
-querying GitHub. The scheduled canary checks every source-derived identity and
-rejects closed, missing, or pull-request references; run it manually as well
-before release or relevant red-team claims. Do not re-cite unrelated code
-merely to quiet that report.
+is split across existing owners: `script-unit` checks privacy and source-usage
+construction, while the always-running Docs Phase 4B oracle freshly derives
+compiler closure and generated-registry agreement. Neither queries GitHub. The
+scheduled canary checks every source-derived identity and rejects closed,
+missing, or pull-request references; run it manually as well before release or
+relevant red-team claims. Do not re-cite unrelated code merely to quiet that
+report.
 
 ## Changing the guarded Nix workflow
 
