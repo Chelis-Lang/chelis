@@ -1452,14 +1452,15 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # target.
         #
         # The three kinds are measured to behave differently and none folds
-        # into another. A rank-0 `tensor[f32]` target traps on both lanes
-        # while a float prim target does not, so rank is not the variable and
-        # the prim scalar is its own value. Every aggregate spelling behaves
-        # identically, so one value covers all five of them.
+        # into another. A rank-0 `tensor[f32]` cotangent retains tensor
+        # identity while a float prim cotangent crosses the typed
+        # tensor-to-scalar boundary. The mixed-target receipt checks those
+        # distinct public types and their written order. Every aggregate
+        # spelling behaves identically, so one value covers all five of them.
         #
-        # Every evaluator cell now retains the authored activation contract.
-        # The primitive-scalar C cells remain at their measured baseline and
-        # are explicitly deferred until native admission is repaired.
+        # Every evaluator and generated-C cell retains the authored activation
+        # contract. The two primitive-scalar C rows use the existing DAG
+        # cotangent reconstruction route and are executable exit receipts.
         #
         # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
         # while beta-reduced C skips its signature and unused actual effects.

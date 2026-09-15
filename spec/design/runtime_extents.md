@@ -347,7 +347,7 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | DCE | unread signature witnesses and potentially trapping extent checks survive; deleting either must make a mismatch test fail |
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
 | specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
-| grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar admission remains #1934. The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
+| grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar selections use the existing DAG cotangent reconstruction route under the same contract (#1934). The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
 | vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, the same edge the grad row records and under the same tensor-typed single-`wrt` bound (chelis#1821) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
 
@@ -1107,8 +1107,8 @@ controls remain. The original empty-literal precision witness must also
 receive a checker verdict, independently of authored generic definitions.
 These are delivery obligations, not an execution receipt.
 
-Phase B has no named deferrals after the seven gradient rows reach their exit
-receipts. B2c removed the old
+Phase B has no named deferrals after the two native primitive-scalar rows join
+the five evaluator rows at their exit receipts. B2c removed the old
 `concat.literal_claim.inlined_root.{c,eval}` deferrals: a claim the lowered
 graph proves wrong is rejected before execution. A deferred row stays at its
 measured start state with its reason; `exit_shortfall` skips it in every
