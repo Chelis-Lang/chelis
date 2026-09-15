@@ -8240,6 +8240,16 @@ fn check_fences_non_direct_transform_targets() {
             "grad",
         ),
         (
+            "grad_module_to_local_alias",
+            "def loss(x: f32) -> f32 = mul(x, x)\n\
+             g = loss\n\
+             out = {\n\
+               h = g\n\
+               grad(h)(1.0f32)\n\
+             }\n",
+            "grad",
+        ),
+        (
             "grad_shadowed_lambda",
             "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
              out = {\n\
@@ -8263,28 +8273,52 @@ fn check_fences_non_direct_transform_targets() {
              }\n",
             "vmap",
         ),
+        (
+            "vmap_module_to_local_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             g = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = g\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
     ];
 
     for (stem, source, transform) in cases {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(format!("{stem}.ch"));
-        write_file(&path, source);
+        let surf_path = dir.path().join(format!("{stem}.ch"));
+        let deep_path = dir.path().join(format!("{stem}.dp"));
+        write_file(&surf_path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        fs::write(&deep_path, deep).expect("write desugared Deep program");
 
-        let json = run_json_check(&path);
-        assert!(
-            json["score"].as_f64().is_some_and(|score| score < 1.0),
-            "{stem} must not receive a perfect check score: {json}"
-        );
-        assert!(
-            json["errors"].as_array().is_some_and(|errors| {
-                errors.iter().any(|error| {
-                    error["message"].as_str().is_some_and(|message| {
-                        message.contains("core transform fragment") && message.contains(transform)
+        for path in [&surf_path, &deep_path] {
+            let json = run_json_check(path);
+            assert!(
+                json["score"].as_f64().is_some_and(|score| score < 1.0),
+                "{stem} ({path:?}) must not receive a perfect check score: {json}"
+            );
+            assert!(
+                json["errors"].as_array().is_some_and(|errors| {
+                    errors.iter().any(|error| {
+                        error["message"].as_str().is_some_and(|message| {
+                            message.contains("core transform fragment")
+                                && message.contains(transform)
+                        })
                     })
-                })
-            }),
-            "{stem} must carry the core-transform fence diagnostic: {json}"
-        );
+                }),
+                "{stem} ({path:?}) must carry the core-transform fence diagnostic: {json}"
+            );
+        }
     }
 }
 

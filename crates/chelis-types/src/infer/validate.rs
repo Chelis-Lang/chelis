@@ -214,7 +214,12 @@ fn walk_core_transform_targets(
             let mut scoped = lexical_scope.clone();
             if let Some(name) = bind_children.first().and_then(symbol_name) {
                 let aliases_top_level_function = bind_children.get(1).is_some_and(|value| {
-                    direct_unshadowed_top_level_function(value, top_level_functions, lexical_scope)
+                    direct_unshadowed_top_level_function(
+                        value,
+                        top_level_functions,
+                        module_function_aliases,
+                        lexical_scope,
+                    )
                 });
                 scoped.bind_local(name.to_string(), aliases_top_level_function);
             }
@@ -315,12 +320,15 @@ fn direct_module_function_alias(
 fn direct_unshadowed_top_level_function(
     expr: &deep::Expr,
     top_level_functions: &UnordSet<String>,
+    module_function_aliases: &UnordSet<String>,
     lexical_scope: &CoreTransformScope,
 ) -> bool {
     stamped_parts(expr).is_some_and(|(tag, _, children)| {
         tag == DeepTag::Var
             && children.first().and_then(symbol_name).is_some_and(|name| {
                 (top_level_functions.contains(name) && !lexical_scope.local_names.contains(name))
+                    || (module_function_aliases.contains(name)
+                        && !lexical_scope.local_names.contains(name))
                     || lexical_scope.direct_function_aliases.contains(name)
             })
     })
