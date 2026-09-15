@@ -350,10 +350,12 @@ class SchemaTests(unittest.TestCase):
             "scripts/ci_candidate_lifecycle.py",
             "scripts/ci_candidate_identity.py",
             "scripts/ci_candidate_receipt.py",
+            "scripts/ci_contract_paths.py",
             "scripts/ci_retarget_validation.py",
             "scripts/test_ci_candidate_lifecycle.py",
             "scripts/test_ci_candidate_identity.py",
             "scripts/test_ci_candidate_receipt.py",
+            "scripts/test_ci_contract_paths.py",
             "scripts/test_ci_retarget_validation.py",
         ):
             with self.subTest(path=path):
