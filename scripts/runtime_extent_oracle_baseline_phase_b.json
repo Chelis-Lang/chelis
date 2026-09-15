@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "0d42c36924377a9bd5b1417ae0a8f02a12b6fe8ba3a818717df2ff3096c11c16",
+  "corpus_sha256": "35d89ba5ced58625c2fa134d93bdc5b2761d0cb1573c6e975a50c1fad72b9e3d",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -665,7 +665,7 @@
     {
       "id": "grad.wrt_prim_scalar.multi.dead_forward.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -677,7 +677,7 @@
     {
       "id": "grad.wrt_prim_scalar.single.dead_forward.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {

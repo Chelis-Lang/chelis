@@ -347,7 +347,7 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | DCE | unread signature witnesses and potentially trapping extent checks survive; deleting either must make a mismatch test fail |
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
 | specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
-| grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar admission remains #1934. The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
+| grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar selections use the existing DAG cotangent reconstruction route under the same contract (#1934). The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
 | vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, the same edge the grad row records and under the same tensor-typed single-`wrt` bound (chelis#1821) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
 
@@ -983,8 +983,8 @@ row-transition checks, and each still has to PASS on its own.
 The phase-B corpus contains 188 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 32 non-`executes_exactly` values against 156
-`executes_exactly`; the dispositions below account for the thirty-two.
+column contains 30 non-`executes_exactly` values against 158
+`executes_exactly`; the dispositions below account for the thirty.
 Twenty-nine rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-nine predate B2c:
@@ -1017,9 +1017,10 @@ restriction transport instead of callee-body inspection. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
 
-Two rows are deferred under #1934: the native primitive-scalar single/multiple
-target cells. `PHASE_B_DEFERRED` names both; the five evaluator rows have real
-failure receipts rather than their earlier successful-gradient dispositions.
+The five evaluator gradient rows already have executable receipts from #2070.
+This slice moves the two formerly deferred native primitive-scalar rows to
+`executes_exactly`; all seven now execute their required forward failures and
+agreeing-gradient controls. `PHASE_B_DEFERRED` is empty.
 
 The `wrt` ARGUMENT KIND is an axis of this corpus, enumerated from the SPEC's
 category rather than from what a review round happened to find. Three
@@ -1029,15 +1030,16 @@ varying that kind, which is what a witness-by-witness list cannot stop:
 "differentiable target" and admits a float tensor of any rank, a float PRIM
 scalar, and an aggregate of those; only a non-differentiable `wrt` is a type
 error. The axis is therefore **every `wrt` kind the spec admits, three of them,
-crossed with single and multi target: six cells, fourteen rows, twelve
-at an exit state and two native primitive-scalar rows deferred.**
+crossed with single and multi target: six cells, fourteen rows, all
+at an exit state.**
 
 None of the three kinds folds into another, and that is measured rather than
-asserted. A rank-0 `tensor[f32]` target traps on both lanes where a float prim
-target does not, so rank is not the variable and the prim scalar is its own
-value. Every aggregate spelling behaves identically, tuple, record, one-field
-record, nested record and a record with a non-differentiable leaf, so one value
-covers all five.
+asserted. A rank-0 `tensor[f32]` cotangent retains tensor identity while a float
+prim cotangent uses the typed tensor-to-scalar boundary; the mixed-target
+receipt checks their distinct consumers and exact values. Evaluator controls
+cover tuples, records, one-field records, nested records and records with a
+non-differentiable leaf. Compiled-C controls cover tuple/record groups and
+mixed scalar/aggregate target ordering.
 
 The evaluator now preserves activation obligations for all six cells. The
 #1920 trace established the shared defect: both formal interface witnesses
@@ -1050,11 +1052,14 @@ aggregate layouts under #1924, and both primitive-scalar evaluator selections
 under #1934. The existing witness preparation and #1912 forward-activation
 dependency remain in place; no extra primal execution is added.
 
-The undifferentiated and differentiated routes now compare the same original
+The undifferentiated and differentiated routes compare the same original
 witnesses and report the same `load` Domain failure. Native primitive-scalar
-admission remains separate: C still refuses the inline transform position for
-single/multiple primitive-scalar targets, while tensor and aggregate targets
-retain their existing native receipts. #1934 owns those two remaining rows.
+admission uses the existing DAG cotangent reconstruction route: primitive
+leaves cross the typed tensor-to-scalar boundary and tensor leaves retain
+their rank, including rank zero. Complete result groups follow the written
+target list, including repeated targets, while primal arguments are evaluated
+once in parameter order. The six-cell eval/C matrix checks agreeing exact
+gradients and rejected activations, including unused and zero cotangents.
 
 chelis#1821's forward-activation dependency is recorded unconditionally, so a
 gradient whose forward carries no obligation retains and emits it anyway: 891
@@ -1102,7 +1107,8 @@ controls remain. The original empty-literal precision witness must also
 receive a checker verdict, independently of authored generic definitions.
 These are delivery obligations, not an execution receipt.
 
-Phase B retains two native primitive-scalar grad deferrals. B2c removed the old
+Phase B has no named deferrals after the two native primitive-scalar rows join
+the five evaluator rows at their exit receipts. B2c removed the old
 `concat.literal_claim.inlined_root.{c,eval}` deferrals: a claim the lowered
 graph proves wrong is rejected before execution. A deferred row stays at its
 measured start state with its reason; `exit_shortfall` skips it in every

@@ -1452,14 +1452,15 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # target.
         #
         # The three kinds are measured to behave differently and none folds
-        # into another. A rank-0 `tensor[f32]` target traps on both lanes
-        # while a float prim target does not, so rank is not the variable and
-        # the prim scalar is its own value. Every aggregate spelling behaves
-        # identically, so one value covers all five of them.
+        # into another. A rank-0 `tensor[f32]` cotangent retains tensor
+        # identity while a float prim cotangent crosses the typed
+        # tensor-to-scalar boundary. The mixed-target receipt checks those
+        # distinct public types and their written order. Every aggregate
+        # spelling behaves identically, so one value covers all five of them.
         #
-        # Every evaluator cell now retains the authored activation contract.
-        # The primitive-scalar C cells remain at their measured baseline and
-        # are explicitly deferred until native admission is repaired.
+        # Every evaluator and generated-C cell retains the authored activation
+        # contract. The two primitive-scalar C rows use the existing DAG
+        # cotangent reconstruction route and are executable exit receipts.
         #
         # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
         # while beta-reduced C skips its signature and unused actual effects.
@@ -1648,9 +1649,8 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
         ),
-        # The authored-signature repair also restores the primitive-scalar
-        # evaluator obligation. Native scalar transform admission remains
-        # #1934: these two C rows still record the measured build refusal.
+        # #1934: primitive-scalar cotangents use the existing typed DAG pack
+        # route, retaining the same forward claim and their scalar identity.
         _row(
             "grad.wrt_prim_scalar.single.dead_forward.eval",
             "silent_unguarded",
@@ -1660,11 +1660,11 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "grad.wrt_prim_scalar.single.dead_forward.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
-        # The multiple-target primitive cell has its own execution control;
-        # the evaluator repair does not claim that native admission is fixed.
+        # Multiple selections preserve complete cotangent groups in written
+        # order, including repeated targets and mixed scalar/tensor structures.
         _row(
             "grad.wrt_prim_scalar.multi.dead_forward.eval",
             "silent_unguarded",
@@ -1674,7 +1674,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "grad.wrt_prim_scalar.multi.dead_forward.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
         ),
         # Main ecf213c18's exact tensor-target witnesses: agreeing independent
@@ -1957,19 +1957,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (self_test_target(python), *manifest_targets("b"))
 
 
-PHASE_B_DEFERRED: Mapping[str, str] = {
-    # Authored-signature transport repairs all five evaluator rows. Native
-    # primitive-scalar gradient admission remains a separate #1934 repair.
-    "grad.wrt_prim_scalar.single.dead_forward.c": (
-        "runtime_extents.md C5: the C lane refuses the primitive-scalar "
-        "gradient with the host-lane transform-position diagnostic; #1934 "
-        "owns native admission"
-    ),
-    "grad.wrt_prim_scalar.multi.dead_forward.c": (
-        "runtime_extents.md C5: the same native build refusal for multiple "
-        "targets including a primitive scalar; #1934"
-    ),
-}
+PHASE_B_DEFERRED: Mapping[str, str] = {}
 
 
 PHASE_A_DEFERRED: Mapping[str, str] = {
