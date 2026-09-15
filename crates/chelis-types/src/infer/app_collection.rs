@@ -24,9 +24,12 @@ pub(super) fn collection_helper_type_error(
 
 /// Decide a transported checked collection contract against settled operands.
 ///
-/// Scheme instantiation installs the relation on the deferred-operand ledger.
-/// Application consumes it; binding an operand discharges it here, and a
-/// multi-operand relation re-suspends until its next operand settles.
+/// Scheme instantiation installs a fresh relation instance on the
+/// inference-local contract ledger. An application binds the exact instances
+/// its callee produced to that call's arguments and evidence, then decides them
+/// here after ordinary call unification has settled every available operand.
+/// An unresolved consumed instance remains owned by that declaration boundary;
+/// a merely returned or aggregated function value remains transportable.
 ///
 /// The eager arms in `app_post.rs` and transported tensor-concat calls feed
 /// the same call-site evidence to [`tensor_concat_result_type`]. The checked

@@ -3799,27 +3799,33 @@ transported contracts without inspecting the callee body.
    contracts, not user-authored §5.9 dtype bounds.
 2. `Scheme::constraints` transports those relations with the same quantified
    variables as the function type. `Env::instantiate_scheme` performs the one
-   renaming and re-installs the relation on the existing deferred-operand
-   ledger. All relation variables must occur in the callable type; there is no
-   connected hidden-intermediate graph.
+   renaming and installs a fresh inference-local contract instance with an
+   opaque identity and lexical owner. Variable-bearing and fully monomorphic
+   relations use this same ledger. All relation variables must occur in the
+   callable type; there is no connected hidden-intermediate graph.
 3. Aliasing, returning, aggregating, or passing a function value leaves its
-   relation transportable. Applying it consumes the relation. If a consumed
-   operand remains generic, the ledger pins it against generalization and the
-   declaration boundary reports the missing collection contract. Thus transport
-   does not become body-inferred wrapper publication. Projecting or returning a
-   result that no longer contains the function-bearing subvalue removes its
-   detached transport entry.
+   relation transportable. Generalization moves only the exact child-scope
+   instances owned by that value onto its scheme; recursive siblings that share
+   a level retain distinct identities. Applying a value captures the exact
+   instances minted while inferring that callee. If a consumed operand remains
+   generic, the declaration boundary reports the missing collection contract.
+   Thus transport does not become body-inferred wrapper publication. Projecting
+   or returning a result that no longer contains the function-bearing subvalue
+   removes its detached transport instance.
 4. Direct syntactic calls keep `app_post.rs`'s operation-specific rules and
    diagnostics. The scheme copy is discarded for that call. Before an indirect
-   call unifies its arguments, a consumed tensor-`concat` relation receives
-   that application's axis value, literal element shapes, or binding-carried
-   list length. Direct and indirect routes then use the same
+   call unifies its arguments, its exact consumed tensor-`concat` instance
+   receives that application's axis value, literal element shapes, or
+   binding-carried list length. After call unification, one discharge returns
+   the operation rule's exact result rather than the callable type's possibly
+   wider wildcard result. Direct and indirect routes use the same
    `tensor_concat_result_type` decision, so exact concat-axis sums and
    out-of-bounds axes do not disappear when the function value was aliased,
    returned, passed, aggregated, imported, or restored from TypeEnv. Nested
    function-valued parameters and results remain transport rather than being
-   consumed by the outer call. Result reconciliation and multi-operand
-   re-suspension remain inside unification.
+   consumed by the outer call. Explicit failed-call cleanup prevents axis or
+   extent evidence from leaking into later calls or independently specialized
+   aliases.
 5. Serialized TypeEnv checker reuse and published package identities both
    include the relation. TypeEnv format 3 follows #2071's format 2 and is the
    source-free checker-reuse path exercised here. CHB format 5 follows #2071's

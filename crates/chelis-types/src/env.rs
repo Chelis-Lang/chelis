@@ -739,24 +739,7 @@ impl Env {
         }
         for constraint in &scheme.constraints {
             let renamed = constraint.map_types(|ty| subst.apply(ty));
-            match crate::unify::pending_collection_var(&renamed, inference_subst) {
-                Some(pending) => inference_subst.record_deferred_tensor_operand(
-                    pending,
-                    crate::unify::DeferredOperandGate::Collection {
-                        constraint: renamed,
-                        transport: true,
-                        tensor_concat: None,
-                    },
-                ),
-                // An obligation whose operands are all settled by the renaming
-                // alone -- one over a quantifier the body pins to a concrete
-                // type -- has no variable to key a ledger entry on. It is NOT
-                // dropped: this instantiation still owes it. It is queued for
-                // the per-def reporting pass, which holds a `&mut Subst` and
-                // decides it through the one discharge body, so a rejection
-                // becomes a diagnostic instead of an accepted program.
-                None => inference_subst.record_settled_collection_obligation(renamed),
-            }
+            inference_subst.record_collection_contract(renamed);
         }
         (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
     }
@@ -816,11 +799,35 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst);
+        self.generalize_owned(ty, subst, None)
+    }
+
+    /// Generalize one deferred declaration using only the contract instances
+    /// created while that declaration was inferred.
+    ///
+    /// Recursive siblings share one inference level, so level membership alone
+    /// cannot distinguish two fully monomorphic checked function values. The
+    /// driver records each member's exact instance IDs and supplies them here.
+    pub(crate) fn generalize_with_collection_contracts(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: &[crate::unify::CollectionContractId],
+    ) -> Scheme {
+        self.generalize_owned(ty, subst, Some(owned_contracts))
+    }
+
+    fn generalize_owned(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> Scheme {
+        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst);
+                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
                 assert_eq!(
                     level_scheme.constraints, sweep_scheme.constraints,
                     "level-based collection obligations diverged from the reference environment sweep"
@@ -848,14 +855,14 @@ impl Env {
             }
         });
         // Transport contracts this scheme now owns have moved off the
-        // per-declaration operand ledger. Each later instantiation installs a
-        // fresh renamed copy.
+        // inference-local contract ledger. Each later instantiation installs a
+        // fresh renamed instance with its own application identity.
         //
-        // The exact key/contract pairs come back from the split. Removing by
-        // key alone could erase a different relation that happens to wait on
-        // the same aliased variable but is not owned by this value.
+        // The exact instance IDs come back from the split. Removing by relation
+        // equality could erase a monomorphic recursive sibling's identical
+        // contract, which belongs to a different value.
         if !ledger_removals.is_empty() {
-            subst.take_collection_gates(&ledger_removals);
+            subst.take_collection_contracts(&ledger_removals);
         }
         level_scheme
     }
@@ -867,37 +874,51 @@ impl Env {
     /// Only relations already owned by a checked function value reach this
     /// split. Their complete variable footprint must be visible in the value's
     /// type; there are no hidden intermediate variables and no body-inferred
-    /// relation graph. A consumed application gate is excluded by
-    /// `pending_collection_gates` and pinned by `pending_gate_result_vars`.
+    /// relation graph. Consumed application instances are absent from
+    /// `pending_collection_contracts` and therefore cannot be republished.
     fn collection_constraints_to_quantify(
+        body: &Type,
         body_variables: &[TypeVar],
         body_candidates: &[TypeVar],
         subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
     ) -> CollectionQuantification {
         let mut split = CollectionQuantification::default();
-        let pending = subst.pending_collection_gates();
+        let pending = subst.pending_collection_contracts();
         if pending.is_empty() {
             return split;
         }
         let visible = body_variables.iter().copied().collect::<UnordSet<_>>();
         let candidates = body_candidates.iter().copied().collect::<UnordSet<_>>();
-        for (waiting_on, constraint) in pending {
+        let current_level = subst.current_level();
+        for (id, level, constraint) in pending {
+            let owned = match owned_contracts {
+                Some(owned) => owned.contains(&id),
+                None => level > current_level,
+            };
+            if !owned {
+                continue;
+            }
             let mut footprint = UnordSet::default();
-            footprint.insert(waiting_on);
             for carried in constraint.carried_types() {
                 footprint.extend(free_tvars(carried));
             }
             let footprint = footprint.into_sorted();
-            if footprint.iter().all(|var| candidates.contains(var)) {
-                split.ledger_removals.push((waiting_on, constraint.clone()));
+            let owned = if footprint.is_empty() {
+                crate::unify::collection_contract_visible_in_type(&constraint, body)
+            } else {
+                footprint.iter().all(|var| candidates.contains(var))
+            };
+            if owned {
+                split.ledger_removals.push(id);
                 if !split.constraints.contains(&constraint) {
                     split.constraints.push(constraint);
                 }
-            } else if footprint.iter().all(|var| !visible.contains(var)) {
+            } else if footprint.is_empty() || footprint.iter().all(|var| !visible.contains(var)) {
                 // The expression discarded the function-bearing subvalue:
                 // `(len, 1).1` and `ignore(len)` must not leave the detached
                 // contract behind to reject an unrelated result.
-                split.ledger_removals.push((waiting_on, constraint));
+                split.ledger_removals.push(id);
             } else {
                 split
                     .pinned
@@ -911,7 +932,8 @@ impl Env {
         &self,
         ty: &Type,
         subst: &Subst,
-    ) -> (Scheme, Vec<(TypeVar, CollectionConstraint)>) {
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
@@ -938,7 +960,13 @@ impl Env {
             .collect::<Vec<_>>();
         // Move only already-checked transport contracts whose complete
         // variable footprint belongs to this generalized function value.
-        let split = Self::collection_constraints_to_quantify(&ty_tvars, &tvars, subst);
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
         tvars.retain(|v| !split.pinned.contains(v));
         let constraints = split.constraints;
         let tvar_restrictions = tvars
@@ -990,7 +1018,8 @@ impl Env {
         &self,
         ty: &Type,
         subst: &Subst,
-    ) -> (Scheme, Vec<(TypeVar, CollectionConstraint)>) {
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
@@ -1010,7 +1039,13 @@ impl Env {
             .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
         // Mirror the checked-contract split in the reference generalizer.
-        let split = Self::collection_constraints_to_quantify(&ty_tvars, &tvars, subst);
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
         tvars.retain(|v| !split.pinned.contains(v));
         let constraints = split.constraints;
         let tvar_restrictions = tvars
@@ -1053,7 +1088,7 @@ struct CollectionQuantification {
     constraints: Vec<CollectionConstraint>,
     /// Exact ledger entries either moved into the scheme or discarded with a
     /// function-bearing subvalue no longer visible in the generalized type.
-    ledger_removals: Vec<(TypeVar, CollectionConstraint)>,
+    ledger_removals: Vec<crate::unify::CollectionContractId>,
     /// Body variables that must stay monomorphic because an obligation this
     /// scheme does NOT own still carries them.
     pinned: UnordSet<TypeVar>,
@@ -1158,6 +1193,61 @@ mod module_scope_tests {
 
         assert!(env.lookup("borrowed").is_none());
         assert!(env.lookup_terminal_unique("borrowed").is_some());
+    }
+
+    #[test]
+    fn same_level_monomorphic_contracts_keep_distinct_declaration_owners() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let list = Type::Adt(
+            "List".to_string(),
+            vec![Type::Tensor(
+                vec![Dim::Lit(2), Dim::Lit(3)],
+                TensorPrec::Concrete(Prim::F32),
+            )],
+        );
+        let result = Type::Tensor(
+            vec![Dim::Wildcard, Dim::Wildcard],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let constraint = CollectionConstraint::Concat {
+            lhs: list.clone(),
+            rhs: Type::Prim(Prim::Int32),
+            result: result.clone(),
+        };
+        let checked = Scheme {
+            tvars: Vec::new(),
+            tvar_restrictions: Vec::new(),
+            dvars: Vec::new(),
+            rvars: Vec::new(),
+            constraints: vec![constraint.clone()],
+            body: Type::Fn(vec![list, Type::Prim(Prim::Int32)], Box::new(result)),
+        };
+
+        let component = subst.enter_level(&var_gen);
+        let first_mark = subst.collection_contract_mark();
+        let first_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let first_ids = subst.collection_contract_ids_since(first_mark);
+        let second_mark = subst.collection_contract_mark();
+        let second_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let second_ids = subst.collection_contract_ids_since(second_mark);
+        subst.leave_level(component, &var_gen);
+
+        let first = env.generalize_with_collection_contracts(&first_ty, &subst, &first_ids);
+        assert_eq!(first.constraints, vec![constraint.clone()]);
+        assert_eq!(
+            subst.pending_collection_contracts().len(),
+            1,
+            "generalizing one recursive sibling must not absorb the other's contract"
+        );
+
+        let second = env.generalize_with_collection_contracts(&second_ty, &subst, &second_ids);
+        assert_eq!(second.constraints, vec![constraint]);
+        assert!(
+            subst.pending_collection_contracts().is_empty(),
+            "each sibling must consume exactly its own contract instance"
+        );
     }
 }
 

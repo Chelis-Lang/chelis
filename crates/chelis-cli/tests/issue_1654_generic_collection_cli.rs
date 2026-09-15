@@ -157,6 +157,19 @@ fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
          }\n",
         "concat",
     );
+    assert_type_or_dimension_rejected(
+        "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+    );
+    assert_rejected(
+        "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op([a, b], 9i32)\n\
+         }\n",
+        "concat",
+    );
     for source in [
         "def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
          op = concat\n\
@@ -170,9 +183,46 @@ fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
          op = concat\n\
          op([a, b], 0i32)\n\
          }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+        "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         rows: tensor[4, 3, f32] = op([a, b], 0i32)\n\
+         cols: tensor[2, 6, f32] = op([a, b], 1i32)\n\
+         cols\n\
+         }\n",
+        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+         -> tensor[*, *, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op([a, b], axis)\n\
+         }\n",
     ] {
         assert_accepted(source);
     }
+}
+
+#[test]
+fn tensor_concat_call_evidence_does_not_leak_between_cli_calls() {
+    assert_rejected(
+        "def mixed(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         bad = op([a, b], 9i32)\n\
+         good: tensor[2, 6, f32] = op([a, b], 1i32)\n\
+         good\n\
+         }\n",
+        "concat",
+    );
+    assert_accepted(
+        "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         rows_op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, 3, f32] = concat\n\
+         cols_op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         rows: tensor[4, 3, f32] = rows_op([a, b], 0i32)\n\
+         cols: tensor[2, 6, f32] = cols_op([a, b], 1i32)\n\
+         cols\n\
+         }\n",
+    );
 }
 
 #[test]

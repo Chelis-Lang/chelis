@@ -291,19 +291,24 @@ pub struct Subst {
     /// Not serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     operand_gate_failures: Mutex<Vec<OperandGateFailure>>,
-    /// chelis#1654: obligations an instantiation re-installed that have NO
-    /// unresolved top-level operand to key a ledger entry on.
+    /// chelis#1654: checked collection-operation contracts instantiated during
+    /// this inference pass.
     ///
-    /// There is no variable whose binding would discharge such an obligation,
-    /// so it cannot go on `deferred_tensor_operands`; dropping it is what this
-    /// issue is about. It is decided instead by the per-def reporting pass,
-    /// which holds a `&mut Subst` and runs before the never-resolved sweep, so
-    /// a rejection reaches the caller's `DiagnosticSink` and a re-suspension
-    /// (an operand that became a variable again) is still caught there.
+    /// Each scheme instantiation gets an opaque ID and its lexical inference
+    /// level. An application captures the exact IDs its callee produced,
+    /// attaches that call's evidence, and discharges only those instances after
+    /// argument unification. A relation merely carried through an alias,
+    /// aggregate, or higher-order result remains transportable until
+    /// generalization moves it back onto the resulting scheme.
     ///
-    /// Not serialized: transient per-pass bookkeeping.
+    /// This is the single lifecycle owner for both variable-bearing and fully
+    /// monomorphic relations. In particular, no settled side queue can decide
+    /// tensor concat before an application supplies its axis and element
+    /// extents. Not serialized: schemes are the durable representation.
     #[serde(skip)]
-    settled_collection_obligations: Mutex<Vec<CollectionConstraint>>,
+    collection_contracts: Mutex<Vec<CollectionContractInstance>>,
+    #[serde(skip)]
+    next_collection_contract_id: Mutex<u64>,
     /// Current lexical generalization level. Serialized because a cloned
     /// checking context must preserve in-flight transactional state.
     #[serde(default)]
@@ -399,18 +404,22 @@ pub(crate) enum DeferredOperandGate {
         route: ShapeRoute,
         result: Box<Type>,
     },
-    /// A checked collection-operation contract carried by a function value.
-    ///
-    /// `transport` is true while the value is merely aliased, returned, or
-    /// passed through another value. Applying the value consumes that
-    /// capability and flips it false. An unresolved consumed relation is an
-    /// authored generic operation requirement under [04-INF-9], so it may not
-    /// be generalized onto the new wrapper.
-    Collection {
-        constraint: crate::types::CollectionConstraint,
-        transport: bool,
-        /// Application-local source evidence for tensor concat. The generic
-        /// checked contract remains serializable without call-site values.
+}
+
+pub(crate) type CollectionContractId = u64;
+
+#[derive(Debug, Clone)]
+struct CollectionContractInstance {
+    id: CollectionContractId,
+    level: u32,
+    constraint: CollectionConstraint,
+    state: CollectionContractState,
+}
+
+#[derive(Debug, Clone)]
+enum CollectionContractState {
+    Transport,
+    Consumed {
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
     },
 }
@@ -503,30 +512,7 @@ impl DeferredOperandGate {
                 Some(result.as_ref())
             }
             Self::HostSlot { .. } => None,
-            // Transport contracts are handled by `Env::generalize`. Consumed
-            // application contracts pin every carried variable in
-            // `pending_gate_result_vars`, because [04-INF-9] forbids turning
-            // that unresolved use into a newly published generic predicate.
-            Self::Collection { .. } => None,
         }
-    }
-
-    /// The collection relation this gate carries, if it is one.
-    pub(crate) fn collection_constraint(&self) -> Option<&crate::types::CollectionConstraint> {
-        match self {
-            Self::Collection { constraint, .. } => Some(constraint),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn is_transport_collection(&self) -> bool {
-        matches!(
-            self,
-            Self::Collection {
-                transport: true,
-                ..
-            }
-        )
     }
 
     // A consumer may have constrained the provisional result's dtype before
@@ -640,18 +626,6 @@ impl DeferredOperandGate {
                     }
                 }
             }
-            Self::Collection {
-                ref constraint,
-                transport,
-                ref tensor_concat,
-            } => {
-                discharge_collection_constraint(
-                    constraint,
-                    transport,
-                    tensor_concat.as_ref(),
-                    subst,
-                );
-            }
         }
     }
 
@@ -675,10 +649,6 @@ impl DeferredOperandGate {
             Self::ShapeRoute { route, .. } => {
                 format!("{} expects tensor input, got {subject}", route.op())
             }
-            Self::Collection { constraint, .. } => format!(
-                "{} expects a collection operand, got {subject}",
-                constraint.builtin()
-            ),
         }
     }
 
@@ -689,7 +659,6 @@ impl DeferredOperandGate {
             Self::Cast { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
             Self::ShapeRoute { route, .. } => route.op(),
-            Self::Collection { constraint, .. } => constraint.builtin(),
         }
     }
 
@@ -703,11 +672,9 @@ impl DeferredOperandGate {
         use crate::errors::CheckErrorKind as Kind;
         match self {
             Self::Cast { .. } => Kind::CastNonTensor,
-            Self::Copy { .. }
-            | Self::HostSlot { .. }
-            | Self::ShapeRoute { .. }
-            // The kind the eager collection arms in `app_post.rs` emit.
-            | Self::Collection { .. } => Kind::TypeMismatch,
+            Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
+                Kind::TypeMismatch
+            }
         }
     }
 
@@ -720,91 +687,97 @@ impl DeferredOperandGate {
     }
 }
 
-/// chelis#1654: decide one collection obligation and reconcile its result.
+/// Decide one consumed collection contract and reconcile its result.
 ///
-/// The ONE discharge body for this class. Both routes that own an obligation
-/// reach it: a ledger gate whose operand just bound
-/// ([`DeferredOperandGate::discharge`]), and an instantiated obligation with no
-/// operand left to wait on, drained by the per-def reporting pass. A second
-/// copy is how one of those routes would silently stop reconciling the result.
-pub(crate) fn discharge_collection_constraint(
+/// `Unresolved` leaves the owning contract instance live until the current
+/// application or declaration boundary supplies the missing evidence. Every
+/// settled verdict removes the instance before entering this function, so
+/// result unification cannot rediscover or cross-contaminate another call.
+enum CollectionDischarge {
+    Unresolved,
+    Settled(Option<Type>),
+}
+
+fn discharge_collection_constraint(
     constraint: &crate::types::CollectionConstraint,
-    transport: bool,
     tensor_concat: Option<&crate::infer::TensorConcatCallEvidence>,
     subst: &mut Subst,
-) {
+) -> CollectionDischarge {
     match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
-        // An operand the rule reads is STILL unresolved: this binding settled
-        // one of several. Re-suspend on the next one rather than deciding
-        // against a variable, so the rejection names both operands and is
-        // reported once.
-        Ok(None) => {
-            if let Some(next) = pending_collection_var(constraint, subst) {
-                subst.realias_operand_gate(
-                    next,
-                    DeferredOperandGate::Collection {
-                        constraint: constraint.clone(),
-                        transport,
-                        tensor_concat: tensor_concat.cloned(),
-                    },
-                );
-            }
-            // No pending operand left and no result: every operand is an error
-            // witness, whose diagnostic is already owned upstream (chelis#731
-            // cascade suppression).
-        }
+        Ok(None) => CollectionDischarge::Unresolved,
         Ok(Some(settled)) => {
             let result = constraint.result();
             if unify(result, &settled, subst).is_err() {
                 let expected = subst.apply(result);
-                subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
-                    gate: DeferredOperandGate::Collection {
-                        constraint: constraint.clone(),
-                        transport,
-                        tensor_concat: tensor_concat.cloned(),
-                    },
-                    expected,
-                    settled,
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: crate::errors::CheckError::new(
+                        crate::errors::CheckErrorKind::TypeMismatch,
+                        format!(
+                            "{} result does not match the type this call produces once its \
+                             operand is known: expected {expected}, got {settled}",
+                            constraint.builtin()
+                        ),
+                        Vec::new(),
+                    ),
                 });
             }
+            CollectionDischarge::Settled(Some(settled))
         }
-        Err(message) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
-            error: crate::errors::CheckError::new(
-                crate::errors::CheckErrorKind::TypeMismatch,
-                message,
-                Vec::new(),
-            ),
-        }),
+        Err(message) => {
+            subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                error: crate::errors::CheckError::new(
+                    crate::errors::CheckErrorKind::TypeMismatch,
+                    message,
+                    Vec::new(),
+                ),
+            });
+            CollectionDischarge::Settled(None)
+        }
     }
 }
 
-/// chelis#1654: the next operand variable a collection constraint is waiting
-/// on, in the order the rule reads its operands.
+/// Whether `ty` still contains the function value governed by `constraint`.
 ///
-/// Only a TOP-LEVEL variable counts. `len(?xs)` cannot be decided, but
-/// `len(List[?e])` can -- the rule reads the outer constructor, and waiting for
-/// the element type would suspend a decidable call forever.
-pub(crate) fn pending_collection_var(
-    constraint: &crate::types::CollectionConstraint,
-    subst: &Subst,
-) -> Option<TypeVar> {
-    constraint
-        .operands()
-        .into_iter()
-        .find_map(|ty| match subst.apply(ty) {
-            Type::Var(v) => Some(v),
-            _ => None,
-        })
+/// The relation's fixed operand/result fields reconstruct its callable type.
+/// Exact structural containment works for fully monomorphic contracts, while
+/// the ordinary shared inference variables make the same test true for
+/// polymorphic aliases and higher-order results after substitution.
+pub(crate) fn collection_contract_visible_in_type(
+    constraint: &CollectionConstraint,
+    ty: &Type,
+) -> bool {
+    let callable = collection_contract_callable_type(constraint);
+    fn contains(ty: &Type, callable: &Type) -> bool {
+        if ty == callable {
+            return true;
+        }
+        match ty {
+            Type::Fn(parameters, result) => {
+                parameters
+                    .iter()
+                    .any(|parameter| contains(parameter, callable))
+                    || contains(result, callable)
+            }
+            Type::Ref(inner) => contains(inner, callable),
+            Type::Adt(_, arguments) | Type::Tuple(arguments) => arguments
+                .iter()
+                .any(|argument| contains(argument, callable)),
+            Type::KindedAdt(_, arguments) => arguments
+                .iter()
+                .any(|argument| matches!(argument, NominalArg::Type(ty) if contains(ty, callable))),
+            Type::Var(_) | Type::Prim(_) | Type::Tensor(_, _) | Type::Unit | Type::Error(_) => {
+                false
+            }
+        }
+    }
+    contains(ty, &callable)
 }
 
-/// Which deferred use shape registered a ledger entry (determines the
-/// violation action text at validation time).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeferredOpaqueUse {
-    /// `(access target field)` with an unresolved target.
-    Access,
-    /// `(record-update target kv...)` with an unresolved target.
-    RecordUpdate,
+fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
+    Type::Fn(
+        constraint.operands().into_iter().cloned().collect(),
+        Box::new(constraint.result().clone()),
+    )
 }
 
 fn collect_non_callable_tvars(ty: &Type, vars: &mut UnordSet<TypeVar>) {
@@ -833,20 +806,35 @@ fn collect_non_callable_tvars(ty: &Type, vars: &mut UnordSet<TypeVar>) {
     }
 }
 
-/// Type variables belonging to the value operands of this application.
-///
-/// Nested function values are capabilities being passed or returned, not
-/// operands consumed by the outer call. Excluding them is what lets
-/// `return_concat()` and `identity(concat)` retain the checked contract.
-fn collection_call_operand_vars(callee: &Type, subst: &Subst) -> UnordSet<TypeVar> {
-    let Type::Fn(parameters, _) = subst.apply(callee) else {
-        return UnordSet::default();
-    };
-    let mut variables = UnordSet::default();
-    for parameter in parameters {
-        collect_non_callable_tvars(&parameter, &mut variables);
+/// Whether an unresolved transported function argument became tied to a
+/// non-callable argument of this application. This is the higher-order
+/// `invoke(len, x)` edge: `identity(len)` returns the callable and is handled
+/// by `collection_contract_visible_in_type`, while `ignore(len, x)` leaves no
+/// shared variable and may discard the unused capability.
+fn collection_contract_tied_to_arguments(
+    constraint: &CollectionConstraint,
+    arguments: &[Type],
+    subst: &Subst,
+) -> bool {
+    let mut argument_vars = UnordSet::default();
+    for argument in arguments {
+        collect_non_callable_tvars(&subst.apply(argument), &mut argument_vars);
     }
-    variables
+    constraint.operands().into_iter().any(|operand| {
+        crate::env::free_tvars(&subst.apply(operand))
+            .into_iter()
+            .any(|variable| argument_vars.contains(&variable))
+    })
+}
+
+/// Which deferred use shape registered a ledger entry (determines the
+/// violation action text at validation time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredOpaqueUse {
+    /// `(access target field)` with an unresolved target.
+    Access,
+    /// `(record-update target kv...)` with an unresolved target.
+    RecordUpdate,
 }
 
 impl Clone for Subst {
@@ -885,11 +873,17 @@ impl Clone for Subst {
                     .expect("subst.deferred_tensor_operands poisoned")
                     .clone(),
             ),
-            settled_collection_obligations: Mutex::new(
-                self.settled_collection_obligations
+            collection_contracts: Mutex::new(
+                self.collection_contracts
                     .lock()
-                    .expect("subst.settled_collection_obligations poisoned")
+                    .expect("subst.collection_contracts poisoned")
                     .clone(),
+            ),
+            next_collection_contract_id: Mutex::new(
+                *self
+                    .next_collection_contract_id
+                    .lock()
+                    .expect("subst.next_collection_contract_id poisoned"),
             ),
             operand_gate_failures: Mutex::new(
                 self.operand_gate_failures
@@ -1345,20 +1339,6 @@ impl Subst {
             return (tvars, dvars, rvars);
         }
         for (_, gate) in ledger.iter() {
-            if let DeferredOperandGate::Collection {
-                constraint,
-                transport: false,
-                ..
-            } = gate
-            {
-                for carried in constraint.carried_types() {
-                    let carried = self.apply(carried);
-                    tvars.extend(crate::env::free_tvars(&carried));
-                    dvars.extend(crate::env::free_dvars(&carried));
-                    rvars.extend(crate::env::free_rvars(&carried));
-                }
-                continue;
-            }
             let Some(result) = gate.result() else {
                 continue;
             };
@@ -1370,201 +1350,271 @@ impl Subst {
         (tvars, dvars, rvars)
     }
 
-    /// chelis#1654: every pending collection constraint, with the variable it
-    /// waits on. Read-only; `Env::generalize` consults it and then removes
-    /// exactly the entries it moved onto a scheme.
-    /// Each carried type is NORMALIZED through the current substitution before
-    /// it leaves the ledger. The raw type a gate was recorded with can name a
-    /// variable that has since been aliased onto a later root, while the
-    /// ledger KEY is re-aliased on every binding
-    /// ([`Self::realias_operand_gate`]). A scheme built from raw types would
-    /// quantify the root and leave the old identity unrenamed in the very
-    /// constraint that names it, so an instantiation would rename nothing.
-    ///
-    /// The key is returned as recorded, not re-derived: it is what
-    /// [`Self::take_collection_gates`] must match to remove the entry.
-    pub(crate) fn pending_collection_gates(&self) -> Vec<(TypeVar, CollectionConstraint)> {
-        let raw = self
-            .deferred_tensor_operands
+    /// Record one fresh use of a checked collection-operation contract.
+    pub(crate) fn record_collection_contract(
+        &self,
+        constraint: CollectionConstraint,
+    ) -> CollectionContractId {
+        let id = {
+            let mut next = self
+                .next_collection_contract_id
+                .lock()
+                .expect("subst.next_collection_contract_id poisoned");
+            let id = *next;
+            *next = next
+                .checked_add(1)
+                .expect("collection contract identity overflow");
+            id
+        };
+        self.collection_contracts
             .lock()
-            .expect("subst.deferred_tensor_operands poisoned")
+            .expect("subst.collection_contracts poisoned")
+            .push(CollectionContractInstance {
+                id,
+                level: self.current_level,
+                constraint,
+                state: CollectionContractState::Transport,
+            });
+        id
+    }
+
+    /// Mark the beginning of an expression's contract instantiations.
+    pub(crate) fn collection_contract_mark(&self) -> CollectionContractId {
+        *self
+            .next_collection_contract_id
+            .lock()
+            .expect("subst.next_collection_contract_id poisoned")
+    }
+
+    /// Live contract instances minted since `mark`, in instantiation order.
+    pub(crate) fn collection_contract_ids_since(
+        &self,
+        mark: CollectionContractId,
+    ) -> Vec<CollectionContractId> {
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
             .iter()
-            .filter_map(|(v, gate)| {
-                if gate.is_transport_collection() {
-                    gate.collection_constraint()
-                        .map(|constraint| (*v, constraint.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        raw.into_iter()
-            .map(|(v, constraint)| (v, constraint.map_types(|ty| self.apply(ty))))
+            .filter_map(|instance| (instance.id >= mark).then_some(instance.id))
             .collect()
     }
 
-    /// chelis#1654: record an instantiated obligation that has no unresolved
-    /// top-level operand to key a ledger entry on. See
-    /// [`Self::settled_collection_obligations`].
-    pub(crate) fn record_settled_collection_obligation(&self, constraint: CollectionConstraint) {
-        self.settled_collection_obligations
+    /// Transportable child-scope instances considered by `Env::generalize`.
+    pub(crate) fn pending_collection_contracts(
+        &self,
+    ) -> Vec<(CollectionContractId, u32, CollectionConstraint)> {
+        self.collection_contracts
             .lock()
-            .expect("subst.settled_collection_obligations poisoned")
-            .push(constraint);
+            .expect("subst.collection_contracts poisoned")
+            .iter()
+            .filter(|instance| matches!(instance.state, CollectionContractState::Transport))
+            .map(|instance| {
+                (
+                    instance.id,
+                    instance.level,
+                    instance.constraint.map_types(|carried| self.apply(carried)),
+                )
+            })
+            .collect()
     }
 
-    /// Drain the obligations recorded by
-    /// [`Self::record_settled_collection_obligation`], for the per-def
-    /// reporting pass to decide.
-    pub(crate) fn take_settled_collection_obligations(&self) -> Vec<CollectionConstraint> {
-        std::mem::take(
-            &mut *self
-                .settled_collection_obligations
-                .lock()
-                .expect("subst.settled_collection_obligations poisoned"),
-        )
-    }
-
-    /// chelis#1654: hand exact collection ledger entries over to a scheme.
-    ///
-    /// Removal is the point. A contract that stayed here as well would be
-    /// reported by `validate_deferred_tensor_operands` as never-resolved, and
-    /// a legitimate alias or return of an already-checked function value would
-    /// be rejected at its own declaration boundary.
-    pub(crate) fn take_collection_gates(&self, removals: &[(TypeVar, CollectionConstraint)]) {
-        self.deferred_tensor_operands
-            .lock()
-            .expect("subst.deferred_tensor_operands poisoned")
-            .retain(|(waiting_on, gate)| {
-                if !gate.is_transport_collection() {
-                    return true;
-                }
-                let Some(constraint) = gate.collection_constraint() else {
-                    return true;
-                };
-                let normalized = constraint.map_types(|ty| self.apply(ty));
-                !removals.iter().any(|(removed_key, removed_constraint)| {
-                    removed_key == waiting_on && removed_constraint == &normalized
-                })
-            });
-    }
-
-    /// Drop the scheme copy of a direct collection builtin's contract.
-    ///
-    /// Direct calls retain their syntax-aware checker route, including tensor
-    /// concat's source-shape evidence. The scheme contract exists for function
-    /// values and would otherwise report the same direct rejection twice.
-    pub(crate) fn discard_direct_collection_contract(&self, callee: &Type) {
-        let callee_vars = crate::env::free_tvars(&self.apply(callee))
-            .into_iter()
-            .collect::<UnordSet<_>>();
-        if callee_vars.is_empty() {
+    /// Move or discard exact transport instances selected by generalization.
+    pub(crate) fn take_collection_contracts(&self, removals: &[CollectionContractId]) {
+        if removals.is_empty() {
             return;
         }
-        let mut ledger = self
-            .deferred_tensor_operands
+        self.collection_contracts
             .lock()
-            .expect("subst.deferred_tensor_operands poisoned");
-        ledger.retain(|(waiting_on, gate)| {
-            !(callee_vars.contains(waiting_on) && gate.is_transport_collection())
-        });
+            .expect("subst.collection_contracts poisoned")
+            .retain(|instance| !removals.contains(&instance.id));
     }
 
-    /// Whether the checked contract instantiated for `callee` includes
-    /// tensor/list `concat` and therefore needs this call's static source
-    /// evidence before argument unification can discharge it.
-    pub(crate) fn callee_has_transported_concat_contract(&self, callee: &Type) -> bool {
-        let callee_vars = collection_call_operand_vars(callee, self);
-        if callee_vars.is_empty() {
-            return false;
-        }
-        self.deferred_tensor_operands
+    /// Drop the scheme copies instantiated for a direct syntactic builtin call.
+    pub(crate) fn discard_collection_contracts(&self, ids: &[CollectionContractId]) {
+        self.take_collection_contracts(ids);
+    }
+
+    /// Whether these exact callee instances include tensor concat.
+    pub(crate) fn collection_contracts_include_concat(
+        &self,
+        ids: &[CollectionContractId],
+        callee: &Type,
+    ) -> bool {
+        let callee = self.apply(callee);
+        self.collection_contracts
             .lock()
-            .expect("subst.deferred_tensor_operands poisoned")
+            .expect("subst.collection_contracts poisoned")
             .iter()
-            .any(|(waiting_on, gate)| {
-                callee_vars.contains(waiting_on)
-                    && matches!(
-                        gate,
-                        DeferredOperandGate::Collection {
-                            constraint: crate::types::CollectionConstraint::Concat { .. },
-                            transport: true,
-                            ..
-                        }
-                    )
+            .any(|instance| {
+                ids.contains(&instance.id)
+                    && matches!(instance.constraint, CollectionConstraint::Concat { .. })
+                    && collection_contract_callable_type(
+                        &instance.constraint.map_types(|carried| self.apply(carried)),
+                    ) == callee
             })
     }
 
-    /// Consume the transported collection contracts owned by this callee
-    /// before unification binds their operand variables.
-    ///
-    /// Tensor concat additionally receives the application-local axis and
-    /// literal-element evidence. It must be attached before the first operand
-    /// binds because discharge is synchronous with that binding.
+    /// Consume the exact checked contracts instantiated by this callee.
     pub(crate) fn prepare_collection_contract_call(
         &self,
+        ids: &[CollectionContractId],
         callee: &Type,
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
     ) {
-        let callee_vars = collection_call_operand_vars(callee, self);
-        if callee_vars.is_empty() {
-            return;
-        }
-        let mut ledger = self
-            .deferred_tensor_operands
+        let callee = self.apply(callee);
+        let mut contracts = self
+            .collection_contracts
             .lock()
-            .expect("subst.deferred_tensor_operands poisoned");
-        for (waiting_on, gate) in ledger.iter_mut() {
-            if !callee_vars.contains(waiting_on) {
+            .expect("subst.collection_contracts poisoned");
+        for instance in contracts.iter_mut() {
+            if !ids.contains(&instance.id) {
                 continue;
             }
-            let DeferredOperandGate::Collection {
-                constraint,
-                transport,
-                tensor_concat: carried_evidence,
-            } = gate
-            else {
+            let normalized = instance.constraint.map_types(|carried| self.apply(carried));
+            if collection_contract_callable_type(&normalized) != callee {
                 continue;
+            }
+            let evidence = matches!(instance.constraint, CollectionConstraint::Concat { .. })
+                .then(|| tensor_concat.clone())
+                .flatten();
+            instance.state = CollectionContractState::Consumed {
+                tensor_concat: evidence,
             };
-            if !*transport {
-                continue;
-            }
-            *transport = false;
-            if matches!(
-                constraint,
-                crate::types::CollectionConstraint::Concat { .. }
-            ) {
-                *carried_evidence = tensor_concat.clone();
-            }
         }
     }
 
-    /// Consume transported contracts whose operand is supplied by this call.
+    /// Finish one application's contract lifecycle after ordinary call
+    /// unification has tied all argument and result variables together.
     ///
-    /// Function-typed subvalues are skipped. Passing `len` through `identity`
-    /// or returning it from `exported()` transports its checked contract;
-    /// supplying a value at the related argument position consumes it. A
-    /// consumed unresolved contract cannot be generalized onto a new wrapper
-    /// under [04-INF-9].
-    pub(crate) fn consume_collection_contracts_in_arguments(&self, arguments: &[Type]) {
-        let mut value_vars = UnordSet::default();
-        for argument in arguments {
-            collect_non_callable_tvars(&self.apply(argument), &mut value_vars);
-        }
-        if value_vars.is_empty() {
-            return;
-        }
-        let mut ledger = self
-            .deferred_tensor_operands
-            .lock()
-            .expect("subst.deferred_tensor_operands poisoned");
-        for (waiting_on, gate) in ledger.iter_mut() {
-            if value_vars.contains(waiting_on)
-                && let DeferredOperandGate::Collection { transport, .. } = gate
-            {
-                *transport = false;
+    /// Exact callee instances are consumed. Contracts instantiated by
+    /// function-valued arguments remain transport when the application result
+    /// still contains their callable; otherwise a now-decidable relation is
+    /// checked and an unresolved ignored value is discarded. No instance from
+    /// before `mark` is examined.
+    pub(crate) fn finish_collection_contract_application(
+        &mut self,
+        mark: CollectionContractId,
+        arguments: &[Type],
+        result: &Type,
+    ) -> Option<Type> {
+        let ids = self.collection_contract_ids_since(mark);
+        let applied_result = self.apply(result);
+        let mut checked_result = None;
+        for id in ids {
+            let Some(instance) = self.take_collection_contract_instance(id) else {
+                continue;
+            };
+            match instance.state.clone() {
+                CollectionContractState::Consumed { tensor_concat } => {
+                    match discharge_collection_constraint(
+                        &instance.constraint,
+                        tensor_concat.as_ref(),
+                        self,
+                    ) {
+                        CollectionDischarge::Unresolved => {
+                            self.restore_collection_contract_instance(instance);
+                        }
+                        CollectionDischarge::Settled(Some(settled)) => {
+                            if let Some(previous) = &checked_result {
+                                let _ = unify(previous, &settled, self);
+                            } else {
+                                checked_result = Some(settled);
+                            }
+                        }
+                        CollectionDischarge::Settled(None) => {}
+                    }
+                }
+                CollectionContractState::Transport => {
+                    let normalized = instance.constraint.map_types(|carried| self.apply(carried));
+                    if collection_contract_visible_in_type(&normalized, &applied_result) {
+                        self.restore_collection_contract_instance(instance);
+                    } else if collection_contract_tied_to_arguments(
+                        &instance.constraint,
+                        arguments,
+                        self,
+                    ) {
+                        match discharge_collection_constraint(&instance.constraint, None, self) {
+                            CollectionDischarge::Unresolved => {
+                                let mut consumed = instance;
+                                consumed.state = CollectionContractState::Consumed {
+                                    tensor_concat: None,
+                                };
+                                self.restore_collection_contract_instance(consumed);
+                            }
+                            CollectionDischarge::Settled(_) => {}
+                        }
+                    } else {
+                        // A checked function argument not returned by the
+                        // outer call is either consumed by the callee's type
+                        // equations or ignored. A decidable relation owns its
+                        // verdict; an unresolved ignored value owns no future
+                        // application and is deliberately discarded.
+                        let _discarded =
+                            discharge_collection_constraint(&instance.constraint, None, self);
+                    }
+                }
             }
         }
+        checked_result
+    }
+
+    /// Cancel every contract instance created while a failed application was
+    /// inferred. This is the explicit cleanup edge that prevents a rejected
+    /// call from lending evidence to a later valid one.
+    pub(crate) fn cancel_collection_contract_application(&self, mark: CollectionContractId) {
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .retain(|instance| instance.id < mark);
+    }
+
+    fn take_collection_contract_instance(
+        &self,
+        id: CollectionContractId,
+    ) -> Option<CollectionContractInstance> {
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let index = contracts.iter().position(|instance| instance.id == id)?;
+        Some(contracts.remove(index))
+    }
+
+    fn restore_collection_contract_instance(&self, instance: CollectionContractInstance) {
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let index = contracts
+            .iter()
+            .position(|current| current.id > instance.id)
+            .unwrap_or(contracts.len());
+        contracts.insert(index, instance);
+    }
+
+    /// Drain unresolved consumed relations and detached child-scope transport
+    /// at a declaration boundary. Transport born in the active recursive
+    /// component's own level stays live until component generalization.
+    pub(crate) fn take_boundary_collection_contracts(&self) -> Vec<CollectionConstraint> {
+        let current_level = self.current_level;
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let mut unresolved = Vec::new();
+        contracts.retain(|instance| match instance.state {
+            CollectionContractState::Consumed { .. } => {
+                unresolved.push(instance.constraint.map_types(|carried| self.apply(carried)));
+                false
+            }
+            CollectionContractState::Transport
+                if current_level == 0 || instance.level > current_level =>
+            {
+                false
+            }
+            CollectionContractState::Transport => true,
+        });
+        unresolved
     }
 
     /// Record a discharge failure for the per-def reporting pass

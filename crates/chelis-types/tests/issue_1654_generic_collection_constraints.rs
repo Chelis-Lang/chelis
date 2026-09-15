@@ -62,7 +62,7 @@ fn accepts(label: &str, source: &str) {
     for (entry, result) in whole_program(source) {
         if let Err(errors) = result {
             panic!(
-                "{label} [{entry}] over-rejected:\n{}",
+                "{label} [{entry}] over-rejected:\n{}\nsource:\n{source}",
                 rendered(&errors).join("\n")
             );
         }
@@ -71,7 +71,10 @@ fn accepts(label: &str, source: &str) {
 
 fn rejects(label: &str, source: &str, operation: &str) {
     for (entry, result) in whole_program(source) {
-        let errors = result.unwrap_err();
+        let errors = match result {
+            Err(errors) => errors,
+            Ok(()) => panic!("{label} [{entry}] unexpectedly accepted:\n{source}"),
+        };
         assert!(
             errors
                 .iter()
@@ -114,6 +117,26 @@ fn rejects_type_or_dimension(label: &str, source: &str) {
                 )
             }),
             "{label} [{entry}] expected a type/dimension rejection:\n{}",
+            rendered(&errors).join("\n")
+        );
+    }
+}
+
+fn rejects_once(label: &str, source: &str, operation: &str) {
+    for (entry, result) in whole_program(source) {
+        let errors = result.unwrap_err();
+        assert_eq!(
+            errors.len(),
+            1,
+            "{label} [{entry}] expected one isolated rejection:\n{}",
+            rendered(&errors).join("\n")
+        );
+        assert!(
+            matches!(
+                errors[0].kind,
+                CheckErrorKind::TypeMismatch | CheckErrorKind::DimensionMismatch
+            ) && errors[0].message.contains(operation),
+            "{label} [{entry}] did not retain the `{operation}` rejection:\n{}",
             rendered(&errors).join("\n")
         );
     }
@@ -300,6 +323,34 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
              }\n"
             .to_string(),
         ),
+        (
+            "recursive return",
+            "def choose_concat(n: int32) \
+             -> List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = \
+             if n == 0i32 then concat else choose_concat(n - 1i32)\n\
+             def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+             op = choose_concat(1i32)\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "monomorphic annotated alias",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
+             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "nested monomorphic function value",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
+             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+             nested = (op, 1i32).0\n\
+             nested([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
     ] {
         rejects_type_or_dimension(&format!("{route} tensor concat result"), &source);
     }
@@ -315,6 +366,14 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
             "alias",
             "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
              op = concat\n\
+             op([a, b], 9i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "monomorphic annotated alias",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
              op([a, b], 9i32)\n\
              }\n"
             .to_string(),
@@ -336,9 +395,60 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
          op = concat\n\
          op([a, b], 0i32)\n\
          }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+         -> tensor[*, *, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op([a, b], axis)\n\
+         }\n",
+        "def direct_dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+         -> tensor[*, *, f32] = concat([a, b], axis)\n",
+        "def choose_concat(n: int32) \
+         -> List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = \
+         if n == 0i32 then concat else choose_concat(n - 1i32)\n\
+         def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = choose_concat(1i32)\n\
+         op([a, b], 1i32)\n\
+         }\n",
     ] {
         accepts("valid transported tensor concat", source);
     }
+}
+
+#[test]
+fn tensor_concat_call_evidence_is_owned_and_cleaned_up_per_application() {
+    accepts(
+        "one alias supports independent axis equations",
+        "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         rows: tensor[4, 3, f32] = op([a, b], 0i32)\n\
+         cols: tensor[2, 6, f32] = op([a, b], 1i32)\n\
+         cols\n\
+         }\n",
+    );
+    accepts(
+        "independently specialized aliases do not share evidence",
+        "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         rows_op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, 3, f32] = concat\n\
+         cols_op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         rows: tensor[4, 3, f32] = rows_op([a, b], 0i32)\n\
+         cols: tensor[2, 6, f32] = cols_op([a, b], 1i32)\n\
+         cols\n\
+         }\n",
+    );
+    rejects_once(
+        "a failed call does not poison the following valid call",
+        "def mixed(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         bad = op([a, b], 9i32)\n\
+         good: tensor[2, 6, f32] = op([a, b], 1i32)\n\
+         good\n\
+         }\n",
+        "concat",
+    );
 }
 
 #[test]
@@ -383,6 +493,35 @@ fn checked_contracts_survive_serialized_library_contexts() {
         "def exported() = concat\n\
          join = exported()\n\
          def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = \
+         join([a, b], 1i32)\n",
+    )
+    .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));
+
+    let invalid_monomorphic_tensor_concat = "def exported() = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op\n\
+         }\n\
+         join = exported()\n\
+         def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = \
+         join([a, b], 1i32)\n";
+    let errors = serialized_context(invalid_monomorphic_tensor_concat).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            matches!(
+                error.kind,
+                CheckErrorKind::TypeMismatch | CheckErrorKind::DimensionMismatch
+            )
+        }),
+        "{}",
+        rendered(&errors).join("\n")
+    );
+    serialized_context(
+        "def exported() = {\n\
+         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op\n\
+         }\n\
+         join = exported()\n\
+         def good(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = \
          join([a, b], 1i32)\n",
     )
     .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));

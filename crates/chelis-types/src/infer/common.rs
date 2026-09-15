@@ -2515,7 +2515,7 @@ pub(super) fn infer_top_level(
     defer_recursive_binding: bool,
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
-) -> Option<(String, Type)> {
+) -> Option<(String, Type, Vec<crate::unify::CollectionContractId>)> {
     let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
@@ -2552,6 +2552,7 @@ pub(super) fn infer_top_level(
         // ordinary declaration owns this per-definition level and closes it
         // before its inferred scheme is generalized.
         let ordinary_level = (!defer_recursive_binding).then(|| subst.enter_level(vg));
+        let collection_contract_mark = subst.collection_contract_mark();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         // spec/04 §3.1.1: when this def is a member of the active recursive
@@ -2980,9 +2981,15 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
-            Some((name, scheme_body))
+            Some((
+                name,
+                scheme_body,
+                subst.collection_contract_ids_since(collection_contract_mark),
+            ))
         } else {
-            let scheme = env.generalize(&scheme_body, subst);
+            let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+            let scheme =
+                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
             env.bind(name, scheme);
             None
         }

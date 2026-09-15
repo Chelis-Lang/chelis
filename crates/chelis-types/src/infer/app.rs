@@ -274,6 +274,12 @@ fn infer_app_inner(
     // minted. The mark is taken before the callee and read immediately after
     // it, so no argument's instantiation is in scope.
     let instantiation_mark = product.instantiation_dvar_mark();
+    // chelis#1654: the same bracket owns checked operation-contract
+    // instantiations. Unlike type variables, a fully monomorphic contract has
+    // no structural identity to rediscover later; the opaque IDs minted while
+    // inferring this callee are the exact capabilities this application may
+    // consume.
+    let collection_contract_mark = subst.collection_contract_mark();
     let func_ty = if applied_constructor_head {
         let source_name = source_func_name.as_deref().unwrap();
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
@@ -325,6 +331,13 @@ fn infer_app_inner(
         product.record_canonical(&kids[0], func_ty.clone());
     }
     let instantiation_dvars = product.instantiation_dvars_since(instantiation_mark);
+    let callee_collection_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+    macro_rules! return_with_collection_cleanup {
+        ($value:expr) => {{
+            subst.cancel_collection_contract_application(collection_contract_mark);
+            return $value;
+        }};
+    }
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
@@ -381,7 +394,7 @@ fn infer_app_inner(
         .collect();
 
     if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
-        return Type::Unit;
+        return_with_collection_cleanup!(Type::Unit);
     }
 
     // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
@@ -427,7 +440,7 @@ fn infer_app_inner(
                     error.span_offset = Some(off);
                 }
             }
-            return report(errors, error);
+            return_with_collection_cleanup!(report(errors, error));
         }
     }
 
@@ -450,7 +463,7 @@ fn infer_app_inner(
     {
         // Preserve the existing direct operation's diagnostic. Symbolic
         // family requirements still travel through ordinary unification.
-        return rejected;
+        return_with_collection_cleanup!(rejected);
     }
     if func_name.as_deref() == Some("matmul") && arg_tys.len() == 2 {
         let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -462,7 +475,12 @@ fn infer_app_inner(
             && left == right
             && left.is_integer()
         {
-            return check_matmul_signature(&arg_tys, &Type::Unit, subst, errors);
+            return_with_collection_cleanup!(check_matmul_signature(
+                &arg_tys,
+                &Type::Unit,
+                subst,
+                errors
+            ));
         }
     }
     let mixed_division_precisions =
@@ -486,7 +504,7 @@ fn infer_app_inner(
         for operand in operands {
             let resolved = type_for_readonly_check(operand, subst);
             if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
-                return report(
+                return_with_collection_cleanup!(report(
                     errors,
                     CheckError::new(
                         kind,
@@ -496,13 +514,13 @@ fn infer_app_inner(
                         ),
                         hints,
                     ),
-                );
+                ));
             }
             if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
                 && let Some(rejected) =
                     decide_precision_variable_operand(list, fname, var, env, subst, errors)
             {
-                return rejected;
+                return_with_collection_cleanup!(rejected);
             }
         }
     }
@@ -527,7 +545,7 @@ fn infer_app_inner(
             product,
         )
     {
-        return rejected;
+        return_with_collection_cleanup!(rejected);
     }
 
     // [05-DIM-3]: the semantic registry owns axis dtype slots. `concat`
@@ -538,7 +556,7 @@ fn infer_app_inner(
         && fname != "concat"
         && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors)
     {
-        return rejected;
+        return_with_collection_cleanup!(rejected);
     }
 
     // [05-DIM-1] fix-naming diagnostic for expand's extent slot: a wrong
@@ -550,7 +568,7 @@ fn infer_app_inner(
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
     {
-        return report(
+        return_with_collection_cleanup!(report(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
@@ -564,7 +582,7 @@ fn infer_app_inner(
                 ),
                 vec![],
             ),
-        );
+        ));
     }
 
     // If the *callee* is Error, propagate. With no resolved callee scheme
@@ -590,7 +608,7 @@ fn infer_app_inner(
     // Error-typed size slot always reaches the per-form located diagnostic.
     // A genuinely sourced size never infers to `Error`.
     if let Some(err) = propagate_if_error([&func_ty]) {
-        return err;
+        return_with_collection_cleanup!(err);
     }
 
     // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
@@ -634,7 +652,7 @@ fn infer_app_inner(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return report(
+                return_with_collection_cleanup!(report(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
@@ -653,10 +671,10 @@ fn infer_app_inner(
                         ),
                         vec![],
                     ),
-                );
+                ));
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
-                return report(errors, te.into());
+                return_with_collection_cleanup!(report(errors, te.into()));
             }
             // Per-axis join (chelis#218 concat ergonomics, tightened
             // by chelis#272). Resolve each dim through the current
@@ -718,7 +736,7 @@ fn infer_app_inner(
                     // guards, and preserve the specified wildcard head bias.
                     _ => {
                         if let Err(te) = unify_dim(&hr, &tr, subst) {
-                            return report(errors, te.into());
+                            return_with_collection_cleanup!(report(errors, te.into()));
                         }
                         subst.apply_dim(&hr)
                     }
@@ -727,7 +745,7 @@ fn infer_app_inner(
             }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
-            return Type::Adt("List".to_string(), vec![elem]);
+            return_with_collection_cleanup!(Type::Adt("List".to_string(), vec![elem]));
         }
     }
 
@@ -736,23 +754,29 @@ fn infer_app_inner(
         Some("len" | "index" | "append" | "concat")
     );
     if direct_collection_builtin {
-        subst.discard_direct_collection_contract(&func_ty);
+        subst.discard_collection_contracts(&callee_collection_contracts);
     } else if matches!(
         subst.apply(&func_ty),
         Type::Fn(ref params, _) if params.len() == arg_tys.len()
     ) {
         let tensor_concat = subst
-            .callee_has_transported_concat_contract(&func_ty)
+            .collection_contracts_include_concat(&callee_collection_contracts, &func_ty)
             .then(|| tensor_concat_call_evidence(kids, env, subst, errors, product));
-        subst.prepare_collection_contract_call(&func_ty, tensor_concat);
+        subst.prepare_collection_contract_call(
+            &callee_collection_contracts,
+            &func_ty,
+            tensor_concat,
+        );
     }
-    let ret_tv =
+    let mut ret_tv =
         match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
             Ok(ret_ty) => ret_ty,
-            Err(rejected) => return rejected,
+            Err(rejected) => return_with_collection_cleanup!(rejected),
         };
-    if !direct_collection_builtin {
-        subst.consume_collection_contracts_in_arguments(&arg_tys);
+    if let Some(checked_result) =
+        subst.finish_collection_contract_application(collection_contract_mark, &arg_tys, &ret_tv)
+    {
+        ret_tv = checked_result;
     }
     absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
     // chelis#1512: watch whether the eager pass rejects this call. A
@@ -778,6 +802,7 @@ fn infer_app_inner(
         expected_result,
     );
     if errors.iter_since(checkpoint).next().is_some() {
+        subst.cancel_collection_contract_application(collection_contract_mark);
         product.cancel_post_app_check_for(list);
     } else {
         product.record_call_result_contracts(&func_ty, contract_name.as_deref(), env, subst);

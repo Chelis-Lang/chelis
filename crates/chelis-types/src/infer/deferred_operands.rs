@@ -45,14 +45,6 @@ pub(super) fn validate_deferred_tensor_operands(
     declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    // chelis#1654: obligations an instantiation re-installed with every
-    // operand already settled. Decided FIRST: the decision can record a
-    // failure (drained just below) and can re-suspend on an operand that is a
-    // variable again (caught by the never-resolved sweep at the end), so this
-    // is the only ordering where neither outcome is lost.
-    for constraint in subst.take_settled_collection_obligations() {
-        crate::unify::discharge_collection_constraint(&constraint, true, None, subst);
-    }
     for failure in subst.take_operand_gate_failures() {
         match failure {
             OperandGateFailure::Decision { error } => errors.push(error),
@@ -75,6 +67,32 @@ pub(super) fn validate_deferred_tensor_operands(
                 gate.suggestions(),
             )),
         }
+    }
+    // A consumed checked collection contract that still has an unresolved
+    // operand would become a newly published generic operation predicate if
+    // this declaration generalized it. [04-INF-9] rejects that authored
+    // boundary. Transport-only instances owned by an enclosing recursive
+    // component remain live for that component's later generalization.
+    for constraint in subst.take_boundary_collection_contracts() {
+        let resolved = constraint
+            .operands()
+            .into_iter()
+            .map(|operand| subst.apply(operand))
+            .find(|operand| matches!(operand, Type::Var(_)));
+        let Some(resolved) = resolved else {
+            // Error operands already own their diagnostic. A consumed
+            // relation with settled operands was decided at application exit.
+            continue;
+        };
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "{} expects a collection operand, got {}",
+                constraint.builtin(),
+                subject_for(&resolved, declared_type_names)
+            ),
+            Vec::new(),
+        ));
     }
     // Whatever is left never had its operand bound to anything.
     for (tv, gate) in subst.take_deferred_tensor_operands() {

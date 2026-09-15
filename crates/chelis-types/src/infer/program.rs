@@ -428,8 +428,9 @@ pub(super) fn infer_program_with_product_in_session(
                 .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty)| {
-                    let scheme = env.generalize(&ty, &subst);
+                .map(|(name, ty, owned_contracts)| {
+                    let scheme =
+                        env.generalize_with_collection_contracts(&ty, &subst, &owned_contracts);
                     (name, scheme)
                 })
                 .collect::<Vec<_>>();
@@ -1515,8 +1516,12 @@ pub(super) fn infer_ir_program_with_state(
                 .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty)| {
-                    let scheme = state.env.generalize(&ty, &state.subst);
+                .map(|(name, ty, owned_contracts)| {
+                    let scheme = state.env.generalize_with_collection_contracts(
+                        &ty,
+                        &state.subst,
+                        &owned_contracts,
+                    );
                     (name, scheme)
                 })
                 .collect::<Vec<_>>();
