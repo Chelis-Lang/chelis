@@ -2000,7 +2000,7 @@ def summarize_package_expansion(
         "version": 1,
         "lane": "package-expansion",
         "required": False,
-        "success": True,
+        "success": not findings,
         "observed_success": not findings,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["package_expansion"]),
@@ -2160,7 +2160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "version": 1,
                 "lane": "package-expansion",
                 "required": False,
-                "success": True,
+                "success": False,
                 "observed_success": False,
                 "plan_digest": plan.get("plan_digest"),
                 "covered_targets": [],
@@ -2171,7 +2171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{args.lane.upper()} REPORT: "
         f"{'PASS' if result['observed_success'] else 'RECORDED FAILURES'}"
     )
-    return 0
+    return 0 if result["observed_success"] else 1
 
 
 if __name__ == "__main__":

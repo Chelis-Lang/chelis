@@ -395,7 +395,10 @@ class WorkflowTests(unittest.TestCase):
 
     def assert_contract(self, workflow):
         events = workflow.get("on", workflow.get(True))
-        self.assertEqual(set(events["pull_request"]["types"]), {"opened", "synchronize", "reopened", "edited"})
+        self.assertEqual(
+            set(events["pull_request"]["types"]),
+            {"opened", "synchronize", "reopened"},
+        )
         job = workflow["jobs"]["docs"]
         steps = job["steps"]
         checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout@")]

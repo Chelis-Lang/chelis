@@ -6,10 +6,6 @@ on:
   pull_request_target:
     types: [edited]
 
-concurrency:
-  group: pr-base-retarget-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
@@ -31,6 +27,9 @@ jobs:
     if: github.event_name == 'pull_request_target' && github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      group: pr-base-retarget-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       actions: write
       checks: write

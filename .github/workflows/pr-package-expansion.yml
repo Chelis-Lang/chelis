@@ -230,6 +230,7 @@ jobs:
               echo
               echo "No validated plan artifact was available."
             } > target/integration-change/package-expansion-summary/summary.md
+            exit 1
           fi
 
       - name: Publish informational package-expansion summary

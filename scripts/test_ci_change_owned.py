@@ -1466,6 +1466,7 @@ class ReportTests(unittest.TestCase):
         owned.attach_receipt_digest(receipts[0])
         summary = owned.summarize_package_expansion(self.plan, receipts[:-1])
         self.assertFalse(summary["observed_success"])
+        self.assertFalse(summary["success"])
         self.assertFalse(summary["required"])
         self.assertTrue(summary["failures"])
 
@@ -1505,7 +1506,7 @@ class ReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sidecar digest"):
                 owned.load_receipts(root)
 
-    def test_informational_cli_records_malformed_receipts_and_returns_zero(self) -> None:
+    def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
         self.plan["package_expansion"] = ["p::default_gated"]
         self.plan["eligible_targets"].append("p::default_gated")
         self.plan["shards"]["package_expansion"] = owned.shard_map(
@@ -1534,7 +1535,8 @@ class ReportTests(unittest.TestCase):
                 ]
             )
             report = json.loads((output / "report.json").read_text())
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
+        self.assertFalse(report["success"])
         self.assertFalse(report["observed_success"])
         self.assertTrue(report["failures"])
 

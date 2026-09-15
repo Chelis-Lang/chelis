@@ -30,6 +30,7 @@ def actions_events(workflow: dict) -> dict:
 
 
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
+    test.assertEqual(workflow["permissions"], {"contents": "read"})
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
@@ -50,6 +51,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("implementation", concurrency)
 
     changes = workflow["jobs"]["changes"]
+    test.assertEqual(
+        changes["permissions"],
+        {"contents": "read", "pull-requests": "read"},
+    )
     test.assertIn("candidate_sha", changes["outputs"])
     checkout = next(
         step
@@ -86,6 +91,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
 
 
 def assert_retarget_workflow(test: unittest.TestCase, workflow: dict) -> None:
+    test.assertNotIn("concurrency", workflow)
     events = actions_events(workflow)
     test.assertEqual(
         events,
@@ -104,6 +110,13 @@ def assert_retarget_workflow(test: unittest.TestCase, workflow: dict) -> None:
     )
     coordinator = jobs["base-retarget"]
     test.assertIn("github.event.changes.base", coordinator["if"])
+    test.assertEqual(
+        coordinator["concurrency"],
+        {
+            "group": "pr-base-retarget-${{ github.event.pull_request.number }}",
+            "cancel-in-progress": True,
+        },
+    )
     test.assertEqual(
         coordinator["permissions"],
         {
@@ -236,6 +249,8 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertNotIn("--required", str(summary))
     test.assertIn("scripts/ci_validate_pr_candidate.py", summary_text)
     test.assertIn("--plan target/integration-change/plan.json", summary_text)
+    test.assertIn("No validated plan artifact was available.", summary_text)
+    test.assertGreaterEqual(summary_text.count("exit 1"), 2)
     workflow_text = str(workflow)
     test.assertEqual(
         workflow_text.count("scripts/ci_validate_pr_candidate.py"),
@@ -291,6 +306,21 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         del acknowledgements["jobs"]["acknowledgements"]
         with self.assertRaises((AssertionError, KeyError)):
             assert_acknowledgement_workflow(self, acknowledgements)
+
+    def test_metadata_edit_cannot_cancel_a_live_base_retarget(self) -> None:
+        retarget = yaml.safe_load(RETARGET.read_text())
+        mutated = copy.deepcopy(retarget)
+        mutated["concurrency"] = mutated["jobs"]["base-retarget"].pop(
+            "concurrency"
+        )
+        with self.assertRaises(AssertionError):
+            assert_retarget_workflow(self, mutated)
+
+    def test_retargeted_candidate_cannot_receive_write_contents(self) -> None:
+        workflow = yaml.safe_load(CI.read_text())
+        workflow["permissions"]["contents"] = "write"
+        with self.assertRaises(AssertionError):
+            assert_ci_metadata_routing(self, workflow)
 
     def test_automatic_expansion_or_an_unbound_dispatch_is_rejected(self) -> None:
         workflow = yaml.safe_load(CI.read_text())

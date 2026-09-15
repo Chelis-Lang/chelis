@@ -98,7 +98,10 @@ class PullRequestLivenessTests(unittest.TestCase):
         checkouts = [s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@")]
         self.assertEqual(len(checkouts), 1)
         self.assertEqual(checkouts[0].get("with", {}).get("fetch-depth"), 0)
-        self.assertNotIn("ref", checkouts[0].get("with", {}))
+        self.assertEqual(
+            checkouts[0].get("with", {}).get("ref"),
+            "${{ needs.changes.outputs.candidate_sha }}",
+        )
         commands = [s for s in job["steps"] if "run" in s and "validate_rejection_issue_manifest.py" in s["run"]]
         self.assertEqual(len(commands), 1)
         step = commands[0]
@@ -122,7 +125,10 @@ class PullRequestLivenessTests(unittest.TestCase):
                 if mutation == "shallow":
                     steps[0]["with"] = {"fetch-depth": 1}
                 elif mutation == "head checkout":
-                    steps[0]["with"] = {"fetch-depth": 0, "ref": "${{ github.event.pull_request.head.sha }}"}
+                    steps[0]["with"] = {
+                        "fetch-depth": 0,
+                        "ref": "${{ github.event.pull_request.head.sha }}",
+                    }
                 else:
                     steps[-1]["env"]["PR_HEAD"] = "${{ github.sha }}"
                 with self.assertRaises(AssertionError):
