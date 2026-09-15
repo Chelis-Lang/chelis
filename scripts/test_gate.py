@@ -648,10 +648,6 @@ NON_GATE_JOBS = {
     # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
     # is out of gate.py scope by design.
     "changes",
-    # Rule-id: GATE-SCOPE-REJECTION-AUTHORITY -- the network-backed
-    # [05-UNS-5] manifest liveness check is CI-owned and deliberately absent
-    # from the offline developer gate.
-    "rejection-authority-liveness",
     # Rule-id: GATE-SCOPE-DIAGNOSTIC-KIND -- C2.2's controlled source
     # mutations are CI-owned and run only when an owner/control path changes.
     "diagnostic-kind-oracle",
@@ -691,25 +687,18 @@ NON_GATE_JOBS = {
 }
 
 
-class RejectionAuthorityLivenessJobTests(unittest.TestCase):
-    def test_job_is_change_gated_and_has_issue_read_access(self):
-        block = _ci_job_block("rejection-authority-liveness")
-        self.assertIn("needs: [changes]", block)
-        self.assertIn("needs.changes.outputs.rejection_authority_changed", block)
-        self.assertIn("issues: read", block)
-        self.assertIn("contents: read", block)
-        self.assertIn("scripts/check_rejection_authority_boundary.py", block)
-        self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
-
-    def test_fresh_source_and_liveness_execution_is_dedicated_job_owned(self):
-        liveness = _ci_job_block("rejection-authority-liveness")
+class RejectionAuthorityPrBoundaryTests(unittest.TestCase):
+    def test_pr_ci_keeps_only_the_offline_construction_boundary(self):
+        workflow = CI_YML.read_text()
         script_unit = _ci_job_block("script-unit")
-        for command in (
+        self.assertNotIn("\n  rejection-authority-liveness:", workflow)
+        self.assertNotIn("rejection_authority_changed", workflow)
+        self.assertNotIn("validate_rejection_issue_manifest.py", workflow)
+        self.assertNotIn("issues: read", workflow)
+        _assert_executable_run_once(
+            script_unit,
             ".venv/bin/python scripts/check_rejection_authority_boundary.py",
-            '.venv/bin/python scripts/validate_rejection_issue_manifest.py --pr-head "$PR_HEAD"',
-        ):
-            _assert_executable_run_once(liveness, command)
-            self.assertNotIn("run: " + command, script_unit)
+        )
 
 
 class DiagnosticKindOracleJobTests(unittest.TestCase):
@@ -4027,7 +4016,6 @@ class DocsOnlySkipTests(unittest.TestCase):
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
-        "rejection-authority-liveness",
         "diagnostic-kind-oracle",
     }
     # Jobs that run for every implementation event, including docs-only PRs.

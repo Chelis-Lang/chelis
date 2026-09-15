@@ -432,29 +432,18 @@ REGISTRIES of what actually exists:
   boundary source owner, the sole citation exclusion, exact parsing, both drift
   directions, duplicate handling, and Rust byte agreement.
 - **A source-derived manifest is still self-authorizing with respect to live
-  tracker state** - the same PR can cite a closed issue, a PR number, or a
-  nonexistent number and regenerate a structurally valid row. Every
-  construction, registry, validator, imported liveness-helper, detector, and
-  workflow input therefore remains in the `Rejection Authority Liveness`
-  change set. Every `.rs` path and every file named `Cargo.toml` anywhere in
-  the repository conservatively triggers that job, including a newly added
-  workspace member or a production `#[path]` target outside its target
-  directory; the job reruns structural source and generated-byte agreement
-  before tracker validation, even when no authority row changes. The PR job
-  verifies only added or modified authority rows against the live tracker
-  (exists, is an issue, is open). It checks out the synthetic merge with full
-  history and passes the event's exact PR head to the validator. The candidate
-  must have two parents and its second parent must match that head; the first
-  parent supplies the committed base manifest. Missing history, a mismatched
-  head, or an unreadable or invalid base manifest fails closed. Both manifests
-  use the same strict schema parser. In schema 1 every row has fixed
-  `kind=issue` and `state=open`, so a valid modified identity is a renumbered
-  row: its successor requires live validation. Removed rows need no lookup,
-  and repeated source sites do not create additional rows. Unchanged rows,
-  including an additional source site citing an existing authority, remain
-  owned by the standing canary. The validator prints the compared commits
-  and selected issue numbers. Without `--pr-head`, it checks every row. The first
-  scheduled §C7.5 slice is now delivered by
+  tracker state** - one change can cite a closed issue, a PR number, or a
+  nonexistent number and regenerate a structurally valid row. Pull-request
+  validation therefore splits the complete offline construction boundary
+  across existing owners: `script-unit` checks privacy and source usage, while
+  the always-running Docs Phase 4B oracle freshly derives production/compiler
+  closure, generated-byte agreement, registry membership, and citation syntax.
+  Neither queries mutable GitHub state. Recent successful dedicated jobs spent
+  10-14 minutes re-deriving the complete source manifest even when the
+  changed-row selection was empty.
+  GitHub issue state is project metadata rather than [05-UNS-5] semantic
+  authority, so the daily/manual canary is the sole automated exists/kind/open
+  owner. It runs
   `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
   check out `main`, freshly rederive the complete standing manifest, and fail
   closed while resolving every row through the issue API. A constant
@@ -469,22 +458,15 @@ REGISTRIES of what actually exists:
   every exact-title match on the next success. This is the standing
   issue-authority canary only; it does not
   deliver the pending exclusion/census/oracle matrix or complete §C7.5.
-  Membership answers the compile-time question; the change-gated and
-  scheduled jobs answer the truth question at their respective executions.
+  Membership answers the compile-time question; the scheduled job answers the
+  mutable tracker-state question at its execution.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
-  privacy errors, locked by `compile_fail` doctests. The required CI job also
-  runs the boundary checker before the network-backed manifest validation.
-  That dedicated liveness job owns fresh production-graph and rustc dep-info
-  execution. Cargo metadata supplies each production target's package, name,
-  kind, root, and required features. The compiler closure enables the union of
-  those package-qualified features and requires matching non-test dep-info for
-  every exact target identity; a newly feature-gated target cannot be silently
-  skipped. Ordinary Python unit discovery tests the parsers, mutations, and
-  orchestration with supplied source evidence; it does not rerun the full
-  Cargo inventory or compiler closure. This keeps the source and tracker
-  checks fresh and fail-closed without executing the same expensive derivation
-  several times in one CI run.
+  privacy errors, locked by `compile_fail` doctests. The PR `script-unit` job
+  runs the boundary checker. The Docs Phase 4B oracle uses Cargo metadata for
+  each production target's package, name, kind, root, and required features;
+  its compiler closure requires matching non-test dep-info for every exact
+  target identity.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's
@@ -510,8 +492,8 @@ admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; a same-PR manifest addition of a closed issue, a PR number,
-or a nonexistent number fails the change-gated live validation. An
+validate; a closed issue, PR number, or nonexistent number fails the
+scheduled or manual live validation. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update
@@ -1577,72 +1559,24 @@ row has no token to parse. Discovery of the [#919] shape (sites that
 derived classes - which would have counted those panics - and to the
 probe corpus, not to this binder.
 
-### C7.5 Change-gated and scheduled authority
+### C7.5 Offline admission and scheduled authority
 
-A named structural authority must actually execute: pre-merge when its
-inputs change, and on a schedule as the drift canary for everything
-else. A point-in-time run is phase-completion evidence, never
-class-maintenance evidence. The Phase 2 oracle's two
-controlled-mutation legs - the plan's own named authority - currently
-run in no CI job; only their self-tests are continuous. A nightly
-alone would be honest as a canary but is NOT recurrence prevention: it
-detects a hole only after main has moved. Phase 4 therefore delivers
-both halves:
+A named authority executes where its evidence is stable. Privacy and source
+usage execute pre-merge in `script-unit`; fresh compiler closure and generated
+registry agreement execute in the always-running Docs Phase 4B oracle. Mutable
+GitHub issue state executes on the daily/manual standing canary and at
+release/red-team checkpoints; it is project metadata, not [05-UNS-5] semantic
+authority. Phase 4 therefore delivers both owners:
 
-1. **Change-gated, pre-merge, blocking - with the trigger loop
-   closed.** A filter derived only from the already-ratified §C6
-   inventory has a hole exactly where it matters: a NEW consumer is by
-   definition not in the inventory yet, so its path would never fire
-   the filter, and the nightly would find it only after merge. The
-   loop closes in two moves. First, per §C7.3, discovery and the
-   manifest-totality guard are unconditional per-PR workspace tests -
-   a PR adding a consumer, member, or root goes red pre-merge with no
-   filter involved, and can only go green by editing the ratified
-   inventory or the registry. Second, the mutation job's path filter
-   covers the files that edit therefore touches: the vocabulary owner
-   sources, `host_abi.rs`, the RATIFIED INVENTORY FILE itself, the
-   CANONICAL EXCLUSION REGISTRY (the third authorization route, per
-   §C7.3 - one artifact, so the filter names it exhaustively), the
-   §C2.1 issue manifest, the root `Cargo.toml`, the non-Cargo
-   product-root registry, the oracle scripts, and the workflows. A new
-   consumer thus cannot reach main without the discovery test forcing
-   an inventory, exclusion-registry, or root-registry edit, and none
-   of those edits
-   can merge without the mutation legs running. The same job carries
-   the §C2.1/§C7 exclusion live validation: added or modified issue-
-   manifest rows AND added or modified canonical-exclusion rows are
-   resolved through the same validator against the tracker (exists,
-   is an issue rather than a PR, is open) before merge. It also runs
-   the sibling [#729] §C6 census-liveness command
-   (`scripts/capacity_census_liveness.py`) when the capacity census or
-   its citations change - converged 2026-07-31 from that plan's
-   original manual-only gate; the script, pass line, and census
-   contract remain [#729]'s, the scheduling and gating are this
-   section's (the [#732] oracle split), and the census artifacts join
-   this filter. An exclusion
-   row cannot bypass the check by citing a standing manifest entry:
-   the changed exclusion's `IssueRef` is re-queried too. **The live
-   check's operational consequences, named rather than implied:** the
-   validation step requires `issues: read` on its job (`ci.yml`'s
-   restrictive permissions block grants nothing by default, and no
-   blocking job queries the issue API today - the open/close pattern
-   this doc cites lives in separate `report` jobs with
-   `issues: write`); tracker unavailability fails CLOSED as a
-   retryable job failure, never a merge-through; and the live half is
-   CI-owned - `scripts/gate.py --local` runs the membership and shape
-   half offline, exactly as the workspace nextest stage is CI-owned
-   in the existing gate split. The
-   crate-scoped `HostAbiType` leg runs on every
-   filter match; the workspace vocabulary leg runs when the vocab
-   owner, the inventory, the exclusion registry, the root manifest, or
-   the product-root registry changes. The job is classified in
-   `scripts/test_gate.py`'s job tables in the same change.
-   Trigger controls land with the workflow: a planted new workspace
-   member, a planted vocab dependency edge, a planted file in a
-   previously uninventoried consumer, and a planted non-Cargo root
-   must each (a) fail the per-PR discovery tests and (b) have their
-   forced inventory/registry edit matched by the filter - asserted
-   against the workflow's path list, not assumed.
+1. **Offline, pre-merge, blocking - with the trigger loop closed.**
+   Per §C7.3, discovery and manifest totality are unconditional PR tests:
+   adding a consumer, member, root, citation, or exclusion cannot pass by
+   avoiding a path filter. The `script-unit` worker executes
+   `check_rejection_authority_boundary.py` for privacy and source-usage checks.
+   The always-running Docs Phase 4B oracle freshly derives production/compiler
+   closure and generated registry agreement, including on docs-only numbered
+   spec changes. The crate-scoped and workspace vocabulary mutation legs retain
+   their existing PR owners. This half performs no GitHub issue lookup.
 2. **Scheduled full matrix, the drift canary.**
    `loud-unsupported-nightly.yml`: a cron workflow running
    `scripts/loud_unsupported_phase2_oracle.py` in full,
@@ -1682,8 +1616,9 @@ both halves:
    match on success, so a legacy or race-created duplicate cannot survive
    recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
    loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
-   and the capacity-census liveness sweep remain pending. Regular PRs validate
-   changed issue-authority rows under §C2.1. The capacity-liveness reader's
+   and the capacity-census liveness sweep remain pending. Regular PR validation
+   collectively runs the complete offline construction boundary under §C2.1.
+   The capacity-liveness reader's
    final-binding format repair is separate: native tagged transports and the
    [05-OP-45] shape operation need no issue lookup, and retired binding
    citations are rejected. That persisted-shape check supplies no current
@@ -1692,9 +1627,8 @@ both halves:
    is only the standing rejection-authority drift canary; neither execution
    half nor §C7.5 as a whole is complete.
 
-Neither half alone satisfies this section: the gated job without the
-nightly leaves unfiltered drift invisible; the nightly without the
-gated job is a canary mislabeled as prevention.
+The offline boundary and standing canary prove different facts; neither
+substitutes for the other.
 
 ---
 
@@ -1712,8 +1646,8 @@ gated job is a canary mislabeled as prevention.
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 | §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | the deciding atom [05-UNS-6] (spec/05 §7) + this doc + the wire-spelling lock test, same PR |
 | §C2.1 `RejectionAuthority` shape | Phase 3 | the deciding atom [05-UNS-5] (spec/05 §7) + this doc + [#687] corpus, same PR |
-| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions are typed rows - `Structural` with a reviewed reason, or `Deferred` carrying an `IssueRef` that passes changed-row live validation and relevance review |
-| §C7.5 execution jobs (the change-gated `ci.yml` job + the nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
+| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions are typed rows - `Structural` with a reviewed reason, or `Deferred` carrying a structurally valid `IssueRef` and explicit relevance review |
+| §C7.5 execution jobs (offline PR boundary + nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
 
@@ -1736,13 +1670,9 @@ gated job is a canary mislabeled as prevention.
 6. **Interlock edits are bidirectional.** Any change to §I1's boundary
    with [#729] updates both documents in the same change set. The same
    rule governs the §I2 interlocks.
-7. **A named structural authority executes pre-merge when its inputs
-   change, and on a schedule otherwise** (§C7.5). A point-in-time
-   oracle run is phase-completion evidence only; class maintenance
-   requires the change-gated blocking job plus the scheduled full
-   matrix with its open/close tracking-issue report. A scheduled-only
-   authority is a canary, not prevention; an authority with neither is
-   itself a hole of this class and gets censused.
+7. **Stable structural evidence executes pre-merge; mutable external
+   liveness executes on a schedule and at release/red-team checkpoints**
+   (§C7.5). An authority with neither owner is a hole and gets censused.
 8. **Ratchet universes are derived, never enumerated** (§C7). A
    recurrence mechanism whose scope is a hand-maintained list is
    mis-rung; scope narrowing is an annotated, issue-backed exclusion.
@@ -2037,9 +1967,9 @@ planted-mutation controls (planted bypass in a non-chokepoint
 compiler-api module fails the workspace check, byte-restored after);
 and the authority admission set - empty atom, malformed atom,
 well-shaped nonexistent atom, issue zero, closed issue, PR-number
-citation, nonexistent nonzero issue, and the same-PR manifest
-addition of any such number - each rejected at construction,
-validation, or the change-gated live check. The supported-neighbor
+citation, nonexistent nonzero issue, and a manifest addition of any such
+number - each rejected at construction,
+offline validation, or the scheduled/manual live check. The supported-neighbor
 control is an open ISSUE manifest row (chelis#879), which passes those
 structural checks; deliberately attaching that unrelated issue to a
 rejection is the paired review-negative control and MUST be rejected
@@ -2091,13 +2021,9 @@ tripwire, §C7, and census rows 24-25 and 27.
    member list.
 5. **Census row 25's conversion** ([#958], the einsum default), the
    row shrinking with the fix per B1.
-6. **Both §C7.5 execution halves**: the change-gated blocking `ci.yml`
-   job for the mutation legs and the shared manifest/exclusion live
-   validation (path
-   filter per §C7.5: the vocab owners, `host_abi.rs`, the ratified
-   inventory, the canonical exclusion registry, the issue manifest,
-   the root `Cargo.toml`, the non-Cargo registry, the oracle scripts,
-   the workflows; classified in `scripts/test_gate.py`), and
+6. **Both §C7.5 execution owners**: the offline construction and
+   discovery boundary split across PR `script-unit` and the always-running
+   Docs Phase 4B oracle, and
    `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
@@ -2128,14 +2054,11 @@ with the ignore-ledger equality and the live-row probe-record
 existence check; the §C7.3 dual-source discovery scan; the
 `compiler_invariant!` guard-referent tier (every guard resolves in the
 selected test set or the atom registry); the execution-wiring
-assertions (the change-gated `ci.yml` job exists, is classified in
-`scripts/test_gate.py`, and its path filter covers the ratified
-inventory file, the canonical exclusion registry, the §C2.1 issue
-manifest, the root `Cargo.toml`, and the non-Cargo registry -
-the §C7.5 trigger-loop closure, asserted against the workflow's
-actual path list; the nightly file exists, names both oracle runners,
+assertions (PR `script-unit` and the always-running Docs Phase 4B oracle
+jointly execute the offline rejection construction boundary; the nightly file
+exists, names both oracle runners,
 and appears in `NON_GATE_WORKFLOWS`; the mutation legs, changed-row
-manifest/exclusion live validation, and scheduled full standing
+manifest/exclusion structural validation, and scheduled full standing
 manifest/exclusion validation are executed by those jobs, not by this
 assertion); and negative controls
 in the Phase 2 oracle's planted style - a planted production
@@ -2155,8 +2078,8 @@ supported-neighbor control and does not become a candidate. A planted
 `Deferred` exclusion
 for a vocab-edge candidate fails until its `IssueRef` names a
 live open issue: chelis#944 (closed issue), chelis#1 (PR),
-chelis#999999999 (missing), and same-PR manifest/exclusion additions
-for each are negative controls, while chelis#879 is the structurally
+chelis#999999999 (missing), and manifest/exclusion additions for each are
+scheduled/manual liveness negatives, while chelis#879 is the structurally
 valid open-issue control; a planted `Structural` exclusion over a
 discovered candidate is red regardless of its reason. A same-PR
 exclusion citing chelis#879 but
@@ -2476,9 +2399,8 @@ closed/PR/missing issue identity cannot masquerade as live. Citation
 RELEVANCE remains explicitly review-owned; the registries do not claim to
 prove it. Sanction exactly one invariant terminal whose metadata is
 shape-checked at compile time and referent-checked by the oracle, and run
-discovery unconditionally on every PR with the mutation authority
-change-gated pre-merge and nightly otherwise, so the proof never goes stale
-and never depends on predicting a path.
+discovery unconditionally on every PR, with mutable issue state checked by the
+nightly/reporting owner, so source coverage never depends on predicting a path.
 
 [#257]: https://github.com/Chelis-Lang/chelis/issues/257
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387

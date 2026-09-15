@@ -918,7 +918,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "changed-row and standing liveness controls run in script-unit; the dedicated PR job also executes source derivation"
+reason = "offline parser and Git-comparison controls run in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
@@ -936,7 +936,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "change detection and liveness input closure tests run in script-unit"
+reason = "docs-only and diagnostic-kind change detection controls run in script-unit"
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
@@ -945,7 +945,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "liveness input trigger controls run in script-unit"
+reason = "change-detector output and path controls run in script-unit"
 tracking_issue = "chelis#1870"
 
 [[path_rule]]
@@ -1192,6 +1192,15 @@ workflow = "ci.yml"
 job = "docs"
 cadence = "pull_request and push"
 reason = "the required Docs job validates the protected dtype contract and exact change acknowledgements"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/remediation_roadmap.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected Phase 4 handoff region and exact change acknowledgement"
 tracking_issue = "chelis#1868"
 
 [[path_rule]]

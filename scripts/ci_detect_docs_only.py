@@ -22,13 +22,12 @@ would let a code change skip the heavy gate.
 Usage:
     git diff --name-only <base>..<head> | python3 scripts/ci_detect_docs_only.py
 
-Writes `docs_only=<bool>`, `rejection_authority_changed=<bool>`, and
-`diagnostic_kind_changed=<bool>` to
+Writes `docs_only=<bool>` and `diagnostic_kind_changed=<bool>` to
 the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
 mechanism); if that env var is unset it prints both lines to stdout so the
 script is runnable and testable off CI. Exit status is always 0. An empty or
-unreadable change set fails safe in both directions: it runs the full build
-and the network-backed rejection-authority liveness check.
+unreadable change set fails safe: it runs the full build and the
+diagnostic-kind mutation oracle.
 """
 
 from __future__ import annotations
@@ -86,28 +85,6 @@ EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
     }
 )
 
-# Inputs whose edits could authorize a new [05-UNS-5] issue citation or weaken
-# its checker. The CI workflow itself is included so a would-be bypass to the
-# job is exercised by the job in the same pull request.
-REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
-    {
-        ".github/workflows/ci.yml",
-        "crates/chelis-types/src/lib.rs",
-        "crates/chelis-types/src/rejection_registry_generated.rs",
-        "crates/chelis-types/src/unsupported.rs",
-        "scripts/capacity_census_liveness.py",
-        "scripts/ci_change_owned.py",
-        "scripts/check_rejection_authority_boundary.py",
-        "scripts/ci_detect_docs_only.py",
-        "scripts/generate_rejection_registries.py",
-        "scripts/test_check_rejection_authority_boundary.py",
-        "scripts/test_generate_rejection_registries.py",
-        "scripts/test_validate_rejection_issue_manifest.py",
-        "scripts/validate_rejection_issue_manifest.py",
-        "spec/design/loud_unsupported_issue_manifest.json",
-    }
-)
-
 # Every source or control whose edit could reopen same-crate Diagnostic.kind
 # construction/mutation or make the closed-vocabulary mutation oracle stop
 # exercising its real owner. The required diagnostic-kind-oracle job consumes
@@ -160,19 +137,6 @@ def is_docs_only(paths: list[str]) -> bool:
     ) and all(is_doc_path(path) for path in cleaned)
 
 
-def rejection_authority_changed(paths: list[str]) -> bool:
-    """Whether the diff must run live validation; empty input fails safe."""
-    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
-    if not cleaned:
-        return True
-    return any(
-        path in REJECTION_AUTHORITY_PATHS
-        or path.endswith(".rs")
-        or PurePosixPath(path).name == "Cargo.toml"
-        for path in cleaned
-    )
-
-
 def diagnostic_kind_changed(paths: list[str]) -> bool:
     """Whether the diff must run the C2.2 mutation oracle; empty fails safe."""
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
@@ -183,13 +147,10 @@ def diagnostic_kind_changed(paths: list[str]) -> bool:
 
 def _emit(
     docs_only: bool,
-    authority_changed: bool,
     diagnostic_changed: bool,
 ) -> None:
     lines = [
         f"docs_only={'true' if docs_only else 'false'}",
-        "rejection_authority_changed="
-        f"{'true' if authority_changed else 'false'}",
         "diagnostic_kind_changed="
         f"{'true' if diagnostic_changed else 'false'}",
     ]
@@ -206,7 +167,6 @@ def main(argv: list[str]) -> int:
     paths = sys.stdin.read().splitlines()
     _emit(
         is_docs_only(paths),
-        rejection_authority_changed(paths),
         diagnostic_kind_changed(paths),
     )
     return 0

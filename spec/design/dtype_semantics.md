@@ -853,12 +853,9 @@ Deliverables, with phase homes:
    command with `CHELIS_CAPACITY_CENSUS_WRITE=1`). The liveness command
    is `.venv/bin/python scripts/capacity_census_liveness.py`; success is
    exit 0 with final line `CAPACITY CENSUS LIVENESS: PASS`. Execution
-   is CI-owned through [#730]'s §C7.5 channel (converged 2026-07-31,
-   superseding the earlier manual-only contract): the change-gated
-   blocking job runs it when the census or its citations change, and
-   the nightly full sweep re-runs it for standing-citation drift;
-   release cuts and red-team passes remain additional manual
-   invocations, not the only ones.
+   is owned by [#730]'s §C7.5 scheduled full sweep, which remains pending;
+   release cuts and red-team passes run it manually in the meantime. The
+   offline census shape and authority-class guards remain on the PR path.
 
    The liveness reader accepts the final binding baseline's native tagged
    transports and [05-OP-45] shape operation alongside CompilerJson and
@@ -1230,19 +1227,11 @@ Deliverables, with phase homes:
      scripts/capacity_census_liveness.py`. As originally landed this
      was a manual gate run at release cuts and red-team passes, with
      the offline constraint as its rationale (round-4 red team N8,
-     recorded); **converged 2026-07-31 onto [#730]'s §C7.5 CI channel**,
-     which resolves the same offline/online split without leaving the
-     live half manual: the change-gated blocking `ci.yml` job (with
-     `issues: read`, failing CLOSED on tracker unavailability) runs the
-     liveness command pre-merge whenever the census or a citation
-     changes, and the nightly full sweep re-runs it so a cited issue
-     closing goes red within a day rather than at the next release
-     cut. A citation naming a missing issue or a PR now fails
-     pre-merge, not only at the next manual pass; the shape/liveness
-     boundary itself is unchanged. Scheduling and gating are [#730]
-     §C7.5's; this script, its pass line, and the census contract
-     remain this plan's (the same contents-vs-scheduling split as the
-     [#732] oracle interlock).
+     recorded). [#730]'s §C7.5 scheduled full sweep is the automated
+     owner and remains pending; release cuts and red-team passes run the
+     command manually until it lands. The shape/liveness boundary is
+     unchanged: PRs prove offline shape and authority classes, while the
+     scheduled/manual command proves exists/kind/open state.
    - **Failure messages teach** the rule, the sanctioned actions, and
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing
@@ -2829,8 +2818,9 @@ stay `Unimplemented`: the backend has real kernels and a documented hardware
 gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
 owes that gate rather than a diagnostic. And [#1291] and the device residual of
 [#1306] both stay open, but for different executable reasons. The remaining
-`Unimplemented` [#1306] cells cite that issue, so rejection-authority liveness
-continues to cover them. The `count` device cells are already
+`Unimplemented` [#1306] cells cite that issue, so the daily/manual standing
+rejection-authority liveness check continues to cover them. The `count` device
+cells are already
 `Implemented { kernel_id }`; no production rejection cites [#1291], so the
 source-derived rejection manifest does not carry it. [#1291] instead closes
 only when its real-hardware numerical gates are green.

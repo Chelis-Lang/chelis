@@ -681,7 +681,7 @@ Either way, chelis#1870's migration inventory must include both sites.
 - Use one source for narrow-float capability prose, then point users to the
   normative dtype matrix rather than restating its contents.
 
-### Standing canary and changed-row PR admission
+### Standing canary and offline PR admission
 
 Chelis#1961 made standing issue membership source-derived, and chelis#1971
 landed `.github/workflows/loud-unsupported-nightly.yml` with daily/manual
@@ -696,15 +696,15 @@ The sequencing preconditions are now satisfied:
 2. the scheduled standing-liveness canary has workflow-registry and
    trigger-loop controls.
 
-The pull-request check now live-validates added or modified authority rows,
-while still freshly checking complete source/manifest agreement on every
-triggered run. Its exact synthetic merge's first parent supplies the base;
-the second must equal the event PR head. Invalid Git evidence or either
-manifest fails closed. Schema 1 fixes each row's kind and state, so a changed
-valid identity is a new or renumbered issue number. The standing nightly
-continues to check every source-derived row, including unchanged authorities
-that acquire more citing sites. This delivers the issue-liveness split only;
-the structured diagnostic migration and broader §C7.5 matrix remain separate.
+Pull requests now split the complete offline source/construction boundary
+across existing owners: `script-unit` checks privacy and source usage, while
+the always-running Docs Phase 4B oracle freshly derives compiler closure and
+generated-registry agreement. The standing nightly checks every source-derived
+row, including newly added and unchanged authorities. This removes a measured
+10-14 minute network job whose successful runs commonly selected zero changed
+authorities, while preserving fail-closed scheduled exists/kind/open
+validation. The structured diagnostic migration and broader §C7.5 matrix
+remain separate.
 
 The capacity-liveness adapter must read the final binding format already
 owned by the Rust binding guard: the three native tagged transports and the
@@ -744,7 +744,7 @@ Pull-request execution reach remains the largest immediate gap:
 | rejected-cells corpus | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | Phase 3 gate contract | Selected by `ci-fast` and reached by the daily/manual broad jobs |
 | wire and bindings capacity censuses | Absent from `ci-fast`; executed by the daily/manual heavy-E2E dtype Phase 0-3 job |
-| §C7.5 standing-liveness canary | Daily/manual workflow checks every standing row on `main`; the regular PR job live-validates changed authority rows |
+| §C7.5 standing-liveness canary | Daily/manual workflow checks every standing row on `main`; PRs retain the offline source/construction boundary only |
 | newly added or changed package integration target | Required change-owned shards landed in chelis#2019 and passed merged-main acceptance; representative hosted cost trials remain under chelis#1824 |
 
 The former contrast between the two expand inventories remains historical
@@ -850,8 +850,8 @@ chelis#1973 trial.
 
 ## Remaining delivery order
 
-The required change-owned lane landed in chelis#2019, changed-row rejection
-liveness in chelis#2025, and the assessed growing-artifact replacements through
+The required change-owned lane landed in chelis#2019, the now-retired
+changed-row liveness experiment landed in chelis#2025, and the assessed growing-artifact replacements through
 chelis#2053. Their pull-request reviews and merged-main evidence are recorded
 in the owning pull requests and the companion evidence appendix. Agents must
 read [the PR-author guide](../../docs/guard_changes_for_pr_authors.md) before
@@ -874,8 +874,8 @@ The remaining work has separate owners and acceptance conditions:
    table construction. The completed chelis#1294 atom closure alone does not
    satisfy that entry condition. Preserve the diagnostic-channel convention
    and producer/transport split owned by chelis#883 instead of adding a prose
-   parser or parallel payload. The wider scheduled/change-gated authority
-   matrix remains chelis#990; chelis#2052 only repairs its current binding
+   parser or parallel payload. The wider scheduled authority matrix remains
+   chelis#990; chelis#2052 only repairs its current binding
    inventory reader.
 3. **A future Nix policy change.** The decision in chelis#1868 is to keep this
    freeze while the temporary event policy stands. Changing that policy must

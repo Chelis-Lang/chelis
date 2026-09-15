@@ -85,73 +85,25 @@ def _assert_no_run_shell_default(
     test.assertNotIn("shell", run_defaults)
 
 
-class PullRequestLivenessTests(unittest.TestCase):
-    """PR row admission and the standing canary must keep distinct modes."""
+class PullRequestBoundaryTests(unittest.TestCase):
+    """PRs keep offline source integrity; nightly owns live tracker state."""
 
-    def assert_pr_contract(self, workflow: dict) -> None:
-        job = workflow["jobs"]["rejection-authority-liveness"]
-        self.assertIn("github.event_name == 'pull_request'", job["if"])
-        self.assertIn("rejection_authority_changed", job["if"])
-        _assert_no_failure_suppression(self, job)
-        _assert_no_run_shell_default(self, workflow)
-        _assert_no_run_shell_default(self, job)
-        checkouts = [s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@")]
-        self.assertEqual(len(checkouts), 1)
-        self.assertEqual(checkouts[0].get("with", {}).get("fetch-depth"), 0)
-        self.assertEqual(
-            checkouts[0].get("with", {}).get("ref"),
-            "${{ needs.changes.outputs.candidate_sha }}",
+    def test_pr_workflow_has_no_network_liveness_job(self) -> None:
+        workflow_path = ROOT / ".github/workflows/ci.yml"
+        workflow = yaml.load(workflow_path.read_text(), Loader=UniqueLoader)
+        self.assertNotIn("rejection-authority-liveness", workflow["jobs"])
+        self.assertNotIn(
+            "validate_rejection_issue_manifest.py",
+            workflow_path.read_text(),
         )
-        commands = [s for s in job["steps"] if "run" in s and "validate_rejection_issue_manifest.py" in s["run"]]
-        self.assertEqual(len(commands), 1)
-        step = commands[0]
-        self.assertEqual(step["run"], COMMAND + ' --pr-head "$PR_HEAD"')
+        script_unit = workflow["jobs"]["script-unit"]
+        runs = [step.get("run") for step in script_unit["steps"]]
         self.assertEqual(
-            step["env"]["PR_HEAD"],
-            "${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}",
+            runs.count(
+                ".venv/bin/python scripts/check_rejection_authority_boundary.py"
+            ),
+            1,
         )
-        self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
-        self.assertNotIn("if", step)
-        self.assertNotIn("shell", step)
-
-    def workflow(self) -> dict:
-        return load_workflow((ROOT / ".github/workflows/ci.yml").read_text())
-
-    def test_pr_job_uses_full_merge_checkout_and_exact_event_head(self) -> None:
-        self.assert_pr_contract(self.workflow())
-
-    def test_rejects_missing_history_wrong_checkout_or_wrong_head(self) -> None:
-        for mutation in ["shallow", "head checkout", "wrong event"]:
-            with self.subTest(mutation=mutation):
-                workflow = self.workflow()
-                steps = workflow["jobs"]["rejection-authority-liveness"]["steps"]
-                if mutation == "shallow":
-                    steps[0]["with"] = {"fetch-depth": 1}
-                elif mutation == "head checkout":
-                    steps[0]["with"] = {
-                        "fetch-depth": 0,
-                        "ref": "${{ github.event.pull_request.head.sha }}",
-                    }
-                else:
-                    steps[-1]["env"]["PR_HEAD"] = "${{ github.sha }}"
-                with self.assertRaises(AssertionError):
-                    self.assert_pr_contract(workflow)
-
-    def test_rejects_default_standing_mode_or_suppressed_failure_on_pr(self) -> None:
-        for mutation in ["standing", "shell suppression", "continue", "skip"]:
-            with self.subTest(mutation=mutation):
-                workflow = self.workflow()
-                step = workflow["jobs"]["rejection-authority-liveness"]["steps"][-1]
-                if mutation == "standing":
-                    step["run"] = COMMAND
-                elif mutation == "shell suppression":
-                    step["run"] += " || true"
-                elif mutation == "continue":
-                    step["continue-on-error"] = True
-                else:
-                    step["if"] = False
-                with self.assertRaises(AssertionError):
-                    self.assert_pr_contract(workflow)
 
 
 def execute_report_reconciliation(script: str) -> dict:
