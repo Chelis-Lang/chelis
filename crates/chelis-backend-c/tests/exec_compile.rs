@@ -5403,8 +5403,11 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
         "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
     );
+    let reads_tensor_rank_field = src.lines().any(|line| {
+        line.contains("->rank") && (line.contains("__arg0_") || line.contains("__arg1_"))
+    });
     assert!(
-        !src.contains("->rank"),
+        !reads_tensor_rank_field,
         "host-lane rank guard must not reopen the opaque tensor descriptor:\n{src}"
     );
 

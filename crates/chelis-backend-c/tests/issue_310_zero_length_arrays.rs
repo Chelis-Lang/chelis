@@ -57,7 +57,10 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
 /// True if any emitted line declares a zero-length array, e.g.
 /// `chelis_value adt_fields0[0];` or `chelis_value tuple_values0[0];`.
 fn has_zero_length_array(src: &str) -> bool {
-    src.lines().any(|line| line.contains("[0];"))
+    src.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("chelis_value ") && line.contains("[0];")
+    })
 }
 
 // ---- Nullary ADT variant -------------------------------------------------

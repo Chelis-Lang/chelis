@@ -21,13 +21,14 @@
 //! here mechanically (in addition to the cli-level structural checks)
 //! to keep the per-op invariants symmetric in the IR test surface.
 
-use chelis_ir::dag::{Dag, RiscOp};
+use chelis_ir::dag::{Dag, ExtentWitnessSite, RiscOp, RtAxis};
 use chelis_ir::host::{
-    HostSparseOpSummary, HostTensorInput, HostTensorSpecialization,
-    summarize_sparse_helper_for_test,
+    HostSparseOpSummary, HostTensorInput, HostTensorSpecialization, SparseOpKind,
+    SparseSummaryAttempt, SummaryRejectionClass, SummaryRejectionDetail,
+    summarize_sparse_helper_for_test, try_summarize_sparse_helper_for_test,
 };
 use chelis_ir::{DimInfo, TensorType};
-use chelis_types::types::Prim;
+use chelis_types::{scalar_from_i64, types::Prim};
 
 fn t_f32(dims: Vec<usize>) -> TensorType {
     TensorType {
@@ -210,6 +211,107 @@ fn scatter_replace_helper_with_load_operands_is_summarized() {
             Some(HostTensorSpecialization::SparseScatterReplace(_))
         ),
         "expected SparseScatterReplace summary, got {summary:?}"
+    );
+}
+
+#[test]
+fn literal_result_claim_owner_copy_preserves_sparse_summary() {
+    let mut dag = Dag::new();
+    let values_ty = t_f32(vec![1000, 128]);
+    let indices_ty = t_i64(vec![64]);
+    let output_ty = t_f32(vec![64, 128]);
+    let values = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        values_ty.clone(),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load { name: "idx".into() },
+        vec![],
+        indices_ty.clone(),
+        None,
+    );
+    let gathered = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![values, indices],
+        output_ty.clone(),
+        None,
+    );
+    let claim = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::LiteralResultClaim,
+            parameter: String::new(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![scalar_from_i64("load", Prim::Int64, 64).unwrap()],
+            claims: vec![],
+        },
+        vec![],
+        t_i64(vec![]),
+        None,
+    );
+    dag.add_shape_dep(gathered, claim);
+    let inner = dag.add_node(RiscOp::Copy, vec![gathered], output_ty.clone(), None);
+    dag.add_shape_dep(inner, gathered);
+    let root = dag.add_node(RiscOp::Copy, vec![inner], output_ty.clone(), None);
+    dag.add_shape_dep(root, gathered);
+    dag.add_shape_dep(root, gathered);
+    dag.add_root(root);
+
+    let inputs = vec![input("table", values_ty), input("idx", indices_ty)];
+    let summary = summarize_sparse_helper_for_test(&dag, &inputs, &output_ty);
+    assert!(
+        matches!(summary, Some(HostTensorSpecialization::SparseGather(_))),
+        "a copy that exists only to own a literal result claim must preserve the gather summary; got {summary:?}"
+    );
+}
+
+#[test]
+fn ordinary_copy_after_sparse_op_remains_post_processing() {
+    let mut dag = Dag::new();
+    let values_ty = t_f32(vec![1000, 128]);
+    let indices_ty = t_i64(vec![64]);
+    let output_ty = t_f32(vec![64, 128]);
+    let values = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        values_ty.clone(),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load { name: "idx".into() },
+        vec![],
+        indices_ty.clone(),
+        None,
+    );
+    let gathered = dag.add_node(
+        RiscOp::Gather { axis: 0 },
+        vec![values, indices],
+        output_ty.clone(),
+        None,
+    );
+    let root = dag.add_node(RiscOp::Copy, vec![gathered], output_ty.clone(), None);
+    dag.add_root(root);
+
+    let inputs = vec![input("table", values_ty), input("idx", indices_ty)];
+    let attempt = try_summarize_sparse_helper_for_test(&dag, &inputs, &output_ty);
+    let Err(SparseSummaryAttempt::Rejected(rejection)) = attempt else {
+        panic!("ordinary copy must remain rejected post-processing; got {attempt:?}");
+    };
+    assert_eq!(
+        rejection.rejection_class,
+        SummaryRejectionClass::PostProcessingAfterSparseOp
+    );
+    assert_eq!(
+        rejection.detail,
+        SummaryRejectionDetail::PostProcessingAfterSparseOp {
+            op: SparseOpKind::Gather,
+            tail_op: "copy".into(),
+        }
     );
 }
 

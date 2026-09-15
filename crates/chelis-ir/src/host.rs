@@ -6862,6 +6862,29 @@ fn summarize_sparse_helper_from_parts(
     try_summarize_sparse_helper(dag, inputs, output).ok()
 }
 
+fn literal_result_claim_owner_input<'a>(
+    dag: &'a crate::Dag,
+    root: &'a crate::dag::DagNode,
+) -> Option<&'a crate::dag::DagNode> {
+    if !matches!(root.op, RiscOp::Copy)
+        || root.inputs.len() != 1
+        || root.shape_deps.is_empty()
+        || !root.shape_deps.iter().all(|dependency| {
+            matches!(
+                dag.get(*dependency).map(|node| &node.op),
+                Some(RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                })
+            ) || crate::axis_sources::has_literal_result_claim(dag, *dependency)
+        })
+    {
+        return None;
+    }
+    let input = dag.get(root.inputs[0])?;
+    (input.output_type == root.output_type).then_some(input)
+}
+
 /// Derive a sparse-op summary for a helper whose DAG is a single
 /// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter` root
 /// whose operands are direct `RiscOp::Load`s referencing helper
@@ -6875,8 +6898,10 @@ fn summarize_sparse_helper_from_parts(
 ///
 /// * `MultipleRoots` — helper body has more than one DAG root.
 /// * `WildcardDim` — helper input/output carries a `Named("*", None)` wildcard.
-/// * `PostProcessingAfterSparseOp` — root op is not sparse but a sparse op
-///   appears in the body.
+/// * `PostProcessingAfterSparseOp` — the semantic root op is not sparse but a
+///   sparse op appears in the body. A compiler-internal `Copy` whose only
+///   shape dependencies are literal-result declaration tokens is an ownership
+///   carrier, not a semantic root.
 /// * `NonLoadOperand` — a sparse-op operand is not a direct `RiscOp::Load`, or
 ///   its `Load` does not match a helper input by name + type (rank / type
 ///   mismatch surfaces here until a dedicated `RankMismatch` check is added).
@@ -6929,11 +6954,11 @@ fn try_summarize_sparse_helper(
         .roots()
         .first()
         .expect("checked roots().len() == 1 above");
-    let root = match dag.get(root_id) {
+    let returned_root = match dag.get(root_id) {
         Some(node) => node,
         None => return Err(SparseSummaryAttempt::NotEligible),
     };
-    if root.output_type != *output {
+    if returned_root.output_type != *output {
         // Output-type mismatch is a structural shape issue — treat as
         // NotEligible to avoid emitting a diagnostic for cases that
         // are routed through a different specialization path.
@@ -6947,10 +6972,16 @@ fn try_summarize_sparse_helper(
         }));
     }
     let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
+    let mut root = returned_root;
+    while let Some(input) = literal_result_claim_owner_input(dag, root) {
+        root = input;
+    }
 
-    // Root must itself be a sparse op. If a sparse op exists deeper in
-    // the body but the root is something else, the recognizer rejects
-    // with `PostProcessingAfterSparseOp` (and names the tail op).
+    // The semantic root must itself be a sparse op. The lowerer may install a
+    // chain of same-typed Copies above it solely to retain a literal-result
+    // producer and its token through nested lowering boundaries; the helper
+    // above peels only those exact carriers. Any ordinary Copy or other op
+    // remains post-processing.
     let root_sparse_kind = sparse_op_kind(&root.op);
     if root_sparse_kind.is_none() {
         return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {

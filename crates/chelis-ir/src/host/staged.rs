@@ -331,7 +331,20 @@ impl Partition<'_> {
         // A host region evaluates each preceding expression even when its
         // value is unused. A completion root retains that execution without
         // exporting every intermediate tensor or replaying a growing prefix.
-        let dependencies = dag.nodes().iter().map(|node| node.id).collect();
+        let dependencies = dag
+            .nodes()
+            .iter()
+            .filter(|node| {
+                !matches!(
+                    node.op,
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    }
+                )
+            })
+            .map(|node| node.id)
+            .collect();
         let completed = dag.add_node(
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("const", chelis_types::types::Prim::Int64, 0)
@@ -522,7 +535,9 @@ mod tests {
     use crate::host_type_state::HostPrecisionTerm;
     use chelis_types::{scalar_from_i64, types::Prim};
 
-    fn fixture() -> (
+    fn fixture(
+        with_literal_result_claim: bool,
+    ) -> (
         Dag,
         Vec<HostSource>,
         Vec<HostParam>,
@@ -564,6 +579,20 @@ mod tests {
             scalar_type(),
             None,
         );
+        let literal_result_claim = with_literal_result_claim.then(|| {
+            dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    parameter: String::new(),
+                    axis: RtAxis::Lit(1),
+                    requirements: vec![scalar_from_i64("reshape", Prim::Int64, 2).unwrap()],
+                    claims: Vec::new(),
+                },
+                Vec::new(),
+                scalar_type(),
+                None,
+            )
+        });
         let result = dag.add_node(
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
@@ -575,6 +604,9 @@ mod tests {
             },
             None,
         );
+        if let Some(claim) = literal_result_claim {
+            dag.add_shape_dep(result, claim);
+        }
         dag.add_root(result);
         let sources = vec![HostSource {
             before: actual.0,
@@ -603,7 +635,7 @@ mod tests {
 
     #[test]
     fn staged_plan_has_one_source_and_no_unresolved_helper_inputs() {
-        let (dag, sources, params, inputs) = fixture();
+        let (dag, sources, params, inputs) = fixture(false);
         let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new(), None).unwrap();
         assert_eq!(plan.stages().len(), 3);
         let mut available = BTreeSet::from(["x".to_owned()]);
@@ -645,8 +677,19 @@ mod tests {
     }
 
     #[test]
+    fn completion_roots_do_not_take_ownership_of_literal_result_claims() {
+        let (dag, sources, params, inputs) = fixture(true);
+        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new(), None).unwrap();
+        for stage in plan.stages() {
+            if let HostStage::Kernel { dag, .. } = stage {
+                assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+            }
+        }
+    }
+
+    #[test]
     fn staged_plan_rejects_missing_duplicate_wrong_type_and_forward_producers() {
-        let (dag, sources, params, inputs) = fixture();
+        let (dag, sources, params, inputs) = fixture(false);
         for mutation in [
             "missing",
             "duplicate",

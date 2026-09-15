@@ -1,6 +1,6 @@
 {
   "schema_version": 7,
-  "freeze_sha256": "66b9d836f48ebbf653c3b58f5a15bc844437ae478542644302293615c76cd412",
+  "freeze_sha256": "f17c376e0f4ee34ae3736bffd3dc39a0fe1535201fdf2ebe1c73503682a2f425",
   "source_inventory": {
     "mutations": [
       {
@@ -2029,6 +2029,14 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_runtime_dim_sites",
       "deletion_phase": 4
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_inherited_result_guards",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal_with_result_claims",
+      "deletion_phase": 1
     }
   ],
   "active_debt": [
@@ -2761,10 +2769,6 @@
       "sample": "index . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal",
-      "sample": "path_random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
-    },
-    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=infer_app_expr_host_type",
       "sample": "kids . len () . saturating_sub (2)"
     },
@@ -3039,6 +3043,14 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_runtime_dim_sites",
       "sample": "((const int64_t*)t{}_data)[0]"
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_inherited_result_guards",
+      "sample": "__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){..."
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal_with_result_claims",
+      "sample": "path_random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
     }
   ]
 }
