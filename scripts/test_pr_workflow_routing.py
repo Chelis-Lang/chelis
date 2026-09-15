@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import re
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -25,6 +27,14 @@ REQUIRED_IMPLEMENTATION_JOBS = {
     "docs": "Docs",
     "no-ai-authorship": "No AI authorship markers",
 }
+PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
+    "content change",
+    "hand-resolved conflict",
+    "base-changing rebase",
+    "base-branch retarget",
+)
+
+
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
 
@@ -261,12 +271,14 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
 def assert_author_contract(test: unittest.TestCase) -> None:
     agents = AGENTS.read_text()
     guide = AUTHOR_GUIDE.read_text()
-    for text in (agents, guide):
+    for raw_text in (agents, guide):
+        text = " ".join(raw_text.split())
         test.assertIn("PR Contract Acknowledgements", text)
         test.assertIn("PR Base Retarget Validation", text)
         test.assertIn("PR Package Expansion", text)
         test.assertIn("exact head SHA", text)
-        test.assertIn("candidate change", text)
+        for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
+            test.assertIn(requirement, text)
         test.assertIn("inherited", text)
         test.assertIn("incomplete coverage", text)
         test.assertIn("base", text)
@@ -294,6 +306,33 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         actions_events(workflow)["pull_request"]["types"].append("edited")
         with self.assertRaises(AssertionError):
             assert_ci_metadata_routing(self, workflow)
+
+    def test_author_contract_requires_each_explicit_invalidation_class(self) -> None:
+        originals = {
+            AGENTS: AGENTS.read_text(),
+            AUTHOR_GUIDE: AUTHOR_GUIDE.read_text(),
+        }
+        for document in originals:
+            for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
+                mutated = dict(originals)
+                pattern = r"\s+".join(
+                    re.escape(word) for word in requirement.split()
+                )
+                mutated[document] = re.sub(pattern, "", mutated[document])
+                with (
+                    self.subTest(document=document.name, requirement=requirement),
+                    patch.object(
+                        Path,
+                        "read_text",
+                        autospec=True,
+                        side_effect=lambda path: mutated[path],
+                    ),
+                    self.assertRaisesRegex(
+                        AssertionError,
+                        re.escape(f"'{requirement}' not found"),
+                    ),
+                ):
+                    assert_author_contract(self)
 
     def test_base_retarget_signal_and_dedicated_acknowledgements_are_required(self) -> None:
         retarget = yaml.safe_load(RETARGET.read_text())
