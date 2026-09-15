@@ -67,6 +67,192 @@ fn float(value: ScalarValue, dtype: Prim) -> Result<f64> {
     Ok(number)
 }
 
+fn input_rank(dag: &WireDag, node: &WireDagNode, slot: usize) -> Option<usize> {
+    node.inputs
+        .get(slot)
+        .and_then(|id| usize::try_from(*id).ok())
+        .and_then(|id| dag.nodes.get(id))
+        .map(|input| input.output_type.dims.len())
+}
+
+fn rt_dim_supplies_extent(dim: &WireRtDim) -> bool {
+    matches!(
+        dim,
+        WireRtDim::Lit { .. } | WireRtDim::Node { .. } | WireRtDim::InputAxis { .. }
+    )
+}
+
+/// Match lowering's admission rule for a declaration token retained by this
+/// producing axis. An op-computed extent is usable only where the existing
+/// guard derivation can compute it before the producer allocates its result.
+fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usize) -> bool {
+    let rank = node.output_type.dims.len();
+    if axis >= rank {
+        return false;
+    }
+    match &node.op {
+        WireRiscOp::Add
+        | WireRiscOp::Sub
+        | WireRiscOp::Mul
+        | WireRiscOp::Div
+        | WireRiscOp::FloorDiv
+        | WireRiscOp::TruncDiv
+        | WireRiscOp::Mod
+        | WireRiscOp::CmpLt
+        | WireRiscOp::MaxElem
+        | WireRiscOp::MinElem
+        | WireRiscOp::ExtremaAdjoint { .. }
+        | WireRiscOp::Relu
+        | WireRiscOp::ReluAdjoint
+        | WireRiscOp::Neg
+        | WireRiscOp::Recip
+        | WireRiscOp::Exp
+        | WireRiscOp::Log
+        | WireRiscOp::Sin
+        | WireRiscOp::Sqrt
+        | WireRiscOp::Cos
+        | WireRiscOp::Tan
+        | WireRiscOp::Atan
+        | WireRiscOp::Abs
+        | WireRiscOp::Floor
+        | WireRiscOp::Ceil
+        | WireRiscOp::Round
+        | WireRiscOp::UniformLike { .. }
+        | WireRiscOp::Dropout { .. }
+        | WireRiscOp::Copy
+        | WireRiscOp::Drop
+        | WireRiscOp::Realize
+        | WireRiscOp::Cast { .. }
+        | WireRiscOp::CastTrunc { .. }
+        | WireRiscOp::FusedElem { .. }
+        | WireRiscOp::Store { .. } => node.inputs.iter().any(|id| {
+            usize::try_from(*id)
+                .ok()
+                .and_then(|id| dag.nodes.get(id))
+                .is_some_and(|input| input.output_type.dims.len() == rank)
+        }),
+        WireRiscOp::Sum { axis: reduced, .. }
+        | WireRiscOp::MaxReduce { axis: reduced }
+        | WireRiscOp::MinReduce { axis: reduced }
+        | WireRiscOp::ProdReduce { axis: reduced }
+        | WireRiscOp::Argmax { axis: reduced }
+        | WireRiscOp::Argmin { axis: reduced } => {
+            let Some(input_rank) = input_rank(dag, node, 0) else {
+                return false;
+            };
+            usize::try_from(*reduced)
+                .ok()
+                .is_some_and(|reduced| reduced < input_rank && input_rank - 1 == rank)
+        }
+        WireRiscOp::Count { axes } => {
+            let Some(input_rank) = input_rank(dag, node, 0) else {
+                return false;
+            };
+            let normalized = axes
+                .iter()
+                .map(|axis| usize::try_from(*axis))
+                .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>();
+            normalized.is_ok_and(|axes| {
+                axes.iter().all(|axis| *axis < input_rank)
+                    && input_rank.saturating_sub(axes.len()) == rank
+            })
+        }
+        WireRiscOp::ReduceWindow { window_shape, .. } => {
+            input_rank(dag, node, 0).is_some_and(|input_rank| {
+                window_shape.len() <= input_rank
+                    && input_rank == rank
+                    && axis < input_rank - window_shape.len()
+            })
+        }
+        WireRiscOp::ReduceWindowGrad { .. } => {
+            input_rank(dag, node, 0).is_some_and(|input_rank| input_rank == rank)
+        }
+        WireRiscOp::Reshape { new_shape } => {
+            new_shape.get(axis).is_some_and(rt_dim_supplies_extent)
+        }
+        WireRiscOp::Permute { axes } => axes.len() == rank,
+        WireRiscOp::Expand {
+            axis: expanded,
+            size,
+        } => {
+            let Some(input_rank) = input_rank(dag, node, 0) else {
+                return false;
+            };
+            let Some(expanded) = usize::try_from(*expanded).ok() else {
+                return false;
+            };
+            ((rank == input_rank && expanded < input_rank)
+                || (input_rank.checked_add(1) == Some(rank) && expanded <= input_rank))
+                && (axis != expanded || rt_dim_supplies_extent(size))
+        }
+        WireRiscOp::OneHot { .. } => {
+            input_rank(dag, node, 0).and_then(|input_rank| input_rank.checked_add(1)) == Some(rank)
+        }
+        WireRiscOp::Pad { padding, .. } | WireRiscOp::Shrink { bounds: padding } => {
+            axis < padding.len()
+        }
+        WireRiscOp::Stride { strides } => matches!(
+            strides.get(axis),
+            Some(WireRtDim::Lit { value }) if value.get() == 1
+        ),
+        WireRiscOp::Shape { .. }
+        | WireRiscOp::ExtentWitness { .. }
+        | WireRiscOp::CheckedReshapeExtent { .. } => false,
+        WireRiscOp::CheckedUnitAxis { .. } => true,
+        WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => {
+            match node.output_type.dims.get(axis) {
+                Some(WireDimInfo::Lit { .. } | WireDimInfo::Named { size: Some(_), .. }) => true,
+                Some(WireDimInfo::Named { name, size: None }) => {
+                    let sibling_shaped = node
+                        .shape_deps
+                        .first()
+                        .and_then(|id| usize::try_from(*id).ok())
+                        .and_then(|id| dag.nodes.get(id))
+                        .is_some_and(|sibling| sibling.output_type.dims.len() == rank);
+                    (!name.is_empty() && name != "*") || sibling_shaped
+                }
+                None => false,
+            }
+        }
+        WireRiscOp::Load { .. } => true,
+        WireRiscOp::BlasMatmul { batch_dims, .. } => {
+            rank >= 2
+                && batch_dims.len() == rank - 2
+                && node.inputs.iter().any(|id| {
+                    usize::try_from(*id)
+                        .ok()
+                        .and_then(|id| dag.nodes.get(id))
+                        .is_some_and(|input| input.output_type.dims.len() == rank)
+                })
+                && axis < batch_dims.len()
+        }
+        WireRiscOp::Gather {
+            axis: gathered_axis,
+        } => {
+            let Some(values_rank) = input_rank(dag, node, 0) else {
+                return false;
+            };
+            let Some(indices_rank) = input_rank(dag, node, 1) else {
+                return false;
+            };
+            usize::try_from(*gathered_axis)
+                .ok()
+                .is_some_and(|gathered_axis| {
+                    gathered_axis < values_rank
+                        && values_rank
+                            .checked_sub(1)
+                            .and_then(|rank| rank.checked_add(indices_rank))
+                            == Some(rank)
+                })
+        }
+        WireRiscOp::ScatterAdd { .. }
+        | WireRiscOp::Scatter { .. }
+        | WireRiscOp::ScatterElements { .. } => {
+            input_rank(dag, node, 0).is_some_and(|input_rank| input_rank == rank)
+        }
+    }
+}
+
 pub(super) fn validate(dag: &WireDag) -> Result<()> {
     for (index, node) in dag.nodes.iter().enumerate() {
         if node.id != host_index(index) {
@@ -92,10 +278,12 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 ..
             } = &required.op
             {
-                if usize::try_from(*value).map_or(true, |axis| axis >= node.output_type.dims.len())
+                if usize::try_from(*value)
+                    .ok()
+                    .is_none_or(|axis| !literal_result_axis_is_supported(dag, node, axis))
                 {
                     return Err(reject(
-                        "literal result dependency requires a valid producing axis",
+                        "literal result dependency requires a supported producing axis",
                     ));
                 }
                 continue;

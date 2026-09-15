@@ -666,6 +666,57 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
     let json = serde_json::to_value(&dag).unwrap();
     let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+    let rank_two = WireTensorType {
+        dims: vec![
+            WireDimInfo::Named {
+                name: "*".into(),
+                size: None,
+            },
+            WireDimInfo::Named {
+                name: "*".into(),
+                size: None,
+            },
+        ],
+        precision: "f32".into(),
+    };
+    let mut unsupported = dag.clone();
+    unsupported.nodes[1].output_type = rank_two.clone();
+    let mut rhs = unsupported.nodes[1].clone();
+    rhs.id = 2;
+    rhs.op = WireRiscOp::Load { name: "y".into() };
+    unsupported.nodes.truncate(2);
+    unsupported.nodes.push(rhs);
+    unsupported.nodes.push(WireDagNode {
+        id: 3,
+        op: WireRiscOp::BlasMatmul {
+            batch_dims: vec![],
+            m: WireDimExpr::Sym { name: "m".into() },
+            n: WireDimExpr::Sym { name: "n".into() },
+            k: WireDimExpr::Sym { name: "k".into() },
+            accumulator: "f32".into(),
+        },
+        inputs: vec![1, 2],
+        shape_deps: vec![0],
+        output_type: rank_two,
+        span_id: None,
+        merged_spans: vec![],
+    });
+    unsupported.roots = vec![3];
+    assert!(
+        serde_json::to_value(&unsupported).is_err(),
+        "the encoder must reject a literal claim on an unsupported producing axis"
+    );
+    let unsupported_json = serde_json::json!({
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "roots": unsupported.roots,
+        "nodes": unsupported.nodes,
+    });
+    assert!(
+        WireDag::from_validated_json(&unsupported_json.to_string()).is_err(),
+        "the decoder must reject a literal claim on an unsupported producing axis"
+    );
+
     for mutation in [
         "old_version",
         "input",
