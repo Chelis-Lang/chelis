@@ -1,0 +1,30 @@
+name: Shared runner canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-runner-canary
+  cancel-in-progress: false
+
+jobs:
+  cache-canary:
+    if: github.ref == 'refs/heads/main' && github.event.repository.private
+    runs-on:
+      group: chelis-ci-trusted
+      labels: chelis-ci-warm-x64
+    timeout-minutes: 20
+    steps:
+      - name: Check out the admitted revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create the isolated Python environment
+        run: /run/current-system/sw/bin/uv venv --python /run/current-system/sw/bin/python3 .venv
+      - name: Check the canary contracts
+        run: .venv/bin/python -m unittest scripts.test_shared_runner_canary
+      - name: Check member cache writes and readback
+        run: .venv/bin/python scripts/shared_runner_canary.py
