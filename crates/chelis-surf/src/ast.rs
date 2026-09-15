@@ -349,17 +349,67 @@ impl std::fmt::Display for DimensionLiteral {
     }
 }
 
+/// A tensor precision spelling with the exact token span that authored it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TensorPrecision {
+    name: String,
+    span: Span,
+}
+
+impl TensorPrecision {
+    pub fn new(name: impl Into<String>, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            span,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl std::fmt::Display for TensorPrecision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(formatter)
+    }
+}
+
+impl std::ops::Deref for TensorPrecision {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for TensorPrecision {
+    fn eq(&self, other: &str) -> bool {
+        self.name == other
+    }
+}
+
+impl PartialEq<&str> for TensorPrecision {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
-    Named(String, Span),                       // f32, bool, MyType
-    DimensionLiteral(DimensionLiteral, Span),  // integer only in Name[...]
-    Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
-    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
-    Ref(Box<TypeExpr>, Span),                  // &T
-    App(String, Vec<TypeExpr>, Span),          // Option f32
-    Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
-    Infer(Span),                               // _
-    RankSpread(String, Span),                  // ..r (rank variable; whole-shape spread)
+    Named(String, Span),                          // f32, bool, MyType
+    DimensionLiteral(DimensionLiteral, Span),     // integer only in Name[...]
+    Tensor(Vec<TypeExpr>, TensorPrecision, Span), // tensor[batch, hidden, f32]
+    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span),    // A -> B -> C (flat)
+    Ref(Box<TypeExpr>, Span),                     // &T
+    App(String, Vec<TypeExpr>, Span),             // Option f32
+    Tuple(Vec<TypeExpr>, Span),                   // (f32, f32)
+    Infer(Span),                                  // _
+    RankSpread(String, Span),                     // ..r (rank variable; whole-shape spread)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

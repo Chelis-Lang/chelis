@@ -2656,7 +2656,7 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
             // names themselves are handled by the d-name / d-var
             // contextual rules elsewhere and are not type variables.
             if is_candidate_tvar_name(precision) {
-                out.insert(precision.clone());
+                out.insert(precision.to_string());
             }
         }
         TypeExpr::Arrow(params, ret, _) => {
@@ -2856,7 +2856,7 @@ fn desugar_type_with_scope_mode(
                 // checker surfaces its unknown-primitive diagnostic.
                 None => node(DeepTag::TPrim, vec![sym(precision)]),
             };
-            children.push(prec_node);
+            children.push(with_structural_span(prec_node, precision.span()));
             node(DeepTag::TTensor, children)
         }
 
@@ -3341,13 +3341,13 @@ mod tests {
                 "x",
                 Some(TypeExpr::Tensor(
                     vec![named_ty("batch"), named_ty("hidden")],
-                    "f32".to_string(),
+                    TensorPrecision::new("f32", s()),
                     s(),
                 )),
             )],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("hidden"), named_ty("batch")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3399,7 +3399,7 @@ mod tests {
                     "x",
                     Some(TypeExpr::Tensor(
                         vec![named_ty("n")],
-                        "f32".to_string(),
+                        TensorPrecision::new("f32", s()),
                         s(),
                     )),
                 ),
@@ -3408,12 +3408,16 @@ mod tests {
                     "f",
                     Some(TypeExpr::Arrow(
                         vec![
-                            TypeExpr::Tensor(vec![named_ty("n")], "f32".to_string(), s()),
+                            TypeExpr::Tensor(
+                                vec![named_ty("n")],
+                                TensorPrecision::new("f32", s()),
+                                s(),
+                            ),
                             named_ty("P"),
                         ],
                         Box::new(TypeExpr::Tensor(
                             vec![named_ty("n")],
-                            "f32".to_string(),
+                            TensorPrecision::new("f32", s()),
                             s(),
                         )),
                         s(),
@@ -3422,7 +3426,7 @@ mod tests {
             ],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("n")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3474,7 +3478,7 @@ mod tests {
                     "x",
                     Some(TypeExpr::Tensor(
                         vec![named_ty("n")],
-                        "f32".to_string(),
+                        TensorPrecision::new("f32", s()),
                         s(),
                     )),
                 ),
@@ -3482,7 +3486,7 @@ mod tests {
             ],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("n")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3753,7 +3757,7 @@ mod tests {
     fn test_type_tensor() {
         let ty = TypeExpr::Tensor(
             vec![named_ty("batch"), named_ty("hidden")],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(
@@ -3766,7 +3770,7 @@ mod tests {
     fn test_type_tensor_with_literal_dims() {
         let ty = TypeExpr::Tensor(
             vec![named_ty("32"), named_ty("784")],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(
@@ -3814,7 +3818,7 @@ mod tests {
         // `tensor[..r, f32]` desugars to a sole `(d-rank {} r)` dim node.
         let ty = TypeExpr::Tensor(
             vec![TypeExpr::RankSpread("r".to_string(), s())],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(

@@ -1558,7 +1558,7 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             let inner = items
                 .iter()
                 .map(format_type_expr)
-                .chain([precision.clone()])
+                .chain([precision.to_string()])
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("tensor[{inner}]")

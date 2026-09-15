@@ -407,59 +407,18 @@ pub(super) fn walk_for_tensor_precision(
                     && let Some((DeepTag::TPrim, _, prec_kids)) = stamped_parts(last)
                     && let Some(name) = prec_kids.first().and_then(symbol_name)
                 {
-                    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names, plus
-                    // the other reserved-but-deferred names of
-                    // spec/04-type-system.md §1.1.1. Mirror the f8e4m3
-                    // §1.1.1 rejection contract — these names never
-                    // resolve through `Prim::parse_name`, so without
-                    // this guard `tensor[..., u8]` (or `tensor[...,
-                    // complex64]`) would silently fall through with no
-                    // §1.1.1-citing diagnostic.
-                    // The §1.1.1 reserved families used to be reported here
-                    // as well as by the resolver. `DeepTypeResolver` now names
-                    // them in every type position and on both carriers
-                    // (chelis#1593), so a branch here would be a second voice
-                    // saying the same sentence. The two `!is_*_dtype_name`
-                    // guards below stay: without them a reserved name falls
-                    // into the unrecognized-primitive arm and gets the wrong
-                    // message.
-                    if let Some(prim) = Prim::parse_name(name)
-                        && !prim.is_valid_tensor_precision()
-                        && seen.insert((def_context.to_string(), name.to_string()))
-                    {
-                        if matches!(prim, Prim::F8e4m3) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::UnsupportedTensorPrecision,
-                                format!(
-                                    "tensor element precision `f8e4m3` is deferred per \
-                                     spec/04-type-system.md §1.1.1 and is not part of the active \
-                                     numeric primitive set ({active_set})",
-                                ),
-                                vec![format!(
-                                    "f8e4m3 has no active backend in this cycle; pick one of \
-                                     {active_set} or see spec/04-type-system.md §1.1.1 for the \
-                                     deferral rationale",
-                                )],
-                            ));
-                        } else {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::UnsupportedTensorPrecision,
-                                format!(
-                                    "tensor element precision `{name}` is not supported by the \
-                                     current backend set (supported: {active_set})",
-                                ),
-                                vec![format!(
-                                    "Use tensor[..., f32] and cast host scalars explicitly, or \
-                                     keep `{name}` as a host scalar",
-                                )],
-                            ));
-                        }
-                    } else if Prim::parse_name(name).is_none()
+                    // The shared Deep resolver owns every §1.1.1 reserved
+                    // spelling, including the internal `Prim::F8e4m3` row.
+                    // This legacy walker retains only its distinct job:
+                    // rejecting an otherwise unknown `t-prim` precision from
+                    // value-position metadata. The reserved-name exclusions
+                    // keep those spellings from acquiring a second owner.
+                    if Prim::parse_name(name).is_none()
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {
+                        let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
                         // WS-A5 RT-3a F3: an identifier in a `t-prim`
                         // precision slot that is neither a known active
                         // primitive nor a §1.1.1 deferred dtype name

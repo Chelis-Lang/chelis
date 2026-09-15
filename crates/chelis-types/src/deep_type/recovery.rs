@@ -157,22 +157,40 @@ impl DeepTypeResolver<'_, '_, '_> {
         let precision = self.recover_type(&children[children.len() - 1]);
         self.resolving_tensor_precision = outer;
         let precision = match precision {
-            TypeResolution::Resolved(Type::Prim(prim)) => Ok(TensorPrec::Concrete(prim)),
-            TypeResolution::Resolved(Type::Var(var)) => Ok(TensorPrec::Var(var)),
-            TypeResolution::Resolved(other) => Err(self.type_error(format!(
-                "tensor precision in {} must be `t-prim` or a legal `t-var`, got `{other}`",
-                self.use_site.label()
-            ))),
-            TypeResolution::Rejected { witness, .. } => Err(witness),
+            TypeResolution::Resolved(Type::Prim(prim)) => (TensorPrec::Concrete(prim), None),
+            TypeResolution::Resolved(Type::Var(var)) => (TensorPrec::Var(var), None),
+            TypeResolution::Resolved(other) => {
+                let witness = self.type_error(format!(
+                    "tensor precision in {} must be `t-prim` or a legal `t-var`, got `{other}`",
+                    self.use_site.label()
+                ));
+                // The rejected signature frame still needs a tensor precision
+                // slot so valid sibling dimensions remain available to body
+                // checking. This fresh variable is private to that frame; the
+                // declaration remains publicly bound to the witness below.
+                (TensorPrec::Var(self.vg.fresh_tvar()), Some(witness))
+            }
+            TypeResolution::Rejected { witness, .. } => {
+                // Keep the tensor constructor and every successfully resolved
+                // dimension in the private recovery frame. The fresh precision
+                // is not a successful interpretation of the authored dtype:
+                // `witness` rejects the declaration, while the placeholder
+                // prevents an unrelated shape check from losing the rank.
+                (TensorPrec::Var(self.vg.fresh_tvar()), Some(witness))
+            }
         };
         // Dimensions have no error constructor. Never replace a failed one with
         // a wildcard or a fresh variable just to construct a tensor frame.
         let dimensions = dimensions.into_iter().collect::<Result<Vec<_>, _>>();
         match (dimensions, precision) {
-            (Ok(dimensions), Ok(precision)) => {
+            (Ok(dimensions), (precision, Some(witness))) => TypeResolution::Rejected {
+                ty: Type::Tensor(dimensions, precision),
+                witness,
+            },
+            (Ok(dimensions), (precision, None)) => {
                 TypeResolution::Resolved(Type::Tensor(dimensions, precision))
             }
-            (Err(witness), _) | (_, Err(witness)) => TypeResolution::failed(witness),
+            (Err(witness), _) => TypeResolution::failed(witness),
         }
     }
 

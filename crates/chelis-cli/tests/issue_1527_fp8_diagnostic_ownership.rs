@@ -11,9 +11,10 @@ struct CheckOutput {
     errors: Vec<ReservedDiagnostic>,
 }
 
-#[derive(Debug, Deserialize)]
-enum ReservedKind {
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+enum DiagnosticKind {
     UnsupportedTensorPrecision,
+    DimensionMismatch,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,10 +26,10 @@ enum PointLocation {
 #[derive(Debug, Deserialize)]
 struct ReservedDiagnostic {
     #[serde(rename = "kind")]
-    _kind: ReservedKind,
+    kind: DiagnosticKind,
     message: String,
-    span: PointLocation,
-    span_id: String,
+    span: Option<PointLocation>,
+    span_id: Option<String>,
 }
 
 fn check(source: &str) -> (bool, CheckOutput, String) {
@@ -77,12 +78,11 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
     expected.sort_by_key(|(_, offset)| *offset);
     assert_eq!(report.errors.len(), expected.len(), "{report:?}");
     for (error, (name, offset)) in report.errors.iter().zip(expected) {
-        let PointLocation::Point { offset: reported } = error.span;
-        assert_eq!(reported, offset, "{error:?}");
-        assert_eq!(
-            error.span_id,
-            format!("source:{offset}..{}", offset + name.len())
-        );
+        let PointLocation::Point { offset: reported } =
+            error.span.as_ref().expect("reserved dtype location");
+        assert_eq!(*reported, offset, "{error:?}");
+        let expected_span = format!("source:{offset}..{}", offset + name.len());
+        assert_eq!(error.span_id.as_deref(), Some(expected_span.as_str()));
         assert!(error.message.contains(name), "{error:?}");
     }
 }
@@ -93,6 +93,55 @@ fn one_reserved_parameter_site_produces_one_cli_error() {
         assert_rejected_sites(
             &format!("def classify(x: {name}) -> int32 = 0i32\n"),
             &[name],
+        );
+    }
+}
+
+#[test]
+fn one_reserved_tensor_element_site_produces_one_located_cli_error() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        assert_rejected_sites(
+            &format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32\n"),
+            &[name],
+        );
+    }
+}
+
+#[test]
+fn a_rejected_tensor_precision_keeps_the_independent_shape_error() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let (success, report, source) = check(&format!(
+            "def inspect(x: tensor[3, {name}]) -> int64 = shape(x, 1i32)\n"
+        ));
+        assert!(!success, "{name}: {report:?}");
+        assert!(report.score < 1.0, "{name}: {report:?}");
+        assert_eq!(report.errors.len(), 2, "{name}: {report:?}");
+
+        let reserved: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|error| error.kind == DiagnosticKind::UnsupportedTensorPrecision)
+            .collect();
+        assert_eq!(reserved.len(), 1, "{name}: {report:?}");
+        let offset = source.find(name).expect("reserved precision site");
+        let PointLocation::Point { offset: reported } =
+            reserved[0].span.as_ref().expect("reserved dtype location");
+        assert_eq!(*reported, offset, "{name}: {reserved:?}");
+        let expected_span = format!("source:{offset}..{}", offset + name.len());
+        assert_eq!(reserved[0].span_id.as_deref(), Some(expected_span.as_str()));
+        assert!(reserved[0].message.contains(name), "{name}: {reserved:?}");
+
+        let dimensions: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|error| error.kind == DiagnosticKind::DimensionMismatch)
+            .collect();
+        assert_eq!(dimensions.len(), 1, "{name}: {report:?}");
+        assert!(
+            dimensions[0]
+                .message
+                .contains("shape axis 1 is out of bounds for rank 1 tensor"),
+            "{name}: {dimensions:?}"
         );
     }
 }
@@ -160,13 +209,17 @@ fn a_failed_signature_does_not_hide_a_cli_body_error() {
     assert_eq!(report.errors.len(), 2, "{report:?}");
     assert!(report.errors[0].message.contains("f8e4m3"), "{report:?}");
     assert!(report.errors[1].message.contains("f8e5m2"), "{report:?}");
-    assert_eq!(report.errors[0].span_id, "source:16..22");
+    assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
     let start = source.find("cast(").expect("cast site");
-    let PointLocation::Point { offset } = report.errors[1].span;
-    assert_eq!(offset, start);
+    let PointLocation::Point { offset } = report.errors[1]
+        .span
+        .as_ref()
+        .expect("cast diagnostic location");
+    assert_eq!(*offset, start);
+    let expected_span = format!("surf:{start}..{}", source.trim_end().len());
     assert_eq!(
-        report.errors[1].span_id,
-        format!("surf:{start}..{}", source.trim_end().len())
+        report.errors[1].span_id.as_deref(),
+        Some(expected_span.as_str())
     );
 }
 

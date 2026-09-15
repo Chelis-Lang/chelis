@@ -18,7 +18,8 @@ use thiserror::Error;
 
 use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
-    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+    Pattern, PropertyOption, TensorPrecision, TypeBinder, TypeExpr, TypeInvariant, UnaryOp,
+    Variant, VariantFields,
 };
 
 /// Failure to structurally resugar a Deep expression.
@@ -3415,7 +3416,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
                     .iter()
                     .map(resugar_dimension)
                     .collect::<Result<Vec<_>, _>>()?,
-                precision.to_string(),
+                TensorPrecision::new(precision, node.span),
                 node.span,
             ))
         }

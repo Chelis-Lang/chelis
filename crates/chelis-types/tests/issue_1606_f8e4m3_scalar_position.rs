@@ -186,6 +186,74 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
 }
 
 #[test]
+fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
+    use chelis_types::errors::CheckErrorKind;
+
+    for name in ["f8e4m3", "f8e5m2"] {
+        let source = format!("def inspect(x: tensor[3, {name}]) -> int64 = shape(x, 1i32)");
+        let program = surf_to_deep(&source);
+        let offset = source.find(name).expect("reserved precision site");
+        let span = format!("source:{offset}..{}", offset + name.len());
+
+        for (entry, result) in [
+            ("ir", check_ir_program(&program)),
+            ("typed", check_typed_program(&program)),
+        ] {
+            let report = result.expect_err("the reserved dtype and invalid axis must reject");
+            assert_eq!(
+                report.errors.len(),
+                2,
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+
+            let reserved: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision))
+                .collect();
+            assert_eq!(reserved.len(), 1, "{entry}/{name}: {:?}", report.errors);
+            assert!(reserved[0].message.contains(name), "{entry}: {reserved:?}");
+            assert_eq!(
+                reserved[0].span_offset,
+                Some(offset),
+                "{entry}: {reserved:?}"
+            );
+            assert_eq!(
+                reserved[0].span_id.as_deref(),
+                Some(span.as_str()),
+                "{entry}: {reserved:?}"
+            );
+
+            let dimensions: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch))
+                .collect();
+            assert_eq!(dimensions.len(), 1, "{entry}/{name}: {:?}", report.errors);
+            assert!(
+                dimensions[0]
+                    .message
+                    .contains("shape axis 1 is out of bounds for rank 1 tensor"),
+                "{entry}/{name}: {dimensions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tensor_element_reserved_site_has_one_located_owner() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for source in [
+            format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32"),
+            format!("def classify(x: tensor[3,   {name}  ]) -> int32 = 0i32"),
+        ] {
+            assert_one_report_per_site(&source, &[name]);
+        }
+    }
+}
+
+#[test]
 fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
     use chelis_types::errors::CheckErrorKind;
     for (source, expected_kind) in [

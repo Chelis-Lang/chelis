@@ -377,7 +377,7 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
             lit.map(|dims| Binder::Tensor {
                 name: p.name.clone(),
                 dims,
-                precision: precision.clone(),
+                precision: precision.to_string(),
             })
         }
         _ => None,
