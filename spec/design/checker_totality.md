@@ -3788,8 +3788,8 @@ unannotated lambda to settle monomorphically at its first application.
 An already-checked function value is different. The checked contracts of
 `len`, `index`, `append`, and `concat` survive aliases, instantiation,
 higher-order passage and return, aggregates, recursive and indirect calls,
-imports, and serialized checker metadata. Calls decide those transported
-contracts without inspecting the callee body.
+imports, and serialized TypeEnv checker metadata. Calls decide those
+transported contracts without inspecting the callee body.
 
 #### Mechanism
 
@@ -3813,11 +3813,15 @@ contracts without inspecting the callee body.
    diagnostics. The scheme copy is discarded for that call. Indirect calls use
    `decide_collection_constraint`; result reconciliation and multi-operand
    re-suspension remain inside unification.
-5. Persisted checker and package identities include the relation. TypeEnv
-   format 3 follows #2071's format 2, CHB format 5 follows #2071's format 4,
-   and Reef schema format 3 follows schema format 2. Predecessors are rejected
-   rather than decoded as unconstrained. Canonical package relations share the
-   function type's alpha-renamed variables and reject hidden variables.
+5. Serialized TypeEnv checker reuse and published package identities both
+   include the relation. TypeEnv format 3 follows #2071's format 2 and is the
+   source-free checker-reuse path exercised here. CHB format 5 follows #2071's
+   format 4, and Reef schema format 3 follows schema format 2; those two
+   surfaces protect package publication and identity, not compiler reuse from
+   CHB or Reef schema. All predecessors are rejected rather than decoded as
+   unconstrained. Canonical package relations share the function type's
+   alpha-renamed variables, are strictly ordered and unique, and reject hidden
+   variables.
 
 This mechanism is the collection constructor/result-relation specialization of
 the general operation-admission design already recorded in §C3.1 and
@@ -3842,12 +3846,12 @@ cargo nextest run -p chelis-reef --test scheme_restriction_schema --no-fail-fast
 Every case must reach both checker APIs. CLI cases must assert the verdict,
 error kind, and score, not merely a nonzero command exit.
 The negatives cover declaration rejection plus invalid direct, alias,
-higher-order, aggregate, recursive, imported, and serialized uses. Positive
-controls cover explicit `List`/`Dict` contracts, both `concat` relations, and
-transport of already-checked values. #1506 remains a regression lock; #1537's
-PP9 shared-driver/pass-set work is separate and is not implied by paired
-checker-ingress coverage here. #1639's alias diagnostic-identity work is also
-separate.
+higher-order, aggregate, recursive, imported, and serialized TypeEnv-reuse
+uses. Positive controls cover explicit `List`/`Dict` contracts, both `concat`
+relations, and transport of already-checked values. #1506 remains a regression
+lock; #1537's PP9 shared-driver/pass-set work is separate and is not implied by
+paired checker-ingress coverage here. #1639's alias diagnostic-identity work
+is also separate.
 
 ---
 

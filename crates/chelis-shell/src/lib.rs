@@ -43,8 +43,10 @@ pub struct ShellSymbol {
     /// never a representation.
     pub type_repr: Option<String>,
     pub type_variable_restrictions: Vec<TypeVariableRestriction>,
-    /// Checked collection-operation relations carried by this function value.
-    /// Every canonical variable must also occur in `type_repr`; newly authored
+    /// Published description of this function value's checked
+    /// collection-operation relations. This ledger contributes to CHB package
+    /// identity; it is not a serialized checker-reuse environment. Every
+    /// canonical variable must also occur in `type_repr`; newly authored
     /// wrappers may not publish hidden body-inferred predicates ([04-INF-9]).
     pub collection_obligations: Vec<CollectionObligation>,
     pub effects: Vec<String>,
@@ -225,6 +227,13 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
         )?;
         for symbol in &module.exports {
             validate_nonempty_trimmed("export name", &symbol.name)?;
+            validate_collection_obligation_order(
+                &format!(
+                    "collection obligations for export `{}` in module `{}`",
+                    symbol.name, module.module
+                ),
+                &symbol.collection_obligations,
+            )?;
             let variables = match &symbol.type_repr {
                 Some(type_repr) => Some(canonical_variables(type_repr, true)?),
                 None if symbol.kind == SymbolKind::Value => {
@@ -495,6 +504,23 @@ fn validate_strict_order<'a>(
     Ok(())
 }
 
+fn validate_collection_obligation_order(
+    label: &str,
+    obligations: &[CollectionObligation],
+) -> Result<(), bincode::Error> {
+    let mut previous: Option<(&str, Vec<&str>)> = None;
+    for obligation in obligations {
+        let key = (obligation.builtin(), obligation.types());
+        if previous.as_ref().is_some_and(|prior| prior >= &key) {
+            return Err(validation_error(&format!(
+                "{label} must be strictly sorted with no duplicates"
+            )));
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
 fn is_lowercase_hex_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -606,6 +632,54 @@ mod tests {
         let encoded = encode_shell(&obligated).expect("checked contract encodes");
         assert_eq!(decode_shell(&encoded).unwrap(), obligated);
         assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+    }
+
+    #[test]
+    fn checked_collection_contract_ledger_is_strictly_canonical() {
+        let append = CollectionObligation::Append {
+            list: "(t-var {} t0)".into(),
+            value: "(t-var {} t1)".into(),
+            result: "(t-var {} t0)".into(),
+        };
+        let len = CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-var {} t1)".into(),
+        };
+
+        let mut canonical = fixture_shell();
+        let symbol = &mut canonical.modules[0].exports[0];
+        symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+        symbol.collection_obligations = vec![append.clone(), len.clone()];
+        let encoded = encode_shell(&canonical).expect("canonical relation ledger must encode");
+        assert_eq!(
+            decode_shell(&encoded).expect("canonical relation ledger must decode"),
+            canonical
+        );
+
+        for (label, obligations) in [
+            ("duplicate", vec![len.clone(), len.clone()]),
+            ("noncanonical order", vec![len.clone(), append.clone()]),
+        ] {
+            let mut invalid = fixture_shell();
+            let symbol = &mut invalid.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            symbol.collection_obligations = obligations;
+
+            let error = validate_shell(&invalid)
+                .expect_err("noncanonical relation ledger must fail validation");
+            assert!(
+                error.to_string().contains("strictly sorted"),
+                "unexpected {label} validation diagnostic: {error}"
+            );
+            assert!(
+                encode_shell(&invalid).is_err(),
+                "{label} relation ledger must not encode"
+            );
+            assert!(
+                decode_shell(&encode_unvalidated(&invalid)).is_err(),
+                "{label} relation ledger must not decode"
+            );
+        }
     }
 
     #[test]

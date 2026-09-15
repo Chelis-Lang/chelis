@@ -105,6 +105,23 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             }
         }])
     );
+    let decoded_current = serde_json::from_value::<PackageSchema>(schema_json.clone())
+        .expect("current package schema version must decode");
+    assert_eq!(
+        serde_json::to_value(decoded_current).expect("decoded current schema must reserialize"),
+        schema_json,
+        "current package schema must round-trip without identity drift"
+    );
+    for version in [2, 99] {
+        let mut incompatible = schema_json.clone();
+        incompatible["format_version"] = version.into();
+        let error = serde_json::from_value::<PackageSchema>(incompatible)
+            .expect_err("non-current package schema versions must be rejected");
+        assert!(
+            error.to_string().contains("unsupported") && error.to_string().contains("expected 3"),
+            "unexpected version {version} diagnostic: {error}"
+        );
+    }
     let mut missing_required_field = schema_json.clone();
     missing_required_field["modules"][0]["functions"][0]
         .as_object_mut()

@@ -100,7 +100,9 @@ fn declaration_boundary_rejects_implicit_collection_contracts() {
 fn checked_builtin_values_reject_invalid_indirect_calls() {
     for (operation, source) in [
         ("len", "measure = len\nout = measure(1i64)\n"),
-        ("index", "op = index\nout = op(1i64, 0i32)\n"),
+        ("index", "op = index\nout = op(1i64, 0i64)\n"),
+        ("index", "op = index\nout = op([1i64], 0i32)\n"),
+        ("index", "op = index\nout = op([1i64], 0i16)\n"),
         ("append", "op = append\nout = op([1i64], \"bad\")\n"),
         ("concat", "op = concat\nout = op([1i64], [1.0f32])\n"),
     ] {
@@ -115,7 +117,7 @@ fn explicit_and_transported_valid_collection_contracts_score_one() {
         "def size[a](xs: List[a]) -> int64 = len(xs)\nout = size([1i64])\n",
         "measure = len\nout = measure([1i64])\n",
         "measure = len\nout: int64 = measure([1i64])\n",
-        "op = index\nout: int64 = op([1i64], 0i32)\n",
+        "op = index\nout: int64 = op([1i64], 0i64)\n",
         "op = append\nout: List[int64] = op([1i64], 2i64)\n",
         "op = concat\nout: List[int64] = op([1i64], [2i64])\n",
     ] {

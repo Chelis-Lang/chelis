@@ -70,8 +70,8 @@ pub(crate) fn decide_collection_constraint(
         },
         CollectionConstraint::Index { list, index, .. } => {
             match index {
-                Type::Prim(prec) if prec.is_integer() => {}
-                other => return Err(format!("index expects integer index, got {other}")),
+                Type::Prim(Prim::Int64) => {}
+                other => return Err(format!("index expects int64 index, got {other}")),
             }
             match list {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {

@@ -212,7 +212,9 @@ fn builtin_contracts_survive_alias_return_aggregate_and_higher_order_passage() {
 #[test]
 fn each_collection_relation_survives_indirect_calls() {
     for (operation, source) in [
-        ("index", "op = index\nout = op(1i64, 0i32)\n"),
+        ("index", "op = index\nout = op(1i64, 0i64)\n"),
+        ("index", "op = index\nout = op([1i64], 0i32)\n"),
+        ("index", "op = index\nout = op([1i64], 0i16)\n"),
         ("append", "op = append\nout = op([1i64], \"bad\")\n"),
         ("concat", "op = concat\nout = op([1i64], [1.0f32])\n"),
         ("concat", "op = concat\nout = op([1i64], 0i64)\n"),
@@ -220,7 +222,7 @@ fn each_collection_relation_survives_indirect_calls() {
         rejects("transported relation", source, operation);
     }
     for source in [
-        "op = index\nout: int64 = op([1i64], 0i32)\n",
+        "op = index\nout: int64 = op([1i64], 0i64)\n",
         "op = append\nout: List[int64] = op([1i64], 2i64)\n",
         "op = concat\nout: List[int64] = op([1i64], [2i64])\n",
         "op = concat\nout = op([to_tensor([1.0f32])], 0i32)\n",
@@ -228,7 +230,7 @@ fn each_collection_relation_survives_indirect_calls() {
         accepts("valid transported relation", source);
     }
     for source in [
-        "op = index\nout: string = op([1i64], 0i32)\n",
+        "op = index\nout: string = op([1i64], 0i64)\n",
         "op = append\nout: List[string] = op([1i64], 2i64)\n",
         "op = concat\nout: List[string] = op([1i64], [2i64])\n",
     ] {

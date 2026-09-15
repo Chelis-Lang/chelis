@@ -5629,12 +5629,41 @@ pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 3;
 
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PackageSchema {
     pub format_version: u32,
     pub package: PackageId,
     pub compiler: String,
     pub modules: Vec<ModuleSchema>,
+}
+
+#[derive(Deserialize)]
+struct PackageSchemaWire {
+    format_version: u32,
+    package: PackageId,
+    compiler: String,
+    modules: Vec<ModuleSchema>,
+}
+
+impl<'de> Deserialize<'de> for PackageSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PackageSchemaWire::deserialize(deserializer)?;
+        if wire.format_version != PACKAGE_SCHEMA_FORMAT_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "package schema format version {} is unsupported; expected {PACKAGE_SCHEMA_FORMAT_VERSION}",
+                wire.format_version
+            )));
+        }
+        Ok(Self {
+            format_version: wire.format_version,
+            package: wire.package,
+            compiler: wire.compiler,
+            modules: wire.modules,
+        })
+    }
 }
 
 /// Schema for one module's exports.
@@ -8131,6 +8160,42 @@ mod shell_type_variable_canonicalization_tests {
     }
 
     #[test]
+    fn published_collection_obligations_are_sorted_and_deduplicated() {
+        use chelis_types::types::CollectionConstraint;
+
+        let append = CollectionConstraint::Append {
+            list: Type::Var(TypeVar(0)),
+            value: Type::Var(TypeVar(1)),
+            result: Type::Var(TypeVar(0)),
+        };
+        let scheme = Scheme {
+            tvars: vec![TypeVar(0), TypeVar(1)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![
+                CollectionConstraint::Len {
+                    operand: Type::Var(TypeVar(0)),
+                    result: Type::Var(TypeVar(1)),
+                },
+                append.clone(),
+                append,
+            ],
+            body: Type::Fn(vec![Type::Var(TypeVar(0))], Box::new(Type::Var(TypeVar(1)))),
+        };
+
+        let published = canonical_shell_scheme(&scheme).expect("scheme must canonicalize");
+        assert_eq!(
+            published
+                .collection_obligations
+                .iter()
+                .map(|obligation| obligation.builtin())
+                .collect::<Vec<_>>(),
+            vec!["append", "len"],
+        );
+    }
+
+    #[test]
     fn hidden_collection_contract_variables_are_rejected() {
         use chelis_types::types::CollectionConstraint;
 
@@ -8253,13 +8318,10 @@ fn exported_function_type(
 /// from the body is rejected: [04-INF-9] does not permit a newly authored
 /// hidden predicate.
 ///
-/// The obligations are visited in an order that does not depend on variable
-/// identity: each is first canonicalized on its own, and that self-contained
-/// rendering is the sort key. Two alpha-equivalent schemes therefore visit
-/// their obligations in the same order and produce the same global numbering.
-/// Obligations that are alpha-equal in isolation but distinct in the scheme
-/// (`len(?a)` and `len(?b)`) tie, and the tie is broken by the scheme's own
-/// order, which is the order the checker's ledger recorded them in.
+/// The body assigns every admissible relation variable its canonical identity
+/// before the relations are rendered. The published ledger is then sorted by
+/// operation and canonical operand/result types and deduplicated, matching the
+/// strict CHB trust-boundary invariant.
 fn canonical_shell_scheme(
     scheme: &chelis_types::types::Scheme,
 ) -> Result<CanonicalExportedType, String> {
@@ -8306,32 +8368,17 @@ fn canonical_shell_scheme(
         }
     }
 
-    let mut ordered = scheme
+    let mut collection_obligations = scheme
         .constraints
         .iter()
-        .enumerate()
-        .map(|(position, constraint)| {
-            // A renamer local to this obligation: the key must describe the
-            // obligation's shape, not where its variables happen to sit in
-            // the scheme's global numbering.
-            let mut local = SchemeVariableRenamer::default();
-            let local = render_collection_obligation(constraint, &mut local);
-            let key = (
-                local.builtin(),
-                local
-                    .types()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>(),
-            );
-            (key, position, constraint)
-        })
+        .map(|constraint| render_collection_obligation(constraint, &mut renamer))
         .collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    let collection_obligations = ordered
-        .into_iter()
-        .map(|(_, _, constraint)| render_collection_obligation(constraint, &mut renamer))
-        .collect::<Vec<_>>();
+    collection_obligations.sort_by(|left, right| {
+        left.builtin()
+            .cmp(right.builtin())
+            .then_with(|| left.types().cmp(&right.types()))
+    });
+    collection_obligations.dedup();
 
     let quantified = scheme.tvars.iter().copied().collect::<UnordSet<_>>();
     let mut seen = UnordSet::new();

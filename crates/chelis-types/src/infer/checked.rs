@@ -1359,14 +1359,16 @@ impl InferenceProduct {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
         self.finish_admission_contracts(declaration, subst, errors);
         for check in self.deferred_shape_checks.drain(..) {
-            let operation = match check.rule {
-                DeferredShapeRule::Matmul => "matmul".to_string(),
-                DeferredShapeRule::Reduction { name } => name,
-                DeferredShapeRule::Expand { builtin, .. } => (*builtin).to_string(),
-                DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
-                DeferredShapeRule::Conv => "conv".to_string(),
-                DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
-                DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
+            let (operation, names_declaration) = match check.rule {
+                DeferredShapeRule::Matmul => ("matmul".to_string(), false),
+                DeferredShapeRule::Reduction { name } => (name, false),
+                DeferredShapeRule::Expand { builtin, .. } => ((*builtin).to_string(), false),
+                DeferredShapeRule::LayerNorm => ("layer_norm".to_string(), false),
+                DeferredShapeRule::Conv => ("conv".to_string(), false),
+                DeferredShapeRule::ScatterElements { .. } => {
+                    ("scatter_elements".to_string(), false)
+                }
+                DeferredShapeRule::ShapeRoute { route, .. } => (route.builtin(), false),
                 // chelis#1512: a collection, host or string route's operand is
                 // NOT required to be a tensor carrying a shape, so an operand
                 // that never binds is not an error here. A polymorphic
@@ -1386,18 +1388,27 @@ impl InferenceProduct {
                 DeferredShapeRule::PostApp { func_name, .. }
                     if matches!(func_name.as_str(), "len" | "index" | "append" | "concat") =>
                 {
-                    func_name
+                    (func_name, true)
                 }
                 DeferredShapeRule::PostApp { .. } => continue,
             };
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
+            let message = if names_declaration {
                 format!(
                     "unresolved `{operation}` shape obligation in `{}` at declaration boundary: \
                      add an outer-constructor parameter annotation or apply the lambda before \
                      the declaration boundary",
                     declaration.unwrap_or("<anonymous>")
-                ),
+                )
+            } else {
+                format!(
+                    "unresolved `{operation}` shape obligation at declaration boundary: \
+                     add an outer-constructor parameter annotation or apply the lambda before \
+                     the declaration boundary"
+                )
+            };
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                message,
                 vec![
                     "A result annotation does not determine an unresolved parameter constructor; top-level declarations do not borrow binding sites from later declarations"
                         .to_string(),
