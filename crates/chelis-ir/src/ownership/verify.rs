@@ -714,6 +714,7 @@ fn census_host_expr<'a>(
         | ConcreteHostExprKind::Tuple(items, _)
         | ConcreteHostExprKind::AdtConstruct { fields: items, .. }
         | ConcreteHostExprKind::Call { args: items, .. }
+        | ConcreteHostExprKind::SignatureEntry { args: items, .. }
         | ConcreteHostExprKind::Builtin { args: items, .. } => {
             for item in items {
                 sites.push(expected_site(unit, HostSiteKind::Argument));

@@ -1379,6 +1379,59 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
         ),
+        # #1788 residual: host entry owns every signature obligation before
+        # body/helper execution. Eval already enforced these measured claims;
+        # C omitted mixed witnesses or reported a later unrelated failure.
+        # The enrolled target also checks literal/binder precedence, valid
+        # independent signatures, unused witnesses and argument/body effects.
+        _row(
+            "entry.host_helper.unused_witness.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.unused_witness.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.signature_order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.host_helper.signature_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.higher_order.invocation.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.higher_order.invocation.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.inline_callback.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
+        _row(
+            "entry.inline_callback.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
         # chelis#1821: the gradient splice imported the forward activation and
         # rooted it nowhere, so the entry-point DCE removed it together with the
         # carrier holding its witness claims. The `live_forward` pair separates
@@ -1407,6 +1460,127 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # Only tensor/single is repaired here. Every other cell is recorded at
         # the state it was MEASURED in and deferred to the issue that owns its
         # mechanism, so the next spec-admitted kind cannot be unlisted.
+        # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
+        # while beta-reduced C skips its signature and unused actual effects.
+        _row(
+            "entry.beta.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.scopes.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.scopes.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.actual.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
+        _row(
+            "entry.beta.actual.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
+        # #1788 round-2 baseline 46bdc8a5: substituting a broader callable
+        # actual erased the narrower formal's invocation-entry contract on
+        # both host lanes. The three receipts separate one literal witness
+        # from transport through aliases/local callables/wrappers and from a
+        # multi-argument repeated binder. Each also checks eager argument
+        # evaluation and excludes body/later effects on failure.
+        _row(
+            "entry.indirect.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transport.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.transport.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
+        # #1788 round-3 baseline f77ef306: C's checked adapter retained the
+        # narrower formal boundary, but Eval attached that boundary only to a
+        # Closure. Direct and locally bound grad values are both Transform
+        # values; each receipt checks the failing length-three input and the
+        # agreeing length-two control with exact argument/later-effect counts.
+        _row(
+            "entry.indirect.transform.direct.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.direct.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
         _row(
             "grad.wrt_tensor.single.dead_forward.eval",
             "silent_unguarded",

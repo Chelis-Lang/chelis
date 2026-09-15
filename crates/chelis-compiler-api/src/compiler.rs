@@ -1086,6 +1086,7 @@ fn project_host_program_to_entry(
                 }
             }
             ConcreteHostExprKind::Builtin { args, .. }
+            | ConcreteHostExprKind::SignatureEntry { args, .. }
             | ConcreteHostExprKind::TensorCall { args, .. } => {
                 for arg in args {
                     collect_expr(arg, bound, out);

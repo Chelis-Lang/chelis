@@ -3605,6 +3605,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
             param_types: vec![None],
             return_type: None,
             checked_signature: None,
+            invocation_contracts: Box::default(),
             body: chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)

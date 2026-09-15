@@ -297,7 +297,8 @@ fn collect_tests(
 /// The full inventory one manifest row's source contributes.
 ///
 /// A `lib` row names its tests by the module path the crate gives them, whose
-/// first segment is the file's own module name. Reconstructing that from a
+/// segments follow the source path below the crate's `src` directory.
+/// Reconstructing that from a
 /// single file is a convention rather than a resolution of the crate's module
 /// tree, which is the second reason `lib` rows are checked for containment
 /// only.
@@ -318,7 +319,16 @@ fn inventory_for(root: &Path, row: &Row) -> Scan {
             "{}: a lib row must name the module's own file, not {stem}.rs",
             row.id
         );
-        format!("{stem}::")
+        let source_root = root.join("crates").join(&row.package).join("src");
+        let relative = source
+            .strip_prefix(&source_root)
+            .unwrap_or_else(|_| panic!("{}: library source is outside src", row.id))
+            .with_extension("");
+        let segments = relative
+            .iter()
+            .map(|part| part.to_str().expect("UTF-8 library module name"))
+            .collect::<Vec<_>>();
+        format!("{}::", segments.join("::"))
     } else {
         String::new()
     };
@@ -688,6 +698,45 @@ fn a_row_naming_a_missing_source_is_rejected() {
     row.file = "crates/chelis-types/tests/fixtures/runtime_extent_manifest/absent.rs".to_string();
     let error = check_row(&root, &row).expect_err("a missing source must be rejected");
     assert!(error.contains("does not exist"), "{error}");
+}
+
+#[test]
+fn a_nested_library_source_retains_its_outer_module_name() {
+    let root = workspace_root();
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(manifest_path()).expect("read the target manifest"),
+    )
+    .expect("valid manifest");
+    let row = parse_rows(&manifest)
+        .into_iter()
+        .find(|row| row.id == "ir_signature_entry_plan")
+        .expect("the nested signature entry receipt is required");
+    check_row(&root, &row).expect("the full nested library path must resolve");
+}
+
+#[test]
+fn a_nested_library_source_rejects_a_shortened_module_name() {
+    let root = workspace_root();
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(manifest_path()).expect("read the target manifest"),
+    )
+    .expect("valid manifest");
+    let mut row = parse_rows(&manifest)
+        .into_iter()
+        .find(|row| row.id == "ir_signature_entry_plan")
+        .expect("the nested signature entry receipt is required");
+    row.selector_mode = "exact".to_string();
+    row.expected = row
+        .expected
+        .iter()
+        .map(|name| {
+            name.strip_prefix("host::")
+                .expect("outer module")
+                .to_string()
+        })
+        .collect();
+    let error = check_row(&root, &row).expect_err("a shortened path must not resolve");
+    assert!(error.contains("named tests are absent"), "{error}");
 }
 
 #[test]

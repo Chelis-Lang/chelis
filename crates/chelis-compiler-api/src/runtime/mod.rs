@@ -185,6 +185,11 @@ pub enum RuntimeValue {
         /// The checked function type retains renamed precision binders used
         /// by body metadata, alongside the signature's declared names.
         checked_signature: Option<Expr>,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary. These execute before this closure's own
+        /// entry so a broader supplied callable cannot erase a narrower
+        /// invocation contract.
+        invocation_contracts: Box<Vec<Expr>>,
         body: Expr,
         env: UnordMap<String, RuntimeValue>,
         /// Lexically captured concrete precision variables. A call derives a
@@ -209,11 +214,43 @@ pub enum RuntimeValue {
         kind: TransformKind,
         transform_expr: Expr,
         captured_env: UnordMap<String, RuntimeValue>,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary, shared with ordinary closures so every
+        /// supported runtime callable executes the same invocation protocol.
+        invocation_contracts: Box<Vec<Expr>>,
     },
     Unit,
 }
 
 impl RuntimeValue {
+    fn invocation_contracts(&self) -> Option<&[Expr]> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
+    fn invocation_contracts_mut(&mut self) -> Option<&mut Vec<Expr>> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
     /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
     /// construction: the storage variant IS the dtype).
     pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {
@@ -754,6 +791,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,
@@ -763,6 +801,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             param_types,
             return_type,
             checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,

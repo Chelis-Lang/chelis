@@ -413,6 +413,7 @@ pub(super) fn resolve_callable_aliases(
             }
         }
         HostExprKind::Builtin { args, .. }
+        | HostExprKind::SignatureEntry { args, .. }
         | HostExprKind::TensorCall { args, .. }
         | HostExprKind::AdtConstruct { fields: args, .. }
         | HostExprKind::List(args, _)
