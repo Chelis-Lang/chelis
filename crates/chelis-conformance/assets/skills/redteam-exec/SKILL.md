@@ -17,8 +17,11 @@ validation pass, or verification of a fix that a red team reported.
 2. A confirmed in-scope P0 or P1 goes back to the reviewer that reported it. A fresh
    round is owed only when the fix introduces a new mechanism or touches files the
    standing reviewer did not read, or once at the end of a long pull request before
-   ready-for-review. A one-word or one-line repair inside the files the reviewer read
-   never earns a fresh round.
+   ready-for-review. A rebase does not itself earn a fresh round: when its hand-resolved
+   intersection stays within files and mechanisms the standing reviewer read, that
+   reviewer verifies the intersection, including semantic conflict resolution. A
+   one-word or one-line repair inside the files the reviewer read never earns a fresh
+   round.
 3. A pull request gets at most three fresh rounds by default; a fourth needs the user's
    explicit approval. A prose-only pull request, design documents included, gets one,
    and a second needs the same approval. Rounds run from any platform count, and the
@@ -56,9 +59,12 @@ validation pass, or verification of a fix that a red team reported.
 
 ## Execution Order: Verify My Fix
 
-1. Name the finding and its class, the new pushed head, and every file changed since
-   the round. If the fix adds a mechanism or touches files the reviewer did not read,
-   stop: that owes a fresh round, not a verification.
+1. Name the finding and its class, the new pushed head, and every pull-request repair
+   since the round. After a rebase, also name the hand-resolved intersection; do not
+   treat every upstream file brought in by the new base as changed review scope. If the
+   repair or intersection adds a mechanism, touches files the reviewer did not read, or
+   materially broadens the reviewed surface, stop: that owes a fresh round, not a
+   verification.
 2. Send the verification brief below to the standing reviewer's handle and wait for
    closed or not closed with the commands it ran.
 3. Record the result under the same round in the pull request. If the reviewer is gone,
@@ -146,12 +152,14 @@ Deliver by: <SendMessage to <name> | final report>.
   round before it merges. Only a confirmed in-scope P0/P1 blocks, and the standing
   reviewer's verification closes it, not another round.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
-  fixes, and textual changes do not inherently merit another round. A rebase whose
-  overlap with the reviewed work is significant, in changed lines or in semantics, may
-  merit a fresh round on the intersection; one that only picks up a change clearly
-  consistent with, or irrelevant to, the reviewed files does not, and neither does one
-  whose only hand-resolved conflicts are generated or digest lines the owning script
-  resolves.
+  fixes, and textual changes do not inherently merit another round. A rebase does not
+  by itself require a fresh round. Its standing reviewer verifies a meaningful
+  hand-resolved intersection when that intersection stays inside the files and
+  mechanisms already reviewed, including semantic conflict resolution. A new round is
+  for a new mechanism, an unread file, or materially broader review scope. A rebase
+  that only picks up a change clearly consistent with, or irrelevant to, the reviewed
+  files needs neither, and neither does one whose only hand-resolved conflicts are
+  generated or digest lines the owning script resolves.
 - Classify every finding against the pull request's stated scope. Mere discovery,
   including an unrelated pre-existing spec/implementation mismatch, does not bring it
   into scope. Do not repair an out-of-scope finding in the pull request; link its

@@ -46,6 +46,13 @@ declaration before expensive CI starts. A PR-body edit does not restart compiler
 CI. If the declaration was omitted, add it and rerun the failed workflow on the
 same head rather than creating another candidate change.
 
+A rebase does not by itself require a fresh round. If its hand-resolved
+intersection stays within files and mechanisms the standing reviewer already
+read, send only that intersection back for focused verification, including
+semantic conflict resolution. Use a fresh round when the rebase introduces a
+new mechanism, touches files that reviewer did not read, or materially broadens
+the reviewed surface.
+
 ## Final package-expansion dispatch
 
 After review findings are resolved and no further content change is planned,
@@ -61,12 +68,16 @@ gh workflow run pr-package-expansion.yml --ref main \
   -f expected_head_sha="$head"
 ```
 
-The workflow rejects a closed pull request, a malformed SHA, or a head that no
-longer equals `expected_head_sha`. Inspect the `Manual Package Expansion
-Summary`, then record the reviewed SHA and run link in the pull request. Resolve
-failures introduced by the candidate. Record inherited failures and missing,
-timed-out or otherwise incomplete coverage explicitly; a summary without
-complete successful receipts is not evidence that the selected tests passed.
+The workflow rejects a closed pull request, a malformed SHA, a head that no
+longer equals `expected_head_sha`, or a target-branch retarget. Its planner
+freezes the exact synthetic merge SHA and target branch name used by every
+worker and the summary. Later movement of the same target branch does not
+invalidate that frozen candidate. Inspect the `Manual Package Expansion
+Summary`, then record the reviewed SHA and run link in the pull request.
+Resolve failures introduced by the candidate. Record inherited failures and
+missing, timed-out or otherwise incomplete coverage explicitly; a summary
+without complete successful receipts is not evidence that the selected tests
+passed.
 A review round does not run package expansion merely because it exists.
 Intermediate review candidates use required CI; expansion starts once on the
 settled reviewed head. A content change, hand-resolved conflict, base-changing

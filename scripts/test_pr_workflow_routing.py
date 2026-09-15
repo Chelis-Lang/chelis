@@ -27,6 +27,17 @@ REQUIRED_IMPLEMENTATION_JOBS = {
     "docs": "Docs",
     "no-ai-authorship": "No AI authorship markers",
 }
+PREFLIGHT_GATED_JOBS = {
+    "diagnostic-kind-oracle",
+    "lint-rust",
+    "script-unit",
+    "smt-build",
+    "smt-build-glibc231",
+    "ci-fast",
+    "integration-plan",
+    "test-telemetry",
+    "backend-sanitizers",
+}
 PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
     "content change",
     "hand-resolved conflict",
@@ -108,7 +119,11 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     changes = workflow["jobs"]["changes"]
     test.assertEqual(
         changes["permissions"],
-        {"contents": "read", "pull-requests": "read"},
+        {
+            "contents": "read",
+            "issues": "read",
+            "pull-requests": "read",
+        },
     )
     test.assertIn("candidate_sha", changes["outputs"])
     test.assertIn("candidate_preflight", changes["outputs"])
@@ -145,6 +160,8 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertTrue(lifecycle["continue-on-error"])
     test.assertIn("gh api", lifecycle["run"])
     test.assertIn("--current-pr", lifecycle["run"])
+    test.assertIn("--target-tip", lifecycle["run"])
+    test.assertIn("--timeline", lifecycle["run"])
     contract = next(
         step
         for step in changes["steps"]
@@ -155,6 +172,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         "steps.detect.outputs.ci_contract_changed == 'true'",
     )
     test.assertTrue(contract["continue-on-error"])
+    test.assertIn("scripts.test_check_agent_skills", contract["run"])
+    test.assertIn("scripts.test_ci_change_owned", contract["run"])
+    test.assertIn("scripts.test_ci_validate_pr_candidate", contract["run"])
+    test.assertIn("scripts.test_regenerate_conformance_assets", contract["run"])
     test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
     test.assertIn("scripts.test_gate.CiParityTests", contract["run"])
     record = next(
@@ -163,8 +184,16 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         if step.get("id") == "candidate-preflight"
     )
     test.assertIn("candidate_preflight=", record["run"])
+    test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
+    test.assertIn('if [ "$contract_changed" = "true" ]', record["run"])
+    test.assertIn('elif [ "$contract_changed" != "false" ]', record["run"])
     docs = workflow["jobs"]["docs"]
     test.assertIn("candidate_preflight", str(docs["steps"]))
+    for job_id in PREFLIGHT_GATED_JOBS:
+        test.assertIn(
+            "needs.changes.outputs.candidate_preflight == 'success'",
+            workflow["jobs"][job_id]["if"],
+        )
 
     for job_id, required_name in REQUIRED_IMPLEMENTATION_JOBS.items():
         job = workflow["jobs"][job_id]
@@ -172,7 +201,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         test.assertEqual(job["name"], required_name)
         if job_id in {"backend-sanitizers", "smt-build"}:
             test.assertIn(
-                "needs.changes.outputs.candidate_preflight != 'failure'",
+                "needs.changes.outputs.candidate_preflight == 'success'",
                 job["if"],
             )
 
@@ -248,7 +277,7 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertIn("scripts.test_ci_candidate_lifecycle", str(changes))
     conformance = workflow["jobs"]["conformance"]
     test.assertIn(
-        "needs.changes.outputs.candidate_preflight != 'failure'",
+        "needs.changes.outputs.candidate_preflight == 'success'",
         conformance["if"],
     )
     checkout = next(
@@ -270,7 +299,14 @@ def assert_acknowledgement_workflow(test: unittest.TestCase, workflow: dict) -> 
     test.assertIn("pull_request.number", str(workflow["concurrency"]))
     job = workflow["jobs"]["acknowledgements"]
     test.assertEqual(job["name"], "PR Contract Acknowledgements")
-    test.assertEqual(job["permissions"], {"contents": "read"})
+    test.assertEqual(
+        job["permissions"],
+        {
+            "contents": "read",
+            "issues": "read",
+            "pull-requests": "read",
+        },
+    )
     text = str(job)
     test.assertNotIn("cargo ", text)
     test.assertNotIn("rust-toolchain", text)
@@ -280,6 +316,10 @@ def assert_acknowledgement_workflow(test: unittest.TestCase, workflow: dict) -> 
     test.assertEqual(text.count("--require-acknowledgement"), 2)
     test.assertIn("github.event.pull_request.head.sha", text)
     test.assertIn("github.event.pull_request.body", text)
+    test.assertIn("ci_candidate_lifecycle.py", text)
+    test.assertIn("--current-pr", text)
+    test.assertIn("--target-tip", text)
+    test.assertIn("--timeline", text)
     for artifact in ("phase3-test-changes", "phase4b-contract-changes"):
         test.assertIn(artifact, text)
 
@@ -302,6 +342,10 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     )
     planner = jobs["integration-plan"]
     planner_text = str(planner)
+    test.assertEqual(
+        set(planner["outputs"]),
+        {"base_ref", "candidate_sha"},
+    )
     test.assertIn("pull-requests", str(planner["permissions"]))
     test.assertIn("refs/pull/", planner_text)
     test.assertIn("expected_head_sha", planner_text)
@@ -325,17 +369,52 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertLess(validator, checkouts[1])
     test.assertEqual(
         planner_steps[checkouts[0]].get("with", {}).get("ref"),
-        "${{ github.event.repository.default_branch }}",
+        "${{ github.sha }}",
+    )
+    test.assertEqual(
+        planner_steps[checkouts[0]].get("with", {}).get("path"),
+        "trusted",
     )
     test.assertEqual(
         planner_steps[checkouts[1]].get("with", {}).get("ref"),
         "refs/pull/${{ inputs.pr_number }}/merge",
     )
+    test.assertEqual(
+        planner_steps[checkouts[1]].get("with", {}).get("path"),
+        "candidate",
+    )
+    candidate = next(
+        step for step in planner_steps if step.get("id") == "candidate"
+    )
+    test.assertIn("candidate_sha=", candidate["run"])
+    test.assertEqual(candidate["working-directory"], "candidate")
+    identity = next(
+        step for step in planner_steps if step.get("id") == "pr-identity"
+    )
+    test.assertIn("trusted/scripts/ci_validate_pr_candidate.py", identity["run"])
+    test.assertIn("--github-output \"$GITHUB_OUTPUT\"", identity["run"])
+    frozen = next(
+        step
+        for step in planner_steps
+        if step.get("name") == "Validate the frozen synthetic candidate"
+    )
+    test.assertEqual(frozen["working-directory"], "candidate")
+    test.assertIn("--expected-base-sha", frozen["run"])
+    test.assertIn("--validate-checkout", frozen["run"])
 
     worker = jobs["package-expansion-shard"]
     test.assertEqual(worker["needs"], ["integration-plan"])
     test.assertEqual(worker["strategy"]["matrix"]["shard"], [0, 1, 2, 3])
     test.assertIn("--lane package-expansion", str(worker))
+    worker_checkout = next(
+        step
+        for step in worker["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    test.assertEqual(
+        worker_checkout["with"]["ref"],
+        "${{ needs.integration-plan.outputs.candidate_sha }}",
+    )
     summary = jobs["package-expansion-summary"]
     test.assertEqual(
         summary["needs"], ["integration-plan", "package-expansion-shard"]
@@ -346,12 +425,33 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     test.assertNotIn("--required", str(summary))
     test.assertIn("scripts/ci_validate_pr_candidate.py", summary_text)
     test.assertIn("--plan target/integration-change/plan.json", summary_text)
+    test.assertIn("--expected-base-ref", summary_text)
+    test.assertIn("--checkout-base-sha", summary_text)
+    test.assertNotIn("--expected-base-sha", summary_text)
     test.assertIn("No validated plan artifact was available.", summary_text)
     test.assertGreaterEqual(summary_text.count("exit 1"), 2)
     workflow_text = str(workflow)
     test.assertEqual(
         workflow_text.count("scripts/ci_validate_pr_candidate.py"),
-        2,
+        3,
+    )
+    summary_checkout = next(
+        step
+        for step in summary["steps"]
+        if step.get("with", {}).get("path") == "candidate"
+    )
+    test.assertEqual(
+        summary_checkout["with"]["ref"],
+        "${{ needs.integration-plan.outputs.candidate_sha }}",
+    )
+    trusted_summary_checkout = next(
+        step
+        for step in summary["steps"]
+        if step.get("with", {}).get("path") == "trusted"
+    )
+    test.assertEqual(
+        trusted_summary_checkout["with"]["ref"],
+        "${{ github.sha }}",
     )
 
 
@@ -380,6 +480,12 @@ def assert_author_contract(test: unittest.TestCase) -> None:
         test.assertIn("Candidate-base-update:", text)
         test.assertIn("Candidate-history-rewrite:", text)
         test.assertIn("before the first push", text)
+        test.assertIn("A rebase does not by itself require a fresh round.", text)
+        test.assertIn("hand-resolved intersection", text)
+        test.assertIn(
+            "Later movement of the same target branch does not invalidate",
+            text,
+        )
     guide = documents[AUTHOR_GUIDE]
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)
@@ -404,6 +510,21 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         actions_events(workflow)["pull_request"]["types"].append("edited")
         with self.assertRaises(AssertionError):
             assert_ci_metadata_routing(self, workflow)
+
+    def test_expensive_jobs_fail_closed_when_preflight_output_is_missing(
+        self,
+    ) -> None:
+        for job_id in PREFLIGHT_GATED_JOBS:
+            workflow = copy.deepcopy(yaml.safe_load(CI.read_text()))
+            workflow["jobs"][job_id]["if"] = workflow["jobs"][job_id][
+                "if"
+            ].replace(
+                "needs.changes.outputs.candidate_preflight == 'success' && ",
+                "",
+                1,
+            )
+            with self.subTest(job=job_id), self.assertRaises(AssertionError):
+                assert_ci_metadata_routing(self, workflow)
 
     def test_author_contract_requires_each_explicit_invalidation_class(self) -> None:
         originals = {

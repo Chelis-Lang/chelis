@@ -10,6 +10,8 @@ concurrency:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   acknowledgements:
@@ -18,6 +20,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -28,6 +32,25 @@ jobs:
 
       - name: Create uv-managed venv
         run: uv venv --python 3.11
+
+      - name: Require persistent candidate lifecycle declaration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          current_pr="$RUNNER_TEMP/current-pr.json"
+          timeline="$RUNNER_TEMP/pr-timeline.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
+          base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
+          git fetch --no-tags origin "refs/heads/$base_ref"
+          target_tip=$(git rev-parse FETCH_HEAD)
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
+          .venv/bin/python scripts/ci_candidate_lifecycle.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --current-pr "$current_pr" \
+            --target-tip "$target_tip" \
+            --timeline "$timeline"
 
       - name: Require protected-test acknowledgements
         env:

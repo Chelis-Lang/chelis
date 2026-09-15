@@ -150,6 +150,8 @@ class CiContractChangeTests(unittest.TestCase):
             ".github/workflows/ci.yml",
             ".github/actions/free-disk-space/action.yml",
             ".config/ci-test-targets.toml",
+            "agent-skills/redteam-exec/SKILL.md",
+            "scripts/gate.py",
             "scripts/ci_change_owned.py",
             "scripts/test_ci_candidate_lifecycle.py",
             "scripts/test_pr_workflow_routing.py",

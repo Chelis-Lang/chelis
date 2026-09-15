@@ -46,6 +46,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: read
 
 env:
@@ -149,12 +150,22 @@ jobs:
           args=(--event "$GITHUB_EVENT_PATH")
           if [ "$EVENT_NAME" = "pull_request" ]; then
             current_pr="$RUNNER_TEMP/current-pr.json"
+            timeline="$RUNNER_TEMP/pr-timeline.json"
             gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"
-            args+=(--current-pr "$current_pr")
+            base_ref=$(jq -er '.base.ref | select(length > 0)' "$current_pr")
+            git fetch --no-tags origin "refs/heads/$base_ref"
+            target_tip=$(git rev-parse FETCH_HEAD)
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
+            args+=(
+              --current-pr "$current_pr"
+              --target-tip "$target_tip"
+              --timeline "$timeline"
+            )
           fi
           if [ "$EVENT_NAME" = "pull_request" ] &&
              [ "$ACTION" = "synchronize" ]; then
-            git fetch origin "$BEFORE" "$HEAD" "$BASE" 2>/dev/null || true
+            git fetch origin "$BEFORE" "$HEAD" "$target_tip" 2>/dev/null || true
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
 
@@ -170,11 +181,15 @@ jobs:
         run: >-
           uv run --managed-python --python 3.11 --no-project
           --with PyYAML==6.0.3 python -m unittest
+          scripts.test_check_agent_skills
           scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_change_owned
           scripts.test_ci_detect_docs_only
+          scripts.test_ci_validate_pr_candidate
           scripts.test_pr_workflow_routing
           scripts.test_change_owned_workflow
           scripts.test_hosted_validation
+          scripts.test_regenerate_conformance_assets
           scripts.test_gate.DocsOnlySkipTests
           scripts.test_gate.CiParityTests
 
@@ -184,12 +199,19 @@ jobs:
         run: |
           lifecycle="${{ steps.candidate-lifecycle.outcome }}"
           contract="${{ steps.ci-contract.outcome }}"
+          contract_changed="${{ steps.detect.outputs.ci_contract_changed }}"
           verdict=success
-          if [ "$lifecycle" = "failure" ] || [ "$contract" = "failure" ]; then
+          if [ "$lifecycle" != "success" ]; then
+            verdict=failure
+          elif [ "$contract_changed" = "true" ]; then
+            if [ "$contract" != "success" ]; then
+              verdict=failure
+            fi
+          elif [ "$contract_changed" != "false" ]; then
             verdict=failure
           fi
           echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
-          echo "candidate lifecycle=$lifecycle, CI contract=$contract, verdict=$verdict"
+          echo "candidate lifecycle=$lifecycle, CI contract changed=$contract_changed, CI contract=$contract, verdict=$verdict"
 
   conformance:
     name: Hull Conformance Gate (Linux)
@@ -198,7 +220,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight != 'failure' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

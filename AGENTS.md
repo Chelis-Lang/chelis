@@ -186,12 +186,15 @@ obligations.
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
   them; merge only after both the required checks and the expansion report have been
-  inspected. Intermediate review candidates do not run expansion. Record the reviewed
-  SHA and run link in the pull request. A content change, hand-resolved conflict,
-  base-changing rebase, or base-branch retarget creates a new synthetic candidate and
-  requires a fresh dispatch. Do not create that invalidation merely to refresh a branch
-  after `origin/main` advances: when GitHub can merge the exact reviewed head safely,
-  preserve that head and its evidence as
+  inspected. Intermediate review candidates do not run expansion. The planner freezes
+  the exact synthetic merge SHA and target branch name used by every shard and the
+  summary. Later movement of the same target branch does not invalidate that frozen
+  candidate; a changed head or target-branch retarget does. Record the reviewed SHA and
+  run link in the pull request. A content change, hand-resolved conflict, base-changing
+  rebase, or base-branch retarget creates a new synthetic candidate and requires a
+  fresh dispatch. Do not create that invalidation merely to refresh a branch after
+  `origin/main` advances: when GitHub can merge the exact reviewed head safely, preserve
+  that head and its evidence as
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
@@ -219,14 +222,16 @@ obligations.
   unavailable"; that record closes the finding, and the end-of-pull-request round, when
   one is owed, re-checks it.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
-  fixes, and textual changes do not inherently merit another round. A rebase whose
-  overlap with your work is significant, either in changed lines or in semantics, may
-  merit a fresh round on the intersection. A rebase that only picks up an atom clearly
-  consistent with, or irrelevant to, the files you are working on does not, and neither
-  does one whose only hand-resolved conflicts are generated or digest lines that the
-  owning script resolves (see
-  [Worktree And Branch Discipline](#worktree-and-branch-discipline)). Use your best
-  judgement.
+  fixes, and textual changes do not inherently merit another round. A rebase does not
+  by itself require a fresh round. When its hand-resolved intersection stays within
+  files and mechanisms the standing reviewer already read, send that intersection to
+  the standing reviewer for focused verification, including semantic conflict
+  resolution. Use a fresh round only when the rebase introduces a new mechanism,
+  touches files that reviewer did not read, or materially broadens the reviewed
+  surface. A rebase that only picks up an atom clearly consistent with, or irrelevant
+  to, the reviewed files needs neither, and neither does one whose only hand-resolved
+  conflicts are generated or digest lines that the owning script resolves (see
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline)).
 - A non-major finding does not block merge, but if you are already rebasing or fixing
   something else, fold in the other relevant issues reviewers raised.
 - Repairs under this gate may correct, remove, or narrow the pull request's existing
@@ -800,11 +805,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
   evidence. Rebase only when that result differs, is unsafe or unclear, or another
   identified semantic or structural issue requires a changed head.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
-  before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
-  result for a non-documentation change or the focused documentation checks for a
-  docs-only change. A content-preserving rebase may retain supporting local evidence;
-  record that its covered head differs, and require CI on the new head. Never
-  force-push a red gate. Obtain approval, then use an exact-head
+  before any history rewrite is published. When the hand-resolved intersection is
+  inside the standing reviewer's prior files and mechanisms, that reviewer inspects
+  the intersection; the rebase does not automatically consume a fresh round. Run
+  `python3 scripts/gate.py --fast` on the result for a non-documentation change or the
+  focused documentation checks for a docs-only change. A content-preserving rebase may
+  retain supporting local evidence; record that its covered head differs, and require
+  CI on the new head. Never force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated registry lines:
   regenerate `rejection_registry_generated.rs` with

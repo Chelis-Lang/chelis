@@ -111,9 +111,11 @@ CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
     {
         ".config/ci-test-targets.toml",
         "AGENTS.md",
+        "agent-skills/redteam-exec/SKILL.md",
         "docs/ci_validation.md",
         "docs/guard_changes_for_pr_authors.md",
         "spec/design/guard_artifact_proposal_assessment.md",
+        "scripts/gate.py",
         "scripts/test_change_owned_workflow.py",
         "scripts/test_hosted_validation.py",
         "scripts/test_pr_workflow_routing.py",

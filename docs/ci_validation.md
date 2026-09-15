@@ -11,7 +11,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` change-owned shards and report | PR and trusted exact-candidate workflow dispatch, with the existing docs-only skip | Every default-enabled integration target added or directly modified by the candidate, or its exact reviewed alternative owner; four deterministic shards with a 20-minute limit each |
 | `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
-| `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of protected-test and frozen-contract acknowledgement lines; no compiler build |
+| `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of persistent candidate-lifecycle, protected-test and frozen-contract acknowledgement lines; no compiler build |
 | `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
@@ -35,6 +35,10 @@ rewrite. Base updates require one exact
 it does not replace review of a conflict resolution or approval for a force
 push. A force-pushed-away old head that Git can no longer inspect fails closed
 unless the current head has the explicit history-rewrite declaration.
+The introducing implementation event requires the exact new head. The
+acknowledgement workflow also runs on later body edits and accepts that recorded
+head only while it remains an ancestor of the current head, so deleting a
+previously required declaration cannot preserve a green required context.
 
 The same first-stage classifier identifies changes to workflows, workflow
 actions, CI ownership, CI scripts and tests, `AGENTS.md`, this document, and the
@@ -91,21 +95,25 @@ Package expansion uses a separate manually dispatched four-shard worker pool
 after the review rounds settle the intended content; intermediate review
 candidates do not dispatch it.
 The dispatcher accepts an open pull request number and an exact expected head
-SHA, validates both before planning, and rejects stale candidates. Its failures,
-missing shards, exclusions, and timing-budget overruns are recorded by `Manual
-Package Expansion Summary`; neither that summary nor its workers feed
-`Integration Tests (Linux)`. Once review repairs have fixed the intended
-content, agents start it alongside the final required implementation checks;
-there is no dependency between their verdicts. Inspect both before merging and
-record the reviewed SHA and run link. A content change, hand-resolved conflict,
-base-changing rebase, or base-branch retarget requires a fresh dispatch because
-it changes the synthetic candidate. In particular, a base-changing rebase after
-expansion must rerun `PR Package Expansion`; rebasing before the first push
-creates no expansion evidence to invalidate. Do not rebase a ready pull request merely
-because `main` advanced: if the exact reviewed head still merges safely,
-preserve it and its evidence. Introduced failures are resolved; inherited
-failures and incomplete coverage are named explicitly. Nightly JUnit reports
-stay in their producing workflow.
+SHA, validates both before planning, and rejects stale candidates. The planner
+records the exact synthetic merge SHA and target branch name; every worker and
+the summary check out that frozen SHA. The final validator requires the same PR
+head and target branch name and verifies the frozen merge's exact planned
+parents. Later movement of that same target branch therefore does not invalidate
+the run, while a changed head or target retarget does. Failures, missing shards,
+exclusions, and timing-budget overruns are recorded by `Manual Package Expansion
+Summary`; neither that summary nor its workers feed `Integration Tests (Linux)`.
+Once review repairs have fixed the intended content, agents start it alongside
+the final required implementation checks; there is no dependency between their
+verdicts. Inspect both before merging and record the reviewed SHA and run link. A
+content change, hand-resolved conflict, base-changing rebase, or base-branch
+retarget requires a fresh dispatch because it changes the synthetic candidate.
+In particular, a base-changing rebase after expansion must rerun `PR Package
+Expansion`; rebasing before the first push creates no expansion evidence to
+invalidate. Do not rebase a ready pull request merely because `main` advanced:
+if the exact reviewed head still merges safely, preserve it and its evidence.
+Introduced failures are resolved; inherited failures and incomplete coverage are
+named explicitly. Nightly JUnit reports stay in their producing workflow.
 The Linux nightly report inspects every execution worker and opens a failure
 tracker on non-success; a manual branch run cannot close a main-nightly tracker.
 

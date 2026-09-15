@@ -15,6 +15,7 @@ NEW_BASE = "2" * 40
 BEFORE = "3" * 40
 HEAD = "4" * 40
 MERGE = "5" * 40
+TARGET = "6" * 40
 
 
 class FakeGraph:
@@ -63,12 +64,21 @@ def payload(*, body: str = "", action: str = "synchronize") -> dict:
 def current_pr(*, body: str = "", head: str = HEAD) -> dict:
     return {
         "body": body,
-        "base": {"sha": NEW_BASE},
+        "base": {"sha": NEW_BASE, "ref": "main"},
         "head": {"sha": head},
     }
 
 
 class CandidateLifecycleTests(unittest.TestCase):
+    def test_non_pr_event_needs_no_candidate_declaration(self) -> None:
+        self.assertEqual(
+            lifecycle.validate_payload(
+                {"ref": "refs/heads/main"},
+                FakeGraph(ancestors=set()),
+            ),
+            "unchanged-candidate",
+        )
+
     def test_opened_candidate_needs_no_history_acknowledgement(self) -> None:
         self.assertEqual(
             lifecycle.validate_payload(payload(action="opened"), FakeGraph(ancestors=set())),
@@ -188,6 +198,127 @@ class CandidateLifecycleTests(unittest.TestCase):
                 FakeGraph(ancestors={(BEFORE, HEAD)}),
                 current_pr=current_pr(head=MERGE),
             )
+
+    def test_live_target_tip_controls_classification_not_event_base_snapshot(
+        self,
+    ) -> None:
+        graph = FakeGraph(
+            ancestors={(OLD_BASE, TARGET)},
+            merge_bases={
+                (BEFORE, TARGET): OLD_BASE,
+                (HEAD, TARGET): TARGET,
+            },
+        )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+                target_tip=TARGET,
+            ),
+            "base-rebase",
+        )
+
+    def test_force_push_declaration_survives_body_edits_and_later_pushes(
+        self,
+    ) -> None:
+        graph = FakeGraph(ancestors={(MERGE, HEAD)}, merges=[])
+        edited = payload(action="edited")
+        edited["pull_request"]["head"]["sha"] = HEAD
+        timeline = [
+            [
+                {
+                    "event": "head_ref_force_pushed",
+                    "commit_id": MERGE,
+                }
+            ]
+        ]
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update.*or"):
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(),
+                target_tip=TARGET,
+                timeline=timeline,
+            )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {MERGE} "
+                        "semantic conflict resolution required the rebase"
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=timeline,
+            ),
+            "unchanged-candidate",
+        )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(
+                    body="\n".join(
+                        [
+                            (
+                                f"Candidate-base-update: {MERGE} "
+                                "semantic conflict resolution required the rebase"
+                            ),
+                            (
+                                f"Candidate-history-rewrite: {HEAD} "
+                                "approved consolidation followed"
+                            ),
+                        ]
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=timeline,
+            ),
+            "unchanged-candidate",
+        )
+
+    def test_prior_base_merge_declaration_survives_later_pushes(self) -> None:
+        graph = FakeGraph(
+            ancestors={(MERGE, HEAD), (NEW_BASE, TARGET)},
+            merges=[(MERGE, (BEFORE, NEW_BASE))],
+        )
+        reopened = payload(action="reopened")
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update"):
+            lifecycle.validate_payload(
+                reopened,
+                graph,
+                current_pr=current_pr(),
+                target_tip=TARGET,
+                timeline=[],
+            )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                reopened,
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {MERGE} "
+                        "main overlap required the merge"
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=[],
+            ),
+            "unchanged-candidate",
+        )
 
     def test_unavailable_old_head_requires_explicit_history_rewrite_reason(self) -> None:
         with self.assertRaisesRegex(ValueError, "Candidate-history-rewrite"):
