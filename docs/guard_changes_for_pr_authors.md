@@ -17,9 +17,10 @@ owning design.
 
 ## Final package-expansion dispatch
 
-After review findings are resolved and required implementation checks pass on
-the final candidate, dispatch `PR Package Expansion` with the pull request
-number and exact head SHA:
+After review findings are resolved and no further content change is planned,
+dispatch `PR Package Expansion` with the pull request number and exact head
+SHA. Do not serialize it behind the final required implementation checks: run
+both at the same time, then inspect both before merging.
 
 ```sh
 pr=1234
@@ -35,8 +36,15 @@ Summary`, then record the reviewed SHA and run link in the pull request. Resolve
 failures introduced by the candidate. Record inherited failures and missing,
 timed-out or otherwise incomplete coverage explicitly; a summary without
 complete successful receipts is not evidence that the selected tests passed.
-Any candidate change requires fresh required implementation validation and a
-fresh package-expansion dispatch.
+A content change, hand-resolved conflict, base-changing rebase, or base-branch
+retarget requires a fresh package-expansion dispatch because the workflow
+validates the exact synthetic candidate. Do not rebase a ready pull request
+merely to refresh it after `main` advances. If GitHub can safely merge the exact
+reviewed head, preserve that head and its existing evidence; inspect the
+prospective merge as described in
+[Worktree And Branch Discipline](../AGENTS.md#worktree-and-branch-discipline).
+A base-branch retarget still requires the fresh coordinated implementation
+validation described below.
 
 `PR Contract Acknowledgements` separately owns acknowledgement enforcement.
 Editing the title or description reruns that required check without cancelling

@@ -163,12 +163,18 @@ obligations.
   coordination dispatches fresh compiler and Hull workflows against the exact new
   synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
   checks before proceeding.
-- After reviews and repairs are complete and the final candidate's required
-  implementation checks pass, dispatch `PR Package Expansion` with the pull request
-  number and that exact head SHA. Inspect its report and record the reviewed SHA and
-  run link in the pull request. Any candidate change invalidates the run and requires a
-  fresh dispatch. Resolve failures introduced by the candidate; identify inherited
-  failures and any missing, timed-out or otherwise incomplete coverage explicitly.
+- After reviews and repairs are complete and no further content change is planned,
+  dispatch `PR Package Expansion` with the pull request number and exact head SHA.
+  Start it alongside the final required implementation checks rather than waiting for
+  them; merge only after both the required checks and the expansion report have been
+  inspected. Record the reviewed SHA and run link in the pull request. A content change,
+  hand-resolved conflict, base-changing rebase, or base-branch retarget creates a new
+  synthetic candidate and requires a fresh dispatch. Do not create that invalidation
+  merely to refresh a branch after `origin/main` advances: when GitHub can merge the
+  exact reviewed head safely, preserve that head and its evidence as
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
+  failures introduced by the candidate; identify inherited failures and any missing,
+  timed-out or otherwise incomplete coverage explicitly.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
