@@ -478,7 +478,7 @@ package = "chelis-cli"
 name = "issue_1417_stdlib_dtype_family_bounds"
 workflow = "ci.yml"
 job = "change-owned-shard"
-cadence = "pull_request and push when directly modified"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
 reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
 tracking_issue = "chelis#1824"
 

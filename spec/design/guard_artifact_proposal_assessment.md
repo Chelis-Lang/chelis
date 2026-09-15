@@ -65,13 +65,16 @@ standing lane.
 |---|---|
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
 | Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
-| New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
+| New hosted change-owned lane | On every non-doc pull request and trusted exact-candidate dispatch, run every default-enabled integration target added or directly modified by the candidate. An exclusion is valid only when it names an exact alternative owner and reason. |
+| Fixed default-branch lane | On every push to `main`, run the same standing `ci-fast` suite and do not derive integration ownership from the just-merged diff. Nightly remains the owner for known residual and full-workspace work. |
 | Explicit hosted package expansion | After reviews and repairs fix the intended content, agents dispatch separate workers alongside the final required implementation checks. They run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale dispatches. Do not create a new synthetic candidate merely to refresh a ready branch after `main` advances; preserve the exact reviewed head when its prospective merge is safe. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
 | macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
 
 The standing lane remains useful even when no package maps from a documentation
-or workflow-only change. The change-owned lane closes the structural omission
+or workflow-only change. On `main` it is deliberately the complete integration
+aggregate input, so default-branch status is stable across unrelated merge
+diffs. The change-owned lane closes the structural omission
 where a pull request adds or directly changes an integration target root but no
 reviewed row names it. Package expansion may catch same-package helper and
 implementation effects without pretending to compute a reverse-dependency or
@@ -129,8 +132,9 @@ For pull requests, the checked-out synthetic merge commit is the execution
 candidate. The planner must require exactly two parents, use `HEAD^1` as the
 base, require `HEAD^2` to equal the event pull-request head, and derive the
 NUL-delimited rename-aware change set with
-`git diff --name-status -z --find-renames BASE CANDIDATE`. A main push uses the
-event's before/after commits and the same path-classification logic.
+`git diff --name-status -z --find-renames BASE CANDIDATE`. A main push does not
+run this planner: its acceptance selection is the fixed standing suite rather
+than the event's before/after diff.
 
 Base and candidate Cargo metadata define exact `package::target` identities and
 their `src_path`. A candidate identity absent from the base is added; an
@@ -172,7 +176,9 @@ command, selected and executed test lists, timings, JUnit, and plan digest. Its
 required report fails on a missing shard, digest mismatch, duplicate execution,
 uncovered selected target, executed exclusion, or non-success result. The
 stable `Integration Tests (Linux)` context eventually depends on the standing
-`ci-fast` worker and this change-owned report only.
+`ci-fast` worker and this change-owned report for PR candidates. On a push to
+`main`, the stable context depends on `ci-fast` alone and all diff-derived jobs
+are skipped.
 
 A target present in both the standing and change-owned sets is not executed
 twice. The standing worker writes a digested coverage record binding candidate,
@@ -859,8 +865,9 @@ starting work and again before merging, as required by `AGENTS.md`.
 
 The remaining work has separate owners and acceptance conditions:
 
-1. **Broader PR execution, chelis#1824.** Keep the required change-owned
-   guarantee and nightly backstop. The chelis#2040 merged-main trial had three
+1. **Broader PR execution, chelis#1824.** Keep the required PR change-owned
+   guarantee, the fixed standing `main` suite, and the nightly backstop. The
+   chelis#2040 merged-main trial had three
    expansion timeouts and one failing receipt, so regular PR/main expansion is
    replaced by exact final-candidate dispatch. Complete the separate empty-plan,
    verified-overlap and package-batching slice, then collect comparable hosted

@@ -281,6 +281,10 @@ class SchemaTests(unittest.TestCase):
             (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
             ("ci.yml", "change-owned-shard", "chelis#1824"),
         )
+        self.assertEqual(
+            manual_owner.cadence,
+            "pull_request and exact-candidate workflow_dispatch when directly modified",
+        )
         for owner in (
             *config.target_exclusions.values(),
             *config.test_exclusions.values(),
