@@ -163,10 +163,35 @@ def assert_change_owned_topology(
         "python3 ../trusted/scripts/ci_validate_pr_candidate.py",
         summary_step["run"],
     )
+    test.assertIn(
+        ".venv/bin/python scripts/ci_change_owned.py report",
+        summary_step["run"],
+    )
     test.assertIn("--expected-base-sha", summary_step["run"])
     test.assertIn("--validate-checkout", summary_step["run"])
     candidate_validation = summary_step["run"].split("report_status=0", 1)[0]
     test.assertNotIn("--plan ", candidate_validation)
+    venv_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Create uv-managed venv"
+    )
+    test.assertEqual(venv_step.get("working-directory"), "candidate")
+    publish_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Publish informational package-expansion summary"
+    )
+    test.assertEqual(publish_step.get("working-directory"), "candidate")
+    upload_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Upload informational package-expansion summary"
+    )
+    test.assertEqual(
+        upload_step["with"]["path"],
+        "candidate/target/integration-change/package-expansion-summary",
+    )
     for step in summary["steps"]:
         if step.get("uses", "").startswith("actions/download-artifact@"):
             test.assertTrue(
@@ -236,10 +261,17 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                 )
 
     def test_expansion_summary_cannot_mix_trusted_and_candidate_tools(self) -> None:
-        for mutation in ("main-report", "unbound-checkout", "missing-candidate"):
+        for mutation in (
+            "main-validator",
+            "trusted-reporter",
+            "unbound-checkout",
+            "missing-candidate",
+            "missing-venv-directory",
+            "wrong-upload",
+        ):
             expansion_workflow = copy.deepcopy(self.expansion_workflow)
             summary = expansion_workflow["jobs"]["package-expansion-summary"]
-            if mutation == "main-report":
+            if mutation == "main-validator":
                 step = next(
                     step
                     for step in summary["steps"]
@@ -249,6 +281,17 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                 step["run"] = step["run"].replace(
                     "python3 ../trusted/scripts/ci_validate_pr_candidate.py",
                     ".venv/bin/python scripts/ci_validate_pr_candidate.py",
+                )
+            elif mutation == "trusted-reporter":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Summarize the informational package expansion"
+                )
+                step["run"] = step["run"].replace(
+                    ".venv/bin/python scripts/ci_change_owned.py report",
+                    "python3 ../trusted/scripts/ci_change_owned.py report",
                 )
             elif mutation == "unbound-checkout":
                 step = next(
@@ -261,12 +304,29 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                     "--validate-checkout 2>&1",
                     "2>&1",
                 )
-            else:
+            elif mutation == "missing-candidate":
                 summary["steps"] = [
                     step
                     for step in summary["steps"]
                     if step.get("with", {}).get("path") != "candidate"
                 ]
+            elif mutation == "missing-venv-directory":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name") == "Create uv-managed venv"
+                )
+                step.pop("working-directory")
+            else:
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Upload informational package-expansion summary"
+                )
+                step["with"]["path"] = (
+                    "trusted/target/integration-change/package-expansion-summary"
+                )
             with self.subTest(mutation=mutation), self.assertRaises(
                 AssertionError
             ):
