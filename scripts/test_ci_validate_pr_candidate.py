@@ -29,11 +29,12 @@ def payload(*, state: str = "open", head: str = HEAD, base: str = BASE) -> dict:
 
 def plan() -> dict:
     result = {
-        "version": 1,
+        "version": owned.PLAN_VERSION,
         "mode": "pull_request",
         "base_sha": BASE,
         "candidate_sha": MERGE,
         "event_pr_head": HEAD,
+        "config_digest": "d" * 64,
         "changed_records": [],
         "path_dispositions": [],
         "target_dispositions": [],
@@ -42,6 +43,7 @@ def plan() -> dict:
         "change_owned": [],
         "package_expansion": [],
         "standing_targets": [],
+        "standing_coverage_reuse": [],
         "manual_only_targets": [],
         "target_exclusions": [],
         "test_exclusions": [],
