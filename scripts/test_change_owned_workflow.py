@@ -13,14 +13,35 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 EXPANSION_WORKFLOW = ROOT / ".github/workflows/pr-package-expansion.yml"
 SHARDS = [0, 1, 2, 3]
+PR_ONLY_JOB_IF = {
+    "integration-plan": (
+        "${{ !cancelled() && github.event_name != 'push' && "
+        "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.docs_only != 'true') }}"
+    ),
+    "change-owned-shard": (
+        "${{ !cancelled() && github.event_name != 'push' && "
+        "needs.integration-plan.result == 'success' }}"
+    ),
+    "change-owned-report": (
+        "${{ always() && github.event_name != 'push' && "
+        "(needs.changes.result != 'success' || "
+        "needs.changes.outputs.docs_only != 'true') }}"
+    ),
+}
 
 
 def _run_steps(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
 
 
-def _assert_pr_only_job(test: unittest.TestCase, job: dict) -> None:
-    test.assertIn("github.event_name != 'push'", job["if"])
+def _assert_pr_only_job(
+    test: unittest.TestCase, name: str, job: dict
+) -> None:
+    test.assertEqual(
+        " ".join(job["if"].split()),
+        " ".join(PR_ONLY_JOB_IF[name].split()),
+    )
 
 
 def _assert_empty_shard_skips_preparation(
@@ -94,7 +115,7 @@ def assert_change_owned_topology(
     test.assertFalse(planner.get("continue-on-error", False))
     test.assertIn("needs.changes.outputs.docs_only != 'true'", planner["if"])
     test.assertIn("needs.changes.result != 'success'", planner["if"])
-    _assert_pr_only_job(test, planner)
+    _assert_pr_only_job(test, "integration-plan", planner)
     checkout = next(
         step
         for step in planner["steps"]
@@ -112,7 +133,7 @@ def assert_change_owned_topology(
     test.assertFalse(required["strategy"]["fail-fast"])
     test.assertEqual(required["strategy"]["matrix"]["shard"], SHARDS)
     test.assertIn("needs.integration-plan.result == 'success'", required["if"])
-    _assert_pr_only_job(test, required)
+    _assert_pr_only_job(test, "change-owned-shard", required)
     test.assertIn(
         "scripts/ci_change_owned.py run-shard", _run_steps(required)
     )
@@ -136,7 +157,7 @@ def assert_change_owned_topology(
         ["changes", "ci-fast", "integration-plan", "change-owned-shard"],
     )
     test.assertIn("always()", required_report["if"])
-    _assert_pr_only_job(test, required_report)
+    _assert_pr_only_job(test, "change-owned-report", required_report)
     test.assertFalse(required_report.get("continue-on-error", False))
     required_report_commands = _run_steps(required_report)
     test.assertIn("scripts/ci_require_success.py", required_report_commands)
@@ -334,6 +355,9 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             "planner-on-push",
             "worker-on-push",
             "report-on-push",
+            "planner-reenabled-on-push",
+            "worker-reenabled-on-push",
+            "report-reenabled-on-push",
             "main-requires-change-owned",
             "pr-omits-change-owned",
         ):
@@ -352,6 +376,16 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                 job = workflow["jobs"]["change-owned-report"]
                 job["if"] = job["if"].replace(
                     "github.event_name != 'push' && ", ""
+                )
+            elif mutation.endswith("-reenabled-on-push"):
+                job_name = {
+                    "planner-reenabled-on-push": "integration-plan",
+                    "worker-reenabled-on-push": "change-owned-shard",
+                    "report-reenabled-on-push": "change-owned-report",
+                }[mutation]
+                job = workflow["jobs"][job_name]
+                job["if"] = job["if"].replace(
+                    " }}", " || github.event_name == 'push' }}"
                 )
             elif mutation == "main-requires-change-owned":
                 step = next(

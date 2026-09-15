@@ -4134,17 +4134,29 @@ class DocsOnlySkipTests(unittest.TestCase):
             pr_step,
         )
 
-    def test_change_owned_jobs_are_absent_from_main_push_execution(self):
+    def test_change_owned_jobs_have_exact_pr_only_predicates(self):
         attrs = _parse_job_attrs()
-        for job in (
-            "integration-plan",
-            "change-owned-shard",
-            "change-owned-report",
-        ):
+        expected = {
+            "integration-plan": (
+                "${{ !cancelled() && github.event_name != 'push' && "
+                "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.docs_only != 'true') }}"
+            ),
+            "change-owned-shard": (
+                "${{ !cancelled() && github.event_name != 'push' && "
+                "needs.integration-plan.result == 'success' }}"
+            ),
+            "change-owned-report": (
+                "${{ always() && github.event_name != 'push' && "
+                "(needs.changes.result != 'success' || "
+                "needs.changes.outputs.docs_only != 'true') }}"
+            ),
+        }
+        for job, predicate in expected.items():
             with self.subTest(job=job):
-                self.assertIn(
-                    "github.event_name != 'push'",
-                    attrs[job].get("if", ""),
+                self.assertEqual(
+                    " ".join(attrs[job].get("if", "").split()),
+                    " ".join(predicate.split()),
                 )
 
     def test_generalize_sweep_aggregator_is_fail_closed_nightly(self):
