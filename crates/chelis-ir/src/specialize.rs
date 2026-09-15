@@ -172,6 +172,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
                 node.span_id.clone(),
             );
             append_consumed_provenance(&mut out, new_id, dag, node, &info);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -221,6 +222,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
                 node.span_id.clone(),
             );
             append_dense_gather_provenance(&mut out, new_id, dag, node, &info);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -263,6 +265,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
         if let RiscOp::OneHot { vocab } = node.op {
             let indices = id_map[&node.inputs[0]];
             let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -918,6 +921,26 @@ mod tests {
         }
     }
 
+    fn literal_result_claim(dag: &mut Dag, axis: i32, required: i64) -> NodeId {
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(axis),
+                requirements: vec![
+                    chelis_types::scalar_from_i64("test", Prim::Int64, required).unwrap(),
+                ],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            None,
+        )
+    }
+
     #[test]
     fn specialization_pipeline_order_is_pinned() {
         assert_eq!(
@@ -1051,6 +1074,56 @@ mod tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::Mul | RiscOp::Expand { .. }))
         );
+    }
+
+    #[test]
+    fn matmul_specialization_preserves_literal_result_claim() {
+        let mut dag = Dag::new();
+        let claim = literal_result_claim(&mut dag, 0, 3);
+        let a_ty = mat(2, 3);
+        let b_ty = mat(3, 4);
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let result = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        dag.add_shape_dep(result, claim);
+        dag.add_root(result);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([
+            (
+                "a".to_string(),
+                crate::eval::TensorValue::from_vec(vec![2, 3], vec![1.0; 6]),
+            ),
+            (
+                "b".to_string(),
+                crate::eval::TensorValue::from_vec(vec![3, 4], vec![1.0; 12]),
+            ),
+        ]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `3`: claimed = 3"), "{before}");
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `3`: claimed = 3"), "{after}");
     }
 
     #[test]
@@ -1366,6 +1439,94 @@ mod tests {
     }
 
     #[test]
+    fn dense_gather_specialization_preserves_literal_result_claim() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat(2, 3),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 2,
+                size: RtDim::Lit(3),
+            },
+            vec![one_hot],
+            t3(4, 2, 3),
+            None,
+        );
+        let values_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(4),
+            },
+            vec![values],
+            t3(4, 2, 3),
+            None,
+        );
+        let product = dag.add_node(
+            RiscOp::Mul,
+            vec![one_hot_exp, values_exp],
+            t3(4, 2, 3),
+            None,
+        );
+        let claim = literal_result_claim(&mut dag, 0, 5);
+        let gathered = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            mat(4, 3),
+            None,
+        );
+        dag.add_shape_dep(gathered, claim);
+        dag.add_root(gathered);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([
+            (
+                "values".to_string(),
+                crate::eval::TensorValue::from_vec(
+                    vec![2, 3],
+                    vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+                ),
+            ),
+            (
+                "indices".to_string(),
+                crate::eval::TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0]),
+            ),
+        ]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `5`: claimed = 5"), "{before}");
+
+        let specialized = specialize_for_exact_arithmetic(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `5`: claimed = 5"), "{after}");
+    }
+
+    #[test]
     fn one_hot_similar_tree_with_wrong_reduction_axis_does_not_false_match_gather() {
         let mut dag = Dag::new();
         let values = dag.add_node(
@@ -1491,5 +1652,51 @@ mod tests {
             after[specialized.roots().first().expect("root")].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
+    }
+
+    #[test]
+    fn unmatched_one_hot_specialization_preserves_literal_result_claim() {
+        let mut dag = Dag::new();
+        let claim = literal_result_claim(&mut dag, 0, 4);
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(3),
+            None,
+        );
+        let one_hot = dag.add_node(
+            RiscOp::OneHot { vocab: 3 },
+            vec![indices],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_shape_dep(one_hot, claim);
+        dag.add_root(one_hot);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([(
+            "indices".to_string(),
+            crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
+        )]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `4`: claimed = 4"), "{before}");
+
+        let specialized = specialize_for_exact_arithmetic(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `4`: claimed = 4"), "{after}");
     }
 }
