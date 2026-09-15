@@ -2,7 +2,7 @@
 //! interleaved calls. These are transport tests, not fixed-control Dropout tests.
 #[allow(dead_code)]
 mod ownership_support;
-use ownership_support::{balanced, emit, run, run_with_peers};
+use ownership_support::{authored_c_symbol, balanced, emit, run, run_with_peers};
 
 const SOURCE: &str = r#"
 def draw(x: tensor[2, f32]) -> tensor[2, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)
@@ -63,6 +63,7 @@ def nested(x: tensor[2, {dtype}]) -> (tensor[2, {dtype}], tensor[2, {dtype}], te
 "#
         );
         let c = emit(&source, "nested");
+        let nested = authored_c_symbol("nested");
         let driver = format!(
             r#"
 int main(void) {{
@@ -72,7 +73,7 @@ int main(void) {{
     assert(memcmp(expected[0], expected[2], sizeof(expected[0])) != 0);
     assert(memcmp(expected[0], expected[1], sizeof(expected[0])) != 0);
     for (int repeat = 0; repeat < 8; ++repeat) {{
-        chelis_tuple *result = nested(x);
+        chelis_tuple *result = {nested}(x);
         assert(chelis_tuple_len(result) == 3);
         for (int i = 0; i < 3; ++i) {{
             chelis_value part = chelis_tuple_get(result, i);
@@ -106,13 +107,14 @@ def mapped(x: f32) -> tensor[2, f32] = with seed(42i64) { to_tensor(map(sample_s
     );
     let first = bits(42, 0).split(',').next().unwrap().to_string();
     let next = bits(42, 1).split(',').next().unwrap().to_string();
+    let mapped = authored_c_symbol("mapped");
     let driver = format!(
         r#"
 {CHECK}
 int main(void) {{
     const uint32_t expected[] = {{{first}, {next}}};
     assert(expected[0] != expected[1]);
-    for (int i = 0; i < 8; ++i) check_bits(mapped(0.0f), expected);
+    for (int i = 0; i < 8; ++i) check_bits({mapped}(0.0f), expected);
     return 0;
 }}
 "#
@@ -168,6 +170,8 @@ def mutual_entry(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) {{ ping
     );
     let c = emit(&source, "recursive_entry");
     let expected = bits(42, 3);
+    let recursive_entry = authored_c_symbol("recursive_entry");
+    let mutual_entry = authored_c_symbol("mutual_entry");
     balanced(&run(
         &c,
         &format!(
@@ -177,8 +181,8 @@ int main(void) {{
     chelis_tensor *x = input(2);
     const uint32_t expected[] = {{{expected}}};
     for (int repeat = 0; repeat < 8; ++repeat) {{
-        check_bits(recursive_entry(x), expected);
-        check_bits(mutual_entry(x), expected);
+        check_bits({recursive_entry}(x), expected);
+        check_bits({mutual_entry}(x), expected);
     }}
     chelis_tensor_release(x);
     return 0;
@@ -228,7 +232,10 @@ fn external_tensor_helpers_keep_their_four_argument_abi() {
         !host.h_header.contains("rng"),
         "public header acquired private state"
     );
-    assert!(host.h_header.contains("total(chelis_tensor* x)"));
+    assert!(
+        host.h_header
+            .contains(&format!("{}(chelis_tensor* x)", authored_c_symbol("total")))
+    );
     let peers =
         helpers
             .into_iter()
@@ -254,13 +261,14 @@ fn external_tensor_helpers_keep_their_four_argument_abi() {
 {}
 int main(void) {{
     chelis_tensor *x = input(2);
-    float (*public_entry)(chelis_tensor *) = total;
+    float (*public_entry)(chelis_tensor *) = {};
     for (int i = 0; i < 8; ++i) assert(public_entry(x) == -4.0f);
     chelis_tensor_release(x);
     return 0;
 }}
 "#,
-            host.h_header
+            host.h_header,
+            authored_c_symbol("total")
         ),
     ));
 }
@@ -283,6 +291,8 @@ fn hooked(c: &str) -> String {
 #[test]
 fn reentrant_public_entry_starts_its_own_context() {
     let c = emit(SOURCE, "seeded");
+    let draw = authored_c_symbol("draw");
+    let seeded = authored_c_symbol("seeded");
     let driver = format!(
         r#"
 {CHECK}
@@ -294,7 +304,7 @@ static chelis_tensor_write *intercept_write(chelis_tensor *tensor) {{
         armed = 0;
         observed++;
         const uint32_t zero[] = {{{zero}}};
-        check_bits(draw(template), zero);
+        check_bits({draw}(template), zero);
     }}
     return chelis_tensor_begin_write(tensor);
 }}
@@ -303,7 +313,7 @@ int main(void) {{
     const uint32_t expected[] = {{{expected}}};
     for (int i = 0; i < 8; ++i) {{
         armed = 1;
-        check_bits(seeded(template), expected);
+        check_bits({seeded}(template), expected);
     }}
     assert(observed == 8);
     chelis_tensor_release(template);
@@ -319,6 +329,8 @@ int main(void) {{
 #[test]
 fn concurrent_public_entries_keep_independent_seed_frames() {
     let c = emit(SOURCE, "seeded");
+    let seeded = authored_c_symbol("seeded");
+    let other = authored_c_symbol("other");
     let driver = format!(
         r#"
 #include <pthread.h>
@@ -350,7 +362,7 @@ static chelis_tensor_write *intercept_write(chelis_tensor *tensor) {{
 static void *first(void *unused) {{
     (void)unused;
     role = 1;
-    results[0] = seeded(template);
+    results[0] = {seeded}(template);
     pthread_mutex_lock(&mutex);
     phase = 3;
     pthread_cond_broadcast(&condition);
@@ -363,7 +375,7 @@ static void *second(void *unused) {{
     while (phase < 1) pthread_cond_wait(&condition, &mutex);
     pthread_mutex_unlock(&mutex);
     role = 2;
-    results[1] = other(template);
+    results[1] = {other}(template);
     return NULL;
 }}
 int main(void) {{

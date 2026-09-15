@@ -57,6 +57,30 @@ use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::{TempDir, tempdir};
 
+/// The C ABI namespace is intentionally independent of authored Chelis names.
+/// Census rows stay source-facing so the checker and emitted artifact can be
+/// compared without reintroducing source spellings into C.
+fn source_name_for_c_symbol(symbol: &str) -> String {
+    if symbol.ends_with("__main") {
+        return "main".to_string();
+    }
+    let Some(hex) = symbol.strip_prefix("chelis_fn_") else {
+        return symbol.to_string();
+    };
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect::<Option<Vec<_>>>();
+    bytes
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| symbol.to_string())
+}
+
 /// Examples the C backend refuses at a capability gate, with the
 /// diagnostic that refusal must carry. The census asserts the refusal rather
 /// than skipping the file: a bare skip stops measuring quietly, and deleting
@@ -985,12 +1009,11 @@ fn emitted_shape_guard_blocks(c_source: &str) -> Vec<EmittedShapeGuard<'_>> {
             && line.contains("__chelis_owned_body(")
             && line.trim_end().ends_with('{')
         {
-            enclosing = Some(
+            enclosing = Some(source_name_for_c_symbol(
                 head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .next()
-                    .unwrap_or("<none>")
-                    .to_string(),
-            );
+                    .unwrap_or("<none>"),
+            ));
             continue;
         }
         if *line == "}" {
@@ -1043,12 +1066,11 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String, String)> {
             && line.contains("__chelis_owned_body(")
             && line.trim_end().ends_with('{')
         {
-            enclosing = Some(
+            enclosing = Some(source_name_for_c_symbol(
                 head.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .next()
-                    .unwrap_or("<none>")
-                    .to_string(),
-            );
+                    .unwrap_or("<none>"),
+            ));
             axes.clear();
             reading_axes = false;
             continue;
@@ -1285,13 +1307,13 @@ fn assert_signature_entry_inventory(stem: &str, source: &str, emitted: &str) {
             .next()
             .expect("function name");
         let source_name = if function == format!("{}__main", c_name.symbol()) {
-            "main"
+            "main".to_string()
         } else {
-            function
+            source_name_for_c_symbol(function)
         };
         let signatures = &checked.signature_inference().functions;
         let signature = signatures
-            .get(source_name)
+            .get(&source_name)
             .or_else(|| {
                 source_name
                     .strip_prefix("chelis_user__")
@@ -1323,7 +1345,7 @@ fn assert_signature_entry_inventory(stem: &str, source: &str, emitted: &str) {
             })
             .collect::<Vec<_>>();
         let expected = signature_entry_inventory(&checked, signature, &c_parameters);
-        let actual = actual.remove(function).unwrap_or_default();
+        let actual = actual.remove(&source_name).unwrap_or_default();
         assert!(
             entry_inventories_match(&expected, &actual),
             "{stem}: ordered signature entry for {function}: expected {expected:?}, actual {actual:?}"

@@ -12,6 +12,15 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Authored Chelis definitions use an injective compiler namespace in C.
+pub fn authored_c_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 fn runtime() -> &'static Path {
     static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
     ARCHIVE.get_or_init(|| {

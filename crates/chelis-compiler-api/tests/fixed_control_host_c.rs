@@ -30,14 +30,16 @@ fn signed_int64_host_boundaries_compile_without_literal_overflow() {
              #elif defined(__GNUC__)\n#pragma GCC diagnostic error \"-Woverflow\"\n#endif\n\
              #define main unused_generated_main\n{generated}\n#undef main\n"
         );
+        let boundary = ownership_support::authored_c_symbol("boundary");
+        let sample = ownership_support::authored_c_symbol("sample");
         let driver = format!(
             r#"
 int main(void) {{
-    assert(boundary() == {literal});
+    assert({boundary}() == {literal});
     chelis_tensor *x = input(4);
     const float expected[] = {{{expected}}};
     for (int repeat = 0; repeat < 3; ++repeat) {{
-        chelis_tensor *result = sample(x);
+        chelis_tensor *result = {sample}(x);
         chelis_read_view view = chelis_tensor_read_view(result);
         assert(view.dtype == CHELIS_DTYPE_F32 && view.count == 4);
         assert(memcmp(view.data, expected, sizeof(expected)) == 0);
@@ -330,19 +332,22 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
 "#,
         "derivative",
     );
-    let driver = r#"
-int main(void) {
+    let derivative = ownership_support::authored_c_symbol("derivative");
+    let driver = format!(
+        r#"
+int main(void) {{
     chelis_tensor *x = input(4);
-    chelis_tensor *outputs[] = {NULL};
-    outputs[0] = derivative(x);
-    const float expected[] = {0.0f, 2.0f, 0.0f, 0.0f};
+    chelis_tensor *outputs[] = {{NULL}};
+    outputs[0] = {derivative}(x);
+    const float expected[] = {{0.0f, 2.0f, 0.0f, 0.0f}};
     tensor_bits(outputs[0], 4, expected);
     chelis_tensor_release(outputs[0]);
     chelis_tensor_release(x);
     return 0;
-}
-"#;
-    ownership_support::balanced(&ownership_support::run(&c, driver));
+}}
+"#
+    );
+    ownership_support::balanced(&ownership_support::run(&c, &driver));
 }
 
 #[test]
