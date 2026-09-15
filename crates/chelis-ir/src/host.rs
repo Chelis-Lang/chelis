@@ -3911,7 +3911,7 @@ fn host_def_kernel_product(
     };
     let name = canonical;
     let transfer_literal_result_claims =
-        top_level_fn_is_called_by_another_definition(program, name);
+        top_level_fn_transfers_literal_result_claims(program, name);
     // A generic definition has no standalone kernel. Its checked application
     // supplies the precision/rank bindings, including when its result is bool
     // and would otherwise look concrete enough to classify as a kernel.
@@ -4138,7 +4138,7 @@ fn staged_def_kernel_product(
         expected,
         crate::lower::StagedHostRegionLoweringOptions::for_declaration(
             random,
-            top_level_fn_is_called_by_another_definition(program, &signature.name),
+            top_level_fn_transfers_literal_result_claims(program, &signature.name),
         ),
         execution_out,
     );
@@ -4949,7 +4949,7 @@ fn lower_def_body_kernel(
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
     let transfer_literal_result_claims =
-        top_level_fn_is_called_by_another_definition(program, &signature.name);
+        top_level_fn_transfers_literal_result_claims(program, &signature.name);
     match staged_def_kernel(program, signature, None)? {
         staged::StagingAttempt::Ready(kernel) => {
             return lower_staged_host_plan(
@@ -13170,17 +13170,20 @@ fn top_level_fn_call_graph(
     graph
 }
 
-/// A declaration used from another declaration is a private pure helper.
-/// Its authored literal result obligations transfer into that helper's DAG;
-/// definitions reached only from top-level roots retain the legacy direct
-/// lowering contract.
-fn top_level_fn_is_called_by_another_definition(
+/// A pure declaration used from another declaration is a private tensor
+/// helper. Its authored literal result obligations transfer into that helper's
+/// DAG. Effecting definitions and definitions reached only from top-level
+/// roots retain the legacy direct lowering contract.
+fn top_level_fn_transfers_literal_result_claims(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> bool {
-    top_level_fn_call_graph(program)
-        .iter()
-        .any(|(caller, callees)| caller != name && callees.contains(name))
+    cached_def_effect_rows(program)
+        .get(name)
+        .is_some_and(|effects| effects.is_empty())
+        && top_level_fn_call_graph(program)
+            .iter()
+            .any(|(caller, callees)| caller != name && callees.contains(name))
 }
 
 fn recursive_top_level_fn_names_from_graph(
@@ -18335,6 +18338,24 @@ mod tests {
 
     fn parse_one_expr(source: &str) -> Expr {
         deep_expr(source)
+    }
+
+    #[test]
+    fn literal_result_claim_transfer_requires_a_pure_called_helper() {
+        let checked = surf_check(
+            "def pure(x: tensor[n, f32]) -> tensor[2, f32] = \
+                 shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             def random(x: tensor[n, f32]) -> tensor[2, f32] = \
+                 dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
+             def caller(x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        assert!(top_level_fn_transfers_literal_result_claims(
+            &session, "pure"
+        ));
+        assert!(!top_level_fn_transfers_literal_result_claims(
+            &session, "random"
+        ));
     }
 
     #[test]

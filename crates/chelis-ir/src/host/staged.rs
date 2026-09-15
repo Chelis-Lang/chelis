@@ -269,7 +269,17 @@ impl Partition<'_> {
             .copied()
             .collect::<BTreeSet<_>>();
         for node in &self.logical.nodes()[end..] {
-            exports.extend(node.inputs.iter().chain(&node.shape_deps).copied());
+            exports.extend(node.inputs.iter().chain(&node.shape_deps).copied().filter(
+                |dependency| {
+                    !matches!(
+                        self.logical.get(*dependency).map(|node| &node.op),
+                        Some(RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            ..
+                        })
+                    )
+                },
+            ));
         }
         for source in self.sources.iter().filter(|source| source.before >= end) {
             exports.extend(
@@ -288,23 +298,40 @@ impl Partition<'_> {
         for node in &self.logical.nodes()[start..end] {
             for &dependency in node.inputs.iter().chain(&node.shape_deps) {
                 if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
+                    let dependency_node = self
+                        .logical
+                        .get(dependency)
+                        .ok_or("missing staged dependency")?;
+                    if matches!(
+                        dependency_node.op,
+                        RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            ..
+                        }
+                    ) {
+                        let id = dag.add_node(
+                            dependency_node.op.clone(),
+                            Vec::new(),
+                            dependency_node.output_type.clone(),
+                            dependency_node.span_id.clone(),
+                        );
+                        dag.node_mut(id)
+                            .expect("new literal result claim")
+                            .merged_spans = dependency_node.merged_spans.clone();
+                        entry.insert(id);
+                        continue;
+                    }
                     if !self.available.contains(&StageValue::Tensor(dependency)) {
                         return Err(
                             "an executable staged helper contains an unresolved input".into()
                         );
                     }
-                    let ty = self
-                        .logical
-                        .get(dependency)
-                        .ok_or("missing staged input")?
-                        .output_type
-                        .clone();
                     entry.insert(dag.add_node(
                         RiscOp::Load {
                             name: self.names[&StageValue::Tensor(dependency)].as_str().into(),
                         },
                         Vec::new(),
-                        ty,
+                        dependency_node.output_type.clone(),
                         None,
                     ));
                 }
@@ -685,6 +712,129 @@ mod tests {
                 assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
             }
         }
+    }
+
+    #[test]
+    fn literal_result_claims_remain_tokens_across_host_source_cuts() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let result_ty = TensorType {
+            dims: vec![DimInfo::Named("actual".into(), None), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            input_ty.clone(),
+            None,
+        );
+        let claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![scalar_from_i64("reshape", Prim::Int64, 2).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let actual = dag.add_node(
+            RiscOp::Load {
+                name: "host-source".into(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let checked = dag.add_node(
+            RiscOp::CheckedReshapeExtent {
+                claims: vec!["2".into()],
+                axis: RtAxis::Lit(0),
+            },
+            vec![actual, required],
+            scalar_type(),
+            None,
+        );
+        let result = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
+            },
+            vec![input, checked],
+            result_ty,
+            None,
+        );
+        dag.add_shape_dep(result, claim);
+        dag.add_root(result);
+
+        let sources = vec![HostSource {
+            before: actual.0,
+            occurrences_before: None,
+            value: StageValue::Tensor(actual),
+            ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+                .unwrap()
+                .remove(0),
+            captures: vec![(
+                "x".into(),
+                StageValue::Tensor(input),
+                HostTypeTerm::Tensor(input_ty.clone()),
+            )],
+        }];
+        let params = vec![HostParam {
+            name: "x".into(),
+            ty: HostTypeTerm::Tensor(input_ty),
+        }];
+        let plan = partition(
+            &dag,
+            &sources,
+            &params,
+            &BTreeMap::from([(input, "x".into())]),
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+
+        let exported_claim = format!("__checked_stage_{}", claim.0);
+        let mut claimed_result = false;
+        for stage in plan.stages() {
+            let HostStage::Kernel { dag, outputs } = stage else {
+                continue;
+            };
+            assert!(!outputs.contains(&exported_claim));
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(&node.op, RiscOp::Load { name } if name == &exported_claim)
+                )
+            );
+            for node in dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+            {
+                claimed_result = true;
+                assert!(node.shape_deps.iter().any(|dependency| matches!(
+                    dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                )));
+            }
+        }
+        assert!(claimed_result);
     }
 
     #[test]
