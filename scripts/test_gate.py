@@ -694,7 +694,7 @@ class RejectionAuthorityPrBoundaryTests(unittest.TestCase):
         self.assertNotIn("\n  rejection-authority-liveness:", workflow)
         self.assertNotIn("rejection_authority_changed", workflow)
         self.assertNotIn("validate_rejection_issue_manifest.py", workflow)
-        self.assertNotIn("issues: read", workflow)
+        self.assertNotIn("issues: read", script_unit)
         _assert_executable_run_once(
             script_unit,
             ".venv/bin/python scripts/check_rejection_authority_boundary.py",

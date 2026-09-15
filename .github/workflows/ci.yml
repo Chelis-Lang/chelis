@@ -222,6 +222,7 @@ jobs:
           scripts.test_regenerate_conformance_assets
           scripts.test_gate.DocsOnlySkipTests
           scripts.test_gate.CiParityTests
+          scripts.test_gate.RejectionAuthorityPrBoundaryTests
 
       - name: Record candidate preflight verdict
         id: candidate-preflight

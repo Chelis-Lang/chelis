@@ -193,6 +193,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
     test.assertIn("scripts.test_gate.CiParityTests", contract["run"])
     test.assertIn(
+        "scripts.test_gate.RejectionAuthorityPrBoundaryTests",
+        contract["run"],
+    )
+    test.assertIn(
         "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
         contract["if"],
     )
