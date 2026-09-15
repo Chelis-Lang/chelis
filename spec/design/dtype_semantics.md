@@ -2607,9 +2607,9 @@ reinterpret either.
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
 atom identities and region boundaries, the frozen-contract acknowledgement
-gate, phase naming, and generated rejection-registry agreement. The committed
-report names each changed atom and region, including owned registry text, and
-requires its exact acknowledgement in addition to the changed-file line.
+report contract, phase naming, and generated rejection-registry agreement. The
+committed report names each changed atom and region, including owned registry
+text, and requires its exact acknowledgement in addition to the changed-file line.
 Required-literal anchors and their mutations remain independent checks.
 Roadmap and current-state documents retain their required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
@@ -2630,9 +2630,10 @@ one line per changed file, no leading whitespace, exactly one space after the
 colon, a repo-relative path with no glob and no `.`/`..` segment, and nothing
 after the path; lines inside fenced code blocks are ignored. An unacknowledged
 change and an acknowledgement naming an unchanged file both fail
-`--require-acknowledgement`, which is the mode CI runs on a pull request. A
-local run without that flag lists the changed contract files and the lines the
-body needs, then exits 0.
+`--require-acknowledgement`, which the dedicated `PR Contract Acknowledgements`
+check applies through `phase4b_change_report.py`. The full Phase 4B oracle runs
+independently in Docs. A local oracle run without that flag lists the changed
+contract files and the lines the body needs, then exits 0.
 
 Atom and region addresses use `Frozen-contract-change: atom:05-OP-33` and
 `Frozen-contract-change: region:"exact region label"`. Missing, duplicate,

@@ -10,6 +10,7 @@ import argparse
 from collections import Counter
 import ast
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -19,6 +20,10 @@ from typing import Callable
 from builtin_atom_registry import parse_registry, ROW
 from ci_change_owned import resolve_pr_commits
 from phase4b_contract_text import ATOM_START, OracleError, frozen_region, normalize_frozen_block, strict_atom_block
+from phase4b_acknowledgements import (
+    acknowledgement_identity,
+    parse_acknowledgements,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -264,6 +269,35 @@ def identity_acknowledgement_violations(result: dict, named: list[tuple[str, str
     return violations
 
 
+def acknowledgement_violations(
+    result: dict, named: list[tuple[str, str]]
+) -> list[str]:
+    """Validate the complete file plus atom/region acknowledgement set."""
+    files = [identity for kind, identity in named if kind == "file"]
+    identities = [(kind, identity) for kind, identity in named if kind != "file"]
+    required_files = set(result["changed_contract_files"])
+    counts = Counter(files)
+    violations = []
+    for path, count in sorted(counts.items()):
+        if count > 1:
+            violations.append(
+                "duplicate frozen contract acknowledgement for "
+                f"{path}: acknowledge each changed contract file exactly once"
+            )
+        if path not in required_files:
+            violations.append(
+                "stale or unknown frozen contract acknowledgement: "
+                f"{acknowledgement_line('file', path)}"
+            )
+    for path in sorted(required_files - counts.keys()):
+        violations.append(
+            "unacknowledged frozen contract change: add "
+            f"{acknowledgement_line('file', path)}; {DOCTRINE}"
+        )
+    violations.extend(identity_acknowledgement_violations(result, identities))
+    return violations
+
+
 def changed_contracts(repo: Path, base_ref: str, candidate_ref: str = "HEAD") -> dict:
     comparison, candidate = commit(repo, base_ref), commit(repo, candidate_ref)
     bases = git(repo, "merge-base", "--all", comparison, candidate).splitlines()
@@ -290,11 +324,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr-head", default="", help="exact PR event head; validate the synthetic candidate's parents")
     parser.add_argument("--candidate", default="HEAD")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--require-acknowledgement",
+        action="store_true",
+        help="require every changed file, atom, and region in the PR body",
+    )
+    body_source = parser.add_mutually_exclusive_group()
+    body_source.add_argument("--acknowledgements-file", type=Path)
+    body_source.add_argument("--acknowledgements-env")
     args = parser.parse_args(argv)
     try:
         args.output.unlink(missing_ok=True)
         base, candidate = resolve_comparison(ROOT, args.candidate, args.base, args.pr_head)
         result = changed_contracts(ROOT, base, candidate)
+        result["acknowledgement_problems"] = []
+        if args.require_acknowledgement:
+            if args.acknowledgements_file is not None:
+                body = args.acknowledgements_file.read_text()
+            elif (
+                args.acknowledgements_env is not None
+                and args.acknowledgements_env in os.environ
+            ):
+                body = os.environ[args.acknowledgements_env]
+            else:
+                raise ValueError(
+                    "enforcing acknowledgement requires an available PR body "
+                    "file or environment variable"
+                )
+            addresses, errors = parse_acknowledgements(body)
+            named: list[tuple[str, str]] = []
+            for address in addresses:
+                try:
+                    named.append(acknowledgement_identity(address))
+                except OracleError as error:
+                    errors.append(str(error))
+            result["acknowledgement_problems"] = errors + acknowledgement_violations(
+                result, named
+            )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")
     except (ValueError, OSError) as error:
@@ -305,7 +371,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f'  {row["kind"]} {row["identity"]}: {", ".join(row["changes"])}')
     for path in result["changed_contract_files"]:
         print(f"  changed contract file: {path}")
+    for line in result["required_acknowledgements"]:
+        print(line)
     print(DOCTRINE)
+    for problem in result["acknowledgement_problems"]:
+        print(problem, file=sys.stderr)
+    if result["acknowledgement_problems"]:
+        print("PHASE 4B CHANGE REPORT: FAIL", file=sys.stderr)
+        return 1
     print(f'PHASE 4B CHANGE REPORT: PASS ({len(result["changes"])} changed identities; contract review required)')
     return 0
 

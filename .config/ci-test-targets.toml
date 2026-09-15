@@ -3,6 +3,53 @@
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
 version = 2
 
+# The completion runner consumes these exact runtime-extent corpus inputs.
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes both registered phase corpora and their receipts"
+tracking_issue = "chelis#1277"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle_targets.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle derives and executes its exact receipt selection from this manifest"
+tracking_issue = "chelis#1277"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle_baseline_phase_b.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle compares the reviewed phase-B baseline and required exit states"
+tracking_issue = "chelis#1277"
+
+# The runtime-representation gate executes the frozen inventory and mutations.
+[[path_rule]]
+prefix = "scripts/runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate checks the reviewed foundation and executes its frozen mutations"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase0_inventory.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate compares the live inventory with this reviewed foundation"
+tracking_issue = "chelis#893"
+
 # chelis#2027: canonical release manifests and bundled locks are live inputs.
 [[standing_target]]
 package = "chelis-cli"
@@ -408,6 +455,19 @@ name = "expand_insert_dispatch_family"
 package = "chelis-types"
 name = "issue_1294_standard_lowerings"
 
+# All five rows in this published-stdlib acceptance target are intentionally
+# ignored. A direct modification remains required change-owned coverage: the
+# worker lists with ignored tests included, rejects this mode if any active
+# test appears, and executes the complete ignored suite with per-test receipts.
+[[manual_only_target]]
+package = "chelis-cli"
+name = "issue_1417_stdlib_dtype_family_bounds"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and push when directly modified"
+reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
+tracking_issue = "chelis#1824"
+
 # The default nextest profile excludes these complete targets. The current
 # unfiltered four-shard Linux workspace job is their exact alternative owner.
 [[target_exclusion]]
@@ -565,6 +625,42 @@ cadence = "pull_request and push"
 reason = "the change-owned workflow graph and command spellings are locked by script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = ".github/workflows/conformance.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "generic-edit exclusion and exact-base Hull dispatch are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-base-retarget.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "trusted base-retarget coordination and its required receipt are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-contract-acknowledgements.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only acknowledgement routing and its dedicated required job are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-package-expansion.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the stale-head-rejecting manual expansion interface and worker topology are locked by script-unit"
+tracking_issue = "chelis#1824"
+
 # The release workflow is text-parsed by the script-unit suites that lock its
 # job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
 # installed-artifact canary wiring, and release-notes extraction. Sibling
@@ -606,6 +702,78 @@ reason = "the required and informational workflow topology is locked by script-u
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/test_pr_workflow_routing.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only CI routing, acknowledgement isolation and manual dispatch inputs are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_hosted_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "hosted Docs coverage and metadata-edit negative controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/openspec_controller.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required-context credential evidence is exercised by the OpenSpec controller script tests"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_openspec_controller.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required-context credential evidence executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_validate_pr_candidate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-head and planned-base manual dispatch validator is locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "exact-base dispatch, polling and head-receipt failure controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_validate_pr_candidate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the manual dispatch validator's positive and stale-candidate controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "retarget success, stale, duplicate, missing and failed receipt controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/ci_test_targets.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -639,6 +807,44 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "gate-owned workflow and cache invariants run in script-unit"
+tracking_issue = "chelis#1824"
+
+# These exact paths use the existing chelis#1824 ownership mechanism.
+# Script-unit owns the portable contracts, not live cache acceptance.
+[[path_rule]]
+prefix = ".github/actionlint.yaml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the custom label in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/shared-runner-canary.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the manual workflow and its credential restrictions in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests exercise the portable cache probe contracts in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner contract suite executes in script-unit."
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
@@ -740,6 +946,15 @@ job = "docs"
 cadence = "pull_request and push"
 reason = "shared atom and region extraction executes in the required Phase 4B report and oracle"
 tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/phase4b_acknowledgements.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the shared frozen-contract acknowledgement grammar and negative controls run in script-unit"
+tracking_issue = "chelis#1824"
 
 # Stable root controls with direct standing owners.
 [[path_rule]]

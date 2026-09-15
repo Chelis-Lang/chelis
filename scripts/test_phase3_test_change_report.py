@@ -387,9 +387,18 @@ class WorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         return yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
 
+    def acknowledgement_workflow(self):
+        root = Path(__file__).resolve().parents[1]
+        return yaml.safe_load(
+            (root / ".github/workflows/pr-contract-acknowledgements.yml").read_text()
+        )
+
     def assert_contract(self, workflow):
         events = workflow.get("on", workflow.get(True))
-        self.assertEqual(set(events["pull_request"]["types"]), {"opened", "synchronize", "reopened", "edited"})
+        self.assertEqual(
+            set(events["pull_request"]["types"]),
+            {"opened", "synchronize", "reopened"},
+        )
         job = workflow["jobs"]["docs"]
         steps = job["steps"]
         checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout@")]
@@ -399,41 +408,82 @@ class WorkflowTests(unittest.TestCase):
         step = reports[0]
         self.assertEqual(step["run"], self.command)
         self.assertEqual(step["env"]["BASE_REF"], "${{ github.event_name == 'push' && github.event.before || '' }}")
-        self.assertEqual(step["env"]["PR_HEAD"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(
+            step["env"]["PR_HEAD"],
+            "${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}",
+        )
         self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("shell", step)
         self.assertNotIn("continue-on-error", job)
-        enforcing = [s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" in s.get("run", "")]
-        self.assertEqual(len(enforcing), 1)
-        enforce = enforcing[0]
-        self.assertEqual(enforce["if"], "github.event_name == 'pull_request'")
+        enforcing = [
+            s
+            for s in steps
+            if "phase3_test_change_report.py" in s.get("run", "")
+            and "--require-acknowledgement" in s.get("run", "")
+        ]
+        self.assertEqual(enforcing, [])
+        ack = self.acknowledgement_workflow()
+        ack_events = ack.get("on", ack.get(True))
+        self.assertEqual(
+            set(ack_events["pull_request"]["types"]),
+            {"opened", "synchronize", "reopened", "edited"},
+        )
+        enforce = next(
+            s
+            for s in ack["jobs"]["acknowledgements"]["steps"]
+            if "phase3_test_change_report.py" in s.get("run", "")
+        )
         self.assertEqual(enforce["run"], '.venv/bin/python scripts/phase3_test_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase3-test-changes.json')
         self.assertEqual(enforce["env"], {"PR_HEAD": "${{ github.event.pull_request.head.sha }}", "PR_BODY": "${{ github.event.pull_request.body }}"})
         self.assertNotIn("continue-on-error", enforce)
         self.assertNotIn("shell", enforce)
-        self.assertLess(steps.index(enforce), steps.index(next(s for s in steps if s.get("with", {}).get("name") == "phase3-test-changes")))
-        artifacts = [s for s in steps if s.get("with", {}).get("name") == "phase3-test-changes"]
+        ack_steps = ack["jobs"]["acknowledgements"]["steps"]
+        self.assertLess(
+            ack_steps.index(enforce),
+            ack_steps.index(
+                next(
+                    s
+                    for s in ack_steps
+                    if s.get("with", {}).get("name") == "phase3-test-changes"
+                )
+            ),
+        )
+        artifacts = [s for s in ack_steps if s.get("with", {}).get("name") == "phase3-test-changes"]
         self.assertEqual(len(artifacts), 1)
         self.assertTrue(artifacts[0]["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(artifacts[0]["with"]["path"], "target/phase3-test-changes.json")
         self.assertEqual(artifacts[0]["with"]["if-no-files-found"], "error")
 
     def test_missing_skipped_suppressed_or_untrusted_enforcement_fails(self):
-        for mutation in ("remove", "skip", "suppress", "body", "head", "interpolate", "edited"):
-            workflow = self.workflow()
-            steps = workflow["jobs"]["docs"]["steps"]
-            step = next((s for s in steps if "phase3_test_change_report.py" in s.get("run", "") and "--require-acknowledgement" in s.get("run", "")), None)
+        for mutation in ("remove", "suppress", "body", "head", "interpolate", "edited"):
+            workflow = self.acknowledgement_workflow()
+            steps = workflow["jobs"]["acknowledgements"]["steps"]
+            step = next(
+                (
+                    s
+                    for s in steps
+                    if "phase3_test_change_report.py" in s.get("run", "")
+                ),
+                None,
+            )
             if step is not None:
-                if mutation == "edited": workflow.get("on", workflow.get(True))["pull_request"] = None
+                if mutation == "edited":
+                    workflow.get("on", workflow.get(True))["pull_request"] = None
                 elif mutation == "remove": steps.remove(step)
-                elif mutation == "skip": step["if"] = "false"
                 elif mutation == "suppress": step["continue-on-error"] = True
                 elif mutation == "body": step["env"].pop("PR_BODY")
                 elif mutation == "head": step["env"]["PR_HEAD"] = "${{ github.event.before }}"
                 else: step["run"] += " ${{ github.event.pull_request.body }}"
-            with self.subTest(mutation=mutation), self.assertRaises((AssertionError, TypeError)):
-                self.assert_contract(workflow)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                (AssertionError, KeyError, StopIteration, TypeError)
+            ):
+                original = self.acknowledgement_workflow
+                self.acknowledgement_workflow = lambda: workflow
+                try:
+                    self.assert_contract(self.workflow())
+                finally:
+                    self.acknowledgement_workflow = original
 
     def test_docs_job_executes_and_publishes_report(self):
         self.assert_contract(self.workflow())
