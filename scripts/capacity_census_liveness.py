@@ -13,7 +13,7 @@ native transport and shape-operation comparison rows. It rejects every legacy
 citation. Its shape cannot replace the binding gate's current registration,
 graph, codec and execution evidence.
 
-Network gate (run by the change-gated and nightly liveness jobs; it also runs
+Network gate (scheduled/full-matrix owner pending under chelis#990; also run
 manually at release cuts and during red-team passes):
 
     .venv/bin/python scripts/capacity_census_liveness.py

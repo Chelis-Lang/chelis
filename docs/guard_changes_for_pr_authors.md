@@ -220,10 +220,11 @@ After changing a production `unimplemented_rejection!` citation, regenerate:
 ```
 
 Review that the issue is relevant to the missing implementation. PR validation
-checks new or changed issue identities against GitHub and rejects closed,
-missing or pull-request references. It still checks complete source/compiler
-agreement on relevant runs. A scheduled canary owns later closure of unchanged
-issue identities; do not re-cite unrelated code merely to quiet that report.
+checks complete source/compiler agreement and construction membership without
+querying GitHub. The scheduled canary checks every source-derived identity and
+rejects closed, missing, or pull-request references; run it manually as well
+before release or relevant red-team claims. Do not re-cite unrelated code
+merely to quiet that report.
 
 ## Changing the guarded Nix workflow
 

@@ -116,57 +116,6 @@ class IsDocsOnlyTests(unittest.TestCase):
                 self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
 
 
-class RejectionAuthorityChangeTests(unittest.TestCase):
-    def test_manifest_and_validator_changes_require_live_validation(self):
-        for path in (
-            "spec/design/loud_unsupported_issue_manifest.json",
-            "scripts/validate_rejection_issue_manifest.py",
-            "scripts/check_rejection_authority_boundary.py",
-            "scripts/test_check_rejection_authority_boundary.py",
-            "scripts/generate_rejection_registries.py",
-            "scripts/test_generate_rejection_registries.py",
-            "scripts/test_validate_rejection_issue_manifest.py",
-            "scripts/capacity_census_liveness.py",
-            "scripts/ci_change_owned.py",
-            "scripts/ci_detect_docs_only.py",
-            "crates/chelis-types/src/rejection_registry_generated.rs",
-            "crates/chelis-types/src/unsupported.rs",
-            "crates/chelis-types/src/lib.rs",
-            ".github/workflows/ci.yml",
-        ):
-            self.assertTrue(m.rejection_authority_changed([path]), path)
-
-    def test_unrelated_paths_do_not_require_live_validation(self):
-        self.assertFalse(
-            m.rejection_authority_changed(
-                ["README.md", "packages/chelis-std/src/prelude.ch"]
-            )
-        )
-
-    def test_existing_new_and_path_reached_rust_sources_require_validation(self):
-        for path in (
-            "crates/chelis-ir/src/lower.rs",
-            "crates/brand-new/src/lib.rs",
-            "crates/brand-new/src/tests.rs",
-            "tests/support/c_lexical.rs",
-        ):
-            with self.subTest(path=path):
-                self.assertTrue(m.rejection_authority_changed([path]))
-
-    def test_workspace_manifest_edits_require_validation(self):
-        for path in (
-            "Cargo.toml",
-            "crates/brand-new/Cargo.toml",
-            "tree-sitter-chelis/Cargo.toml",
-            "arbitrary/location/Cargo.toml",
-        ):
-            with self.subTest(path=path):
-                self.assertTrue(m.rejection_authority_changed([path]))
-
-    def test_empty_change_set_fails_safe(self):
-        self.assertTrue(m.rejection_authority_changed([]))
-
-
 class DiagnosticKindChangeTests(unittest.TestCase):
     def test_every_oracle_owner_and_control_triggers_the_mutation_job(self):
         for path in (
@@ -204,12 +153,11 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True, False, False)
+                    m._emit(True, False)
                 self.assertEqual(
                     buf.getvalue().splitlines(),
                     [
                         "docs_only=true",
-                        "rejection_authority_changed=false",
                         "diagnostic_kind_changed=false",
                     ],
                 )
@@ -218,7 +166,6 @@ class EmitTests(unittest.TestCase):
                         fh.read().splitlines(),
                         [
                             "docs_only=true",
-                            "rejection_authority_changed=false",
                             "diagnostic_kind_changed=false",
                         ],
                     )
@@ -233,12 +180,11 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False, True, True)
+                m._emit(False, True)
             self.assertEqual(
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=false",
-                    "rejection_authority_changed=true",
                     "diagnostic_kind_changed=true",
                 ],
             )
@@ -261,7 +207,6 @@ class MainTests(unittest.TestCase):
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=true",
-                    "rejection_authority_changed=false",
                     "diagnostic_kind_changed=false",
                 ],
             )
