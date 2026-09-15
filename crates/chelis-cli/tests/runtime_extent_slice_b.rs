@@ -8996,40 +8996,9 @@ fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
     );
 }
 
-/// The MULTI-target spelling of the disagreeing named claim, recorded as the
-/// divergence it is rather than claimed as repaired.
-///
-/// `grad(h, wrt=(x, z))` over the same callee traps on C and still prints
-/// zeros on the interpreter. Round 1 of this pull request found it, and the
-/// measurement that decided the disposition is this: the shape dependency is
-/// recorded on both cotangents, and the raw-roots evaluator both traverses
-/// `shape_deps` and marks the retained forward activation live, so there is no
-/// traversal rule to add. What the interpreter's lowering of a multi-target
-/// grad never emits is the callee's other interface witness: the single-target
-/// DAG carries `ExtentWitness { parameter: "x" }` and an
-/// `ExtentWitness { parameter: "y", claims: [ExtentClaim { claim: "n" }] }`
-/// reading it, while the multi-target DAG carries only a `y` witness with
-/// empty `requirements` and `claims`. With no pair there is nothing to
-/// compare, so the obligation is never formed rather than formed and dropped.
-///
-/// Forming it is a different repair in a different place, owned by
-/// chelis#1920, so this pull request narrows its claim to a tensor-typed
-/// single `wrt`. Two corpus rows record the split:
-/// `grad.wrt_tensor.multi.dead_forward.c` is `silent_unguarded` to
-/// `executes_exactly`, the lane this change repaired, and
-/// `grad.wrt_tensor.multi.dead_forward.eval` records the `lane_divergent` it
-/// was measured in and is named in `PHASE_B_DEFERRED` with chelis#1920 as its
-/// reason.
-///
-/// EVIDENTIARY STATUS: disposition lock on both halves, and it pins today's
-/// wrong answer deliberately. On `6abca2406` both lanes printed zeros and
-/// exited 0; at this head C traps and eval does not. The lock exists so
-/// chelis#1920, which forms the multi-target witness, has to flip it and move
-/// the deferred eval row to an exit state, and so that the eval half cannot
-/// silently change while the C half is already correct.
-///
-/// The sibling below covers the OTHER axis of the same enumeration, an
-/// aggregate-typed `wrt`, whose mechanism is different.
+/// Both lanes retain the authored result claim under multi-target grad.
+/// The historical test name remains the corpus receipt identity. Inferred
+/// result binders must not replace the signature's `n` at the eval boundary.
 #[test]
 fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
     if !gcc_available() {
@@ -9053,40 +9022,205 @@ fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
 
     let (eval_ok, eval_out) = eval_result(&dir, "grad_multiwrt_eval.ch", source);
     assert!(
-        eval_ok,
-        "residual, recorded not repaired: the interpreter's multi-target grad forms no \
-         witness pair, so it still computes a derivative here: {eval_out}"
+        !eval_ok,
+        "the rejected activation has no gradient: {eval_out}"
     );
     assert!(
-        eval_out.contains("main.0 = tensor(shape=[2], data=[0.0, 0.0])")
-            && eval_out.contains("main.1 = tensor(shape=[2], data=[0.0, 0.0])"),
-        "and its answer is unchanged from the base: {eval_out}"
+        eval_out.contains(&domain_trap_line("load"))
+            && eval_out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the evaluator keeps the authored claim: {eval_out}"
     );
+    let agreeing = source.replace("[1.0f32, 2.0f32, 3.0f32]", "[1.0f32, 2.0f32]");
+    for (ok, out) in [
+        eval_result(&dir, "grad_multiwrt_agree.ch", &agreeing),
+        c_run_result(&dir, "grad_multiwrt_agree_c", &agreeing),
+    ] {
+        assert!(ok, "{out}");
+        assert!(
+            out.contains("main.0 = tensor(shape=[2], data=[0.0, 0.0])"),
+            "{out}"
+        );
+        assert!(
+            out.contains("main.1 = tensor(shape=[2], data=[0.0, 0.0])"),
+            "{out}"
+        );
+    }
 }
 
-/// An AGGREGATE-typed `wrt` is still lane-divergent, on every spelling.
-///
-/// Round 2 found this by varying the `wrt` argument shape, which is why that
-/// shape is now an axis of the phase-B corpus rather than a sixth witness row.
-/// A record-typed `wrt` is a SINGLE target by `spec/04-type-system.md` line 993's
-/// definition, and it is the ordinary training shape, so this is not a
-/// construct nobody writes.
-///
-/// The mechanism is NOT chelis#1920's. Measured: the undifferentiated
-/// `h(Params { .. })` traps on both lanes at base and at head, so the
-/// interface witness claim IS formed here; only the interpreter's
-/// differentiated route loses it. chelis#1924 owns that route.
-///
-/// One test for three cells because every aggregate spelling was measured to
-/// behave identically, tuple, record, one-field record, nested record and a
-/// record with a non-differentiable leaf included: the axis has two values,
-/// not five.
-///
-/// EVIDENTIARY STATUS: disposition locks on both lanes of all three cells,
-/// pinning today's wrong eval answer deliberately. Every cell printed zeros on
-/// both lanes at `ae9260727`; at this head C traps with the forward call's
-/// rendering and eval still prints zeros. chelis#1924's fix flips the eval
-/// half and moves the three deferred rows to an exit state.
+fn independent_grad_claim_source(
+    distinct: bool,
+    renamed: bool,
+    width: usize,
+    sizes: (usize, usize),
+    zero: bool,
+    computed: bool,
+) -> String {
+    let (n, m) = if renamed { ("p", "q") } else { ("n", "m") };
+    let size = if computed {
+        "add(shape(y, 0i32), 0i64)"
+    } else {
+        "shape(y, 0i32)"
+    };
+    let declaration = if distinct {
+        format!(
+            "def g(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> tensor[{n}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, {size})\n"
+        )
+    } else {
+        String::new()
+    };
+    let callee = if distinct { "g" } else { "f" };
+    let left = format!("f(copy(a), {})", vector_literal(sizes.0));
+    let right = format!("{callee}(copy(b), {})", vector_literal(sizes.1));
+    let (left, right) = if zero {
+        (left, right)
+    } else {
+        (format!("mul({left}, a)"), format!("mul({right}, b)"))
+    };
+    format!(
+        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, {size})\n{declaration}def h(a: tensor[2, f32], b: tensor[{width}, f32]) -> tensor[f32] = add(sum({left}, 0i32), sum({right}, 0i32))\ndef main() = grad(h, wrt=(b, a))({}, {})\n",
+        vector_literal(2),
+        vector_literal(width)
+    )
+}
+
+fn independent_grad_claim_outputs(dir: &TempDir, source: &str) -> [(bool, String); 2] {
+    [
+        eval_result(dir, "independent_grad.ch", source),
+        c_run_result(dir, "independent_grad_c", source),
+    ]
+}
+
+#[test]
+fn independent_grad_entry_claims_agree_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for width in [2, 3] {
+            for zero in [false, true] {
+                let source = independent_grad_claim_source(
+                    distinct,
+                    renamed,
+                    width,
+                    (2, width),
+                    zero,
+                    false,
+                );
+                let first = if zero {
+                    0.0
+                } else if distinct {
+                    11.0
+                } else {
+                    7.0
+                };
+                let second = if zero { 0.0 } else { 7.0 };
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert!(ok, "{source}\n{out}");
+                    assert!(
+                        out.contains(&format!(
+                            "main.0 = tensor(shape=[{width}], data={:?})",
+                            vec![first; width]
+                        )),
+                        "{out}"
+                    );
+                    assert!(
+                        out.contains(&format!(
+                            "main.1 = tensor(shape=[2], data={:?})",
+                            vec![second; 2]
+                        )),
+                        "{out}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_grad_entry_failures_are_ordered_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for zero in [false, true] {
+            for (sizes, label, required, actual) in [
+                ((4, 5), "n", 2, 4),
+                ((2, 5), if renamed { "p" } else { "n" }, 3, 5),
+            ] {
+                let source =
+                    independent_grad_claim_source(distinct, renamed, 3, sizes, zero, false);
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert!(!ok, "{source}\n{out}");
+                    assert!(
+                        out.contains(&format!(
+                            "extent `{label}`: x axis 0 = {required}, y axis 0 = {actual}"
+                        )),
+                        "{source}\n{out}"
+                    );
+                    assert!(out.contains(&domain_trap_line("load")), "{out}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_grad_computed_claims_keep_producer_on_eval_and_c() {
+    assert!(gcc_available(), "both lanes must execute");
+    let dir = tempfile::tempdir().unwrap();
+    for (distinct, renamed) in [(false, false), (true, false), (true, true)] {
+        for zero in [false, true] {
+            for mismatch in [false, true] {
+                let source = independent_grad_claim_source(
+                    distinct,
+                    renamed,
+                    3,
+                    (2, if mismatch { 5 } else { 3 }),
+                    zero,
+                    true,
+                );
+                for (ok, out) in independent_grad_claim_outputs(&dir, &source) {
+                    assert_eq!(ok, !mismatch, "{source}\n{out}");
+                    if mismatch {
+                        let label = if renamed { "p" } else { "n" };
+                        assert!(
+                            out.contains(&format!(
+                                "extent `{label}`: claimed = 3, insert axis 0 = 5"
+                            )),
+                            "{source}\n{out}"
+                        );
+                        assert!(out.contains(&domain_trap_line("insert")), "{out}");
+                    } else {
+                        let first = if zero {
+                            0.0
+                        } else if distinct {
+                            11.0
+                        } else {
+                            7.0
+                        };
+                        let second = if zero { 0.0 } else { 7.0 };
+                        assert!(
+                            out.contains(&format!(
+                                "main.0 = tensor(shape=[3], data={:?})",
+                                vec![first; 3]
+                            )),
+                            "{out}"
+                        );
+                        assert!(
+                            out.contains(&format!(
+                                "main.1 = tensor(shape=[2], data={:?})",
+                                vec![second; 2]
+                            )),
+                            "{out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Aggregate single/multiple targets preserve the same activation claim.
+/// Both the refuted call and an agreeing exact-zero control execute on eval
+/// and compiled C; the historical name remains the corpus receipt identity.
 #[test]
 fn an_aggregate_typed_wrt_is_still_lane_divergent() {
     if !gcc_available() {
@@ -9141,37 +9275,28 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
         );
         let (eval_ok, eval_out) = eval_result(&dir, &format!("{stem}.ch"), &source);
         assert!(
-            eval_ok,
-            "{stem}: residual, recorded not repaired: the interpreter's differentiated \
-             route still loses a formed claim under an aggregate `wrt` (chelis#1924): {eval_out}"
+            !eval_ok,
+            "{stem}: the rejected activation has no gradient: {eval_out}"
         );
         assert!(
-            eval_out.contains(zeros),
-            "{stem}: and its answer is unchanged from the base: {eval_out}"
+            eval_out.contains(&domain_trap_line("load"))
+                && eval_out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+            "{stem}: the evaluator keeps the authored claim: {eval_out}"
         );
+        let agreeing = source.replace("[1.0f32, 2.0f32, 3.0f32]", "[1.0f32, 2.0f32]");
+        for (ok, out) in [
+            eval_result(&dir, &format!("{stem}_agree.ch"), &agreeing),
+            c_run_result(&dir, &format!("{stem}_agree_c"), &agreeing),
+        ] {
+            assert!(ok, "{stem}: {out}");
+            assert!(out.contains(zeros), "{stem}: {out}");
+        }
     }
 }
 
-/// A float PRIM scalar `wrt`: the third kind the spec admits, and the one
-/// round 3 found unlisted.
-///
-/// `spec/04-type-system.md` lines 991-995 defines the category as a
-/// "differentiable target" and admits a float prim parameter as a single one;
-/// only a NON-differentiable `wrt` is a type error. So this is a supported
-/// spelling, and the `wrt`-kind axis is enumerated from that category rather
-/// than from what a round happened to find.
-///
-/// It does not fold into any other value. A rank-0 `tensor[f32]` target traps
-/// on both lanes for this same body, so rank is not the variable: the `wrt`'s
-/// own type is. And its C half is not a trap but a BUILD REFUSAL, which the
-/// rank-0 tensor and tensor variants of the same inline `grad` in the same
-/// def-body position do not hit, so it is specific to this kind.
-///
-/// EVIDENTIARY STATUS: disposition locks on both lanes, pinning today's wrong
-/// answers deliberately. The silence is PRE-EXISTING, not introduced by
-/// chelis#1821: the same measurement holds with `lower.rs` and `vmap.rs`
-/// reverted. chelis#1934 owns both halves and its fix flips this lock and
-/// moves the two deferred rows.
+/// Primitive scalar eval retains the authored claim for single/multiple
+/// targets. Native admission remains a separate #1934 repair; its build
+/// refusal is still recorded here until a generated binary executes.
 #[test]
 fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
     let source = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
@@ -9182,16 +9307,16 @@ fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
                   def main() = grad(h, wrt=s)(3.0f32, to_tensor([1.0f32, 2.0f32]))\n";
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // The eval half: a derivative for a program the forward call rejects.
+    // The eval half rejects the same activation as the forward call.
     let (eval_ok, eval_out) = eval_result(&dir, "grad_prim_scalar.ch", source);
     assert!(
-        eval_ok,
-        "residual, recorded not repaired: a float prim `wrt` still computes \
-         here (chelis#1934): {eval_out}"
+        !eval_ok,
+        "the rejected activation has no gradient: {eval_out}"
     );
     assert!(
-        eval_out.contains("main = 21.0"),
-        "and its answer is unchanged: {eval_out}"
+        eval_out.contains(&domain_trap_line("load"))
+            && eval_out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "{eval_out}"
     );
 
     // The undifferentiated control, which is what makes the silence a defect
@@ -9238,15 +9363,14 @@ fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
         "and it is the host-lane transform-position refusal: {stderr}"
     );
     // The prim scalar crossed with a MULTI target, so the axis's sixth cell
-    // is measured here too rather than assumed from the single one: eval
-    // computes both cotangents and C refuses the same way.
+    // preserves the claim on eval too; C still refuses before execution.
     let multi = source.replace("grad(h, wrt=s)(", "grad(h, wrt=(s, x))(");
     let (multi_ok, multi_out) = eval_result(&dir, "grad_prim_multi.ch", &multi);
-    assert!(multi_ok, "{multi_out}");
+    assert!(!multi_ok, "{multi_out}");
     assert!(
-        multi_out.contains("main.0 = 21.0")
-            && multi_out.contains("main.1 = tensor(shape=[2], data=[0.0, 0.0])"),
-        "both cotangents, unchanged: {multi_out}"
+        multi_out.contains(&domain_trap_line("load"))
+            && multi_out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the multi-target call keeps the same claim: {multi_out}"
     );
     let multi_build = build_c(
         &fixture(&dir, "grad_prim_multi_c.ch", &multi),

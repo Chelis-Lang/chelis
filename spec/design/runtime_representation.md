@@ -1459,6 +1459,15 @@ checks that the admitted frames execute at the producer with the required
 primitive attribution and effect order. No dtype, width or numbered semantic
 contract changes.
 
+The captured activation-claim comparison adds the private
+`load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
+`chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the
+producer guard and retains the existing tagged tensor storage contract. The
+amendment preserves every previous identity, deletion phase and frozen
+mutation; it adds no public ABI or numeric carrier exception. The
+load-store-template mutations continue to reject any unregistered owner. The
+combined Phase 0 foundation contains 366 rows, including 252 active-debt rows.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

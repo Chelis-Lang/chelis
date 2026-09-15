@@ -63,6 +63,125 @@ fn fixture() -> WireDag {
         ],
     }
 }
+
+#[test]
+fn result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport() {
+    let mut dag = fixture();
+    dag.nodes.truncate(2);
+    let mut token = dag.nodes[1].clone();
+    token.id = 2;
+    token.shape_deps = vec![1];
+    let WireRiscOp::ExtentWitness {
+        site, requirements, ..
+    } = &mut token.op
+    else {
+        unreachable!()
+    };
+    *site = WireExtentWitnessSite::ResultClaim {
+        claim: "rows".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    requirements.clear();
+    dag.nodes.push(token);
+    dag.nodes.push(WireDagNode {
+        id: 3,
+        op: WireRiscOp::Const { value: integer(7) },
+        inputs: vec![],
+        output_type: WireTensorType {
+            dims: vec![],
+            precision: "int64".into(),
+        },
+        shape_deps: vec![],
+        span_id: None,
+        merged_spans: vec![],
+    });
+    dag.nodes.push(WireDagNode {
+        id: 4,
+        op: WireRiscOp::Expand {
+            axis: 0,
+            size: WireRtDim::Node { input: 1 },
+        },
+        inputs: vec![3, 1],
+        output_type: WireTensorType {
+            dims: vec![WireDimInfo::Named {
+                name: "*".into(),
+                size: None,
+            }],
+            precision: "int64".into(),
+        },
+        shape_deps: vec![2],
+        span_id: None,
+        merged_spans: vec![],
+    });
+    dag.roots = vec![4];
+    let json = serde_json::to_value(&dag).unwrap();
+    let roundtrip = WireDag::from_validated_json(&json.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), json);
+    for mutation in [
+        "old_version",
+        "missing_label",
+        "missing_axis",
+        "empty_label",
+        "negative_axis",
+        "wrong_axis",
+        "missing_declaration",
+        "wrong_declaration",
+        "entry_requirement",
+        "future_dependency",
+        "wrong_producer",
+        "literal_producer",
+        "literal_reshape_producer",
+        "stride_producer",
+    ] {
+        let mut malformed = json.clone();
+        match mutation {
+            "old_version" => malformed["schema_version"] = 11.into(),
+            "missing_label" => {
+                malformed["nodes"][2]["op"]["site"]["result_claim"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("claim");
+            }
+            "missing_axis" => {
+                malformed["nodes"][2]["op"]["site"]["result_claim"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("axis");
+            }
+            "empty_label" => {
+                malformed["nodes"][2]["op"]["site"]["result_claim"]["claim"] = "".into()
+            }
+            "negative_axis" => {
+                malformed["nodes"][2]["op"]["site"]["result_claim"]["axis"]["value"] = (-1).into()
+            }
+            "wrong_axis" => {
+                malformed["nodes"][2]["op"]["site"]["result_claim"]["axis"]["value"] = 1.into()
+            }
+            "missing_declaration" => malformed["nodes"][2]["shape_deps"] = serde_json::json!([]),
+            "wrong_declaration" => malformed["nodes"][2]["shape_deps"] = serde_json::json!([0]),
+            "entry_requirement" => {
+                malformed["nodes"][2]["op"]["requirements"] = serde_json::json!([4])
+            }
+            "future_dependency" => malformed["nodes"][4]["shape_deps"] = serde_json::json!([4]),
+            "wrong_producer" => malformed["nodes"][4]["op"] = serde_json::json!({"kind": "copy"}),
+            "literal_producer" => {
+                malformed["nodes"][4]["op"]["size"] =
+                    serde_json::json!({"bound": "lit", "value": 7})
+            }
+            "literal_reshape_producer" => {
+                malformed["nodes"][4]["op"] = serde_json::json!({"kind": "reshape", "new_shape": [{"bound": "lit", "value": 7}]})
+            }
+            "stride_producer" => {
+                malformed["nodes"][4]["op"] = serde_json::json!({"kind": "stride", "strides": [{"bound": "node", "input": 1}]})
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            WireDag::from_validated_json(&malformed.to_string()).is_err(),
+            "{mutation}"
+        );
+    }
+}
 #[test]
 fn witness_roundtrip_retains_claim_dependency_and_provenance() {
     let dag = fixture();

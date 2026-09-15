@@ -6955,6 +6955,13 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
                     WireExtentWitnessSite::LocalExpand
                 }
+                chelis_ir::dag::ExtentWitnessSite::ResultClaim {
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::ResultClaim {
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
             },
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
@@ -7255,7 +7262,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 11);
+        assert_eq!(json["schema_version"], 12);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

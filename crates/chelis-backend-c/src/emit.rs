@@ -1486,6 +1486,7 @@ impl CEmitter {
                 let operation = match site {
                     chelis_ir::dag::ExtentWitnessSite::Caller => "load",
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
+                    chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
                 };
                 let input = node.inputs[0].0;
                 let parameter = match site {
@@ -1493,6 +1494,7 @@ impl CEmitter {
                         chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string()
                     }
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
+                    chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
                 };
                 for required in requirements {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
@@ -6771,10 +6773,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             let Some((_, extent_expr)) = extents.iter().find(|(a, _)| *a == axis) else {
                 continue;
             };
-            // The class's canonical value, rendered as a C expression: the
-            // variable this function's prologue declared for the claim's
-            // binder, or the size the checker resolved.
-            let operand = site.canonical.to_string();
+            // Read the exact captured scalar, the canonical input binding,
+            // or the checker-resolved literal, according to the guard plan.
+            let operand = match &site.canonical {
+                chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
+                    format!("((const int64_t*)t{}_data)[0]", witness.0)
+                }
+                other => other.to_string(),
+            };
             let (name, op) = (site.claim, site.op);
             let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
             self.line(&format!("if (({extent_expr}) != {operand}) {{"));

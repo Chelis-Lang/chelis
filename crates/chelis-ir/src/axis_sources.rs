@@ -1368,7 +1368,7 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 ///
 /// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
-fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
+pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
     let carrier = match op {
         RiscOp::Expand { axis: set, size } if axis == *set => size,
         RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
@@ -2065,8 +2065,14 @@ pub fn entry_covered_witness_claims(dag: &Dag) -> Vec<(NodeId, usize)> {
 pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
     if !matches!(
         dag.get(id).map(|node| &node.op),
-        Some(RiscOp::ExtentWitness { .. })
+        Some(RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller
+                | crate::dag::ExtentWitnessSite::LocalExpand,
+            ..
+        })
     ) {
+        // ResultClaim's producer reads its scalar through shape_deps. It
+        // cannot be discharged as a host entry-only witness on any target.
         return false;
     }
     if dag.roots().contains(&id) {
@@ -2134,6 +2140,7 @@ pub fn witness_entry_obligations(
     let operation = match site {
         crate::dag::ExtentWitnessSite::Caller => "load",
         crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+        crate::dag::ExtentWitnessSite::ResultClaim { .. } => return None,
     };
     let read_for = |id: NodeId| -> Option<ExtentRecord> {
         let observed = dag.get(id)?;
@@ -2244,6 +2251,57 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
             });
         }
     }
+    // Physical dimension classes establish the comparison, while a typed
+    // result claim identifies which observation declared its requirement.
+    // A foreign producer can precede that declaring parameter. Preserve this
+    // exact edge's diagnostic orientation without changing the comparison's
+    // readiness position or joining any additional dimension classes.
+    let witness_axis = |id: NodeId| {
+        let node = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        Some((load_through_casts(dag, id, 0)?, usize::try_from(axis).ok()?))
+    };
+    for guard in &mut guards {
+        let EntryExtentGuard::Named {
+            claim,
+            canonical,
+            observed,
+        } = guard
+        else {
+            continue;
+        };
+        let declaring_pair = dag.nodes().iter().find_map(|node| {
+            let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                return None;
+            };
+            let here = witness_axis(node.id)?;
+            claims
+                .iter()
+                .zip(node.inputs.iter().skip(1))
+                .find_map(|(recorded, edge)| {
+                    let there = witness_axis(*edge)?;
+                    (recorded.claim == *claim
+                        && ((here == *canonical && there == *observed)
+                            || (there == *canonical && here == *observed)))
+                        .then_some(if recorded.requirement_declares {
+                            (there, here)
+                        } else {
+                            (here, there)
+                        })
+                })
+        });
+        if let Some((declaring, producing)) = declaring_pair {
+            *canonical = declaring;
+            *observed = producing;
+        }
+    }
     guards.sort_by_key(|guard| match guard {
         EntryExtentGuard::Named {
             canonical,
@@ -2284,6 +2342,8 @@ pub enum CanonicalExtent {
     /// extent and the value actually observed, and the entry path already
     /// emits exactly that for a `Literal` claim (chelis#1377).
     Resolved(usize),
+    /// The exact declaring activation's rank-0 int64 observation.
+    Witness(NodeId),
 }
 
 impl std::fmt::Display for CanonicalExtent {
@@ -2295,6 +2355,7 @@ impl std::fmt::Display for CanonicalExtent {
         match self {
             CanonicalExtent::Binder(binder) => f.write_str(binder),
             CanonicalExtent::Resolved(value) => write!(f, "{value}"),
+            CanonicalExtent::Witness(node) => write!(f, "extent witness {}", node.0),
         }
     }
 }
@@ -2638,6 +2699,49 @@ pub struct LocalGuardClaim {
 /// cannot.
 pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
     let mut sites = Vec::new();
+    // Explicit result obligations have graph identity, independently of any
+    // labels the checked caller retains on its result. Their producer owns
+    // the observation and their dependency owns the canonical value.
+    for node in dag.nodes() {
+        for required in &node.shape_deps {
+            let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::ResultClaim {
+                                claim,
+                                axis: RtAxis::Lit(axis),
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            else {
+                continue;
+            };
+            let axis = usize::try_from(*axis).expect("verified result axis");
+            let observed = if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
+                LocalGuardObservation::Carrier(carrier.clone())
+            } else {
+                let extent =
+                    op_computed_axis_extent(&node.op, axis).expect("verified result producer");
+                LocalGuardObservation::ComputedExtent(extent)
+            };
+            let op = expansion_kind(dag, node.id).map_or_else(
+                || crate::grad::risc_op_name(&node.op),
+                ExpansionKind::primitive_name,
+            );
+            sites.push((
+                (node.id.0, axis),
+                LocalGuardClaim {
+                    claim: claim.clone(),
+                    canonical: CanonicalExtent::Witness(*required),
+                    op,
+                    observed,
+                },
+            ));
+        }
+    }
     for class in derive_runtime_dim_classes(dag) {
         if class.placement(dag) != GuardPlacement::Local {
             continue;
@@ -2659,6 +2763,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             }
         };
         for member in &class.members {
+            // Captured named tokens and these physical/literal contracts
+            // are additive. One agreeing requirement cannot discharge another.
             // Only the independent extent source can discharge a claim.
             // Runtime carriers remain observable even when result metadata
             // contains a number. Literal-source proofs were handled by
