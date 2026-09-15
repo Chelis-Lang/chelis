@@ -769,6 +769,15 @@ reason = "script-unit validates the canonical required-check contract path class
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_rebase_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates trusted prior-receipt discovery, exact patch replay and fail-closed rebase lane selection"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_ci_change_owned.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -820,6 +829,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the isolated changelog policy fixture executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_rebase_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "rebase evidence reuse and negative fallback controls execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
@@ -928,6 +946,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "CI cadence and stable dependency assertions run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "gate stage definitions and command construction are exercised by the gate contract suite in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

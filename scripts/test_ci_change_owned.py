@@ -351,13 +351,16 @@ class SchemaTests(unittest.TestCase):
             "scripts/ci_candidate_identity.py",
             "scripts/ci_candidate_receipt.py",
             "scripts/ci_contract_paths.py",
+            "scripts/ci_rebase_reuse.py",
             "scripts/ci_retarget_validation.py",
             "scripts/test_ci_candidate_lifecycle.py",
             "scripts/test_ci_candidate_identity.py",
             "scripts/test_ci_candidate_receipt.py",
             "scripts/test_ci_contract_paths.py",
             "scripts/test_changelog.py",
+            "scripts/test_ci_rebase_reuse.py",
             "scripts/test_ci_retarget_validation.py",
+            "scripts/gate.py",
         ):
             with self.subTest(path=path):
                 rule = by_path[path]
@@ -531,6 +534,39 @@ class PlanningTests(unittest.TestCase):
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
         self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
+        owned.verify_plan_digest(plan)
+
+    def test_targeted_rebase_promotes_the_affected_package_to_required(self) -> None:
+        sources = fixture_sources()
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertEqual(plan["mode"], "targeted_rebase")
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::smoke"],
+        )
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["standing_coverage_reuse"], [])
+        self.assertEqual(
+            plan["shards"]["change_owned"],
+            owned.shard_map(
+                [
+                    owned.Identity("p", "default_gated"),
+                    owned.Identity("p", "smoke"),
+                ]
+            ),
+        )
         owned.verify_plan_digest(plan)
 
     def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
@@ -715,6 +751,61 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["selected_packages"], ["p", "q"])
         self.assertEqual(plan["path_dispositions"][0]["kind"], "path_rule_packages")
 
+    def test_targeted_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
+        shared = "crates/p/tests/shared.rs"
+        duplicate = metadata(
+            package(
+                "p",
+                [
+                    ("first", shared, []),
+                    ("second", shared, []),
+                ],
+            )
+        )
+
+        self.assertEqual(
+            owned.targeted_rebase_preflight_path_classification(
+                shared,
+                base_metadata=duplicate,
+                candidate_metadata=duplicate,
+                config=load_config(),
+            ),
+            "ambiguous_integration_target",
+        )
+
+    def test_targeted_preflight_rejects_every_reused_standing_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        reused = [
+            rule
+            for rule in config.path_rules
+            if rule.owner is not None
+            and (rule.owner.workflow, rule.owner.job)
+            in owned.TARGETED_REBASE_REUSED_OWNER_JOBS
+        ]
+        self.assertTrue(reused)
+        for rule in reused:
+            with self.subTest(path=rule.prefix):
+                self.assertEqual(
+                    owned.targeted_rebase_preflight_path_classification(
+                        rule.prefix,
+                        base_metadata=fixture_metadata(),
+                        candidate_metadata=fixture_metadata(),
+                        config=config,
+                    ),
+                    "reused_standing_owner",
+                )
+
+        self.assertEqual(
+            owned.targeted_rebase_preflight_path_classification(
+                "scripts/gate.py",
+                base_metadata=fixture_metadata(),
+                candidate_metadata=fixture_metadata(),
+                config=config,
+            ),
+            "rule",
+        )
+
     def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/heavy.rs")])
         self.assertEqual(plan["change_owned"], [])
@@ -747,6 +838,59 @@ class PlanningTests(unittest.TestCase):
                 owned.resolve_pr_commits(Path("/repo"), "merge", "head"),
                 ("base", "merge"),
             )
+
+    def test_targeted_rebase_plans_between_synthetic_candidates(self) -> None:
+        prior_candidate = "a" * 40
+        current_candidate = "b" * 40
+        pr_head = "c" * 40
+        current_base = "d" * 40
+        metadata = fixture_metadata()
+        config = load_config()
+        with (
+            mock.patch.object(
+                owned,
+                "_commit",
+                side_effect=lambda _repo, value: {
+                    "HEAD": current_candidate,
+                    "prior": prior_candidate,
+                    "head": pr_head,
+                }.get(value, value),
+            ),
+            mock.patch.object(
+                owned,
+                "resolve_pr_commits",
+                return_value=(current_base, current_candidate),
+            ),
+            mock.patch.object(owned, "read_config", return_value=config),
+            mock.patch.object(owned, "metadata_at", return_value=metadata),
+            mock.patch.object(
+                owned,
+                "diff_at",
+                return_value=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            ) as diff_at,
+            mock.patch.object(
+                owned,
+                "tracked_paths_at",
+                return_value=set(fixture_sources()),
+            ),
+            mock.patch.object(owned, "make_plan", return_value={"plan": "ok"}) as make,
+        ):
+            result = owned.generate_plan(
+                Path("/repo"),
+                event_name="targeted_rebase",
+                pr_head="head",
+                before="prior",
+                after="",
+                config_path=Path("config.toml"),
+            )
+
+        self.assertEqual(result, {"plan": "ok"})
+        diff_at.assert_called_once_with(
+            Path("/repo"), prior_candidate, current_candidate
+        )
+        self.assertEqual(make.call_args.kwargs["base_sha"], prior_candidate)
+        self.assertEqual(make.call_args.kwargs["candidate_sha"], current_candidate)
+        self.assertEqual(make.call_args.kwargs["event_pr_head"], pr_head)
 
 
 class ShardingAndExecutionTests(unittest.TestCase):

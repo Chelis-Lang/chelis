@@ -479,6 +479,15 @@ class CandidateReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.ReceiptError, "candidate identity"):
             self.collect(artifacts=artifacts)
 
+    def test_rejects_a_forged_observed_base_parent(self) -> None:
+        artifacts = dict(self.fixture.artifacts)
+        ci = dict(self.fixture.identities["ci.yml"])
+        ci["base_sha"] = self.fixture.repository.root_sha
+        artifacts[501] = artifact(ci)
+
+        with self.assertRaisesRegex(receipt.ReceiptError, "candidate identity"):
+            self.collect(artifacts=artifacts)
+
     def test_rejects_forged_patch_identity_even_from_successful_workflow(self) -> None:
         artifacts = dict(self.fixture.artifacts)
         ci = dict(self.fixture.identities["ci.yml"])

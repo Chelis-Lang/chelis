@@ -357,6 +357,19 @@ NEXTEST_WORKSPACE_CI: list[str] = [
     "ci",
     "--no-fail-fast",
 ]
+NEXTEST_TARGETED_UNITS: list[str] = [
+    "cargo",
+    "nextest",
+    "run",
+    "--workspace",
+    "--lib",
+    "--bins",
+    "--locked",
+    "--profile",
+    "ci-fast",
+    "--ignore-default-filter",
+    "--no-fail-fast",
+]
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
 # a compile-fail contract needs an explicit rustdoc command. The current
 # gate covers the type-system and compiler-pipeline contracts. The
@@ -507,6 +520,7 @@ EMISSION_OBSERVER_TESTS: list[str] = [
 
 STAGES: dict[str, list[list[str]]] = {
     "ci-fast": [[MANAGED_PYTHON, "scripts/ci_test_targets.py"]],
+    "targeted-units": [NEXTEST_TARGETED_UNITS],
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,

@@ -71,6 +71,7 @@ STANDING_EXECUTION = {
     "run_ignored": "default",
     "no_fail_fast": True,
 }
+TARGETED_REBASE_REUSED_OWNER_JOBS = frozenset({("ci.yml", "ci-fast")})
 
 
 @dataclass(frozen=True, order=True)
@@ -618,6 +619,62 @@ def _matching_packages(path: str, packages: Sequence[PackageInfo]) -> list[str]:
     return matches
 
 
+def static_path_classification(
+    path: str,
+    packages: Sequence[PackageInfo],
+    config: Config,
+) -> tuple[str, list[str], list[PathRule]]:
+    """Return the planner's non-target disposition for one changed path."""
+    package_matches = sorted(set(_matching_packages(path, packages)))
+    matching_rules = [rule for rule in config.path_rules if rule.matches(path)]
+    if len(package_matches) > 1:
+        return "ambiguous_package", package_matches, matching_rules
+    if package_matches:
+        return "package", package_matches, matching_rules
+    if not matching_rules and is_docs_only([path]):
+        return "docs", package_matches, matching_rules
+    if len(matching_rules) == 1:
+        return "rule", package_matches, matching_rules
+    return (
+        "ambiguous_rule" if matching_rules else "unclassified",
+        package_matches,
+        matching_rules,
+    )
+
+
+def targeted_rebase_preflight_path_classification(
+    path: str,
+    *,
+    base_metadata: Mapping[str, Any],
+    candidate_metadata: Mapping[str, Any],
+    config: Config,
+) -> str:
+    """Classify one path against exact targets and targeted-lane owner execution."""
+    base_targets = _target_at_path(path, all_integration_targets(base_metadata))
+    candidate_targets = _target_at_path(
+        path, all_integration_targets(candidate_metadata)
+    )
+    if len(base_targets) > 1 or len(candidate_targets) > 1:
+        return "ambiguous_integration_target"
+    if base_targets or candidate_targets:
+        return "integration_target"
+    classification, _, matching_rules = static_path_classification(
+        path,
+        (*package_infos(base_metadata), *package_infos(candidate_metadata)),
+        config,
+    )
+    if classification == "rule":
+        rule = matching_rules[0]
+        if (
+            rule.disposition == "owner"
+            and rule.owner is not None
+            and (rule.owner.workflow, rule.owner.job)
+            in TARGETED_REBASE_REUSED_OWNER_JOBS
+        ):
+            return "reused_standing_owner"
+    return classification
+
+
 def _target_at_path(
     path: str, targets: Mapping[Identity, TargetInfo]
 ) -> list[Identity]:
@@ -692,7 +749,7 @@ def make_plan(
     event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
 ) -> dict[str, Any]:
-    if mode not in {"pull_request", "push"}:
+    if mode not in {"pull_request", "push", "targeted_rebase"}:
         raise ValueError(f"unsupported planning mode: {mode}")
     validate_config(
         config,
@@ -821,15 +878,16 @@ def make_plan(
             )
             continue
 
-        package_matches = sorted(
-            set(_matching_packages(path, base_packages))
-            | set(_matching_packages(path, candidate_packages))
+        classification, package_matches, matching_rules = static_path_classification(
+            path,
+            (*base_packages, *candidate_packages),
+            config,
         )
-        if len(package_matches) > 1:
+        if classification == "ambiguous_package":
             raise ValueError(
                 f"ambiguous package path {path!r}: matches {package_matches}"
             )
-        if package_matches:
+        if classification == "package":
             package = package_matches[0]
             if package in candidate_package_names:
                 selected_packages.add(package)
@@ -846,12 +904,13 @@ def make_plan(
             )
             continue
 
-        matching_rules = [rule for rule in config.path_rules if rule.matches(path)]
-        if not matching_rules and is_docs_only([path]):
+        if classification == "docs":
             dispositions.append({"path": path, "status": status, "kind": "docs_only"})
             continue
-        if len(matching_rules) != 1:
-            qualifier = "ambiguous" if matching_rules else "unclassified"
+        if classification != "rule":
+            qualifier = (
+                "ambiguous" if classification == "ambiguous_rule" else "unclassified"
+            )
             raise ValueError(f"{qualifier} changed path: {path}")
         rule = matching_rules[0]
         disposition: dict[str, Any] = {
@@ -878,8 +937,14 @@ def make_plan(
     }
     if change_owned & expansion:
         raise ValueError("change-owned and package-expansion selections overlap")
-    standing_coverage_reuse = change_owned & set(config.standing_targets)
-    change_owned_execution = change_owned - standing_coverage_reuse
+    if mode == "targeted_rebase":
+        change_owned |= expansion
+        expansion = set()
+        standing_coverage_reuse: set[Identity] = set()
+        change_owned_execution = change_owned
+    else:
+        standing_coverage_reuse = change_owned & set(config.standing_targets)
+        change_owned_execution = change_owned - standing_coverage_reuse
 
     target_exclusions, test_exclusions = _exclusion_rows(config)
     plan: dict[str, Any] = {
@@ -998,7 +1063,11 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         )
     if type(plan.get("version")) is not int or plan["version"] != PLAN_VERSION:
         raise ValueError(f"plan version must be {PLAN_VERSION}")
-    if plan.get("mode") not in {"pull_request", "push"}:
+    if plan.get("mode") not in {
+        "pull_request",
+        "push",
+        "targeted_rebase",
+    }:
         raise ValueError(f"invalid plan mode: {plan.get('mode')!r}")
     for key in ("base_sha", "candidate_sha"):
         if not isinstance(plan.get(key), str) or not SHA.fullmatch(plan[key]):
@@ -1008,9 +1077,11 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     ):
         raise ValueError("plan config_digest must be a SHA-256 digest")
     event_head = plan.get("event_pr_head")
-    if plan["mode"] == "pull_request":
+    if plan["mode"] in {"pull_request", "targeted_rebase"}:
         if not isinstance(event_head, str) or not SHA.fullmatch(event_head):
-            raise ValueError("pull_request plan requires a full event_pr_head")
+            raise ValueError(
+                f"{plan['mode']} plan requires a full event_pr_head"
+            )
     elif event_head is not None:
         raise ValueError("push plan event_pr_head must be null")
     for key in ("changed_records", "path_dispositions", "target_dispositions"):
@@ -1035,7 +1106,12 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         raise ValueError("plan lanes overlap")
     if not (change_owned | expansion) <= eligible:
         raise ValueError("plan lane contains an ineligible target")
-    if standing_reuse != change_owned & standing:
+    expected_standing_reuse = (
+        set()
+        if plan["mode"] == "targeted_rebase"
+        else change_owned & standing
+    )
+    if standing_reuse != expected_standing_reuse:
         raise ValueError(
             "plan standing coverage reuse must exactly match "
             "change-owned standing targets"
@@ -1520,6 +1596,16 @@ def generate_plan(
         base, candidate = resolve_pr_commits(repo, head, pr_head)
         mode = "pull_request"
         event_pr_head: str | None = pr_head
+    elif event_name == "targeted_rebase":
+        if not pr_head or not before:
+            raise ValueError(
+                "targeted_rebase planning requires --pr-head and --before"
+            )
+        pr_head = _commit(repo, pr_head)
+        _, candidate = resolve_pr_commits(repo, head, pr_head)
+        base = _commit(repo, before)
+        mode = "targeted_rebase"
+        event_pr_head = pr_head
     elif event_name == "push":
         if not before or not after:
             raise ValueError("push planning requires --before and --after")

@@ -13,7 +13,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
 | `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of persistent candidate-lifecycle, protected-test and frozen-contract acknowledgement lines; no compiler build |
 | `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
-| `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned shadow receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; it does not alter required CI |
+| `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; eligible receipts can authorize the guarded targeted-rebase lane |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
 | `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
@@ -52,12 +52,15 @@ build work is suppressed, while the required Docs and Hull contexts run a cheap
 failure step rather than reporting skipped success.
 
 CI and Hull each publish an immutable identity for the synthetic candidate they
-checked out. The identity records the exact two parents, and describes the PR
-patch from `merge-base(base, head)..head`; using `base..head` would incorrectly
-count unrelated target-branch advances as pull-request changes. It also records
-the stable patch id, an exact normalized-diff digest that retains added and
-removed bytes, and the changed paths and their digest. These producer artifacts
-are candidate-controlled inputs, not receipts.
+checked out. The checked-out candidate's first parent is the authoritative
+target snapshot, even when `main` advances after GitHub creates the event
+payload; its second parent must still equal the event's exact PR head. The
+identity records those exact two parents and describes the PR patch from
+`merge-base(base, head)..head`; using `base..head` would incorrectly count
+unrelated target-branch advances as pull-request changes. It also records the
+stable patch id, an exact normalized-diff digest that retains added and removed
+bytes, and the changed paths and their digest. These producer artifacts are
+candidate-controlled inputs, not receipts.
 
 The default branch's `workflow_run` collector fetches the named Git objects
 without checking out or executing pull-request content and recomputes every
@@ -70,14 +73,45 @@ the receipt. The receipt also marks workflow, CI-policy, agent-contract and
 CI-script changes as ineligible for later evidence reuse; their green state is
 recorded, but candidate-controlled validation logic cannot authorize its own
 reuse. A successful `pr-candidate-receipt-<head-sha>` artifact is therefore
-trusted shadow evidence keyed to the exact prior head for a later targeted-rebase
-lane. In this foundation slice it does not
-skip, cancel, or satisfy any required check, and no PR workflow can issue its
-own trusted receipt. The collector currently issues receipts only for ordinary
-`pull_request` candidates. A base-retarget candidate is validated by trusted
-dispatch and coordinator paths that this receipt schema does not yet model, so
-its absent receipt must remain a full-validation fallback rather than reusable
-evidence.
+trusted evidence keyed to the exact prior head for a later targeted-rebase
+lane. On a `synchronize` event, CI and Hull check out the trusted verifier from
+the exact target SHA and retrieve only the receipt named for `event.before`.
+The verifier requires the same pull request and target, a strict forward base
+advance, a new head containing that base, exact synthetic-candidate parents, no
+retarget after the receipt, and a receipt marked eligible for reuse. It records
+patch-identity changes and path overlap for review. The complete validation
+delta runs from the receipt's prior synthetic candidate to the current
+synthetic candidate, so it includes both the conflict resolution and target
+movement included in that frozen candidate; `event.before..event.after` remains
+the exact head-rewrite record. Before selecting an incremental lane, the trusted
+verifier applies the planner's exact preflight classification to every delta
+path, including Cargo metadata identities for integration targets and the
+reviewed package/path rules.
+An ambiguous target, path owned by standing evidence that the targeted lane
+would reuse rather than rerun, CI-policy delta, stale or missing receipt,
+retarget, non-forward update, candidate mismatch, unmapped path, or uncertain
+history falls back to full CI. This includes inputs owned by `ci-fast`, which
+the targeted lane otherwise skips. That fail-closed lane overrides the ordinary
+docs-only skip. A linear content update remains on ordinary docs-aware routing
+rather than attempting receipt reuse. No pull-request workflow can issue its
+own trusted receipt.
+
+The cheap docs lane requires both the prior/current PR patch and the complete
+rebase delta to be documentation-only. It runs the contract preflight, PR
+acknowledgements, changelog policy, Docs, and inexpensive metadata paths. A
+code-bearing patch or delta reruns combined-candidate Rust policy/compile,
+every default-feature Rust library/binary unit, and Python unit evidence plus
+base-sensitive Hull, SMT, backend, documentation and metadata checks, and makes
+the change-owned planner execute all change-owned and package-targeted coverage
+selected between the prior and current synthetic candidates. This includes
+same-file and same-line conflict resolutions and target movement after the
+rebase. Required contexts still report on the rewritten head; reuse
+short-circuits only the standing integration and final-expansion work whose
+trusted evidence remains applicable.
+The collector issues receipts only for ordinary `pull_request` candidates. A
+base-retarget candidate is validated by trusted dispatch and coordinator paths
+that the receipt schema does not model, so its absent receipt remains a
+full-validation fallback rather than reusable evidence.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 
@@ -115,6 +149,14 @@ only (chelis#1781).
 
 On a pull request or trusted exact-candidate dispatch, `Integration Tests (Linux)` fails closed on both the standing fast worker and the required change-owned report. The four required shards are assigned by `sha256(package + "::" + target) mod 4`; their report rejects missing shards, digest disagreement, duplicate execution, uncovered selected targets, executed exclusions, and test failure. A change-owned target already in the standing set is removed from shard execution only when the report verifies the ci-fast record against the same candidate SHA, normalized configuration digest, exact execution mode, complete standing target set, and matching selected/executed per-test results. Missing, stale, partial, failed, or tampered standing evidence does not satisfy the obligation. The `integration-change-plan`, per-shard receipts, standing coverage, required report, JUnit, commands, selected/executed lists, and timings are retained for 14 days.
 
+For an accepted targeted rebase, the planner compares the prior receipt's
+synthetic candidate with the current synthetic candidate. Every direct
+change-owned and package-expansion target selected by that exact candidate
+delta becomes required change-owned coverage. The plan deliberately reuses no
+standing coverage receipt: its selected shards execute and report the affected
+targets on the current synthetic candidate before the required integration
+context passes.
+
 On a push to `main`, `Integration Tests (Linux)` instead requires only the fixed `ci-fast` standing receipt. The planner, change-owned workers, and their report are skipped. This makes every default-branch commit answer the same standing acceptance question: a merge cannot make `main` red merely because its file diff happens to select known nightly residuals, and a later unrelated merge cannot make `main` green by selecting a different target set. Full workspace and hardware-sensitive residual work remains owned by the scheduled suites and its tracking issues.
 
 Each worker downloads the current run's plan after Cargo cache restoration and before execution. The cache may replace `target/`, so it cannot own the plan; a missing artifact remains a job failure.
@@ -137,13 +179,16 @@ exclusions, and timing-budget overruns are recorded by `Manual Package Expansion
 Summary`; neither that summary nor its workers feed `Integration Tests (Linux)`.
 Once review repairs have fixed the intended content, agents start it alongside
 the final required implementation checks; there is no dependency between their
-verdicts. Inspect both before merging and record the reviewed SHA and run link. A
-content change, hand-resolved conflict, base-changing rebase, or base-branch
-retarget requires a fresh dispatch because it changes the synthetic candidate.
-In particular, a base-changing rebase after expansion must rerun `PR Package
-Expansion`; rebasing before the first push creates no expansion evidence to
-invalidate. Do not rebase a ready pull request merely because `main` advanced:
-if the exact reviewed head still merges safely, preserve it and its evidence.
+verdicts. Inspect both before merging and record the reviewed SHA and run link.
+An ordinary content change after expansion, a base-branch retarget, or a rebase
+the trusted verifier does not accept requires a fresh dispatch. An accepted
+rebase, including a hand-resolved conflict, retains the successful expansion on
+the prior-receipt head after its complete delta-selected coverage passes and the
+standing reviewer inspects the resolution. Record that expansion's SHA and run
+together with the new rebase decision and required check run. Rebasing before
+the first push creates no expansion evidence to invalidate. Do not rebase a
+ready pull request merely because `main` advanced: if the exact reviewed head
+still merges safely, preserve it and its evidence.
 Introduced failures are resolved; inherited failures and incomplete coverage are
 named explicitly. Nightly JUnit reports stay in their producing workflow.
 The Linux nightly report inspects every execution worker and opens a failure

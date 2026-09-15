@@ -94,6 +94,45 @@ class CandidateIdentityTests(unittest.TestCase):
         self.assertEqual(payload["workflow_run_id"], 101)
         self.assertEqual(payload["workflow_run_attempt"], 2)
 
+    def test_candidate_first_parent_survives_a_stale_event_base(self) -> None:
+        payload = identity.build_identity(
+            repository_path=self.repository.path,
+            repository="Chelis-Lang/chelis",
+            workflow_file="ci.yml",
+            run_id=101,
+            run_attempt=1,
+            pr_number=2099,
+            head_sha=self.repository.head_sha,
+            base_ref="main",
+            base_sha=None,
+            candidate_sha=self.repository.candidate_sha,
+        )
+
+        self.assertNotEqual(self.repository.root_sha, self.repository.base_sha)
+        self.assertEqual(payload["base_sha"], self.repository.base_sha)
+        self.assertEqual(
+            payload["candidate_parents"],
+            [self.repository.base_sha, self.repository.head_sha],
+        )
+
+    def test_explicit_expected_base_still_rejects_a_mismatch(self) -> None:
+        with self.assertRaisesRegex(
+            identity.IdentityError,
+            "candidate base parent does not match the expected base",
+        ):
+            identity.build_identity(
+                repository_path=self.repository.path,
+                repository="Chelis-Lang/chelis",
+                workflow_file="ci.yml",
+                run_id=101,
+                run_attempt=1,
+                pr_number=2099,
+                head_sha=self.repository.head_sha,
+                base_ref="main",
+                base_sha=self.repository.root_sha,
+                candidate_sha=self.repository.candidate_sha,
+            )
+
     def test_exact_patch_digest_survives_an_unrelated_clean_rebase(self) -> None:
         original = self.build()
         git(
@@ -192,7 +231,8 @@ class CandidateIdentityTests(unittest.TestCase):
 
     def test_rejects_candidate_whose_second_parent_is_not_the_pr_head(self) -> None:
         with self.assertRaisesRegex(
-            identity.IdentityError, "candidate parents do not match"
+            identity.IdentityError,
+            "candidate head parent does not match the pull request head",
         ):
             identity.build_identity(
                 repository_path=self.repository.path,
@@ -283,7 +323,7 @@ class CandidateIdentityTests(unittest.TestCase):
                     pr_number=2098,
                     head_sha=head_sha,
                     base_ref="main",
-                    base_sha=base_sha,
+                    base_sha=None,
                     candidate_sha=candidate_sha,
                 )
 
@@ -299,6 +339,7 @@ class CandidateIdentityTests(unittest.TestCase):
             {"run_id": 0},
             {"run_attempt": 0},
             {"pr_number": 0},
+            {"base_sha": "not-a-sha"},
         )
         defaults: dict[str, object] = {
             "repository_path": self.repository.path,
