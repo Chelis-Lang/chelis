@@ -3,19 +3,28 @@
 use assert_cmd::Command;
 use std::fs;
 use std::path::Path;
+use std::process::ExitStatus;
 use tempfile::tempdir;
 
-fn check_path(path: &Path) -> serde_json::Value {
+struct CheckResult {
+    status: ExitStatus,
+    report: serde_json::Value,
+}
+
+fn check_path(path: &Path) -> CheckResult {
     let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
         .output()
         .expect("run chelis check");
-    serde_json::from_slice(&output.stdout).expect("check JSON")
+    CheckResult {
+        status: output.status,
+        report: serde_json::from_slice(&output.stdout).expect("check JSON"),
+    }
 }
 
-fn check(source: &str) -> serde_json::Value {
+fn check(source: &str) -> CheckResult {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("collection_contract.ch");
     fs::write(&path, source).expect("write fixture");
@@ -23,7 +32,8 @@ fn check(source: &str) -> serde_json::Value {
 }
 
 fn assert_rejected(source: &str, operation: &str) {
-    let report = check(source);
+    let CheckResult { status, report } = check(source);
+    assert!(!status.success(), "{status:?}: {report}");
     assert!(report["score"].as_f64().unwrap() < 1.0, "{report}");
     let errors = report["errors"].as_array().unwrap();
     assert!(
@@ -38,13 +48,15 @@ fn assert_rejected(source: &str, operation: &str) {
 }
 
 fn assert_accepted(source: &str) {
-    let report = check(source);
+    let CheckResult { status, report } = check(source);
+    assert!(status.success(), "{status:?}: {report}");
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
     assert!(report["errors"].as_array().unwrap().is_empty(), "{report}");
 }
 
 fn assert_type_mismatch(source: &str) {
-    let report = check(source);
+    let CheckResult { status, report } = check(source);
+    assert!(!status.success(), "{status:?}: {report}");
     assert!(report["score"].as_f64().unwrap() < 1.0, "{report}");
     assert!(
         report["errors"]
@@ -73,7 +85,7 @@ fn declaration_boundary_rejects_implicit_collection_contracts() {
     ] {
         assert_rejected(source, operation);
     }
-    let report = check("def size(x) = len(x)\n");
+    let CheckResult { report, .. } = check("def size(x) = len(x)\n");
     assert!(
         report["errors"].as_array().unwrap().iter().any(|error| {
             error["message"]
@@ -164,7 +176,14 @@ fn imported_checked_values_keep_their_collection_contract() {
         "module Demo.Main\nimport Contract.Measure (measure)\nout = measure(1i64)\n",
     )
     .expect("invalid application source");
-    let rejected = check_path(&main);
+    let CheckResult {
+        status: rejected_status,
+        report: rejected,
+    } = check_path(&main);
+    assert!(
+        !rejected_status.success(),
+        "{rejected_status:?}: {rejected}"
+    );
     assert!(rejected["score"].as_f64().unwrap() < 1.0, "{rejected}");
     assert!(
         rejected["errors"].as_array().unwrap().iter().any(|error| {
@@ -181,7 +200,11 @@ fn imported_checked_values_keep_their_collection_contract() {
         "module Demo.Main\nimport Contract.Measure (measure)\nout: int64 = measure([1i64])\n",
     )
     .expect("valid application source");
-    let accepted = check_path(&main);
+    let CheckResult {
+        status: accepted_status,
+        report: accepted,
+    } = check_path(&main);
+    assert!(accepted_status.success(), "{accepted_status:?}: {accepted}");
     assert_eq!(accepted["score"].as_f64(), Some(1.0), "{accepted}");
     assert!(
         accepted["errors"].as_array().unwrap().is_empty(),
