@@ -6,6 +6,23 @@ After expansion the program contains only RISC primitives. A transform must alwa
 applied; a bare `grad` with no function is a parse error. Transforms compose. The
 authoritative source is `spec/06-transformations.md`.
 
+## Chelis 0.19 core-transform fence
+
+For the 0.19 core promise, write named transforms against a direct, unshadowed
+top-level function declaration, such as `grad(loss)` or `vmap(process)`.
+The checker rejects aliases of a top-level function at either module or local
+scope, and a local binding that shadows a top-level target, rather than
+silently selecting a different callable. An inline `vmap` lambda remains
+supported when every parameter has an explicit type; an untyped parameter is
+rejected because it could be inferred from the unsliced input rather than the
+mapped slice.
+
+These are current supported-fragment fences, not changes to the language
+semantics in the numbered specification. The related launch rows are
+[#1887](https://github.com/Chelis-Lang/chelis/issues/1887),
+[#1952](https://github.com/Chelis-Lang/chelis/issues/1952), and
+[#1954](https://github.com/Chelis-Lang/chelis/issues/1954).
+
 ## grad
 
 `grad(f)` is reverse-mode differentiation. It produces a new function from `f`'s arguments to

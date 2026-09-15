@@ -8187,6 +8187,141 @@ fn eval_vmap_returns_per_element_results() {
         ));
 }
 
+/// The core transform fragment admits direct top-level declarations and typed
+/// inline `vmap` lambdas. These controls retain those supported forms while
+/// the adjacent negative cases fence dynamic callable targets before
+/// evaluation.
+#[test]
+fn check_accepts_supported_core_transform_targets() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("direct_transform_targets.ch");
+    write_file(
+        &path,
+        "def loss(x: f32) -> f32 = mul(x, x)\n\
+         def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+         gradient = grad(loss)\n\
+         mapped = vmap(reduce)\n\
+         def inline(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
+         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n",
+    );
+
+    let json = run_json_check(&path);
+    assert_eq!(json["score"].as_f64(), Some(1.0), "{json}");
+    assert!(
+        json["errors"].as_array().is_some_and(Vec::is_empty),
+        "{json}"
+    );
+}
+
+/// #1887, #1952, and #1954: local aliases, shadowing local lambdas, and
+/// untyped inline `vmap` lambdas can be accepted with a false transform
+/// contract. They are outside the documented core fragment until their
+/// independent semantics land, so `check` must reject each form loudly rather
+/// than let a later lane choose a different callable or rank.
+#[test]
+fn check_fences_non_direct_transform_targets() {
+    let cases = [
+        (
+            "grad_chained_local_alias",
+            "def relay(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
+             def loss(f: tensor[2, f32]) -> tensor[f32] = sum(relay(f), 0i32)\n\
+             out = {\n\
+               g = loss\n\
+               h = g\n\
+               grad(h)(to_tensor([1.0f32, 2.0f32]))\n\
+             }\n",
+            "grad",
+        ),
+        (
+            "grad_top_level_alias",
+            "def loss(x: f32) -> f32 = mul(x, x)\n\
+             g = loss\n\
+             out = grad(g)(1.0f32)\n",
+            "grad",
+        ),
+        (
+            "grad_module_to_local_alias",
+            "def loss(x: f32) -> f32 = mul(x, x)\n\
+             g = loss\n\
+             out = {\n\
+               h = g\n\
+               grad(h)(1.0f32)\n\
+             }\n",
+            "grad",
+        ),
+        (
+            "grad_shadowed_lambda",
+            "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+             out = {\n\
+               loss = fn (x: tensor[2, f32]) -> sum(x, 0i32)\n\
+               grad(loss)(to_tensor([1.0f32, 2.0f32]))\n\
+             }\n",
+            "grad",
+        ),
+        (
+            "vmap_untyped_inline_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(fn (v) -> sum(v, 0i32))(t)\n",
+            "vmap",
+        ),
+        (
+            "vmap_local_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = reduce\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_module_to_local_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             g = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = g\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+    ];
+
+    for (stem, source, transform) in cases {
+        let dir = tempdir().expect("tempdir");
+        let surf_path = dir.path().join(format!("{stem}.ch"));
+        let deep_path = dir.path().join(format!("{stem}.dp"));
+        write_file(&surf_path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        fs::write(&deep_path, deep).expect("write desugared Deep program");
+
+        for path in [&surf_path, &deep_path] {
+            let json = run_json_check(path);
+            assert!(
+                json["score"].as_f64().is_some_and(|score| score < 1.0),
+                "{stem} ({path:?}) must not receive a perfect check score: {json}"
+            );
+            assert!(
+                json["errors"].as_array().is_some_and(|errors| {
+                    errors.iter().any(|error| {
+                        error["message"].as_str().is_some_and(|message| {
+                            message.contains("core transform fragment")
+                                && message.contains(transform)
+                        })
+                    })
+                }),
+                "{stem} ({path:?}) must carry the core-transform fence diagnostic: {json}"
+            );
+        }
+    }
+}
+
 /// Negative parity for `realize`: exercising it in the host lane with
 /// no inner expression must produce a clean error rather than a panic.
 /// Synthesized programs with bad shape are caught at type-check; this
