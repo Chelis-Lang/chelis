@@ -1539,6 +1539,35 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
         ),
+        # #1788 round-3 baseline f77ef306: C's checked adapter retained the
+        # narrower formal boundary, but Eval attached that boundary only to a
+        # Closure. Direct and locally bound grad values are both Transform
+        # values; each receipt checks the failing length-three input and the
+        # agreeing length-two control with exact argument/later-effect counts.
+        _row(
+            "entry.indirect.transform.direct.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.direct.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
         _row(
             "grad.wrt_tensor.single.dead_forward.eval",
             "silent_unguarded",

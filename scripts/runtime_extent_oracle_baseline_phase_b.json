@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "069acf21c9a1a2364fd5da121958cdaac9b1c95c41a52e207522624284b3ce56",
+  "corpus_sha256": "e37256b477abea5e8859e2925bbf4222a3623e85b293c5e2085716c28576bb36",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -331,6 +331,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals"
+    },
+    {
+      "id": "entry.indirect.transform.direct.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.direct.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.local.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.local.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary"
     },
     {
       "id": "entry.indirect.transport.c",

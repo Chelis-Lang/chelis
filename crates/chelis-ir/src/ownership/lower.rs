@@ -871,6 +871,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     fn borrow(&mut self, value: Value) -> Result<Operand, OwnershipError> {
         match value {
             Value::Fresh(owner) => {
+                // A fresh value projected out of a nested scope carries the
+                // moved marker that suppressed that inner scope's terminal.
+                // Borrowing it in the enclosing scope transfers liveness to
+                // that scope just as binding it does, so its eventual terminal
+                // remains scheduled after the borrow.
+                self.moved.remove(&owner);
                 self.register(owner)?;
                 Ok(Operand::borrow(owner))
             }

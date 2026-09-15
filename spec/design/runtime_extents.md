@@ -435,9 +435,10 @@ values, execute its entry plan, then run the substituted body and callbacks.
 An indirect invocation likewise retains its checked callable contract.
 Host specialization represents a callable formal with entry obligations as an
 explicit checked adapter around the supplied callable syntax. Eval retains the
-same authored formal signature as an invocation contract on the supplied
-closure. Both forms consume one `SignatureEntryPlan` before the supplied
-callable's own entry and body, without re-evaluating payload actuals. Inline
+same authored formal signature as an invocation contract on every supported
+runtime callable value (ordinary closures and `grad`/`vmap` transforms). Both
+forms consume one `SignatureEntryPlan` before the supplied callable's own
+entry, transform, kernel, or body, without re-evaluating payload actuals. Inline
 collection callbacks retain a signature-entry node before their body, so each
 iteration checks even a parameter whose value the callback never reads. Eval
 and C consume the same ordered obligations. The #1991 `apply4` control compares
@@ -933,10 +934,10 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The phase-B corpus contains 176 rows. Completion requires `--phase b` to
+The phase-B corpus contains 180 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 35 non-`executes_exactly` values against 141
+column contains 35 non-`executes_exactly` values against 145
 `executes_exactly`; the dispositions below account for the thirty-five. Twenty-seven rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-seven predate B2c:

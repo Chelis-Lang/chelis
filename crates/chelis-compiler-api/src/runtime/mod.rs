@@ -214,11 +214,43 @@ pub enum RuntimeValue {
         kind: TransformKind,
         transform_expr: Expr,
         captured_env: UnordMap<String, RuntimeValue>,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary, shared with ordinary closures so every
+        /// supported runtime callable executes the same invocation protocol.
+        invocation_contracts: Box<Vec<Expr>>,
     },
     Unit,
 }
 
 impl RuntimeValue {
+    fn invocation_contracts(&self) -> Option<&[Expr]> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
+    fn invocation_contracts_mut(&mut self) -> Option<&mut Vec<Expr>> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
     /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
     /// construction: the storage variant IS the dtype).
     pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {

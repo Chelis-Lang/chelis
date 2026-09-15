@@ -350,6 +350,59 @@ fn indirect_callable_keeps_formal_repeated_binder_and_eager_actuals() {
     check_indirect_entry(&indirect_repeated_binder_source(2), true, 2);
 }
 
+fn indirect_grad_source(extent: usize, local: bool) -> String {
+    let binding = if local { " local = grad(loss)\n" } else { "" };
+    let callable = if local { "local" } else { "grad(loss)" };
+    format!(
+        "{BETA_OPAQUE}def loss(x: tensor[*, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0i32))\ndef invoke(f: (tensor[2, f32]) -> tensor[2, f32], x: tensor[*, f32]) -> tensor[*, f32] ! {{ IO }} = f(x)\nout = {{\n{binding} result = invoke({callable}, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        beta_actual(extent)
+    )
+}
+
+fn check_indirect_grad_entry(source: &str, succeeds: bool) {
+    for c in [false, true] {
+        let output = run(source, c);
+        let rendered = text(&output);
+        assert_eq!(output.status.success(), succeeds, "C={c}: {rendered}");
+        assert_eq!(
+            rendered.matches("argument-ran").count(),
+            1,
+            "C={c}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("following-ran").count(),
+            usize::from(succeeds),
+            "C={c}: {rendered}"
+        );
+        if succeeds {
+            assert!(
+                rendered.contains("out = tensor(shape=[2], data=[2.0, 2.0])"),
+                "C={c}: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line == "numeric trap: domain in load at int64"),
+                "C={c}: {rendered}"
+            );
+            assert!(!rendered.contains("out = tensor"), "C={c}: {rendered}");
+        }
+    }
+}
+
+#[test]
+fn indirect_grad_transform_keeps_formal_entry_boundary() {
+    check_indirect_grad_entry(&indirect_grad_source(3, false), false);
+    check_indirect_grad_entry(&indirect_grad_source(2, false), true);
+}
+
+#[test]
+fn local_indirect_grad_transform_keeps_formal_entry_boundary() {
+    check_indirect_grad_entry(&indirect_grad_source(3, true), false);
+    check_indirect_grad_entry(&indirect_grad_source(2, true), true);
+}
+
 #[test]
 fn beta_reduced_callbacks_keep_literal_entry_and_eager_actuals() {
     for extent in [2, 3] {

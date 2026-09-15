@@ -1125,6 +1125,7 @@ impl<'a> EvalContext<'a> {
                     kind: TransformKind::Grad,
                     transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
                     captured_env: self.bindings.clone(),
+                    invocation_contracts: Box::default(),
                 })
             }
             Some(DeepTag::Vmap) => {
@@ -1133,6 +1134,7 @@ impl<'a> EvalContext<'a> {
                     kind: TransformKind::Vmap,
                     transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
                     captured_env: self.bindings.clone(),
+                    invocation_contracts: Box::default(),
                 })
             }
             Some(DeepTag::Jit) => {
@@ -1985,6 +1987,11 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        if let Some(contracts) = callable.invocation_contracts() {
+            for contract in contracts {
+                check_callable_invocation_contract(contract, &args)?;
+            }
+        }
         let saved_exclusion = self.execution_exclusion;
         if let RuntimeValue::Closure { body, params, .. } = &callable {
             self.admit_execution_profile(body, params);
@@ -2014,7 +2021,7 @@ impl<'a> EvalContext<'a> {
                 param_types,
                 return_type,
                 checked_signature,
-                invocation_contracts,
+                invocation_contracts: _,
                 body,
                 env,
                 precision_env,
@@ -2026,9 +2033,6 @@ impl<'a> EvalContext<'a> {
                         params.len(),
                         args.len()
                     ));
-                }
-                for contract in invocation_contracts.iter() {
-                    check_callable_invocation_contract(contract, &args)?;
                 }
                 // chelis#1277 B2h: a def the C lane lowers as a kernel is
                 // applied through that kernel, so eval runs the DAG C emits
@@ -2212,13 +2216,10 @@ impl<'a> EvalContext<'a> {
                         if callable_contract.is_some_and(|contract| {
                             tagged_expr_children(contract)
                                 .is_some_and(|(tag, _)| tag == DeepTag::TFn)
-                        }) && let RuntimeValue::Closure {
-                            invocation_contracts,
-                            ..
-                        } = &mut arg
+                        }) && let Some(invocation_contracts) = arg.invocation_contracts_mut()
                         {
                             // This parameter is a new adapter around any
-                            // contracts the supplied closure already carries,
+                            // contracts the supplied callable already carries,
                             // so its entry runs first at the eventual call.
                             invocation_contracts
                                 .insert(0, callable_contract.expect("checked above").clone());
@@ -2268,6 +2269,7 @@ impl<'a> EvalContext<'a> {
                 kind,
                 transform_expr,
                 captured_env,
+                invocation_contracts: _,
             } => self.apply_transform(kind, &transform_expr, captured_env, args),
             other => Err(format!("value is not callable: {other:?}")),
         }
