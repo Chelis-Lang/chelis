@@ -208,8 +208,10 @@ termination, and successful completion without changing required execution.
    automatic package expansion from PR/main CI, add the explicit PR-number plus
    expected-head dispatch, make final-candidate dispatch an agent requirement,
    and move PR-body acknowledgement enforcement into its own required check.
-   Description edits rerun only that enforcement surface; base retargets still
-   require fresh implementation validation.
+   Description edits rerun only acknowledgement/changelog policy and do not
+   enter compiler or Hull workflows. Base retargets create a separate required
+   head receipt that remains pending until trusted-base coordination dispatches
+   exact-head/exact-base CI and Hull against the new synthetic merge.
 4. Land execution optimization separately. Skip setup for plan-proven empty
    groups, reuse only complete exact-candidate/configuration coverage receipts,
    and batch expansion by package while preserving exact target and per-test
@@ -373,9 +375,11 @@ including removed requirements, and publishes them with the comparison.
 The dedicated required `PR Contract Acknowledgements` job enforces those lines
 against the validated PR merge. A PR-description edit reruns that job so
 removing a line invalidates the old result, but it neither cancels nor
-recreates compiler validation for the unchanged commit. A base retarget is an
-implementation event and requires fresh validation against the new synthetic
-merge. The enforcement rejects
+recreates compiler validation for the unchanged commit. Generic edits do not
+enter compiler or Hull workflows. A base retarget is an implementation event:
+a dedicated required head receipt remains pending until trusted-base
+coordination dispatches fresh exact-head/exact-base CI and Hull runs against the
+new synthetic merge. The enforcement rejects
 missing, duplicate, stale, unknown or malformed acknowledgements in that
 opening block. The block precedes all prose and is separated from it by a
 blank line; initial blank lines are harmless. Later lines are examples or

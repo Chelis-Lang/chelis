@@ -34,6 +34,7 @@ def validate_candidate(
     payload: Mapping[str, Any],
     *,
     expected_head_sha: str,
+    expected_base_sha: str | None = None,
     plan: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Return the current ``(head, base)`` after fail-closed validation."""
@@ -52,6 +53,15 @@ def validate_candidate(
         raise ValueError(
             f"stale head: expected {expected_head_sha}, current head is {head}"
         )
+    if expected_base_sha is not None:
+        if not SHA.fullmatch(expected_base_sha):
+            raise ValueError(
+                "expected_base_sha must be a lowercase 40-character commit SHA"
+            )
+        if base != expected_base_sha:
+            raise ValueError(
+                f"stale base: expected {expected_base_sha}, current base is {base}"
+            )
 
     if plan is not None:
         ci_change_owned.verify_plan_digest(plan)
@@ -68,11 +78,58 @@ def validate_candidate(
     return head, base
 
 
+def validate_checkout(
+    *,
+    expected_head_sha: str,
+    expected_base_sha: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """Return the candidate SHA after validating exact merge parents."""
+    for label, value in (
+        ("expected_head_sha", expected_head_sha),
+        ("expected_base_sha", expected_base_sha),
+    ):
+        if not SHA.fullmatch(value):
+            raise ValueError(
+                f"{label} must be a lowercase 40-character commit SHA"
+            )
+    try:
+        completed = runner(
+            ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr or error.stdout or str(error)
+        raise ValueError(f"cannot inspect candidate checkout: {detail}") from error
+    fields = completed.stdout.strip().split()
+    if len(fields) != 3 or not all(SHA.fullmatch(value) for value in fields):
+        raise ValueError(
+            "candidate checkout must be one commit with exactly two parents"
+        )
+    candidate_sha, first_parent, second_parent = fields
+    if first_parent != expected_base_sha:
+        raise ValueError(
+            f"candidate first parent is {first_parent}, expected base "
+            f"{expected_base_sha}"
+        )
+    if second_parent != expected_head_sha:
+        raise ValueError(
+            f"candidate second parent is {second_parent}, expected head "
+            f"{expected_head_sha}"
+        )
+    return candidate_sha
+
+
 def run(
     *,
     repository: str,
     pr_number: int,
     expected_head_sha: str,
+    expected_base_sha: str | None = None,
+    validate_checkout_parents: bool = False,
     plan_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[str, str]:
@@ -101,11 +158,23 @@ def run(
     plan = None
     if plan_path is not None:
         plan = ci_change_owned.load_json(plan_path)
-    return validate_candidate(
+    head, base = validate_candidate(
         payload,
         expected_head_sha=expected_head_sha,
+        expected_base_sha=expected_base_sha,
         plan=plan,
     )
+    if validate_checkout_parents:
+        if expected_base_sha is None:
+            raise ValueError(
+                "--validate-checkout requires --expected-base-sha"
+            )
+        validate_checkout(
+            expected_head_sha=head,
+            expected_base_sha=expected_base_sha,
+            runner=runner,
+        )
+    return head, base
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--pr-number", required=True, type=int)
     parser.add_argument("--expected-head-sha", required=True)
+    parser.add_argument("--expected-base-sha")
+    parser.add_argument("--validate-checkout", action="store_true")
     parser.add_argument("--plan", type=Path)
     return parser
 
@@ -123,9 +194,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         repository=args.repository,
         pr_number=args.pr_number,
         expected_head_sha=args.expected_head_sha,
+        expected_base_sha=args.expected_base_sha,
+        validate_checkout_parents=args.validate_checkout,
         plan_path=args.plan,
     )
-    scope = "head and base" if args.plan else "head"
+    scope = "head"
+    if args.expected_base_sha is not None:
+        scope = "head and base"
+    if args.validate_checkout:
+        scope += " and synthetic merge parents"
     print(
         f"PR CANDIDATE: PASS: exact {scope}; "
         f"head={head}, base={base}"

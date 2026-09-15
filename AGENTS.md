@@ -157,9 +157,12 @@ obligations.
   has the runs behind this rule.
 - `PR Contract Acknowledgements` is the required owner for pull-request-description
   acknowledgements. A title or description edit reruns that check without cancelling
-  or replacing compiler validation for the same commit. Retargeting the pull request's
-  base is an implementation change: wait for fresh required implementation checks
-  against the new synthetic merge before proceeding.
+  or replacing compiler validation for the same commit. Generic edits do not enter
+  compiler or Hull workflows. Retargeting the pull request's base is an implementation
+  change: `PR Base Retarget Validation` holds the head pending while trusted
+  coordination dispatches fresh compiler and Hull workflows against the exact new
+  synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
+  checks before proceeding.
 - After reviews and repairs are complete and the final candidate's required
   implementation checks pass, dispatch `PR Package Expansion` with the pull request
   number and that exact head SHA. Inspect its report and record the reviewed SHA and

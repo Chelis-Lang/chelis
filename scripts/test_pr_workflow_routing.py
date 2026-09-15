@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github/workflows/ci.yml"
 ACKNOWLEDGEMENTS = ROOT / ".github/workflows/pr-contract-acknowledgements.yml"
 EXPANSION = ROOT / ".github/workflows/pr-package-expansion.yml"
+RETARGET = ROOT / ".github/workflows/pr-base-retarget.yml"
+HULL = ROOT / ".github/workflows/conformance.yml"
 AGENTS = ROOT / "AGENTS.md"
 AUTHOR_GUIDE = ROOT / "docs/guard_changes_for_pr_authors.md"
 REQUIRED_IMPLEMENTATION_JOBS = {
@@ -23,13 +25,6 @@ REQUIRED_IMPLEMENTATION_JOBS = {
     "docs": "Docs",
     "no-ai-authorship": "No AI authorship markers",
 }
-METADATA_ONLY = (
-    "github.event_name == 'pull_request'"
-    " && github.event.action == 'edited'"
-    " && github.event.changes.base == null"
-)
-
-
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
 
@@ -38,46 +33,122 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     events = actions_events(workflow)
     test.assertEqual(
         set(events["pull_request"]["types"]),
-        {"opened", "synchronize", "reopened", "edited"},
+        {"opened", "synchronize", "reopened"},
+    )
+    inputs = events["workflow_dispatch"]["inputs"]
+    test.assertEqual(
+        set(inputs),
+        {
+            "pr_number",
+            "expected_head_sha",
+            "expected_base_sha",
+            "retarget_token",
+        },
     )
     concurrency = str(workflow["concurrency"])
-    test.assertIn("github.event.changes.base", concurrency)
-    test.assertIn("metadata", concurrency)
+    test.assertIn("inputs.pr_number", concurrency)
     test.assertIn("implementation", concurrency)
 
     changes = workflow["jobs"]["changes"]
-    test.assertIn("implementation_required", changes["outputs"])
-    policy = next(
-        step for step in changes["steps"] if step.get("id") == "event-policy"
-    )
-    test.assertIn("github.event.changes.base", str(policy))
-    test.assertIn("implementation_required=false", policy["run"])
+    test.assertIn("candidate_sha", changes["outputs"])
     checkout = next(
         step
         for step in changes["steps"]
-        if step.get("uses", "").startswith("actions/checkout@")
+        if step.get("name") == "Checkout exact candidate"
     )
-    test.assertIn("steps.event-policy.outputs.implementation_required", checkout["if"])
+    test.assertIn("refs/pull/", str(checkout))
+    test.assertIn("inputs.pr_number", str(checkout))
+    validation = next(
+        step for step in changes["steps"]
+        if "ci_validate_pr_candidate.py" in step.get("run", "")
+    )
+    test.assertEqual(validation["if"], "github.event_name == 'workflow_dispatch'")
+    test.assertIn("../trusted/scripts/ci_validate_pr_candidate.py", validation["run"])
+    test.assertIn("--expected-base-sha", validation["run"])
+    test.assertIn("--validate-checkout", validation["run"])
+    trusted = next(
+        step for step in changes["steps"]
+        if step.get("name") == "Checkout trusted retarget validator"
+    )
+    test.assertEqual(trusted["with"]["ref"], "${{ inputs.expected_base_sha }}")
+    test.assertLess(changes["steps"].index(trusted), changes["steps"].index(checkout))
+    test.assertLess(
+        changes["steps"].index(checkout), changes["steps"].index(validation)
+    )
 
     for job_id, required_name in REQUIRED_IMPLEMENTATION_JOBS.items():
         job = workflow["jobs"][job_id]
         test.assertIn("changes", job["needs"])
-        test.assertIn(METADATA_ONLY, job["if"])
-        test.assertIn(METADATA_ONLY, job["name"])
-        test.assertIn(required_name, job["name"])
-        test.assertIn("metadata-only edit", job["name"])
-
-    for job_id, job in workflow["jobs"].items():
-        if job_id == "changes":
-            continue
-        test.assertIn(
-            METADATA_ONLY,
-            job.get("if", ""),
-            f"{job_id} must not execute implementation work for body/title edits",
-        )
+        test.assertEqual(job["name"], required_name)
 
     test.assertNotIn("package-expansion-shard", workflow["jobs"])
     test.assertNotIn("package-expansion-summary", workflow["jobs"])
+
+
+def assert_retarget_workflow(test: unittest.TestCase, workflow: dict) -> None:
+    events = actions_events(workflow)
+    test.assertEqual(
+        events,
+        {
+            "pull_request": {
+                "types": ["opened", "synchronize", "reopened"],
+            },
+            "pull_request_target": {"types": ["edited"]},
+        },
+    )
+    jobs = workflow["jobs"]
+    ordinary = jobs["ordinary-candidate"]
+    test.assertEqual(ordinary["name"], "PR Base Retarget Validation")
+    test.assertEqual(
+        ordinary["if"], "github.event_name == 'pull_request'"
+    )
+    coordinator = jobs["base-retarget"]
+    test.assertIn("github.event.changes.base", coordinator["if"])
+    test.assertEqual(
+        coordinator["permissions"],
+        {
+            "actions": "write",
+            "checks": "write",
+            "contents": "read",
+            "pull-requests": "read",
+        },
+    )
+    text = str(coordinator)
+    test.assertIn("scripts/ci_retarget_validation.py", text)
+    test.assertIn("github.event.pull_request.head.sha", text)
+    test.assertIn("github.event.pull_request.base.sha", text)
+    test.assertIn("github.event.pull_request.base.ref", text)
+    test.assertNotIn("github.event.pull_request.body", text)
+
+
+def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> None:
+    events = actions_events(workflow)
+    test.assertEqual(
+        set(events["pull_request"]["types"]),
+        {"opened", "synchronize", "reopened"},
+    )
+    test.assertIn("workflow_dispatch", events)
+    test.assertEqual(
+        set(events["workflow_dispatch"]["inputs"]),
+        {
+            "pr_number",
+            "expected_head_sha",
+            "expected_base_sha",
+            "retarget_token",
+        },
+    )
+    changes = workflow["jobs"]["changes"]
+    test.assertIn("candidate_sha", changes["outputs"])
+    test.assertIn("ci_validate_pr_candidate.py", str(changes))
+    conformance = workflow["jobs"]["conformance"]
+    checkout = next(
+        step for step in conformance["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    test.assertEqual(
+        checkout["with"]["ref"],
+        "${{ needs.changes.outputs.candidate_sha }}",
+    )
 
 
 def assert_acknowledgement_workflow(test: unittest.TestCase, workflow: dict) -> None:
@@ -177,6 +248,7 @@ def assert_author_contract(test: unittest.TestCase) -> None:
     guide = AUTHOR_GUIDE.read_text()
     for text in (agents, guide):
         test.assertIn("PR Contract Acknowledgements", text)
+        test.assertIn("PR Base Retarget Validation", text)
         test.assertIn("PR Package Expansion", text)
         test.assertIn("exact head SHA", text)
         test.assertIn("candidate change", text)
@@ -198,27 +270,22 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         assert_manual_expansion_workflow(
             self, yaml.safe_load(EXPANSION.read_text())
         )
+        assert_retarget_workflow(self, yaml.safe_load(RETARGET.read_text()))
+        assert_hull_retarget_dispatch(self, yaml.safe_load(HULL.read_text()))
         assert_author_contract(self)
 
-    def test_body_edits_cannot_reuse_required_context_names(self) -> None:
+    def test_body_edits_cannot_reenter_compiler_ci(self) -> None:
         workflow = yaml.safe_load(CI.read_text())
-        for job_id in REQUIRED_IMPLEMENTATION_JOBS:
-            mutated = copy.deepcopy(workflow)
-            mutated["jobs"][job_id]["name"] = REQUIRED_IMPLEMENTATION_JOBS[job_id]
-            with self.subTest(job=job_id), self.assertRaises(AssertionError):
-                assert_ci_metadata_routing(self, mutated)
+        actions_events(workflow)["pull_request"]["types"].append("edited")
+        with self.assertRaises(AssertionError):
+            assert_ci_metadata_routing(self, workflow)
 
     def test_base_retarget_signal_and_dedicated_acknowledgements_are_required(self) -> None:
-        workflow = yaml.safe_load(CI.read_text())
-        mutated = copy.deepcopy(workflow)
-        policy = next(
-            step
-            for step in mutated["jobs"]["changes"]["steps"]
-            if step.get("id") == "event-policy"
-        )
-        policy["env"].pop("BASE_CHANGED")
+        retarget = yaml.safe_load(RETARGET.read_text())
+        mutated = copy.deepcopy(retarget)
+        mutated["jobs"]["base-retarget"]["if"] = "false"
         with self.assertRaises(AssertionError):
-            assert_ci_metadata_routing(self, mutated)
+            assert_retarget_workflow(self, mutated)
 
         acknowledgements = yaml.safe_load(ACKNOWLEDGEMENTS.read_text())
         del acknowledgements["jobs"]["acknowledgements"]

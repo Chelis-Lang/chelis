@@ -1,0 +1,56 @@
+name: PR Base Retarget Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [edited]
+
+concurrency:
+  group: pr-base-retarget-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ordinary-candidate:
+    name: PR Base Retarget Validation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm ordinary implementation ownership
+        run: >-
+          echo "No base retarget is pending; the normal required CI and Hull
+          contexts own implementation validation for this candidate."
+
+  base-retarget:
+    name: Coordinate exact-base implementation validation
+    if: github.event_name == 'pull_request_target' && github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: write
+      checks: write
+      contents: read
+      pull-requests: read
+    steps:
+      # pull_request_target executes the trusted base revision. Never checkout
+      # the untrusted head in this coordinator; dispatched workers validate and
+      # checkout the exact synthetic merge themselves.
+      - name: Checkout trusted coordinator
+        uses: actions/checkout@v6
+
+      - name: Dispatch CI and Hull and hold the head receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci_retarget_validation.py
+          --repository "${{ github.repository }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --expected-head-sha "${{ github.event.pull_request.head.sha }}"
+          --expected-base-sha "${{ github.event.pull_request.base.sha }}"
+          --expected-base-ref "${{ github.event.pull_request.base.ref }}"
+          --token "${{ github.run_id }}-${{ github.run_attempt }}"

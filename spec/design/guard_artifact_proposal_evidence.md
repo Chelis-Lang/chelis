@@ -276,10 +276,12 @@ from PR updates and main pushes while retaining the nightly backstop. Agents
 dispatch expansion once on the reviewed final PR head through a workflow that
 accepts the PR number and expected head SHA and rejects stale candidates.
 Acknowledgement enforcement moves to a separate required check so description
-edits do not cancel or replace implementation evidence; base retargets remain
-implementation events. Empty-plan setup avoidance, exact verified overlap
-reuse, package batching and comparative cost measurements are a separate slice
-and are not evidenced by the runs above.
+edits do not enter compiler or Hull workflows and therefore cannot cancel or
+replace implementation evidence. Base retargets remain implementation events:
+a separate required head receipt waits for trusted-base exact-head/exact-base
+CI and Hull dispatches against the new synthetic merge. Empty-plan setup
+avoidance, exact verified overlap reuse, package batching and comparative cost
+measurements are a separate slice and are not evidenced by the runs above.
 
 ## Historical extended-run evidence at `23729c638`
 

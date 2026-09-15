@@ -64,6 +64,14 @@ class CandidateValidationTests(unittest.TestCase):
             candidate.validate_candidate(
                 payload(),
                 expected_head_sha=HEAD,
+                expected_base_sha=BASE,
+            ),
+            (HEAD, BASE),
+        )
+        self.assertEqual(
+            candidate.validate_candidate(
+                payload(),
+                expected_head_sha=HEAD,
                 plan=plan(),
             ),
             (HEAD, BASE),
@@ -83,6 +91,20 @@ class CandidateValidationTests(unittest.TestCase):
                 ValueError, message
             ):
                 candidate.validate_candidate(pr, expected_head_sha=expected)
+
+    def test_expected_base_is_exact_and_fail_closed(self) -> None:
+        for expected, message in (
+            ("B" * 40, "expected_base_sha"),
+            ("d" * 40, "stale base"),
+        ):
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                candidate.validate_candidate(
+                    payload(),
+                    expected_head_sha=HEAD,
+                    expected_base_sha=expected,
+                )
 
     def test_final_validation_rejects_stale_base_head_and_tampered_plan(self) -> None:
         stale_base = copy.deepcopy(plan())
@@ -133,6 +155,49 @@ class CandidateValidationTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+    def test_checkout_validation_requires_exact_two_parent_candidate(self) -> None:
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["git"],
+                0,
+                f"{MERGE} {BASE} {HEAD}\n",
+                "",
+            )
+        )
+        self.assertEqual(
+            candidate.validate_checkout(
+                expected_head_sha=HEAD,
+                expected_base_sha=BASE,
+                runner=runner,
+            ),
+            MERGE,
+        )
+        runner.assert_called_once_with(
+            ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        for row, message in (
+            (f"{MERGE} {BASE}\n", "exactly two parents"),
+            (f"{MERGE} {HEAD} {BASE}\n", "first parent"),
+            (f"{MERGE} {BASE} {'d' * 40}\n", "second parent"),
+        ):
+            with self.subTest(row=row), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                candidate.validate_checkout(
+                    expected_head_sha=HEAD,
+                    expected_base_sha=BASE,
+                    runner=mock.Mock(
+                        return_value=subprocess.CompletedProcess(
+                            ["git"], 0, row, ""
+                        )
+                    ),
+                )
 
     def test_cli_rejects_invalid_pr_number_and_gh_or_json_failure(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive integer"):

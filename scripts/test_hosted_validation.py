@@ -16,18 +16,11 @@ SKILL_COMMANDS = (
     f"{PYTHON} -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation",
     "cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity",
 )
-METADATA_ONLY = (
-    "github.event_name == 'pull_request' && "
-    "github.event.action == 'edited' && "
-    "github.event.changes.base == null"
-)
-
-
 def assert_hosted_coverage(test, workflow, nightly):
     jobs = workflow["jobs"]
     docs = jobs["docs"]
     test.assertEqual(docs.get("needs"), ["changes"])
-    test.assertIn(METADATA_ONLY, docs.get("if", ""))
+    test.assertEqual(docs.get("if"), "${{ !cancelled() }}")
     test.assertNotIn("docs_only", docs.get("if", ""))
     test.assertFalse(docs.get("continue-on-error", False))
     for command in SKILL_COMMANDS:
@@ -131,7 +124,6 @@ class HostedCoverageTests(unittest.TestCase):
     def test_docs_checks_cannot_be_skipped_or_made_nonblocking(self):
         for key, value in (
             ("if", "false"),
-            ("if", "${{ !cancelled() }}"),
             (
                 "if",
                 "${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}",

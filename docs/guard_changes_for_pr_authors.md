@@ -40,9 +40,11 @@ fresh package-expansion dispatch.
 
 `PR Contract Acknowledgements` separately owns acknowledgement enforcement.
 Editing the title or description reruns that required check without cancelling
-or replacing implementation results for the unchanged commit. A base-branch
-retarget is not metadata-only and requires fresh implementation validation
-against the new synthetic merge.
+or replacing implementation results for the unchanged commit; generic edits do
+not enter compiler or Hull workflows. A base-branch retarget is not
+metadata-only. `PR Base Retarget Validation` holds the head pending while fresh
+compiler and Hull dispatches validate the exact new synthetic merge. Wait for
+that receipt and the refreshed acknowledgement/changelog checks.
 
 ## Adding, moving or removing tests
 

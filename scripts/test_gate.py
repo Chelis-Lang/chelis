@@ -753,6 +753,7 @@ NON_GATE_WORKFLOWS = {
     # compiler CI, and final package expansion is an explicit exact-head
     # dispatch. Neither is a developer gate.py stage.
     "pr-contract-acknowledgements.yml",
+    "pr-base-retarget.yml",
     "pr-package-expansion.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
@@ -2179,11 +2180,7 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(oracle_block.count("    needs:"), 0)
         self.assertNotIn("needs.integration", oracle_block)
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
-        self.assertIn("'Integration Tests (Linux)'", aggregate_block)
-        self.assertIn(
-            "'Integration Tests (Linux) (metadata-only edit)'",
-            aggregate_block,
-        )
+        self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, ci-fast, change-owned-report]",
             aggregate_block,
@@ -3563,11 +3560,7 @@ class SmtCiSplitTests(unittest.TestCase):
 
     def test_required_smt_job_stays_fast_smoke(self):
         block = _ci_job_block("smt-build")
-        self.assertIn("'SMT Feature Build (Linux)'", block)
-        self.assertIn(
-            "'SMT Feature Build (Linux) (metadata-only edit)'",
-            block,
-        )
+        self.assertIn("name: SMT Feature Build (Linux)", block)
         self.assertIn("verify_release_smt.py ./target/debug/chelis", block)
         self.assertIn(
             "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
@@ -4010,11 +4003,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         "rejection-authority-liveness",
         "diagnostic-kind-oracle",
     }
-    # Jobs that run for every implementation event, including docs-only PRs,
-    # but do not recreate their required contexts for metadata-only edits.
+    # Jobs that run for every implementation event, including docs-only PRs.
+    # Generic metadata edits never trigger ci.yml.
     IMPLEMENTATION_ALWAYS_RUN_JOBS = {"no-ai-authorship", "docs"}
-    # The classifier itself is the only ci.yml job that runs on metadata-only
-    # edits; it performs no checkout or compiler work in that mode.
+    # The classifier is always present on actual implementation events.
     ALWAYS_RUN_JOBS = {"changes"}
 
     def test_changes_job_exists_and_is_ungated(self):
@@ -4189,17 +4181,12 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"always-run job '{job}' must not carry a docs_only `if`",
             )
 
-    def test_implementation_always_run_jobs_skip_only_metadata_edits(self):
+    def test_implementation_always_run_jobs_are_not_docs_gated(self):
         attrs = _parse_job_attrs()
-        metadata_only = (
-            "github.event_name == 'pull_request' && "
-            "github.event.action == 'edited' && "
-            "github.event.changes.base == null"
-        )
         for job in self.IMPLEMENTATION_ALWAYS_RUN_JOBS:
             self.assertEqual(attrs[job].get("needs"), "[changes]")
             condition = attrs[job].get("if", "")
-            self.assertIn(metadata_only, condition)
+            self.assertEqual(condition, "${{ !cancelled() }}")
             self.assertNotIn("docs_only", condition)
 
     def test_every_job_is_classified(self):

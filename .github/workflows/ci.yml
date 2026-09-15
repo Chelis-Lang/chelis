@@ -1,27 +1,40 @@
 name: CI
 
+run-name: ${{ inputs.retarget_token != '' && format('Retarget CI {0}', inputs.retarget_token) || github.workflow }}
+
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose synthetic merge must be tested
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact open pull-request head
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact retargeted base commit
+        required: true
+        type: string
+      retarget_token:
+        description: Unique coordinator token
+        required: true
+        type: string
 
 concurrency:
-  # Body/title edits rerun the dedicated acknowledgement workflow but must not
-  # cancel implementation validation already running for the same head. A base
-  # retarget is different: `changes.base` is present and the implementation
-  # group is reused so validation restarts against the new synthetic merge.
-  group: >-
-    ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      github.event.action == 'edited' &&
-      github.event.changes.base == null &&
-      'metadata' || 'implementation'
-    }}
+  # Generic PR edits never enter this workflow. Exact-base retarget dispatches
+  # and normal PR updates share the implementation group for the same PR.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-implementation
   cancel-in-progress: true
 
 permissions:
   contents: write
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,53 +57,60 @@ jobs:
     name: Detect docs-only changes
     runs-on: ubuntu-latest
     outputs:
-      implementation_required: ${{ steps.event-policy.outputs.implementation_required }}
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
       diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
     steps:
-      - name: Classify implementation and metadata events
-        id: event-policy
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
-        run: |
-          if [ "$EVENT_NAME" = "pull_request" ] &&
-             [ "$ACTION" = "edited" ] &&
-             [ "$BASE_CHANGED" != "true" ]; then
-            echo "implementation_required=false" >> "$GITHUB_OUTPUT"
-            echo "metadata-only pull-request edit"
-          else
-            echo "implementation_required=true" >> "$GITHUB_OUTPUT"
-            echo "implementation validation required"
-          fi
-
-      # Shallow checkout (depth 1); the detect step deepens to the PR
-      # commit range. GitHub Actions expressions have no arithmetic, so
-      # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
-      # On push the detect step short-circuits without needing history.
-      - name: Checkout
-        if: steps.event-policy.outputs.implementation_required == 'true' && github.event_name == 'pull_request'
+      - name: Checkout trusted retarget validator
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.expected_base_sha }}
+          path: trusted
           fetch-depth: 1
+
+      # Shallow checkout (depth 1); the detect step deepens to the PR
+      # commit range. A retarget dispatch fetches the exact synthetic merge
+      # with full parents so the trusted validator can bind both sides.
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          path: candidate
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+
+      - name: Validate exact retarget candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: >-
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py
+          --repository "${{ github.repository }}"
+          --pr-number "${{ inputs.pr_number }}"
+          --expected-head-sha "${{ inputs.expected_head_sha }}"
+          --expected-base-sha "${{ inputs.expected_base_sha }}"
+          --validate-checkout
+
+      - name: Record exact candidate
+        id: candidate
+        working-directory: candidate
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
       - name: Compute docs_only
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
+        working-directory: candidate
         run: |
-          if [ "${{ steps.event-policy.outputs.implementation_required }}" != "true" ]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
-            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
-            echo "metadata-only event: implementation routing skipped"
-            exit 0
-          fi
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             # push-to-main (or any non-PR event) always runs the full
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -103,7 +123,11 @@ jobs:
           # base tip's parent so base..head resolves), then backstop-fetch
           # the base commit so it is present as an object even on a stale
           # count (force-push between the event and the run).
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          else
+            git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+          fi
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
@@ -117,13 +141,14 @@ jobs:
     name: Rejection Authority Liveness
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
     permissions:
       contents: read
       issues: read
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       - name: Install uv
@@ -149,7 +174,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
     permissions:
       contents: read
     env:
@@ -158,6 +183,8 @@ jobs:
       CARGO_TARGET_DIR: target/diagnostic-kind-oracle
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -187,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -201,6 +228,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -264,11 +293,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Small compiler fixtures remain here; full C6 execution is nightly-owned.
       - name: Install Rust toolchain
@@ -305,14 +336,16 @@ jobs:
   # Preserve the required branch-protection context while the independent
   # Rust and Python policy workers execute in parallel.
   lint-and-unit:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'Lint and Unit Tests (Linux) (metadata-only edit)' || 'Lint and Unit Tests (Linux)' }}
+    name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
-    if: ${{ always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Require every lint and unit worker
         run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
@@ -325,7 +358,7 @@ jobs:
   # display name stable: branch protection requires this exact context.
   # Runbook: docs/smt_build_setup.md.
   smt-build:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'SMT Feature Build (Linux) (metadata-only edit)' || 'SMT Feature Build (Linux)' }}
+    name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
     # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
     # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
@@ -339,7 +372,7 @@ jobs:
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # cvc5 builds from source into target/ on top of the workspace build —
     # the heaviest disk consumer of any Linux job — so it gets both the
     # free-disk reclaim and the debuginfo strip (chelis#392). It was the
@@ -349,6 +382,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo + cvc5 build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -496,7 +531,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # The immutable digest supplies Python, git, curl, and CA certificates
     # before checkout while retaining Debian 11's glibc 2.31. After checkout,
     # ci_apt_get replaces its moving mirrors with the repository-pinned
@@ -508,6 +543,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # m4 is required by GMP's configure; cmake/g++/libclang support the cvc5
       # source build. The pinned snapshot makes package indices and payloads
@@ -597,12 +634,14 @@ jobs:
     timeout-minutes: 20
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -663,10 +702,11 @@ jobs:
     permissions:
       contents: read
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
@@ -681,10 +721,10 @@ jobs:
 
       - name: Derive the change-owned and package-expansion plan
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name == 'workflow_dispatch' && 'pull_request' || github.event_name }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
+          AFTER: ${{ needs.changes.outputs.candidate_sha }}
         run: >-
           .venv/bin/python scripts/ci_change_owned.py plan
           --event-name "$EVENT_NAME"
@@ -708,7 +748,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, integration-plan]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && needs.integration-plan.result == 'success' }}
+    if: ${{ !cancelled() && needs.integration-plan.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -718,6 +758,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -778,9 +820,11 @@ jobs:
     permissions:
       contents: read
     needs: [changes, integration-plan, change-owned-shard]
-    if: ${{ always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -833,14 +877,16 @@ jobs:
 
 
   integration:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'Integration Tests (Linux) (metadata-only edit)' || 'Integration Tests (Linux)' }}
+    name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [changes, ci-fast, change-owned-report]
-    if: ${{ always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Require all integration legs
         run: >-
@@ -858,9 +904,11 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.ci-fast.result == 'success' }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.ci-fast.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -889,13 +937,13 @@ jobs:
           retention-days: 14
 
   backend-sanitizers:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'Backend Sanitizers (metadata-only edit)' || 'Backend Sanitizers' }}
+    name: Backend Sanitizers
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -907,6 +955,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -934,10 +984,10 @@ jobs:
         run: cargo test -p chelis-backend-c --doc
 
   no-ai-authorship:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'No AI authorship markers (metadata-only edit)' || 'No AI authorship markers' }}
+    name: No AI authorship markers
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) }}
+    if: ${{ !cancelled() }}
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
       # repo history (chelis#421). GitHub Actions expressions have no
@@ -948,19 +998,26 @@ jobs:
       # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 1
 
       - name: Check commits for AI authorship markers
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ] ||
+             [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Deepen head to the PR commit range, then backstop-fetch the
             # base commit so `base..head` resolves at the shallow boundary
             # (both no-ops if already present).
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            else
+              git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+            fi
             git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
@@ -1004,10 +1061,10 @@ jobs:
           echo "All commits clean."
 
   docs:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'Docs (metadata-only edit)' || 'Docs' }}
+    name: Docs
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null) }}
+    if: ${{ !cancelled() }}
     # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     # This job compiles the chelis-e2e skill-suite test binary.
     env:
@@ -1025,6 +1082,7 @@ jobs:
       # green for the right reason.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       # Free ~25-30 GB before the cargo build; see
