@@ -23,6 +23,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+STANDING_EXECUTION = dict(ci_change_owned.STANDING_EXECUTION)
 
 
 def read_targets(path: Path) -> list[tuple[str, str]]:
@@ -91,7 +92,11 @@ def merge_listings(documents: list[dict]) -> dict:
             "test-count": sum(len(suite["testcases"]) for suite in suites.values())}
 
 
-def validate_listing(data: dict, metadata: dict, selected: list[tuple[str, str]]) -> None:
+def validate_listing(
+    data: dict,
+    metadata: dict,
+    selected: list[tuple[str, str]],
+) -> list[str]:
     cargo_selections(metadata, selected)
     integrations = {f"{package}::{name}" for package, name in selected}
     expected = set(integrations)
@@ -107,6 +112,7 @@ def validate_listing(data: dict, metadata: dict, selected: list[tuple[str, str]]
     suites = data["rust-suites"]
     if set(suites) != expected:
         raise ValueError(f"compiled test target mismatch: missing={sorted(expected - set(suites))}, extra={sorted(set(suites) - expected)}")
+    selected_tests = []
     for binary, suite in suites.items():
         tests = suite["testcases"]
         active = [info for info in tests.values() if not info["ignored"]]
@@ -114,10 +120,51 @@ def validate_listing(data: dict, metadata: dict, selected: list[tuple[str, str]]
             raise ValueError(f"selected integration has no non-ignored tests: {binary}")
         if any(info["filter-match"]["status"] != "matches" for info in active):
             raise ValueError(f"fast lane silently filters a non-ignored test: {binary}")
+        if binary in integrations:
+            selected_tests.extend(
+                f"{binary}::{name}"
+                for name, info in tests.items()
+                if not info["ignored"]
+            )
+    if len(selected_tests) != len(set(selected_tests)):
+        raise ValueError("fast lane listing contains duplicate integration tests")
+    return sorted(selected_tests)
 
 
-def run(root: Path = ROOT) -> None:
-    selected = read_targets(root / ".config/ci-test-targets.toml")
+def junit_integration_tests(
+    path: Path,
+    selected: list[tuple[str, str]],
+) -> list[str]:
+    selected_targets = {f"{package}::{target}" for package, target in selected}
+    tests = []
+    for case in ET.parse(path).iter("testcase"):
+        classname = case.get("classname")
+        if classname not in selected_targets:
+            continue
+        name = case.get("name")
+        if not name:
+            raise ValueError(
+                f"standing JUnit testcase has no name for {classname}"
+            )
+        ci_change_owned.require_executed_junit_case(case, path)
+        tests.append(f"{classname}::{name}")
+    if len(tests) != len(set(tests)):
+        raise ValueError("standing JUnit contains duplicate integration tests")
+    return sorted(tests)
+
+
+def run(root: Path = ROOT, *, candidate_sha: str | None = None) -> None:
+    config = ci_change_owned.read_config(
+        root / ".config/ci-test-targets.toml"
+    )
+    selected = [
+        (identity.package, identity.target)
+        for identity in config.standing_targets
+    ]
+    if candidate_sha is None:
+        candidate_sha = ci_change_owned._commit(root, "HEAD")
+    elif not ci_change_owned.SHA.fullmatch(candidate_sha):
+        raise ValueError("candidate_sha must be a full lowercase commit SHA")
     metadata = json.loads(subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
         cwd=root, check=True, stdout=subprocess.PIPE, text=True,
@@ -133,6 +180,9 @@ def run(root: Path = ROOT) -> None:
     commands = []
     listings = []
     suite_documents = []
+    selected_tests: list[str] = []
+    executed_tests: list[str] = []
+    caught: Exception | None = None
     junit = target / "nextest/ci-fast/junit.xml"
     junit.parent.mkdir(parents=True, exist_ok=True)
     junit.unlink(missing_ok=True)
@@ -158,7 +208,7 @@ def run(root: Path = ROOT) -> None:
             listings.append(json.loads(result.stdout))
         combined = merge_listings(listings)
         (receipts / "test-list.json").write_text(json.dumps(combined, indent=2) + "\n")
-        validate_listing(combined, metadata, selected)
+        selected_tests = validate_listing(combined, metadata, selected)
         for index, args in enumerate(selections):
             # nextest overwrites its profile's JUnit path on each invocation.
             # Remove the previous receipt so a missing write cannot look fresh.
@@ -173,12 +223,70 @@ def run(root: Path = ROOT) -> None:
                     group_junit = receipts / f"junit-{index}.xml"
                     shutil.copyfile(junit, group_junit)
                     suite_documents.append(group_junit)
+                    executed_tests.extend(
+                        junit_integration_tests(group_junit, selected)
+                    )
             if not junit.is_file():
                 raise ValueError(f"missing JUnit for command group {index}")
+    except Exception as error:
+        caught = error
     finally:
         (receipts / "commands.json").write_text(json.dumps(commands, indent=2) + "\n")
         (receipts / "timing.json").write_text(json.dumps(timing, indent=2) + "\n")
-        ci_change_owned._write_junit(junit, suite_documents)
+        try:
+            ci_change_owned._write_junit(junit, suite_documents)
+        except (ValueError, ET.ParseError) as error:
+            if caught is None:
+                caught = error
+        expected_targets = sorted(
+            f"{package}::{name}" for package, name in selected
+        )
+        executed_tests = sorted(set(executed_tests))
+        executed_targets = []
+        for identity in expected_targets:
+            prefix = f"{identity}::"
+            selected_for_target = {
+                test for test in selected_tests if test.startswith(prefix)
+            }
+            executed_for_target = {
+                test for test in executed_tests if test.startswith(prefix)
+            }
+            if selected_for_target and selected_for_target == executed_for_target:
+                executed_targets.append(identity)
+        failures = []
+        if caught is not None:
+            failures.append(str(caught))
+        if sorted(selected_tests) != executed_tests:
+            failures.append(
+                "standing integration test results are incomplete: "
+                f"selected={sorted(selected_tests)}, "
+                f"executed={executed_tests}"
+            )
+        if executed_targets != expected_targets:
+            failures.append(
+                "standing integration target results are incomplete: "
+                f"selected={expected_targets}, executed={executed_targets}"
+            )
+        coverage = {
+            "version": ci_change_owned.STANDING_COVERAGE_VERSION,
+            "candidate_sha": candidate_sha,
+            "config_digest": ci_change_owned.config_digest(config),
+            "execution": dict(STANDING_EXECUTION),
+            "selected_targets": expected_targets,
+            "executed_targets": executed_targets,
+            "selected_tests": sorted(selected_tests),
+            "executed_tests": executed_tests,
+            "success": not failures,
+            "failures": failures,
+        }
+        ci_change_owned.attach_standing_coverage_digest(coverage)
+        (receipts / "coverage.json").write_bytes(
+            ci_change_owned.canonical_json(coverage)
+        )
+    if caught is not None:
+        raise caught
+    if failures:
+        raise ValueError("; ".join(failures))
 
 
 if __name__ == "__main__":

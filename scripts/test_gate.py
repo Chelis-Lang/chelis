@@ -3914,14 +3914,22 @@ class IntegrationPlanHandoffTests(unittest.TestCase):
     def plan_after_restore(block):
         steps = re.split(r"(?m)^      - ", block)[1:]
         restores = [i for i, step in enumerate(steps) if "uses: Swatinem/rust-cache@" in step]
-        downloads = [i for i, step in enumerate(steps) if "name: integration-change-plan\n" in step]
+        downloads = [
+            i
+            for i, step in enumerate(steps)
+            if "name: integration-change-plan\n" in step
+            and "path: target/integration-change\n" in step
+        ]
         executions = [i for i, step in enumerate(steps) if "scripts/ci_change_owned.py run-shard" in step]
         assert len(restores) == len(downloads) == len(executions) == 1, "one restore, current plan download and executor required"
         restore, download, execute = restores[0], downloads[0], executions[0]
         assert restore < download < execute, "download the current plan after restoring target and before execution"
         assert "path: target/integration-change\n" in steps[download], "download must reach the executor plan path"
         assert "--plan target/integration-change/plan.json\n" in steps[execute], "executor must read the downloaded plan"
-        assert "        if:" not in steps[download], "current plan download must be unconditional"
+        assert (
+            "if: steps.shard-selection.outputs.has_targets == 'true'"
+            in steps[download]
+        ), "current plan download must run exactly for nonempty shards"
         assert "continue-on-error:" not in steps[download], "missing current plan must fail the job"
 
     def test_workers_download_the_current_plan_after_cache_restore(self):
@@ -3942,7 +3950,10 @@ class IntegrationPlanHandoffTests(unittest.TestCase):
                                 plan.unlink(missing_ok=True)
                             else:
                                 plan.write_text("stale cached plan")
-                        elif "name: integration-change-plan\n" in step:
+                        elif (
+                            "name: integration-change-plan\n" in step
+                            and "path: target/integration-change\n" in step
+                        ):
                             plan.write_text("current run plan")
                         elif "scripts/ci_change_owned.py run-shard" in step:
                             self.assertEqual(plan.read_text(), "current run plan")
@@ -3951,13 +3962,29 @@ class IntegrationPlanHandoffTests(unittest.TestCase):
         for job in ("change-owned-shard", "package-expansion-shard"):
             block = _ci_job_block(job)
             steps = re.split(r"(?m)(?=^      - )", block)
-            download = next(step for step in steps if "name: integration-change-plan\n" in step)
+            download = next(
+                step
+                for step in steps
+                if "name: integration-change-plan\n" in step
+                and "path: target/integration-change\n" in step
+            )
             early = download + block.replace(download, "", 1)
             for label, mutant in (
                 ("early", early),
                 ("missing", block.replace(download, "", 1)),
                 ("wrong path", block.replace("path: target/integration-change\n", "path: stale-plan\n", 1)),
-                ("conditional", block.replace(download, download.replace("        uses:", "        if: failure()\n        uses:", 1), 1)),
+                (
+                    "wrong condition",
+                    block.replace(
+                        download,
+                        download.replace(
+                            "if: steps.shard-selection.outputs.has_targets == 'true'",
+                            "if: failure()",
+                            1,
+                        ),
+                        1,
+                    ),
+                ),
                 ("optional", block.replace(download, download.replace("        uses:", "        continue-on-error: true\n        uses:", 1), 1)),
             ):
                 with self.subTest(job=job, mutation=label):
