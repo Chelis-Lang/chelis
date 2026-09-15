@@ -1930,7 +1930,7 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
         &path,
         "xs = to_list(to_tensor([1.0, 2.0]))\n\
          state0 = (to_tensor([0.0, 0.0]), cast(0.0, f32))\n\
-         step = fn (state, x) -> {\n\
+         step = fn (state, x: f32) -> {\n\
            l_inner = state.0\n\
            total = state.1\n\
            (l_inner, add(total, x))\n\

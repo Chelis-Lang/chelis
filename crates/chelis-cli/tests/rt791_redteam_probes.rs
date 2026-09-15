@@ -117,32 +117,12 @@ fn c_run(program: &str, name: &str) -> Result<(bool, String, String), String> {
     ))
 }
 
-fn branded_line(text: &str) -> Option<&str> {
-    text.lines().find(|l| l.contains("unsupported: "))
-}
-
-/// The section C2 rendering, checked structurally: the literal brand, an
-/// ` on ` context clause, a parenthesized stage, and typed authority.
-fn assert_frozen_shape(line: &str, ctx: &str) {
-    let tail = line
-        .split_once("unsupported: ")
-        .map(|(_, t)| t)
-        .unwrap_or_default();
-    assert!(
-        tail.contains(" on ")
-            && (line.contains("); deliberate [") || line.contains("); unimplemented chelis#")),
-        "{ctx}: not the authority-bearing `unsupported: <what> on <context> (<stage>); <authority>: <hint>` \
-         shape: {line}"
-    );
-}
-
 // ===========================================================================
 // Orchestrator probe 1 - the absorption-guard boundary
 // ===========================================================================
 
-/// 1(a): an unsupported-op def that IS a DAG root (tensor signature) must
-/// surface the branded rejection in eval - even when a healthy tensor
-/// root sits beside it.
+/// 1(a): an invalid-family def that IS a DAG root must be rejected before
+/// eval, even when a healthy tensor root sits beside it.
 #[test]
 fn rt_p1a_unsupported_tensor_root_surfaces_in_eval() {
     let program = "module M.Main\n\
@@ -151,9 +131,10 @@ fn rt_p1a_unsupported_tensor_root_surfaces_in_eval() {
          out = print(good(to_tensor([1.0, -2.0, 3.0, -4.0])))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => {
-            let line = branded_line(&stderr)
-                .unwrap_or_else(|| panic!("rejection must be branded; got: {stderr}"));
-            assert!(line.contains("Cos") || line.contains("cos"), "got: {line}");
+            assert!(
+                stderr.contains("dtype family `Float`") && stderr.contains("int32"),
+                "invalid cos operand must be rejected by the checked family contract: {stderr}"
+            );
         }
         Ok(stdout) => panic!(
             "a program containing a DAG-rooted unsupported def must not eval cleanly \
@@ -423,10 +404,9 @@ fn rt_keep2_unknown_tag_with_children_is_rejected() {
 // Orchestrator probe 4 - frozen-shape byte parity across lanes
 // ===========================================================================
 
-/// The same lowering raise (cos on an int32 tensor, def-rooted) must
-/// render the identical branded byte sequence via eval and via
-/// `chelis build --target c` / `--target hip` (a lane-skewed rendering is
-/// the chelis#712 shape the corpus exists to catch).
+/// The checked Float-family rejection for cos on an int32 tensor must be
+/// present on eval and both build lanes. The build lanes share the same
+/// checker boundary and therefore retain byte parity.
 #[test]
 fn rt_p4_branded_bytes_agree_across_lanes() {
     let program = "module M.Main\n\
@@ -437,25 +417,17 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
     let (c_ok, c_err, _) = build_target(program, ".ch", "rt_parity_c", "c");
     let (h_ok, h_err, _) = build_target(program, ".ch", "rt_parity_hip", "hip");
     assert!(!c_ok && !h_ok, "both build lanes must reject");
-    let brand = |s: &str| -> String {
-        branded_line(s)
-            .and_then(|l| l.split_once("unsupported: ").map(|(_, t)| t.to_string()))
-            .unwrap_or_else(|| panic!("no branded line in: {s}"))
-    };
-    let (e, c, h) = (brand(&eval_err), brand(&c_err), brand(&h_err));
-    for (lane, line) in [("eval", &e), ("build-c", &c), ("build-hip", &h)] {
-        assert_frozen_shape(&format!("unsupported: {line}"), lane);
+    for (lane, diagnostic) in [
+        ("eval", &eval_err),
+        ("build-c", &c_err),
+        ("build-hip", &h_err),
+    ] {
         assert!(
-            line.to_lowercase().contains("cos"),
-            "{lane} must name the op; got: {line}"
+            diagnostic.contains("dtype family `Float`") && diagnostic.contains("int32"),
+            "{lane} must report the checked Float-family rejection; got: {diagnostic}"
         );
     }
-    // The BUILD lanes must agree byte-for-byte (the c host emitter is the
-    // shared refusal point). eval-vs-build render DIFFERENT diagnostics
-    // for this repro (lowering raise vs host-emission arm) - a DISCLOSED
-    // routing skew (issue_687 corpus row comment) reported in prose, not
-    // asserted here.
-    assert_eq!(c, h, "C vs HIP branded bytes must agree");
+    assert_eq!(c_err, h_err, "C vs HIP checker diagnostics must agree");
 }
 
 /// Text admission rejects unknown effect kinds before either execution lane.

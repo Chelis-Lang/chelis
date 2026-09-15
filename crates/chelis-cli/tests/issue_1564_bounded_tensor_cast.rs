@@ -94,7 +94,7 @@ fn invalid_bounded_tensor_calls_reject_before_either_execution_lane() {
     for (body, expected_diagnostic) in [
         (
             "def f[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, int64] = f(to_tensor([1, 2]))\n",
-            "TypeMismatch",
+            "Float",
         ),
         (
             "def f[p](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, int32] = f(to_tensor([1, 2]))\n",
