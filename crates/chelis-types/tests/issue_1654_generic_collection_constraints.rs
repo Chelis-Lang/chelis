@@ -100,6 +100,25 @@ fn rejects_type_mismatch(label: &str, source: &str) {
     }
 }
 
+fn rejects_type_or_dimension(label: &str, source: &str) {
+    for (entry, result) in whole_program(source) {
+        let errors = match result {
+            Err(errors) => errors,
+            Ok(()) => panic!("{label} [{entry}] unexpectedly accepted"),
+        };
+        assert!(
+            errors.iter().any(|error| {
+                matches!(
+                    error.kind,
+                    CheckErrorKind::TypeMismatch | CheckErrorKind::DimensionMismatch
+                )
+            }),
+            "{label} [{entry}] expected a type/dimension rejection:\n{}",
+            rendered(&errors).join("\n")
+        );
+    }
+}
+
 #[test]
 fn authored_generic_wrappers_must_declare_collection_constructors() {
     for (operation, source) in [
@@ -239,6 +258,90 @@ fn each_collection_relation_survives_indirect_calls() {
 }
 
 #[test]
+fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
+    rejects_type_or_dimension(
+        "direct tensor concat result",
+        "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = \
+         concat([a, b], 1i32)\n",
+    );
+    for (route, source) in [
+        (
+            "alias",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+             op = concat\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "higher-order return",
+            "def return_concat() = concat\n\
+             def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+             op = return_concat()\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "higher-order passage",
+            "def identity(f) = f\n\
+             def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+             op = identity(concat)\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+        (
+            "aggregate",
+            "def pair() = (concat, 1i32)\n\
+             def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+             op = pair().0\n\
+             op([a, b], 1i32)\n\
+             }\n"
+            .to_string(),
+        ),
+    ] {
+        rejects_type_or_dimension(&format!("{route} tensor concat result"), &source);
+    }
+
+    for (route, source) in [
+        (
+            "direct",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = \
+             concat([a, b], 9i32)\n"
+                .to_string(),
+        ),
+        (
+            "alias",
+            "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+             op = concat\n\
+             op([a, b], 9i32)\n\
+             }\n"
+            .to_string(),
+        ),
+    ] {
+        rejects(&format!("{route} tensor concat axis"), &source, "concat");
+    }
+
+    for source in [
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = concat\n\
+         op([a, b], -1i32)\n\
+         }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[4, 3, f32]) -> tensor[6, 3, f32] = {\n\
+         op = concat\n\
+         op([a, b], 0i32)\n\
+         }\n",
+    ] {
+        accepts("valid transported tensor concat", source);
+    }
+}
+
+#[test]
 fn checked_contracts_survive_serialized_library_contexts() {
     for source in [
         "def exported() = len\nmeasure = exported()\nout = measure(1i64)\n",
@@ -260,6 +363,29 @@ fn checked_contracts_survive_serialized_library_contexts() {
         serialized_context(source)
             .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));
     }
+
+    let invalid_tensor_concat = "def exported() = concat\n\
+         join = exported()\n\
+         def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = \
+         join([a, b], 1i32)\n";
+    let errors = serialized_context(invalid_tensor_concat).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            matches!(
+                error.kind,
+                CheckErrorKind::TypeMismatch | CheckErrorKind::DimensionMismatch
+            )
+        }),
+        "{}",
+        rendered(&errors).join("\n")
+    );
+    serialized_context(
+        "def exported() = concat\n\
+         join = exported()\n\
+         def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = \
+         join([a, b], 1i32)\n",
+    )
+    .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));
 }
 
 #[test]

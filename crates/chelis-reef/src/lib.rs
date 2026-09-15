@@ -5657,6 +5657,19 @@ impl<'de> Deserialize<'de> for PackageSchema {
                 wire.format_version
             )));
         }
+        for module in &wire.modules {
+            for function in &module.functions {
+                chelis_shell::validate_collection_obligation_ledger(
+                    &function.collection_obligations,
+                )
+                .map_err(|message| {
+                    serde::de::Error::custom(format!(
+                        "collection obligations for function `{}` in module `{}` {message}",
+                        function.name, module.module
+                    ))
+                })?;
+            }
+        }
         Ok(Self {
             format_version: wire.format_version,
             package: wire.package,

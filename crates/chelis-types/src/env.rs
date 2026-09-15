@@ -745,6 +745,7 @@ impl Env {
                     crate::unify::DeferredOperandGate::Collection {
                         constraint: renamed,
                         transport: true,
+                        tensor_concat: None,
                     },
                 ),
                 // An obligation whose operands are all settled by the renaming

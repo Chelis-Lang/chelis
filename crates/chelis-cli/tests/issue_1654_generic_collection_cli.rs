@@ -68,6 +68,23 @@ fn assert_type_mismatch(source: &str) {
     );
 }
 
+fn assert_type_or_dimension_rejected(source: &str) {
+    let CheckResult { status, report } = check(source);
+    assert!(!status.success(), "{status:?}: {report}");
+    assert!(report["score"].as_f64().unwrap() < 1.0, "{report}");
+    assert!(
+        report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| matches!(
+                error["kind"].as_str(),
+                Some("TypeMismatch" | "DimensionMismatch")
+            )),
+        "{report}"
+    );
+}
+
 #[test]
 fn declaration_boundary_rejects_implicit_collection_contracts() {
     for (operation, source) in [
@@ -126,6 +143,39 @@ fn explicit_and_transported_valid_collection_contracts_score_one() {
 }
 
 #[test]
+fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
+    assert_type_or_dimension_rejected(
+        "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
+         op = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+    );
+    assert_rejected(
+        "def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = concat\n\
+         op([a, b], 9i32)\n\
+         }\n",
+        "concat",
+    );
+    for source in [
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = concat\n\
+         op([a, b], 1i32)\n\
+         }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
+         op = concat\n\
+         op([a, b], -1i32)\n\
+         }\n",
+        "def good(a: tensor[2, 3, f32], b: tensor[4, 3, f32]) -> tensor[6, 3, f32] = {\n\
+         op = concat\n\
+         op([a, b], 0i32)\n\
+         }\n",
+    ] {
+        assert_accepted(source);
+    }
+}
+
+#[test]
 fn higher_order_and_aggregate_transport_remain_checked() {
     for source in [
         "def identity(f) = f\nmeasure = identity(len)\nout = measure(1i64)\n",
@@ -161,7 +211,7 @@ fn imported_checked_values_keep_their_collection_contract() {
     .expect("dependency manifest");
     fs::write(
         dependency.join("src/measure.ch"),
-        "module Contract.Measure\nexport (measure)\nmeasure = len\n",
+        "module Contract.Measure\nexport (measure, join)\nmeasure = len\njoin = concat\n",
     )
     .expect("dependency source");
     fs::write(
@@ -202,6 +252,52 @@ fn imported_checked_values_keep_their_collection_contract() {
         "module Demo.Main\nimport Contract.Measure (measure)\nout: int64 = measure([1i64])\n",
     )
     .expect("valid application source");
+    let CheckResult {
+        status: accepted_status,
+        report: accepted,
+    } = check_path(&main);
+    assert!(accepted_status.success(), "{accepted_status:?}: {accepted}");
+    assert_eq!(accepted["score"].as_f64(), Some(1.0), "{accepted}");
+    assert!(
+        accepted["errors"].as_array().unwrap().is_empty(),
+        "{accepted}"
+    );
+
+    fs::write(
+        &main,
+        "module Demo.Main\n\
+         import Contract.Measure (join)\n\
+         def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = \
+         join([a, b], 1i32)\n",
+    )
+    .expect("invalid imported concat source");
+    let CheckResult {
+        status: rejected_status,
+        report: rejected,
+    } = check_path(&main);
+    assert!(
+        !rejected_status.success(),
+        "{rejected_status:?}: {rejected}"
+    );
+    assert!(rejected["score"].as_f64().unwrap() < 1.0, "{rejected}");
+    assert!(
+        rejected["errors"].as_array().unwrap().iter().any(|error| {
+            matches!(
+                error["kind"].as_str(),
+                Some("TypeMismatch" | "DimensionMismatch")
+            )
+        }),
+        "{rejected}"
+    );
+
+    fs::write(
+        &main,
+        "module Demo.Main\n\
+         import Contract.Measure (join)\n\
+         def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = \
+         join([a, b], 1i32)\n",
+    )
+    .expect("valid imported concat source");
     let CheckResult {
         status: accepted_status,
         report: accepted,

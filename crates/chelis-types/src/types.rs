@@ -704,8 +704,8 @@ impl fmt::Display for EffectSet {
 pub enum CollectionConstraint {
     /// `len(operand) -> int64`: the operand is a `List` or a `Dict`.
     Len { operand: Type, result: Type },
-    /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is an
-    /// integer, and `result` is `e`.
+    /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is
+    /// exactly `int64`, and `result` is `e`.
     Index {
         list: Type,
         index: Type,

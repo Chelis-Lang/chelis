@@ -409,6 +409,9 @@ pub(crate) enum DeferredOperandGate {
     Collection {
         constraint: crate::types::CollectionConstraint,
         transport: bool,
+        /// Application-local source evidence for tensor concat. The generic
+        /// checked contract remains serializable without call-site values.
+        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
     },
 }
 
@@ -640,8 +643,14 @@ impl DeferredOperandGate {
             Self::Collection {
                 ref constraint,
                 transport,
+                ref tensor_concat,
             } => {
-                discharge_collection_constraint(constraint, transport, subst);
+                discharge_collection_constraint(
+                    constraint,
+                    transport,
+                    tensor_concat.as_ref(),
+                    subst,
+                );
             }
         }
     }
@@ -721,9 +730,10 @@ impl DeferredOperandGate {
 pub(crate) fn discharge_collection_constraint(
     constraint: &crate::types::CollectionConstraint,
     transport: bool,
+    tensor_concat: Option<&crate::infer::TensorConcatCallEvidence>,
     subst: &mut Subst,
 ) {
-    match crate::infer::decide_collection_constraint(constraint, subst) {
+    match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
         // An operand the rule reads is STILL unresolved: this binding settled
         // one of several. Re-suspend on the next one rather than deciding
         // against a variable, so the rejection names both operands and is
@@ -735,6 +745,7 @@ pub(crate) fn discharge_collection_constraint(
                     DeferredOperandGate::Collection {
                         constraint: constraint.clone(),
                         transport,
+                        tensor_concat: tensor_concat.cloned(),
                     },
                 );
             }
@@ -750,6 +761,7 @@ pub(crate) fn discharge_collection_constraint(
                     gate: DeferredOperandGate::Collection {
                         constraint: constraint.clone(),
                         transport,
+                        tensor_concat: tensor_concat.cloned(),
                     },
                     expected,
                     settled,
@@ -819,6 +831,22 @@ fn collect_non_callable_tvars(ty: &Type, vars: &mut UnordSet<TypeVar>) {
         }
         Type::Prim(_) | Type::Tensor(_, TensorPrec::Concrete(_)) | Type::Unit | Type::Error(_) => {}
     }
+}
+
+/// Type variables belonging to the value operands of this application.
+///
+/// Nested function values are capabilities being passed or returned, not
+/// operands consumed by the outer call. Excluding them is what lets
+/// `return_concat()` and `identity(concat)` retain the checked contract.
+fn collection_call_operand_vars(callee: &Type, subst: &Subst) -> UnordSet<TypeVar> {
+    let Type::Fn(parameters, _) = subst.apply(callee) else {
+        return UnordSet::default();
+    };
+    let mut variables = UnordSet::default();
+    for parameter in parameters {
+        collect_non_callable_tvars(&parameter, &mut variables);
+    }
+    variables
 }
 
 impl Clone for Subst {
@@ -1320,6 +1348,7 @@ impl Subst {
             if let DeferredOperandGate::Collection {
                 constraint,
                 transport: false,
+                ..
             } = gate
             {
                 for carried in constraint.carried_types() {
@@ -1439,6 +1468,75 @@ impl Subst {
         ledger.retain(|(waiting_on, gate)| {
             !(callee_vars.contains(waiting_on) && gate.is_transport_collection())
         });
+    }
+
+    /// Whether the checked contract instantiated for `callee` includes
+    /// tensor/list `concat` and therefore needs this call's static source
+    /// evidence before argument unification can discharge it.
+    pub(crate) fn callee_has_transported_concat_contract(&self, callee: &Type) -> bool {
+        let callee_vars = collection_call_operand_vars(callee, self);
+        if callee_vars.is_empty() {
+            return false;
+        }
+        self.deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned")
+            .iter()
+            .any(|(waiting_on, gate)| {
+                callee_vars.contains(waiting_on)
+                    && matches!(
+                        gate,
+                        DeferredOperandGate::Collection {
+                            constraint: crate::types::CollectionConstraint::Concat { .. },
+                            transport: true,
+                            ..
+                        }
+                    )
+            })
+    }
+
+    /// Consume the transported collection contracts owned by this callee
+    /// before unification binds their operand variables.
+    ///
+    /// Tensor concat additionally receives the application-local axis and
+    /// literal-element evidence. It must be attached before the first operand
+    /// binds because discharge is synchronous with that binding.
+    pub(crate) fn prepare_collection_contract_call(
+        &self,
+        callee: &Type,
+        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+    ) {
+        let callee_vars = collection_call_operand_vars(callee, self);
+        if callee_vars.is_empty() {
+            return;
+        }
+        let mut ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        for (waiting_on, gate) in ledger.iter_mut() {
+            if !callee_vars.contains(waiting_on) {
+                continue;
+            }
+            let DeferredOperandGate::Collection {
+                constraint,
+                transport,
+                tensor_concat: carried_evidence,
+            } = gate
+            else {
+                continue;
+            };
+            if !*transport {
+                continue;
+            }
+            *transport = false;
+            if matches!(
+                constraint,
+                crate::types::CollectionConstraint::Concat { .. }
+            ) {
+                *carried_evidence = tensor_concat.clone();
+            }
+        }
     }
 
     /// Consume transported contracts whose operand is supplied by this call.

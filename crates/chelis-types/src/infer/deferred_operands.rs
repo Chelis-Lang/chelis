@@ -51,7 +51,7 @@ pub(super) fn validate_deferred_tensor_operands(
     // variable again (caught by the never-resolved sweep at the end), so this
     // is the only ordering where neither outcome is lost.
     for constraint in subst.take_settled_collection_obligations() {
-        crate::unify::discharge_collection_constraint(&constraint, true, subst);
+        crate::unify::discharge_collection_constraint(&constraint, true, None, subst);
     }
     for failure in subst.take_operand_gate_failures() {
         match failure {

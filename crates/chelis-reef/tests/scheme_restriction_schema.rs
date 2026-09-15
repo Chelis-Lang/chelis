@@ -141,6 +141,68 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         "schema v3 consumers must not silently default a missing collection ledger"
     );
 
+    let canonical_append = serde_json::json!({
+        "append": {
+            "list": "(t-var {} t0)",
+            "value": "(t-var {} t1)",
+            "result": "(t-var {} t0)"
+        }
+    });
+    let canonical_len = serde_json::json!({
+        "len": {
+            "operand": "(t-var {} t0)",
+            "result": "(t-var {} t1)"
+        }
+    });
+    let mut canonical_multi_relation = schema_json.clone();
+    let measure = canonical_multi_relation["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|module| module["functions"].as_array_mut().unwrap())
+        .find(|function| function["name"] == "measure")
+        .unwrap();
+    measure["collection_obligations"] =
+        serde_json::json!([canonical_append.clone(), canonical_len.clone()]);
+    serde_json::from_value::<PackageSchema>(canonical_multi_relation.clone())
+        .expect("a sorted unique canonical relation ledger must deserialize");
+
+    for (label, obligations) in [
+        (
+            "duplicate",
+            serde_json::json!([canonical_len.clone(), canonical_len.clone()]),
+        ),
+        (
+            "noncanonical order",
+            serde_json::json!([canonical_len.clone(), canonical_append.clone()]),
+        ),
+        (
+            "noncanonical Deep",
+            serde_json::json!([{
+                "len": {
+                    "operand": "(t-var   {} t0)",
+                    "result": "(t-var {} t1)"
+                }
+            }]),
+        ),
+    ] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["collection_obligations"] = obligations;
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("noncanonical schema obligation ledger must be rejected");
+        assert!(
+            error.to_string().contains("collection obligations"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
+
     let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
         .expect("schema package must build");
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");

@@ -1411,22 +1411,14 @@ pub(super) fn finish_unified_app(
                         // types already produced while inferring the
                         // list argument, so ragged extents can SUM
                         // without a second semantic traversal.
-                        let raw_axis = kids.get(2).and_then(extract_int_for_dim);
-                        let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
-                            Some(elements) => ConcatListInfo::Direct(
-                                elements
-                                    .iter()
-                                    .map(|elem| {
-                                        match product.current_owner_type(elem, subst, errors) {
-                                            Some(Type::Tensor(dims, _)) => dims,
-                                            _ => Vec::new(),
-                                        }
-                                    })
-                                    .collect(),
-                            ),
-                            None => ConcatListInfo::BindingLen(static_list_len(kids.get(1), env)),
-                        };
-                        match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst) {
+                        let evidence =
+                            tensor_concat_call_evidence(kids, env, subst, errors, product);
+                        match tensor_concat_result_type(
+                            &lhs_args[0],
+                            evidence.raw_axis,
+                            evidence.list_info,
+                            subst,
+                        ) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 return report(

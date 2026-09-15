@@ -3810,8 +3810,15 @@ transported contracts without inspecting the callee body.
    result that no longer contains the function-bearing subvalue removes its
    detached transport entry.
 4. Direct syntactic calls keep `app_post.rs`'s operation-specific rules and
-   diagnostics. The scheme copy is discarded for that call. Indirect calls use
-   `decide_collection_constraint`; result reconciliation and multi-operand
+   diagnostics. The scheme copy is discarded for that call. Before an indirect
+   call unifies its arguments, a consumed tensor-`concat` relation receives
+   that application's axis value, literal element shapes, or binding-carried
+   list length. Direct and indirect routes then use the same
+   `tensor_concat_result_type` decision, so exact concat-axis sums and
+   out-of-bounds axes do not disappear when the function value was aliased,
+   returned, passed, aggregated, imported, or restored from TypeEnv. Nested
+   function-valued parameters and results remain transport rather than being
+   consumed by the outer call. Result reconciliation and multi-operand
    re-suspension remain inside unification.
 5. Serialized TypeEnv checker reuse and published package identities both
    include the relation. TypeEnv format 3 follows #2071's format 2 and is the
@@ -3820,8 +3827,11 @@ transported contracts without inspecting the callee body.
    surfaces protect package publication and identity, not compiler reuse from
    CHB or Reef schema. All predecessors are rejected rather than decoded as
    unconstrained. Canonical package relations share the function type's
-   alpha-renamed variables, are strictly ordered and unique, and reject hidden
-   variables.
+   alpha-renamed variables, use exact canonical Deep rendering, are strictly
+   ordered and unique, and reject hidden variables. CHB validation,
+   encode/decode, and public Reef-schema deserialization all enforce that
+   ledger invariant rather than treating parse-equivalent relation strings or
+   duplicate rows as distinct package identities.
 
 This mechanism is the collection constructor/result-relation specialization of
 the general operation-admission design already recorded in §C3.1 and

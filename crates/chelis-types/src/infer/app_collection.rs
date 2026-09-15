@@ -28,10 +28,10 @@ pub(super) fn collection_helper_type_error(
 /// Application consumes it; binding an operand discharges it here, and a
 /// multi-operand relation re-suspends until its next operand settles.
 ///
-/// The eager arms in `app_post.rs` do NOT delegate here. They decide their
-/// settled cases themselves, against the call site's syntactic element list,
-/// which this has no access to -- see the tensor `concat` note below. The two
-/// implementations therefore coexist, and the eager one is better informed.
+/// The eager arms in `app_post.rs` and transported tensor-concat calls feed
+/// the same call-site evidence to [`tensor_concat_result_type`]. The checked
+/// function value carries the generic operation rule; its application
+/// contributes the axis expression and any statically visible list elements.
 ///
 /// `Ok(Some(result))` is the type the rule produces, which the caller unifies
 /// into whatever the call already published. `Ok(None)` means an operand is
@@ -39,11 +39,9 @@ pub(super) fn collection_helper_type_error(
 /// already owned upstream -- and the caller suspends or suppresses. `Err` is
 /// the rule's own rejection text.
 ///
-/// The tensor `concat` overload is decided here without the call site's
-/// syntactic element list, so its extents are wildcards. That is honest for a
-/// transported decision.
 pub(crate) fn decide_collection_constraint(
     constraint: &CollectionConstraint,
+    tensor_concat: Option<&TensorConcatCallEvidence>,
     subst: &mut Subst,
 ) -> Result<Option<Type>, String> {
     let applied = constraint.map_types(|ty| subst.apply(ty));
@@ -123,13 +121,10 @@ pub(crate) fn decide_collection_constraint(
             (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
                 if lhs_name == "List" && lhs_args.len() == 1 =>
             {
-                tensor_concat_result_type(
-                    &lhs_args[0],
-                    None,
-                    ConcatListInfo::BindingLen(None),
-                    subst,
-                )
-                .map(Some)
+                let (raw_axis, list_info) = tensor_concat
+                    .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
+                    .unwrap_or((None, ConcatListInfo::BindingLen(None)));
+                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(Some)
             }
             (lhs, rhs) => Err(format!(
                 "concat expects matching List inputs, got {lhs} and {rhs}"
@@ -138,7 +133,18 @@ pub(crate) fn decide_collection_constraint(
     }
 }
 
+/// Static source evidence used by the tensor overload of a consumed checked
+/// `concat` value. This is application state, not part of the serialized
+/// function contract: aliases and imports carry the generic rule, and each
+/// call supplies its own axis and visible element shapes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TensorConcatCallEvidence {
+    pub(super) raw_axis: Option<i64>,
+    pub(super) list_info: ConcatListInfo,
+}
+
 /// How the concat arm can see the list's elements (chelis#594).
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConcatListInfo {
     /// A literal `Cons` chain at the call site: each element's full dim
     /// vector, in list order (read from the current inference epoch's
@@ -150,6 +156,38 @@ pub(super) enum ConcatListInfo {
     /// come from the §4.5.2 joined element type, so the sum is
     /// `joined extent x length` and requires uniform extents.
     BindingLen(Option<usize>),
+}
+
+/// Read the tensor-concat evidence from one already-inferred application.
+///
+/// Direct and transported calls share this extraction so neither route can
+/// retain the axis while dropping literal element extents, or vice versa.
+pub(super) fn tensor_concat_call_evidence(
+    kids: &[deep::Expr],
+    env: &Env,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &InferenceProduct,
+) -> TensorConcatCallEvidence {
+    let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+    let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
+        Some(elements) => ConcatListInfo::Direct(
+            elements
+                .iter()
+                .map(
+                    |elem| match product.current_owner_type(elem, subst, errors) {
+                        Some(Type::Tensor(dims, _)) => dims,
+                        _ => Vec::new(),
+                    },
+                )
+                .collect(),
+        ),
+        None => ConcatListInfo::BindingLen(static_list_len(kids.get(1), env)),
+    };
+    TensorConcatCallEvidence {
+        raw_axis,
+        list_info,
+    }
 }
 
 /// Result type of a tensor `concat(list, axis)` (spec/04-type-system.md

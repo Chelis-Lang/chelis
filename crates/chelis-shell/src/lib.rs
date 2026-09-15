@@ -508,13 +508,36 @@ fn validate_collection_obligation_order(
     label: &str,
     obligations: &[CollectionObligation],
 ) -> Result<(), bincode::Error> {
+    validate_collection_obligation_ledger(obligations)
+        .map_err(|message| validation_error(&format!("{label} {message}")))
+}
+
+/// Validate the canonical identity of one published collection-contract
+/// ledger.
+///
+/// Parsing alone is insufficient at an artifact trust boundary: whitespace
+/// variants describe the same Deep type while producing distinct CHB bytes.
+/// Exact canonical rendering plus strict order makes semantic identity and
+/// artifact identity agree.
+pub fn validate_collection_obligation_ledger(
+    obligations: &[CollectionObligation],
+) -> Result<(), String> {
     let mut previous: Option<(&str, Vec<&str>)> = None;
     for obligation in obligations {
+        for carried in obligation.types() {
+            let expression = chelis_deep::parse_and_stamp_type(carried).map_err(|error| {
+                format!("contain a type representation that is not valid Deep: {error}")
+            })?;
+            let canonical = chelis_deep::printer::print_expr(&expression);
+            if canonical != carried {
+                return Err(format!(
+                    "must use exact canonical Deep rendering; got `{carried}`, canonical form is `{canonical}`"
+                ));
+            }
+        }
         let key = (obligation.builtin(), obligation.types());
         if previous.as_ref().is_some_and(|prior| prior >= &key) {
-            return Err(validation_error(&format!(
-                "{label} must be strictly sorted with no duplicates"
-            )));
+            return Err("must be strictly sorted with no duplicates".to_string());
         }
         previous = Some(key);
     }
@@ -669,6 +692,39 @@ mod tests {
                 .expect_err("noncanonical relation ledger must fail validation");
             assert!(
                 error.to_string().contains("strictly sorted"),
+                "unexpected {label} validation diagnostic: {error}"
+            );
+            assert!(
+                encode_shell(&invalid).is_err(),
+                "{label} relation ledger must not encode"
+            );
+            assert!(
+                decode_shell(&encode_unvalidated(&invalid)).is_err(),
+                "{label} relation ledger must not decode"
+            );
+        }
+
+        for (label, mutate) in [
+            ("operand whitespace", 0usize),
+            ("result whitespace", 1usize),
+        ] {
+            let mut invalid = fixture_shell();
+            let symbol = &mut invalid.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            let mut noncanonical = len.clone();
+            if let CollectionObligation::Len { operand, result } = &mut noncanonical {
+                if mutate == 0 {
+                    *operand = "(t-var   {} t0)".into();
+                } else {
+                    *result = "(t-var {}   t1)".into();
+                }
+            }
+            symbol.collection_obligations = vec![noncanonical];
+
+            let error =
+                validate_shell(&invalid).expect_err("noncanonical Deep must fail validation");
+            assert!(
+                error.to_string().contains("canonical Deep"),
                 "unexpected {label} validation diagnostic: {error}"
             );
             assert!(

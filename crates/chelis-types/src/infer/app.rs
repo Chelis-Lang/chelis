@@ -737,6 +737,14 @@ fn infer_app_inner(
     );
     if direct_collection_builtin {
         subst.discard_direct_collection_contract(&func_ty);
+    } else if matches!(
+        subst.apply(&func_ty),
+        Type::Fn(ref params, _) if params.len() == arg_tys.len()
+    ) {
+        let tensor_concat = subst
+            .callee_has_transported_concat_contract(&func_ty)
+            .then(|| tensor_concat_call_evidence(kids, env, subst, errors, product));
+        subst.prepare_collection_contract_call(&func_ty, tensor_concat);
     }
     let ret_tv =
         match unify_checked_call_contract(list, &func_ty, &arg_tys, vg, subst, errors, product) {
