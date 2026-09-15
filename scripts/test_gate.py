@@ -4115,6 +4115,8 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertNotIn("!cancelled()", cond)
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
+        self.assertIn("needs.changes.outputs.rebase_lane != 'docs'", cond)
+        self.assertIn("needs.changes.outputs.rebase_lane == 'targeted'", cond)
         block = _ci_job_block("integration")
         self.assertIn("needs.ci-fast.result", block)
         self.assertIn("needs.change-owned-report.result", block)
@@ -4124,7 +4126,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             block,
         )
         main_step, pr_step = block.split(
-            "      - name: Require all pull-request integration legs",
+            "      - name: Require all ordinary pull-request integration legs",
             1,
         )
         self.assertIn("if: github.event_name == 'push'", main_step)
@@ -4136,6 +4138,19 @@ class DocsOnlySkipTests(unittest.TestCase):
             "change-owned-report=${{ needs.change-owned-report.result }}",
             pr_step,
         )
+        self.assertIn(
+            "      - name: Require targeted rebase integration",
+            pr_step,
+        )
+        targeted_step = pr_step.split(
+            "      - name: Require targeted rebase integration",
+            1,
+        )[1]
+        self.assertNotIn("ci-fast=", targeted_step)
+        self.assertIn(
+            "change-owned-report=${{ needs.change-owned-report.result }}",
+            targeted_step,
+        )
 
     def test_change_owned_jobs_have_exact_pr_only_predicates(self):
         attrs = _parse_job_attrs()
@@ -4144,7 +4159,9 @@ class DocsOnlySkipTests(unittest.TestCase):
                 "${{ !cancelled() && github.event_name != 'push' && "
                 "needs.changes.outputs.candidate_preflight == 'success' && "
                 "(needs.changes.result != 'success' || "
-                "needs.changes.outputs.docs_only != 'true') }}"
+                "(needs.changes.outputs.rebase_lane != 'docs' && "
+                "(needs.changes.outputs.rebase_lane == 'targeted' || "
+                "needs.changes.outputs.docs_only != 'true'))) }}"
             ),
             "change-owned-shard": (
                 "${{ !cancelled() && github.event_name != 'push' && "
@@ -4153,7 +4170,9 @@ class DocsOnlySkipTests(unittest.TestCase):
             "change-owned-report": (
                 "${{ always() && github.event_name != 'push' && "
                 "(needs.changes.result != 'success' || "
-                "needs.changes.outputs.docs_only != 'true') }}"
+                "(needs.changes.outputs.rebase_lane != 'docs' && "
+                "(needs.changes.outputs.rebase_lane == 'targeted' || "
+                "needs.changes.outputs.docs_only != 'true'))) }}"
             ),
         }
         for job, predicate in expected.items():

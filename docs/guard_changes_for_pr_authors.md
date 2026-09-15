@@ -56,6 +56,22 @@ semantic conflict resolution. Use a fresh round when the rebase introduces a
 new mechanism, touches files that reviewer did not read, or materially broadens
 the reviewed surface.
 
+On a base-changing `synchronize`, the trusted rebase verifier may reuse prior
+evidence when the previous head has an eligible default-branch receipt, the
+target is unchanged, the base advanced strictly forward, the new head contains
+that base, and the current synthetic candidate is exact. The complete
+incremental validation delta runs from the prior receipt's synthetic candidate
+to the current one, covering both conflict resolution and any target advance
+included in that frozen candidate. `event.before..event.after` remains the head-rewrite record
+for review. A docs-only delta takes the cheap docs and contract lane. A code
+delta reruns combined-candidate lint/unit and base-sensitive checks plus every
+required change-owned and package-targeted test selected for the affected
+paths. CI-policy changes, retargets, missing receipts, non-forward updates,
+unmapped paths, and uncertain history run full CI. Every required context still
+reports on the new head. Patch changes and path overlap are reported so the
+standing reviewer can inspect the resolution; they do not alone force
+unrelated work to rerun.
+
 ## Final package-expansion dispatch
 
 After review findings are resolved and no further content change is planned,
@@ -83,12 +99,16 @@ without complete successful receipts is not evidence that the selected tests
 passed.
 A review round does not run package expansion merely because it exists.
 Intermediate review candidates use required CI; expansion starts once on the
-settled reviewed head. A content change, hand-resolved conflict, base-changing
-rebase, or base-branch retarget requires a fresh package-expansion dispatch
-because the workflow validates the exact synthetic candidate. Do not rebase a
-ready pull request merely to refresh it after `main` advances. If GitHub can
-safely merge the exact reviewed head, preserve that head and its existing
-evidence; inspect the prospective merge as described in
+settled reviewed head. An ordinary content change after expansion, a
+base-branch retarget, or a rebase the trusted verifier does not accept requires
+a fresh package-expansion dispatch. A verifier-accepted rebase, including a
+hand-resolved conflict, retains the successful expansion from the receipt's
+previous head after the complete delta-selected checks pass and the standing
+reviewer inspects the resolution. Record its SHA/run with the rebase decision
+and current required-check run. Do not rebase a ready pull request merely to
+refresh it after `main` advances. If GitHub can safely merge the exact reviewed
+head, preserve that head and its existing evidence; inspect the prospective
+merge as described in
 [Worktree And Branch Discipline](../AGENTS.md#worktree-and-branch-discipline).
 A base-branch retarget still requires the fresh coordinated implementation
 validation described below.

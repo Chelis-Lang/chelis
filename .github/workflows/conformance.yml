@@ -64,11 +64,19 @@ jobs:
   changes:
     name: Detect docs-only changes (conformance)
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
       candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
+      rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
+      rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
+      rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
     steps:
       - name: Checkout trusted retarget validator
         if: github.event_name == 'workflow_dispatch'
@@ -86,6 +94,14 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
           path: candidate
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+
+      - name: Checkout trusted rebase reuse verifier
+        if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-rebase
+          fetch-depth: 1
 
       - name: Validate exact retarget candidate
         if: github.event_name == 'workflow_dispatch'
@@ -200,13 +216,51 @@ jobs:
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
 
+      - name: Select targeted rebase lane
+        id: rebase-reuse
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LIFECYCLE: ${{ steps.candidate-lifecycle.outcome }}
+          BEFORE: ${{ github.event.before }}
+        working-directory: candidate
+        run: |
+          record_full() {
+            echo "rebase_lane=full" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+          }
+          if [ "$EVENT_NAME" != "pull_request" ] ||
+             [ "$ACTION" != "synchronize" ] ||
+             [ "$LIFECYCLE" != "success" ]; then
+            record_full "not an eligible synchronize event"
+            exit 0
+          fi
+          verifier="../trusted-rebase/scripts/ci_rebase_reuse.py"
+          if [ ! -f "$verifier" ]; then
+            record_full "trusted rebase verifier is not available on the base"
+            exit 0
+          fi
+          if ! python3 "$verifier" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-path . \
+            --event "$GITHUB_EVENT_PATH" \
+            --current-pr "$RUNNER_TEMP/current-pr.json" \
+            --timeline "$RUNNER_TEMP/pr-timeline.json" \
+            --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}" \
+            --output "$RUNNER_TEMP/rebase-reuse/decision.json" \
+            --github-output "$GITHUB_OUTPUT"; then
+            record_full "trusted rebase verifier failed closed"
+          fi
       - name: Install uv for CI contract preflight
-        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Validate changed CI contracts before Hull build
         id: ci-contract
-        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
         continue-on-error: true
         working-directory: candidate
         run: >-
@@ -216,6 +270,7 @@ jobs:
           scripts.test_ci_candidate_lifecycle
           scripts.test_ci_candidate_identity
           scripts.test_ci_candidate_receipt
+          scripts.test_ci_rebase_reuse
           scripts.test_ci_change_owned
           scripts.test_ci_contract_paths
           scripts.test_ci_detect_docs_only
@@ -236,12 +291,15 @@ jobs:
           contract="${{ steps.ci-contract.outcome }}"
           detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
           bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
+          rebase_contract="${{ steps.rebase-reuse.outputs.rebase_contract_changed }}"
           contract_changed=unknown
           if [ "$detected_contract" = "true" ] ||
-             [ "$bootstrap_contract" = "true" ]; then
+             [ "$bootstrap_contract" = "true" ] ||
+             [ "$rebase_contract" = "true" ]; then
             contract_changed=true
           elif [ "$detected_contract" = "false" ] &&
-               [ "$bootstrap_contract" = "false" ]; then
+               [ "$bootstrap_contract" = "false" ] &&
+               { [ "$rebase_contract" = "false" ] || [ -z "$rebase_contract" ]; }; then
             contract_changed=false
           fi
           verdict=success
@@ -256,7 +314,7 @@ jobs:
           fi
           echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
           echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
-          echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
+          echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, rebase CI contract=$rebase_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
 
       - name: Record immutable candidate identity
         if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
@@ -290,7 +348,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

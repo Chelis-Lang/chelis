@@ -1,0 +1,606 @@
+from __future__ import annotations
+
+from io import BytesIO
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from zipfile import ZipFile
+
+from scripts import ci_candidate_identity as identity
+from scripts import ci_rebase_reuse as reuse
+
+
+def git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+class RebaseRepository:
+    def __init__(
+        self,
+        *,
+        delta_path: str = "docs/rebase.md",
+        overlap: bool = False,
+        overlap_path: str = "shared.txt",
+        literal_conflict: bool = False,
+    ) -> None:
+        if literal_conflict and not overlap:
+            raise ValueError("literal_conflict requires overlap")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name)
+        git(self.path, "init", "-b", "main")
+        git(self.path, "config", "user.name", "CI Test")
+        git(self.path, "config", "user.email", "ci@example.invalid")
+        shared = self.path / overlap_path
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text(
+            "first\nmiddle one\nmiddle two\nlast\n"
+        )
+        git(self.path, "add", overlap_path)
+        git(self.path, "commit", "-m", "root")
+        self.root_sha = git(self.path, "rev-parse", "HEAD")
+
+        (self.path / "base.txt").write_text("base one\n")
+        git(self.path, "add", "base.txt")
+        git(self.path, "commit", "-m", "base one")
+        self.old_base_sha = git(self.path, "rev-parse", "HEAD")
+
+        git(self.path, "switch", "-c", "feature")
+        if overlap:
+            shared.write_text(
+                "candidate\nmiddle one\nmiddle two\nlast\n"
+            )
+            git(self.path, "add", overlap_path)
+        else:
+            (self.path / "feature.txt").write_text("candidate\n")
+            git(self.path, "add", "feature.txt")
+        git(self.path, "commit", "-m", "feature")
+        self.old_head_sha = git(self.path, "rev-parse", "HEAD")
+
+        git(self.path, "switch", "-c", "old-candidate", self.old_base_sha)
+        git(self.path, "merge", "--no-ff", "feature", "-m", "old candidate")
+        self.old_candidate_sha = git(self.path, "rev-parse", "HEAD")
+
+        git(self.path, "switch", "main")
+        if overlap:
+            shared.write_text(
+                (
+                    "base\nmiddle one\nmiddle two\nlast\n"
+                    if literal_conflict
+                    else "first\nmiddle one\nmiddle two\nbase two\n"
+                )
+            )
+            git(self.path, "add", overlap_path)
+        else:
+            delta = self.path / delta_path
+            delta.parent.mkdir(parents=True, exist_ok=True)
+            delta.write_text("base two\n")
+            git(self.path, "add", delta_path)
+        git(self.path, "commit", "-m", "base two")
+        self.new_base_sha = git(self.path, "rev-parse", "HEAD")
+        self.rebased_onto_sha = self.new_base_sha
+
+        git(self.path, "switch", "-c", "rebased-feature", self.old_head_sha)
+        if literal_conflict:
+            conflict = subprocess.run(
+                [
+                    "git",
+                    "rebase",
+                    "--onto",
+                    self.new_base_sha,
+                    self.old_base_sha,
+                ],
+                cwd=self.path,
+                text=True,
+                capture_output=True,
+            )
+            if conflict.returncode == 0:
+                raise AssertionError("fixture expected a literal rebase conflict")
+            shared.write_text(
+                "candidate plus base\nmiddle one\nmiddle two\nlast\n"
+            )
+            git(self.path, "add", overlap_path)
+            git(self.path, "-c", "core.editor=true", "rebase", "--continue")
+        else:
+            git(
+                self.path,
+                "rebase",
+                "--onto",
+                self.new_base_sha,
+                self.old_base_sha,
+            )
+        self.new_head_sha = git(self.path, "rev-parse", "HEAD")
+
+        self.candidate_base_sha = self.new_base_sha
+        git(self.path, "switch", "-c", "new-candidate", self.new_base_sha)
+        git(
+            self.path,
+            "merge",
+            "--no-ff",
+            "rebased-feature",
+            "-m",
+            "new candidate",
+        )
+        self.new_candidate_sha = git(self.path, "rev-parse", "HEAD")
+
+    def advance_target_after_rebase(self, path: str = "docs/late.md") -> None:
+        git(self.path, "switch", "main")
+        late = self.path / path
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("late base advance\n")
+        git(self.path, "add", path)
+        git(self.path, "commit", "-m", "late base advance")
+        self.new_base_sha = git(self.path, "rev-parse", "HEAD")
+        self.candidate_base_sha = self.new_base_sha
+        git(self.path, "switch", "-C", "new-candidate", self.new_base_sha)
+        git(
+            self.path,
+            "merge",
+            "--no-ff",
+            "rebased-feature",
+            "-m",
+            "new candidate after late base advance",
+        )
+        self.new_candidate_sha = git(self.path, "rev-parse", "HEAD")
+
+    def advance_live_target_without_rebuilding_candidate(
+        self, path: str = "docs/still-later.md"
+    ) -> None:
+        git(self.path, "switch", "main")
+        late = self.path / path
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("base moved after candidate creation\n")
+        git(self.path, "add", path)
+        git(self.path, "commit", "-m", "base moves after candidate creation")
+        self.new_base_sha = git(self.path, "rev-parse", "HEAD")
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+    def prior_receipt(self, *, reuse_eligible: bool = True) -> dict[str, object]:
+        prior = identity.build_identity(
+            repository_path=self.path,
+            repository="Chelis-Lang/chelis",
+            workflow_file="ci.yml",
+            run_id=101,
+            run_attempt=1,
+            pr_number=42,
+            head_sha=self.old_head_sha,
+            base_ref="main",
+            base_sha=self.old_base_sha,
+            candidate_sha=self.old_candidate_sha,
+        )
+        return {
+            "schema": "chelis-ci-candidate-receipt/v1",
+            "repository": "Chelis-Lang/chelis",
+            "pr_number": 42,
+            "head_sha": prior["head_sha"],
+            "base_ref": prior["base_ref"],
+            "base_sha": prior["base_sha"],
+            "patch_base_sha": prior["patch_base_sha"],
+            "candidate_sha": prior["candidate_sha"],
+            "candidate_parents": prior["candidate_parents"],
+            "patch_id": prior["patch_id"],
+            "patch_digest": prior["patch_digest"],
+            "changed_paths": prior["changed_paths"],
+            "changed_paths_sha256": prior["changed_paths_sha256"],
+            "reuse_eligible": reuse_eligible,
+            "reuse_blockers": [] if reuse_eligible else ["scripts/ci_policy.py"],
+            "required_checks": [],
+            "workflow_runs": {},
+            "source_trigger_run_id": 101,
+            "receipt_workflow_run_id": 202,
+        }
+
+    def event(self) -> dict[str, object]:
+        return {
+            "action": "synchronize",
+            "before": self.old_head_sha,
+            "after": self.new_head_sha,
+            "pull_request": {
+                "number": 42,
+                "base": {"ref": "main", "sha": self.new_base_sha},
+                "head": {"sha": self.new_head_sha},
+            },
+        }
+
+    def current_pr(self, *, base_ref: str = "main") -> dict[str, object]:
+        return {
+            "number": 42,
+            "base": {
+                "ref": base_ref,
+                "sha": self.new_base_sha,
+                "repo": {"full_name": "Chelis-Lang/chelis"},
+            },
+            "head": {
+                "sha": self.new_head_sha,
+                "repo": {"full_name": "Chelis-Lang/chelis"},
+            },
+        }
+
+    def evaluate(
+        self,
+        *,
+        receipt: dict[str, object] | None = None,
+        current_pr: dict[str, object] | None = None,
+        timeline: list[dict[str, object]] | None = None,
+        receipt_created_at: str = "2026-09-15T12:00:00Z",
+    ) -> dict[str, object]:
+        return reuse.evaluate_rebase(
+            repository_path=self.path,
+            repository="Chelis-Lang/chelis",
+            event=self.event(),
+            current_pr=current_pr or self.current_pr(),
+            candidate_sha=self.new_candidate_sha,
+            prior_receipt=receipt if receipt is not None else self.prior_receipt(),
+            receipt_created_at=receipt_created_at,
+            timeline=timeline or [],
+        )
+
+
+class RebaseReuseTests(unittest.TestCase):
+    def test_docs_only_clean_rebase_reuses_prior_evidence(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "docs")
+        self.assertEqual(decision["reason"], "trusted docs-only rebase delta")
+        self.assertEqual(decision["before_sha"], repository.old_head_sha)
+        self.assertEqual(decision["head_sha"], repository.new_head_sha)
+        self.assertEqual(decision["delta_paths"], ["docs/rebase.md"])
+        self.assertEqual(decision["base_delta_paths"], ["docs/rebase.md"])
+        self.assertEqual(decision["overlap_paths"], [])
+        self.assertTrue(decision["patch_identity_unchanged"])
+        self.assertFalse(decision["standing_review_required"])
+        self.assertEqual(
+            decision["validation_base_sha"], repository.old_candidate_sha
+        )
+        self.assertEqual(decision["prior_receipt_run_id"], 202)
+        self.assertFalse(decision["ci_contract_changed"])
+
+    def test_disjoint_code_delta_uses_targeted_lane(self) -> None:
+        repository = RebaseRepository(
+            delta_path="crates/chelis-types/src/rebase_delta.rs"
+        )
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(
+            decision["reason"],
+            "trusted code rebase delta",
+        )
+        self.assertEqual(
+            decision["delta_paths"],
+            ["crates/chelis-types/src/rebase_delta.rs"],
+        )
+        self.assertFalse(decision["ci_contract_changed"])
+
+    def test_target_may_advance_again_after_the_rebase(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+        repository.advance_target_after_rebase()
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "docs")
+        self.assertEqual(
+            decision["delta_paths"],
+            ["docs/late.md", "docs/rebase.md"],
+        )
+        self.assertEqual(
+            decision["rebase_base_sha"], repository.rebased_onto_sha
+        )
+        self.assertEqual(decision["base_sha"], repository.new_base_sha)
+        self.assertEqual(
+            decision["validation_base_sha"], repository.old_candidate_sha
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            github_output = Path(temporary) / "github-output"
+            reuse.write_decision(
+                decision,
+                output=Path(temporary) / "decision.json",
+                github_output=github_output,
+            )
+            self.assertIn(
+                f"rebase_before={repository.old_candidate_sha}",
+                github_output.read_text(),
+            )
+
+    def test_live_base_movement_does_not_rebind_the_frozen_candidate(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+        repository.advance_live_target_without_rebuilding_candidate()
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "docs")
+        self.assertEqual(decision["base_sha"], repository.candidate_base_sha)
+        self.assertNotEqual(decision["base_sha"], repository.new_base_sha)
+        self.assertEqual(decision["delta_paths"], ["docs/rebase.md"])
+
+    def test_missing_or_ineligible_receipt_falls_back_to_full(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+
+        missing = reuse.evaluate_rebase(
+            repository_path=repository.path,
+            repository="Chelis-Lang/chelis",
+            event=repository.event(),
+            current_pr=repository.current_pr(),
+            candidate_sha=repository.new_candidate_sha,
+            prior_receipt=None,
+            receipt_created_at=None,
+            timeline=[],
+        )
+        blocked = repository.evaluate(
+            receipt=repository.prior_receipt(reuse_eligible=False)
+        )
+
+        self.assertEqual(missing["lane"], "full")
+        self.assertEqual(missing["reason"], "prior trusted receipt unavailable")
+        self.assertEqual(blocked["lane"], "full")
+        self.assertIn("not reusable", blocked["reason"])
+
+    def test_retarget_after_receipt_falls_back_to_full(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+
+        changed_target = repository.evaluate(
+            current_pr=repository.current_pr(base_ref="release")
+        )
+        timeline_target = repository.evaluate(
+            timeline=[
+                {
+                    "event": "base_ref_changed",
+                    "created_at": "2026-09-15T12:01:00Z",
+                }
+            ]
+        )
+
+        self.assertEqual(changed_target["lane"], "full")
+        self.assertIn("target branch changed", changed_target["reason"])
+        self.assertEqual(timeline_target["lane"], "full")
+        self.assertIn("retargeted after", timeline_target["reason"])
+
+    def test_same_second_retarget_and_slurped_timeline_fail_closed(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate(
+            timeline=[
+                [],
+                [
+                    {
+                        "event": "base_ref_changed",
+                        "created_at": "2026-09-15T12:00:00Z",
+                    }
+                ],
+            ]
+        )
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertIn("retargeted after", decision["reason"])
+
+    def test_patch_change_uses_incremental_delta_coverage(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+        git(repository.path, "switch", "rebased-feature")
+        (repository.path / "feature.txt").write_text("changed candidate\n")
+        git(repository.path, "add", "feature.txt")
+        git(repository.path, "commit", "-m", "change candidate")
+        repository.new_head_sha = git(repository.path, "rev-parse", "HEAD")
+        git(repository.path, "switch", "-C", "changed-candidate", repository.new_base_sha)
+        git(
+            repository.path,
+            "merge",
+            "--no-ff",
+            "rebased-feature",
+            "-m",
+            "changed candidate",
+        )
+        repository.new_candidate_sha = git(repository.path, "rev-parse", "HEAD")
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertFalse(decision["patch_identity_unchanged"])
+        self.assertTrue(decision["standing_review_required"])
+        self.assertIn("feature.txt", decision["delta_paths"])
+
+    def test_same_file_overlap_uses_incremental_delta_coverage(self) -> None:
+        repository = RebaseRepository(overlap=True)
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(decision["overlap_paths"], ["shared.txt"])
+        self.assertFalse(decision["patch_identity_unchanged"])
+        self.assertTrue(decision["standing_review_required"])
+
+    def test_literal_docs_conflict_uses_docs_delta_and_standing_review(self) -> None:
+        repository = RebaseRepository(
+            overlap=True,
+            overlap_path="docs/shared.md",
+            literal_conflict=True,
+        )
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "docs")
+        self.assertEqual(decision["delta_paths"], ["docs/shared.md"])
+        self.assertEqual(decision["overlap_paths"], ["docs/shared.md"])
+        self.assertFalse(decision["patch_identity_unchanged"])
+        self.assertTrue(decision["standing_review_required"])
+
+    def test_ci_contract_delta_falls_back_to_full_after_preflight(self) -> None:
+        repository = RebaseRepository(delta_path=".github/workflows/ci.yml")
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertEqual(
+            decision["reason"],
+            "rebase changed CI policy; full CI follows contract preflight",
+        )
+        self.assertTrue(decision["ci_contract_changed"])
+
+    def test_missing_receipt_still_marks_ci_contract_delta(self) -> None:
+        repository = RebaseRepository(delta_path="AGENTS.md")
+        self.addCleanup(repository.close)
+
+        decision = reuse.evaluate_rebase(
+            repository_path=repository.path,
+            repository="Chelis-Lang/chelis",
+            event=repository.event(),
+            current_pr=repository.current_pr(),
+            candidate_sha=repository.new_candidate_sha,
+            prior_receipt=None,
+            receipt_created_at=None,
+            timeline=[],
+        )
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertTrue(decision["ci_contract_changed"])
+
+
+def receipt_archive(payload: dict[str, object]) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w") as archive:
+        archive.writestr("receipt.json", json.dumps(payload))
+    return output.getvalue()
+
+
+class PriorReceiptDiscoveryTests(unittest.TestCase):
+    def test_accepts_only_default_branch_receipt_workflow_artifact(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+        trusted = repository.prior_receipt()
+        trusted["receipt_workflow_run_id"] = 900
+        untrusted = dict(trusted)
+        untrusted["receipt_workflow_run_id"] = 901
+        artifact_name = (
+            "pr-candidate-receipt-" + repository.old_head_sha
+        )
+        responses: dict[str, object] = {
+            "repos/Chelis-Lang/chelis": {
+                "id": 123,
+                "default_branch": "main",
+            },
+            (
+                "repos/Chelis-Lang/chelis/actions/artifacts"
+                f"?name={artifact_name}&per_page=100&page=1"
+            ): {
+                "artifacts": [
+                    {
+                        "id": 10,
+                        "name": artifact_name,
+                        "expired": False,
+                        "workflow_run": {
+                            "id": 901,
+                            "repository_id": 123,
+                        },
+                    },
+                    {
+                        "id": 9,
+                        "name": artifact_name,
+                        "expired": False,
+                        "workflow_run": {
+                            "id": 900,
+                            "repository_id": 123,
+                        },
+                    },
+                ]
+            },
+            "repos/Chelis-Lang/chelis/actions/runs/901": {
+                "id": 901,
+                "path": ".github/workflows/ci.yml",
+                "event": "pull_request",
+                "conclusion": "success",
+                "head_branch": "feature",
+                "head_repository": {"full_name": "Chelis-Lang/chelis"},
+                "created_at": "2026-09-15T12:01:00Z",
+            },
+            "repos/Chelis-Lang/chelis/actions/runs/900": {
+                "id": 900,
+                "path": ".github/workflows/pr-candidate-receipt.yml",
+                "event": "workflow_run",
+                "conclusion": "success",
+                "head_branch": "main",
+                "head_repository": {"full_name": "Chelis-Lang/chelis"},
+                "created_at": "2026-09-15T12:00:00Z",
+            },
+        }
+
+        found = reuse.find_prior_receipt(
+            repository="Chelis-Lang/chelis",
+            before_sha=repository.old_head_sha,
+            api=lambda endpoint: responses[endpoint],
+            download_artifact=lambda artifact_id: {
+                10: receipt_archive(untrusted),
+                9: receipt_archive(trusted),
+            }[artifact_id],
+        )
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found.artifact_id, 9)
+        self.assertEqual(found.run_id, 900)
+        self.assertEqual(found.payload, trusted)
+
+    def test_mismatched_or_expired_receipts_are_unavailable(self) -> None:
+        repository = RebaseRepository()
+        self.addCleanup(repository.close)
+        artifact_name = (
+            "pr-candidate-receipt-" + repository.old_head_sha
+        )
+        responses: dict[str, object] = {
+            "repos/Chelis-Lang/chelis": {
+                "id": 123,
+                "default_branch": "main",
+            },
+            (
+                "repos/Chelis-Lang/chelis/actions/artifacts"
+                f"?name={artifact_name}&per_page=100&page=1"
+            ): {
+                "artifacts": [
+                    {
+                        "id": 9,
+                        "name": artifact_name,
+                        "expired": True,
+                        "workflow_run": {
+                            "id": 900,
+                            "repository_id": 123,
+                        },
+                    }
+                ]
+            },
+        }
+
+        found = reuse.find_prior_receipt(
+            repository="Chelis-Lang/chelis",
+            before_sha=repository.old_head_sha,
+            api=lambda endpoint: responses[endpoint],
+            download_artifact=lambda _artifact_id: b"",
+        )
+
+        self.assertIsNone(found)
+
+
+if __name__ == "__main__":
+    unittest.main()

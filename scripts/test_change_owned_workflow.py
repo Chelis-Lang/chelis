@@ -18,7 +18,9 @@ PR_ONLY_JOB_IF = {
         "${{ !cancelled() && github.event_name != 'push' && "
         "needs.changes.outputs.candidate_preflight == 'success' && "
         "(needs.changes.result != 'success' || "
-        "needs.changes.outputs.docs_only != 'true') }}"
+        "(needs.changes.outputs.rebase_lane != 'docs' && "
+        "(needs.changes.outputs.rebase_lane == 'targeted' || "
+        "needs.changes.outputs.docs_only != 'true'))) }}"
     ),
     "change-owned-shard": (
         "${{ !cancelled() && github.event_name != 'push' && "
@@ -27,7 +29,9 @@ PR_ONLY_JOB_IF = {
     "change-owned-report": (
         "${{ always() && github.event_name != 'push' && "
         "(needs.changes.result != 'success' || "
-        "needs.changes.outputs.docs_only != 'true') }}"
+        "(needs.changes.outputs.rebase_lane != 'docs' && "
+        "(needs.changes.outputs.rebase_lane == 'targeted' || "
+        "needs.changes.outputs.docs_only != 'true'))) }}"
     ),
 }
 
@@ -124,6 +128,9 @@ def assert_change_owned_topology(
     )
     test.assertEqual(checkout.get("with", {}).get("fetch-depth"), 0)
     test.assertIn("scripts/ci_change_owned.py plan", _run_steps(planner))
+    test.assertIn("targeted_rebase", _run_steps(planner))
+    test.assertIn("REBASE_LANE", _run_steps(planner))
+    test.assertIn("REBASE_BEFORE", _run_steps(planner))
     test.assertIn("integration-change-plan", str(planner))
     test.assertIn("target/integration-change/plan.json", str(planner))
 
@@ -168,6 +175,11 @@ def assert_change_owned_topology(
     )
     test.assertIn("ci-fast-receipts", str(required_report))
     test.assertIn("--standing-coverage", required_report_commands)
+    test.assertIn("REBASE_LANE", required_report_commands)
+    test.assertIn(
+        'if [ "$REBASE_LANE" != "targeted" ]',
+        required_report_commands,
+    )
     test.assertIn("scripts/ci_change_owned.py report", required_report_commands)
     test.assertIn("--lane change-owned", required_report_commands)
     test.assertIn("--required", required_report_commands)
@@ -189,13 +201,32 @@ def assert_change_owned_topology(
     pr_step = next(
         step
         for step in stable["steps"]
-        if step.get("name") == "Require all pull-request integration legs"
+        if step.get("name")
+        == "Require all ordinary pull-request integration legs"
     )
-    test.assertEqual(pr_step.get("if"), "github.event_name != 'push'")
+    test.assertIn("github.event_name != 'push'", pr_step.get("if"))
+    test.assertIn(
+        "needs.changes.outputs.rebase_lane != 'targeted'",
+        pr_step.get("if"),
+    )
     test.assertIn("ci-fast=${{ needs.ci-fast.result }}", pr_step["run"])
     test.assertIn(
         "change-owned-report=${{ needs.change-owned-report.result }}",
         pr_step["run"],
+    )
+    targeted_step = next(
+        step
+        for step in stable["steps"]
+        if step.get("name") == "Require targeted rebase integration"
+    )
+    test.assertEqual(
+        targeted_step.get("if"),
+        "needs.changes.outputs.rebase_lane == 'targeted'",
+    )
+    test.assertNotIn("ci-fast=", targeted_step["run"])
+    test.assertIn(
+        "change-owned-report=${{ needs.change-owned-report.result }}",
+        targeted_step["run"],
     )
     test.assertNotIn("package-expansion", str(stable))
 
@@ -417,7 +448,7 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
                     step
                     for step in workflow["jobs"]["integration"]["steps"]
                     if step.get("name")
-                    == "Require all pull-request integration legs"
+                    == "Require all ordinary pull-request integration legs"
                 )
                 step["run"] = step["run"].replace(
                     " change-owned-report="

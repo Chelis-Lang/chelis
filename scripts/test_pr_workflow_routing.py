@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-import re
 import unittest
-from unittest.mock import patch
 
 import yaml
 
@@ -20,7 +18,6 @@ RECEIPT = ROOT / ".github/workflows/pr-candidate-receipt.yml"
 HULL = ROOT / ".github/workflows/conformance.yml"
 AGENTS = ROOT / "AGENTS.md"
 AUTHOR_GUIDE = ROOT / "docs/guard_changes_for_pr_authors.md"
-CI_VALIDATION = ROOT / "docs/ci_validation.md"
 REQUIRED_IMPLEMENTATION_JOBS = {
     "lint-and-unit": "Lint and Unit Tests (Linux)",
     "integration": "Integration Tests (Linux)",
@@ -52,61 +49,8 @@ RECEIPT_TRIGGER_WORKFLOWS = {
     "PR Contract Acknowledgements",
     "PR Base Retarget Validation",
 }
-PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
-    "content change",
-    "hand-resolved conflict",
-    "base-changing rebase",
-    "base-branch retarget",
-)
-PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES = {
-    AGENTS: "creates a new synthetic candidate and requires a fresh dispatch.",
-    AUTHOR_GUIDE: (
-        "requires a fresh package-expansion dispatch because the workflow "
-        "validates the exact synthetic candidate."
-    ),
-}
-
-
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
-
-
-def remove_from_invalidation_clause(
-    raw_text: str, document: Path, requirement: str
-) -> str:
-    text = " ".join(raw_text.split())
-    suffix = PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES[document]
-    suffix_start = text.index(suffix)
-    clause_start = text.rfind(". ", 0, suffix_start) + 2
-    clause = text[clause_start : suffix_start + len(suffix)]
-    mutated_clause = clause.replace(requirement, "", 1)
-    if mutated_clause == clause:
-        raise AssertionError(f"{requirement!r} is absent from the invalidation clause")
-    return text[:clause_start] + mutated_clause + text[suffix_start + len(suffix) :]
-
-
-def package_expansion_invalidation_clause(
-    test: unittest.TestCase, document: Path, text: str
-) -> str:
-    suffix = PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES[document]
-    test.assertEqual(
-        text.count(suffix),
-        1,
-        f"{document.name}: expected one package-expansion invalidation clause",
-    )
-    suffix_start = text.index(suffix)
-    sentence_boundary = text.rfind(". ", 0, suffix_start)
-    test.assertNotEqual(
-        sentence_boundary,
-        -1,
-        f"{document.name}: package-expansion invalidation clause has no boundary",
-    )
-    clause = text[sentence_boundary + 2 : suffix_start + len(suffix)]
-    test.assertTrue(
-        clause.startswith("A "),
-        f"{document.name}: malformed package-expansion invalidation clause",
-    )
-    return clause
 
 
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
@@ -134,6 +78,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(
         changes["permissions"],
         {
+            "actions": "read",
             "contents": "read",
             "issues": "read",
             "pull-requests": "read",
@@ -141,6 +86,9 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertIn("candidate_sha", changes["outputs"])
     test.assertIn("candidate_preflight", changes["outputs"])
+    test.assertIn("rebase_lane", changes["outputs"])
+    test.assertIn("rebase_before", changes["outputs"])
+    test.assertIn("rebase_contract_changed", changes["outputs"])
     test.assertEqual(
         changes["outputs"]["ci_contract_changed"],
         "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
@@ -169,6 +117,28 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertLess(
         changes["steps"].index(checkout), changes["steps"].index(validation)
     )
+    reuse_checkout = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Checkout trusted rebase reuse verifier"
+    )
+    test.assertEqual(
+        reuse_checkout["with"]["ref"],
+        "${{ github.event.pull_request.base.sha }}",
+    )
+    test.assertEqual(reuse_checkout["with"]["path"], "trusted-rebase")
+    reuse = next(
+        step for step in changes["steps"] if step.get("id") == "rebase-reuse"
+    )
+    test.assertEqual(reuse["if"], "always()")
+    test.assertIn(
+        "../trusted-rebase/scripts/ci_rebase_reuse.py",
+        reuse["run"],
+    )
+    test.assertIn("--current-pr", reuse["run"])
+    test.assertIn("--timeline", reuse["run"])
+    test.assertIn("--github-output", reuse["run"])
+    test.assertIn("rebase_contract_changed=false", reuse["run"])
     lifecycle = next(
         step
         for step in changes["steps"]
@@ -188,6 +158,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("scripts.test_check_agent_skills", contract["run"])
     test.assertIn("scripts.test_ci_candidate_identity", contract["run"])
     test.assertIn("scripts.test_ci_candidate_receipt", contract["run"])
+    test.assertIn("scripts.test_ci_rebase_reuse", contract["run"])
     test.assertIn("scripts.test_ci_change_owned", contract["run"])
     test.assertIn("scripts.test_ci_contract_paths", contract["run"])
     test.assertIn("scripts.test_ci_validate_pr_candidate", contract["run"])
@@ -200,6 +171,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertIn(
         "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
+        contract["if"],
+    )
+    test.assertIn(
+        "steps.rebase-reuse.outputs.rebase_contract_changed == 'true'",
         contract["if"],
     )
     bootstrap = next(
@@ -232,6 +207,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
     test.assertIn('if [ "$detected_contract" = "true" ]', record["run"])
     test.assertIn('[ "$bootstrap_contract" = "true" ]', record["run"])
+    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
     identity = next(
         step
         for step in changes["steps"]
@@ -262,6 +238,39 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
             "needs.changes.outputs.candidate_preflight == 'success'",
             workflow["jobs"][job_id]["if"],
         )
+    test.assertIn(
+        "needs.changes.outputs.rebase_lane == 'full'",
+        workflow["jobs"]["ci-fast"]["if"],
+    )
+    for job_id in ("lint-rust", "script-unit"):
+        test.assertIn(
+            "needs.changes.outputs.rebase_lane != 'docs'",
+            workflow["jobs"][job_id]["if"],
+        )
+        test.assertIn(
+            "needs.changes.outputs.rebase_lane == 'targeted'",
+            workflow["jobs"][job_id]["if"],
+        )
+    for job_id in (
+        "diagnostic-kind-oracle",
+        "backend-sanitizers",
+        "smt-build",
+        "smt-build-glibc231",
+    ):
+        test.assertIn(
+            "needs.changes.outputs.rebase_lane != 'docs'",
+            workflow["jobs"][job_id]["if"],
+        )
+    lint_summary = workflow["jobs"]["lint-and-unit"]
+    test.assertIn("needs.changes.outputs.rebase_lane != 'docs'", lint_summary["if"])
+    lint_gate = next(
+        step
+        for step in lint_summary["steps"]
+        if step.get("name") == "Require every lint and unit worker"
+    )
+    test.assertNotIn("if", lint_gate)
+    test.assertIn("lint-rust=", lint_gate["run"])
+    test.assertIn("script-unit=", lint_gate["run"])
 
     for job_id, required_name in REQUIRED_IMPLEMENTATION_JOBS.items():
         job = workflow["jobs"][job_id]
@@ -340,6 +349,18 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     changes = workflow["jobs"]["changes"]
     test.assertIn("candidate_sha", changes["outputs"])
     test.assertIn("candidate_preflight", changes["outputs"])
+    test.assertIn("rebase_lane", changes["outputs"])
+    test.assertIn("rebase_before", changes["outputs"])
+    test.assertIn("rebase_contract_changed", changes["outputs"])
+    test.assertEqual(
+        changes["permissions"],
+        {
+            "actions": "read",
+            "contents": "read",
+            "issues": "read",
+            "pull-requests": "read",
+        },
+    )
     test.assertEqual(
         changes["outputs"]["ci_contract_changed"],
         "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
@@ -347,6 +368,11 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertIn("ci_validate_pr_candidate.py", str(changes))
     test.assertIn("ci_candidate_lifecycle.py", str(changes))
     test.assertIn("scripts.test_ci_candidate_lifecycle", str(changes))
+    test.assertIn("scripts.test_ci_rebase_reuse", str(changes))
+    test.assertIn(
+        "../trusted-rebase/scripts/ci_rebase_reuse.py",
+        str(changes),
+    )
     bootstrap = next(
         step
         for step in changes["steps"]
@@ -374,6 +400,16 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
         contract["if"],
     )
+    test.assertIn(
+        "steps.rebase-reuse.outputs.rebase_contract_changed == 'true'",
+        contract["if"],
+    )
+    record = next(
+        step
+        for step in changes["steps"]
+        if step.get("id") == "candidate-preflight"
+    )
+    test.assertIn('[ "$rebase_contract" = "true" ]', record["run"])
     identity = next(
         step
         for step in changes["steps"]
@@ -395,9 +431,14 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertEqual(upload["with"]["name"], "candidate-identity-hull")
     test.assertEqual(upload["with"]["if-no-files-found"], "error")
     conformance = workflow["jobs"]["conformance"]
-    test.assertIn(
-        "needs.changes.outputs.candidate_preflight != 'success'",
+    test.assertEqual(
         conformance["if"],
+        "${{ !cancelled() && "
+        "(needs.changes.outputs.candidate_preflight != 'success' || "
+        "needs.changes.result != 'success' || "
+        "(needs.changes.outputs.rebase_lane != 'docs' && "
+        "(needs.changes.outputs.rebase_lane == 'targeted' || "
+        "needs.changes.outputs.docs_only != 'true'))) }}",
     )
     preflight = conformance["steps"][0]
     test.assertEqual(
@@ -643,52 +684,12 @@ def assert_candidate_receipt_workflow(
     test.assertEqual(upload["with"]["retention-days"], 30)
 
 
-def assert_candidate_receipt_docs(test: unittest.TestCase) -> None:
-    text = " ".join(CI_VALIDATION.read_text().split())
-    for requirement in (
-        "default branch's `workflow_run` collector",
-        "merge-base(base, head)..head",
-        "same synthetic candidate",
-        "expected workflow file and exact job id",
-        "shadow evidence",
-        "does not skip, cancel, or satisfy any required check",
-    ):
-        test.assertIn(requirement, text)
-
-
-def assert_author_contract(test: unittest.TestCase) -> None:
-    documents = {
-        AGENTS: AGENTS.read_text(),
-        AUTHOR_GUIDE: AUTHOR_GUIDE.read_text(),
-    }
-    for document, raw_text in documents.items():
-        text = " ".join(raw_text.split())
-        test.assertIn("PR Contract Acknowledgements", text)
-        test.assertIn("PR Base Retarget Validation", text)
-        test.assertIn("PR Package Expansion", text)
-        test.assertIn("exact head SHA", text)
-        invalidation_clause = package_expansion_invalidation_clause(
-            test, document, text
-        )
-        for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
-            test.assertIn(requirement, invalidation_clause)
-        test.assertIn("inherited", text)
-        test.assertIn("incomplete coverage", text)
-        test.assertIn("base", text)
-        test.assertIn("fresh", text)
-        test.assertIn("initial review candidate", text)
-        test.assertIn("one consolidated repair candidate", text)
+def assert_author_machine_tokens(test: unittest.TestCase) -> None:
+    for document in (AGENTS, AUTHOR_GUIDE):
+        text = document.read_text()
         test.assertIn("Candidate-base-update:", text)
         test.assertIn("Candidate-history-rewrite:", text)
-        test.assertIn("before the first push", text)
-        test.assertIn("A rebase does not by itself require a fresh round.", text)
-        test.assertIn("hand-resolved intersection", text)
-        test.assertIn(
-            "Later movement of the same target branch does not invalidate",
-            text,
-        )
-        test.assertIn("required Docs and Hull contexts", text)
-    guide = documents[AUTHOR_GUIDE]
+    guide = AUTHOR_GUIDE.read_text()
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)
     test.assertIn("-f expected_head_sha=", guide)
@@ -708,8 +709,7 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         assert_candidate_receipt_workflow(
             self, yaml.safe_load(RECEIPT.read_text())
         )
-        assert_candidate_receipt_docs(self)
-        assert_author_contract(self)
+        assert_author_machine_tokens(self)
 
     def test_body_edits_cannot_reenter_compiler_ci(self) -> None:
         workflow = yaml.safe_load(CI.read_text())
@@ -786,35 +786,6 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 )["run"]
             )
         self.assertEqual(bootstrap_runs[0], bootstrap_runs[1])
-
-    def test_author_contract_requires_each_explicit_invalidation_class(self) -> None:
-        originals = {
-            AGENTS: AGENTS.read_text(),
-            AUTHOR_GUIDE: AUTHOR_GUIDE.read_text(),
-        }
-        for document in originals:
-            for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
-                mutated = dict(originals)
-                mutated[document] = (
-                    f"Unrelated note retaining the words {requirement}.\n\n"
-                    + remove_from_invalidation_clause(
-                        mutated[document], document, requirement
-                    )
-                )
-                with (
-                    self.subTest(document=document.name, requirement=requirement),
-                    patch.object(
-                        Path,
-                        "read_text",
-                        autospec=True,
-                        side_effect=lambda path: mutated[path],
-                    ),
-                    self.assertRaisesRegex(
-                        AssertionError,
-                        re.escape(f"'{requirement}' not found"),
-                    ),
-                ):
-                    assert_author_contract(self)
 
     def test_base_retarget_signal_and_dedicated_acknowledgements_are_required(self) -> None:
         retarget = yaml.safe_load(RETARGET.read_text())

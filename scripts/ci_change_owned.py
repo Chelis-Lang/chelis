@@ -692,7 +692,7 @@ def make_plan(
     event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
 ) -> dict[str, Any]:
-    if mode not in {"pull_request", "push"}:
+    if mode not in {"pull_request", "push", "targeted_rebase"}:
         raise ValueError(f"unsupported planning mode: {mode}")
     validate_config(
         config,
@@ -878,8 +878,14 @@ def make_plan(
     }
     if change_owned & expansion:
         raise ValueError("change-owned and package-expansion selections overlap")
-    standing_coverage_reuse = change_owned & set(config.standing_targets)
-    change_owned_execution = change_owned - standing_coverage_reuse
+    if mode == "targeted_rebase":
+        change_owned |= expansion
+        expansion = set()
+        standing_coverage_reuse: set[Identity] = set()
+        change_owned_execution = change_owned
+    else:
+        standing_coverage_reuse = change_owned & set(config.standing_targets)
+        change_owned_execution = change_owned - standing_coverage_reuse
 
     target_exclusions, test_exclusions = _exclusion_rows(config)
     plan: dict[str, Any] = {
@@ -998,7 +1004,11 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         )
     if type(plan.get("version")) is not int or plan["version"] != PLAN_VERSION:
         raise ValueError(f"plan version must be {PLAN_VERSION}")
-    if plan.get("mode") not in {"pull_request", "push"}:
+    if plan.get("mode") not in {
+        "pull_request",
+        "push",
+        "targeted_rebase",
+    }:
         raise ValueError(f"invalid plan mode: {plan.get('mode')!r}")
     for key in ("base_sha", "candidate_sha"):
         if not isinstance(plan.get(key), str) or not SHA.fullmatch(plan[key]):
@@ -1008,9 +1018,11 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     ):
         raise ValueError("plan config_digest must be a SHA-256 digest")
     event_head = plan.get("event_pr_head")
-    if plan["mode"] == "pull_request":
+    if plan["mode"] in {"pull_request", "targeted_rebase"}:
         if not isinstance(event_head, str) or not SHA.fullmatch(event_head):
-            raise ValueError("pull_request plan requires a full event_pr_head")
+            raise ValueError(
+                f"{plan['mode']} plan requires a full event_pr_head"
+            )
     elif event_head is not None:
         raise ValueError("push plan event_pr_head must be null")
     for key in ("changed_records", "path_dispositions", "target_dispositions"):
@@ -1035,7 +1047,12 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         raise ValueError("plan lanes overlap")
     if not (change_owned | expansion) <= eligible:
         raise ValueError("plan lane contains an ineligible target")
-    if standing_reuse != change_owned & standing:
+    expected_standing_reuse = (
+        set()
+        if plan["mode"] == "targeted_rebase"
+        else change_owned & standing
+    )
+    if standing_reuse != expected_standing_reuse:
         raise ValueError(
             "plan standing coverage reuse must exactly match "
             "change-owned standing targets"
@@ -1520,6 +1537,16 @@ def generate_plan(
         base, candidate = resolve_pr_commits(repo, head, pr_head)
         mode = "pull_request"
         event_pr_head: str | None = pr_head
+    elif event_name == "targeted_rebase":
+        if not pr_head or not before:
+            raise ValueError(
+                "targeted_rebase planning requires --pr-head and --before"
+            )
+        pr_head = _commit(repo, pr_head)
+        _, candidate = resolve_pr_commits(repo, head, pr_head)
+        base = _commit(repo, before)
+        mode = "targeted_rebase"
+        event_pr_head = pr_head
     elif event_name == "push":
         if not before or not after:
             raise ValueError("push planning requires --before and --after")

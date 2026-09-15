@@ -185,6 +185,22 @@ obligations.
   suppresses expensive work but must fail the required Docs and Hull contexts. If it
   rejects an already-pushed head, repair the body and rerun that same workflow; do not
   manufacture another candidate change merely to satisfy the guard.
+- A base-changing rebase may use incremental CI when the default-branch verifier finds
+  the exact trusted receipt for the previous head, confirms the same target and a
+  strict forward base update, verifies the new head contains that base, and binds the
+  current synthetic candidate. The validation delta is the prior receipt's synthetic
+  candidate through the current synthetic candidate, so it includes the conflict
+  resolution and every target advance included in that frozen candidate;
+  `event.before..event.after` remains the head-rewrite record for review. A docs-only
+  delta runs the cheap contract preflight, acknowledgements/changelog checks, Docs, and
+  inexpensive metadata checks. A code delta runs the base-sensitive required checks,
+  combined-candidate lint/unit checks, and all change-owned and package-targeted tests
+  selected for the affected paths. A CI-policy delta, missing or ineligible receipt,
+  retarget, non-forward update, candidate mismatch, unmapped path, or uncertain history
+  runs full CI. Every required context still reports on the new head. Path overlap and
+  patch-identity changes are recorded for review, not treated as proof that all prior
+  evidence is unusable. The standing reviewer inspects any hand-resolved intersection;
+  use a fresh round only under the review rules above.
 - After reviews and repairs are complete and no further content change is planned,
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
@@ -193,11 +209,15 @@ obligations.
   the exact synthetic merge SHA and target branch name used by every shard and the
   summary. Later movement of the same target branch does not invalidate that frozen
   candidate; a changed head or target-branch retarget does. Record the reviewed SHA and
-  run link in the pull request. A content change, hand-resolved conflict, base-changing
-  rebase, or base-branch retarget creates a new synthetic candidate and requires a
-  fresh dispatch. Do not create that invalidation merely to refresh a branch after
-  `origin/main` advances: when GitHub can merge the exact reviewed head safely, preserve
-  that head and its evidence as
+  run link in the pull request. An ordinary content change after expansion, a
+  base-branch retarget, or a rebase the trusted verifier does not accept requires a
+  fresh dispatch. A verifier-accepted rebase, including a hand-resolved conflict, does
+  not invalidate the successful expansion on the prior-receipt head after its complete
+  delta receives the required coverage and the standing reviewer inspects the
+  resolution. Record the old expansion SHA/run together with the new rebase decision
+  and required-check run. Do not rebase merely to refresh a branch after `origin/main`
+  advances: when GitHub can merge the exact reviewed head safely, preserve that head
+  and its evidence as
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
@@ -814,7 +834,9 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `python3 scripts/gate.py --fast` on the result for a non-documentation change or the
   focused documentation checks for a docs-only change. A content-preserving rebase may
   retain supporting local evidence; record that its covered head differs, and require
-  CI on the new head. Never force-push a red gate. Obtain approval, then use an exact-head
+  applicable CI on the new head; the trusted targeted-rebase lane may reuse prior
+  evidence only under the Pull Request Review Gate above. Never force-push a red gate.
+  Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated registry lines:
   regenerate `rejection_registry_generated.rs` with
