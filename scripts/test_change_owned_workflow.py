@@ -19,6 +19,41 @@ def _run_steps(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
 
 
+def _assert_empty_shard_skips_preparation(
+    test: unittest.TestCase, job: dict
+) -> None:
+    selection = next(
+        step for step in job["steps"] if step.get("id") == "shard-selection"
+    )
+    test.assertIn("scripts/ci_change_owned.py prepare-shard", selection["run"])
+    test.assertIn("${{ runner.temp }}", str(job))
+    heavy_markers = (
+        "free-disk-space",
+        "ci_apt_get.py",
+        "rust-toolchain",
+        "setup-uv",
+        "ci_setup_uv_python.py",
+        "rust-cache",
+        "uv pip install",
+        "install-action@nextest",
+    )
+    for step in job["steps"]:
+        if any(marker in str(step) for marker in heavy_markers):
+            test.assertEqual(
+                step.get("if"),
+                "steps.shard-selection.outputs.has_targets == 'true'",
+            )
+    executor = next(
+        step
+        for step in job["steps"]
+        if "scripts/ci_change_owned.py run-shard" in step.get("run", "")
+    )
+    test.assertEqual(
+        executor.get("if"),
+        "steps.shard-selection.outputs.has_targets == 'true'",
+    )
+
+
 def assert_change_owned_topology(
     test: unittest.TestCase, workflow: dict, expansion_workflow: dict
 ) -> None:
@@ -33,8 +68,16 @@ def assert_change_owned_topology(
     test.assertNotIn("package-expansion-summary", jobs)
     for name in expected:
         steps = jobs[name]["steps"]
-        invoke = next(index for index, step in enumerate(steps)
-                      if "scripts/ci_change_owned.py" in step.get("run", ""))
+        invoke = next(
+            (
+                index
+                for index, step in enumerate(steps)
+                if ".venv/bin/python scripts/ci_change_owned.py"
+                in step.get("run", "")
+            ),
+            None,
+        )
+        test.assertIsNotNone(invoke, f"{name} requires managed Python invocation")
         setup = next((index for index, step in enumerate(steps)
                       if step.get("run") in {"uv venv --python 3.11", "python3 scripts/ci_setup_uv_python.py"}), None)
         test.assertIsNotNone(setup, f"{name} requires managed Python setup")
@@ -71,6 +114,7 @@ def assert_change_owned_topology(
     test.assertIn(
         "integration-change-owned-${{ matrix.shard }}", str(required)
     )
+    _assert_empty_shard_skips_preparation(test, required)
     required_upload = next(
         step
         for step in required["steps"]
@@ -83,7 +127,7 @@ def assert_change_owned_topology(
     required_report = jobs["change-owned-report"]
     test.assertEqual(
         required_report["needs"],
-        ["changes", "integration-plan", "change-owned-shard"],
+        ["changes", "ci-fast", "integration-plan", "change-owned-shard"],
     )
     test.assertIn("always()", required_report["if"])
     test.assertFalse(required_report.get("continue-on-error", False))
@@ -93,6 +137,8 @@ def assert_change_owned_topology(
         "change-owned-shard=${{ needs.change-owned-shard.result }}",
         required_report_commands,
     )
+    test.assertIn("ci-fast-receipts", str(required_report))
+    test.assertIn("--standing-coverage", required_report_commands)
     test.assertIn("scripts/ci_change_owned.py report", required_report_commands)
     test.assertIn("--lane change-owned", required_report_commands)
     test.assertIn("--required", required_report_commands)
@@ -124,6 +170,7 @@ def assert_change_owned_topology(
     test.assertIn(
         "integration-package-expansion-${{ matrix.shard }}", str(expansion)
     )
+    _assert_empty_shard_skips_preparation(test, expansion)
 
     summary = expansion_jobs["package-expansion-summary"]
     test.assertEqual(
@@ -332,6 +379,49 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             ):
                 assert_change_owned_topology(
                     self, self.workflow, expansion_workflow
+                )
+
+    def test_empty_shards_cannot_restore_caches_or_install_build_dependencies(self) -> None:
+        for workflow, job_id in (
+            (self.workflow, "change-owned-shard"),
+            (self.expansion_workflow, "package-expansion-shard"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            job = mutated["jobs"][job_id]
+            cache = next(
+                step
+                for step in job["steps"]
+                if "rust-cache" in step.get("uses", "")
+            )
+            cache.pop("if")
+            with self.subTest(job=job_id), self.assertRaises(AssertionError):
+                assert_change_owned_topology(
+                    self,
+                    mutated if job_id == "change-owned-shard" else self.workflow,
+                    mutated if job_id == "package-expansion-shard"
+                    else self.expansion_workflow,
+                )
+
+    def test_empty_shards_cannot_enter_the_executor(self) -> None:
+        for workflow, job_id in (
+            (self.workflow, "change-owned-shard"),
+            (self.expansion_workflow, "package-expansion-shard"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            executor = next(
+                step
+                for step in mutated["jobs"][job_id]["steps"]
+                if "scripts/ci_change_owned.py run-shard"
+                in step.get("run", "")
+            )
+            executor.pop("if")
+            with self.subTest(job=job_id), self.assertRaises(AssertionError):
+                assert_change_owned_topology(
+                    self,
+                    mutated if job_id == "change-owned-shard"
+                    else self.workflow,
+                    mutated if job_id == "package-expansion-shard"
+                    else self.expansion_workflow,
                 )
 
 

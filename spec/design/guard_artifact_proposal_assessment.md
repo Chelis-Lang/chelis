@@ -153,10 +153,11 @@ selectors, merging their listing and execution receipts.
 ### Execution and receipts
 
 The planner writes one machine-readable plan containing the candidate and base
-SHAs, raw changed-path records, path dispositions, selected packages, eligible
-targets, the exact change-owned subset, the disjoint package-expansion subset,
-target/test exclusions, exclusion owners, and a plan digest. Planning is
-required: malformed or incomplete classification blocks both execution
+SHAs, a normalized ownership-configuration digest, raw changed-path records,
+path dispositions, selected packages, eligible targets, the exact change-owned
+subset, the standing-coverage reuse subset, the disjoint package-expansion
+subset, target/test exclusions, exclusion owners, and a plan digest. Planning
+is required: malformed or incomplete classification blocks both execution
 surfaces.
 
 Required change-owned execution and manually dispatched package expansion must
@@ -172,6 +173,15 @@ required report fails on a missing shard, digest mismatch, duplicate execution,
 uncovered selected target, executed exclusion, or non-success result. The
 stable `Integration Tests (Linux)` context eventually depends on the standing
 `ci-fast` worker and this change-owned report only.
+
+A target present in both the standing and change-owned sets is not executed
+twice. The standing worker writes a digested coverage record binding candidate,
+normalized configuration, exact execution mode, every standing target and
+every selected/executed test. The required report accepts the overlap only when
+that record is complete and exact; stale candidates, changed configuration,
+missing results, failures and tampering leave the change-owned obligation
+unsatisfied. A plan-proven empty shard writes explicit zero-selection evidence
+before dependency installation or cache restoration.
 
 Package expansion runs only through a separate four-shard manual workflow with
 its own 20-minute hard timeout and 15-minute soft telemetry budget. Agents
@@ -196,6 +206,10 @@ The required change-owned executor does not acquire this shorter deadline.
 Positive and negative subprocess/receipt tests must exercise expiry during
 build, listing and execution, preservation of earlier results, child-process
 termination, and successful completion without changing required execution.
+Within a shard, ordinary expansion targets are batched by exact package.
+Manual-only targets and targets with exact exclusions remain singleton groups.
+The listing and JUnit parser maps the package command back to every exact target
+and test; missing per-test output leaves the affected target incomplete.
 
 ### Delivery sequence
 
@@ -212,10 +226,11 @@ termination, and successful completion without changing required execution.
    enter compiler or Hull workflows. Base retargets create a separate required
    head receipt that remains pending until trusted-base coordination dispatches
    exact-head/exact-base CI and Hull against the new synthetic merge.
-4. Land execution optimization separately. Skip setup for plan-proven empty
-   groups, reuse only complete exact-candidate/configuration coverage receipts,
-   and batch expansion by package while preserving exact target and per-test
-   evidence, honest timeouts, and partial results.
+4. Land execution optimization separately. The implementation candidate skips
+   setup for plan-proven empty groups, reuses only complete
+   exact-candidate/configuration coverage receipts, and batches expansion by
+   package while preserving exact target and per-test evidence, honest
+   timeouts, and partial results.
 5. Collect comparable small, multi-package, script-only, and documentation PR
    measurements, including required latency, runner minutes, dollars per run,
    final expansion and post-merge spending. Remove `PROVISIONAL pending

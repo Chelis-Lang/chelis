@@ -43,11 +43,16 @@ def shared_metadata():
     return data
 
 
-def write_junit(root, binaries):
+def write_junit(root, binaries, *, skipped=None):
+    skipped = skipped or set()
     document = ET.Element("testsuites")
     for binary in binaries:
         suite = ET.SubElement(document, "testsuite", name=binary)
-        ET.SubElement(suite, "testcase", name="positive", classname=binary)
+        case = ET.SubElement(
+            suite, "testcase", name="positive", classname=binary
+        )
+        if binary in skipped:
+            ET.SubElement(case, "skipped")
     path = root / "target/nextest/ci-fast/junit.xml"
     path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(document).write(path)
@@ -180,7 +185,7 @@ class TargetSelectionTests(unittest.TestCase):
                     return mock.Mock(stdout=json.dumps(payload), returncode=0)
                 with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
                     with self.assertRaises((ValueError, subprocess.CalledProcessError)):
-                        targets.run(root)
+                        targets.run(root, candidate_sha="b" * 40)
                 self.assertFalse(any(c[1:3] == ["nextest", "run"] for c in calls))
                 if failure == "missing-target":
                     self.assertEqual(len(calls), 1)
@@ -226,7 +231,7 @@ class TargetSelectionTests(unittest.TestCase):
                     write_junit(root, listing()["rust-suites"])
                 return mock.Mock(stdout=json.dumps(payload), returncode=0)
             with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
-                targets.run(root)
+                targets.run(root, candidate_sha="b" * 40)
             self.assertEqual(calls[1], ["cargo", "build", "--workspace", "--lib", "--bins", "--locked"])
             self.assertEqual(calls[2][0:3], ["cargo", "nextest", "list"])
             self.assertEqual(calls[3][0:3], ["cargo", "nextest", "run"])
@@ -236,6 +241,69 @@ class TargetSelectionTests(unittest.TestCase):
                 self.assertIn("--bins", command)
                 self.assertEqual(command[command.index("--test") + 1], "smoke")
             self.assertTrue((root / "target/ci-fast/selection.json").is_file())
+            coverage = json.loads(
+                (root / "target/ci-fast/coverage.json").read_text()
+            )
+            self.assertEqual(coverage["candidate_sha"], "b" * 40)
+            self.assertEqual(coverage["execution"], targets.STANDING_EXECUTION)
+            self.assertEqual(coverage["selected_targets"], ["p::smoke"])
+            self.assertEqual(coverage["executed_targets"], ["p::smoke"])
+            self.assertEqual(
+                coverage["selected_tests"],
+                ["p::smoke::positive"],
+            )
+            self.assertEqual(
+                coverage["executed_tests"],
+                coverage["selected_tests"],
+            )
+            targets.ci_change_owned.verify_standing_coverage_digest(coverage)
+
+    def test_standing_receipt_rejects_a_skipped_selected_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".config").mkdir()
+            (root / ".config/ci-test-targets.toml").write_text(
+                'version = 2\n[[standing_target]]\n'
+                'package = "p"\nname = "smoke"\n'
+            )
+
+            def run(command, **kwargs):
+                payload = (
+                    metadata() if command[1] == "metadata" else listing()
+                )
+                if command[1:3] == ["nextest", "run"]:
+                    write_junit(
+                        root,
+                        listing()["rust-suites"],
+                        skipped={"p::smoke"},
+                    )
+                return mock.Mock(
+                    stdout=json.dumps(payload), returncode=0
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"CARGO_TARGET_DIR": str(root / "target")},
+                ),
+                mock.patch.object(
+                    targets.subprocess, "run", side_effect=run
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "skipped rather than executed"
+                ),
+            ):
+                targets.run(root, candidate_sha="b" * 40)
+            coverage = json.loads(
+                (root / "target/ci-fast/coverage.json").read_text()
+            )
+            self.assertFalse(coverage["success"])
+            self.assertEqual(coverage["executed_targets"], [])
+            self.assertEqual(coverage["executed_tests"], [])
+            self.assertIn(
+                "skipped rather than executed",
+                " ".join(coverage["failures"]),
+            )
 
     def test_group_receipts_preserve_junit_commands_and_timings_and_reject_missing_junit(self):
         for missing in (False, True):
@@ -259,9 +327,9 @@ class TargetSelectionTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
                     if missing:
                         with self.assertRaisesRegex(ValueError, "JUnit"):
-                            targets.run(root)
+                            targets.run(root, candidate_sha="b" * 40)
                     else:
-                        targets.run(root)
+                        targets.run(root, candidate_sha="b" * 40)
                 self.assertEqual(sum(c[1] == "build" for c in calls), 1)
                 junit = ET.parse(root / "target/nextest/ci-fast/junit.xml")
                 cases = [case.get("classname") for case in junit.iter("testcase")]
@@ -270,6 +338,14 @@ class TargetSelectionTests(unittest.TestCase):
                 receipts = root / "target/ci-fast"
                 self.assertEqual(len(json.loads((receipts / "commands.json").read_text())), 7)
                 self.assertEqual(len(json.loads((receipts / "timing.json").read_text())), 7)
+                coverage = json.loads((receipts / "coverage.json").read_text())
+                self.assertEqual(coverage["success"], not missing)
+                if missing:
+                    self.assertTrue(coverage["failures"])
+                    self.assertNotEqual(
+                        coverage["selected_tests"],
+                        coverage["executed_tests"],
+                    )
 
 
 if __name__ == "__main__":

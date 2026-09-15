@@ -501,10 +501,16 @@ class PlanningTests(unittest.TestCase):
             ]
         )
         self.assertEqual(plan["change_owned"], ["p::smoke"])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(
+            plan["shards"]["change_owned"],
+            owned.shard_map([]),
+        )
         self.assertIn("p::default_gated", plan["package_expansion"])
         self.assertNotIn("p::smoke", plan["package_expansion"])
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
+        self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
         owned.verify_plan_digest(plan)
 
     def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
@@ -698,10 +704,15 @@ class PlanningTests(unittest.TestCase):
 
     def test_plan_digest_detects_mutation(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs")])
-        mutated = copy.deepcopy(plan)
-        mutated["change_owned"] = []
-        with self.assertRaises(ValueError):
-            owned.verify_plan_digest(mutated)
+        for key, value in (
+            ("change_owned", []),
+            ("standing_coverage_reuse", []),
+            ("config_digest", "0" * 64),
+        ):
+            mutated = copy.deepcopy(plan)
+            mutated[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                owned.verify_plan_digest(mutated)
 
     def test_pr_candidate_requires_two_parents_and_exact_event_head(self) -> None:
         with mock.patch.object(owned, "git_output") as git_output:
@@ -723,8 +734,8 @@ class ShardingAndExecutionTests(unittest.TestCase):
         identity = owned.Identity("p", "smoke")
         shard = owned.shard_for(identity)
         later = next(
-            owned.Identity("p", f"z{n}") for n in range(100)
-            if owned.shard_for(owned.Identity("p", f"z{n}")) == shard
+            owned.Identity("q", f"z{n}") for n in range(100)
+            if owned.shard_for(owned.Identity("q", f"z{n}")) == shard
         )
         for expired_call, truncated_junit in (
             (0, False), (1, False), (2, False), (3, False),
@@ -754,16 +765,20 @@ class ShardingAndExecutionTests(unittest.TestCase):
                         )
                     if command[1] == "build":
                         return subprocess.CompletedProcess(command, 0, "", "")
+                    package = command[command.index("-p") + 1]
                     name = command[command.index("--test") + 1]
                     if command[2] == "list":
                         cases = {"fast_case": {"ignored": False, "filter-match": {"status": "matches"}}}
                         if name == "smoke":
                             cases["slow_case"] = {"ignored": False, "filter-match": {"status": "mismatch"}}
-                        payload = {"rust-suites": {f"p::{name}": {"testcases": cases}}}
+                        payload = {"rust-suites": {f"{package}::{name}": {"testcases": cases}}}
                         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
                     junit = target / "nextest/ci-full/junit.xml"
                     junit.parent.mkdir(parents=True, exist_ok=True)
-                    junit.write_text('<testsuite><testcase name="fast_case"/></testsuite>')
+                    junit.write_text(
+                        f'<testsuite><testcase name="fast_case" '
+                        f'classname="{package}::{name}"/></testsuite>'
+                    )
                     return subprocess.CompletedProcess(command, 0, "", "")
 
                 with (
@@ -792,7 +807,13 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
                 if truncated_junit:
                     self.assertIn("malformed JUnit", " ".join(receipt["failures"]))
-                    self.assertEqual(owned._junit_tests(root / "receipt/junit.xml", identity), ["p::smoke::fast_case"])
+                    self.assertEqual(
+                        owned._junit_tests(
+                            root / "receipt/junit.xml",
+                            identity,
+                        ),
+                        ["p::smoke::fast_case"],
+                    )
 
     def test_budget_is_shared_and_no_command_starts_after_it_expires(self) -> None:
         plan = self._plan(lane="package-expansion")
@@ -894,15 +915,187 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "all",
         )
 
+    def test_expansion_groups_ordinary_targets_by_package_only(self) -> None:
+        ordinary = (
+            owned.Identity("p", "alpha"),
+            owned.Identity("p", "beta"),
+        )
+        excluded = owned.Identity("p", "filtered")
+        manual = owned.Identity("p", "manual")
+        other = owned.Identity("q", "alpha")
+        plan = self._plan(lane="package-expansion")
+        plan["manual_only_targets"] = [
+            {"identity": manual.canonical, "owner": OWNER}
+        ]
+        plan["test_exclusions"] = [
+            {
+                "identity": f"{excluded.canonical}::slow_case",
+                "owner": OWNER,
+            }
+        ]
+        groups = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[
+                identity.canonical
+                for identity in (*ordinary, excluded, manual, other)
+            ],
+        )
+        self.assertEqual(
+            groups,
+            [
+                ordinary,
+                (excluded,),
+                (manual,),
+                (other,),
+            ],
+        )
+        command = owned.target_group_command(
+            ordinary,
+            {},
+            list_only=False,
+            manual_only=False,
+        )
+        self.assertEqual(command.count("--test"), 2)
+        self.assertEqual(
+            [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--test"
+            ],
+            ["alpha", "beta"],
+        )
+
+    def test_package_batch_preserves_exact_targets_tests_and_missing_results(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        sibling = next(
+            owned.Identity("p", f"z{index}")
+            for index in range(100)
+            if owned.shard_for(owned.Identity("p", f"z{index}"))
+            == owned.shard_for(identity)
+        )
+        for outcome in ("complete", "missing", "skipped"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                plan = self._plan(lane="package-expansion")
+                plan["eligible_targets"].append(sibling.canonical)
+                plan["package_expansion"].append(sibling.canonical)
+                plan["test_exclusions"] = []
+                plan["shards"]["package_expansion"] = owned.shard_map(
+                    [identity, sibling]
+                )
+                owned.attach_plan_digest(plan)
+                calls = []
+
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    names = [
+                        command[index + 1]
+                        for index, value in enumerate(command)
+                        if value == "--test"
+                    ]
+                    if command[2] == "list":
+                        suites = {}
+                        for name in names:
+                            cases = {
+                                "fast_case": {
+                                    "ignored": False,
+                                    "filter-match": {"status": "matches"},
+                                }
+                            }
+                            suites[f"p::{name}"] = {"testcases": cases}
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            json.dumps({"rust-suites": suites}),
+                            "",
+                        )
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    cases = []
+                    for name in names:
+                        if outcome == "missing" and name == sibling.target:
+                            continue
+                        skipped = (
+                            "<skipped/>"
+                            if outcome == "skipped"
+                            and name == sibling.target
+                            else ""
+                        )
+                        cases.append(
+                            f'<testcase name="fast_case" '
+                            f'classname="p::{name}">{skipped}</testcase>'
+                        )
+                    junit.write_text(
+                        "<testsuite>" + "".join(cases) + "</testsuite>"
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"CARGO_TARGET_DIR": str(target)},
+                    ),
+                    mock.patch.object(
+                        owned,
+                        "_commit",
+                        return_value="b" * 40,
+                    ),
+                ):
+                    receipt = owned.execute_shard(
+                        plan,
+                        lane="package-expansion",
+                        shard=owned.shard_for(identity),
+                        output=root / "receipt",
+                        repo=root,
+                        runner=run,
+                    )
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[1].count("--test"), 2)
+                self.assertEqual(calls[2].count("--test"), 2)
+                self.assertEqual(
+                    receipt["selected_targets"],
+                    sorted([identity.canonical, sibling.canonical]),
+                )
+                self.assertEqual(
+                    receipt["success"], outcome == "complete"
+                )
+                if outcome != "complete":
+                    self.assertNotIn(
+                        sibling.canonical,
+                        receipt["executed_targets"],
+                    )
+                    self.assertIn(
+                        (
+                            "skipped rather than executed"
+                            if outcome == "skipped"
+                            else "incomplete"
+                        ),
+                        " ".join(receipt["failures"]),
+                    )
+                else:
+                    self.assertEqual(
+                        receipt["executed_targets"],
+                        receipt["selected_targets"],
+                    )
+                    self.assertEqual(
+                        receipt["executed_tests"],
+                        receipt["selected_tests"],
+                    )
+
     def _plan(self, *, lane: str = "change-owned") -> dict:
         lane_key = owned.LANE_KEYS[lane]
         identity = owned.Identity("p", "smoke")
         plan = {
-            "version": 1,
+            "version": owned.PLAN_VERSION,
             "mode": "push",
             "base_sha": "a" * 40,
             "candidate_sha": "b" * 40,
             "event_pr_head": None,
+            "config_digest": "c" * 64,
             "changed_records": [],
             "path_dispositions": [],
             "target_dispositions": [],
@@ -915,6 +1108,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 [identity.canonical] if lane_key == "package_expansion" else []
             ),
             "standing_targets": [],
+            "standing_coverage_reuse": [],
             "manual_only_targets": [],
             "target_exclusions": [],
             "test_exclusions": [
@@ -1188,6 +1382,59 @@ class ShardingAndExecutionTests(unittest.TestCase):
             )
         runner.assert_not_called()
 
+    def test_prepare_empty_shard_writes_explicit_receipt_without_a_runner(self) -> None:
+        plan = self._plan()
+        empty_shard = next(
+            shard
+            for shard in owned.SHARDS
+            if not plan["shards"]["change_owned"][str(shard)]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "_commit", return_value="b" * 40
+        ), mock.patch.object(owned, "run_command") as runner:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=empty_shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(
+                github_output.read_text(),
+                "has_targets=false\n",
+            )
+            self.assertIsNotNone(receipt)
+            self.assertTrue(receipt["success"])
+            self.assertEqual(receipt["selected_targets"], [])
+            self.assertEqual(receipt["executed_targets"], [])
+            self.assertEqual(receipt["selected_tests"], [])
+            self.assertEqual(receipt["executed_tests"], [])
+            self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+            runner.assert_not_called()
+
+    def test_prepare_nonempty_shard_defers_to_the_worker(self) -> None:
+        plan = self._plan()
+        shard = owned.shard_for(owned.Identity("p", "smoke"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "execute_shard"
+        ) as execute:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(github_output.read_text(), "has_targets=true\n")
+            self.assertIsNone(receipt)
+            execute.assert_not_called()
+
     def test_run_shard_returns_zero_after_captured_failure_receipt(self) -> None:
         plan = self._plan()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1212,6 +1459,28 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(result, 0)
+
+    def test_prepare_shard_cli_spelling(self) -> None:
+        args = owned.build_parser().parse_args(
+            [
+                "prepare-shard",
+                "--plan",
+                "plan.json",
+                "--lane",
+                "change-owned",
+                "--shard",
+                "2",
+                "--output",
+                "receipt",
+                "--github-output",
+                "github-output",
+            ]
+        )
+        self.assertEqual((args.command, args.lane, args.shard), (
+            "prepare-shard",
+            "change-owned",
+            2,
+        ))
 
     def test_cli_spellings_match_the_workflow_contract(self) -> None:
         parser = owned.build_parser()
@@ -1358,11 +1627,12 @@ class BoundedCommandTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.plan = {
-            "version": 1,
+            "version": owned.PLAN_VERSION,
             "mode": "push",
             "base_sha": "a" * 40,
             "candidate_sha": "b" * 40,
             "event_pr_head": None,
+            "config_digest": "c" * 64,
             "changed_records": [],
             "path_dispositions": [],
             "target_dispositions": [],
@@ -1370,7 +1640,8 @@ class ReportTests(unittest.TestCase):
             "eligible_targets": ["p::smoke", "q::smoke"],
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],
-            "standing_targets": [],
+            "standing_targets": ["p::smoke"],
+            "standing_coverage_reuse": ["p::smoke"],
             "manual_only_targets": [],
             "target_exclusions": [{"identity": "p::heavy", "owner": OWNER}],
             "test_exclusions": [
@@ -1378,12 +1649,28 @@ class ReportTests(unittest.TestCase):
             ],
             "shards": {
                 "change_owned": owned.shard_map(
-                    [owned.Identity("p", "smoke"), owned.Identity("q", "smoke")]
+                    [owned.Identity("q", "smoke")]
                 ),
                 "package_expansion": owned.shard_map([]),
             },
         }
         owned.attach_plan_digest(self.plan)
+
+    def standing_coverage(self) -> dict:
+        coverage = {
+            "version": 1,
+            "candidate_sha": self.plan["candidate_sha"],
+            "config_digest": self.plan["config_digest"],
+            "execution": dict(owned.STANDING_EXECUTION),
+            "selected_targets": ["p::smoke"],
+            "executed_targets": ["p::smoke"],
+            "selected_tests": ["p::smoke::fast_case"],
+            "executed_tests": ["p::smoke::fast_case"],
+            "success": True,
+            "failures": [],
+        }
+        owned.attach_standing_coverage_digest(coverage)
+        return coverage
 
     def receipts(self, *, surface: str = "change_owned") -> list[dict]:
         result = []
@@ -1425,24 +1712,35 @@ class ReportTests(unittest.TestCase):
 
     def assert_required_fails(self, mutate) -> None:
         receipts = self.receipts()
-        mutate(receipts)
+        coverage = self.standing_coverage()
+        mutate(receipts, coverage)
         with self.assertRaises(ValueError):
-            owned.validate_change_owned_report(self.plan, receipts)
+            owned.validate_change_owned_report(self.plan, receipts, coverage)
 
     def test_required_report_accepts_exact_four_shard_cover(self) -> None:
-        report = owned.validate_change_owned_report(self.plan, self.receipts())
+        report = owned.validate_change_owned_report(
+            self.plan,
+            self.receipts(),
+            self.standing_coverage(),
+        )
         self.assertTrue(report["success"])
         self.assertEqual(report["covered_targets"], sorted(self.plan["change_owned"]))
 
     def test_required_report_rejects_missing_digest_duplicate_uncovered_excluded_and_failure(self) -> None:
         mutations = [
-            lambda rows: rows.pop(),
-            lambda rows: rows[0].update(plan_digest="bad"),
-            lambda rows: rows.append(copy.deepcopy(rows[0])),
-            lambda rows: rows[0].update(executed_targets=[]),
-            lambda rows: rows[0]["executed_targets"].append("p::heavy"),
-            lambda rows: rows[0].update(success=False, failures=["command failed"]),
-            lambda rows: rows[0]["executed_tests"].append("p::smoke::slow_case"),
+            lambda rows, coverage: rows.pop(),
+            lambda rows, coverage: rows[0].update(plan_digest="bad"),
+            lambda rows, coverage: rows.append(copy.deepcopy(rows[0])),
+            lambda rows, coverage: next(
+                row for row in rows if row["selected_targets"]
+            ).update(executed_targets=[]),
+            lambda rows, coverage: rows[0]["executed_targets"].append("p::heavy"),
+            lambda rows, coverage: rows[0].update(
+                success=False, failures=["command failed"]
+            ),
+            lambda rows, coverage: rows[0]["executed_tests"].append(
+                "p::smoke::slow_case"
+            ),
         ]
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -1450,8 +1748,47 @@ class ReportTests(unittest.TestCase):
 
     def test_receipt_digest_mismatch_is_rejected(self) -> None:
         self.assert_required_fails(
-            lambda rows: rows[0]["selected_targets"].append("p::invented")
+            lambda rows, coverage: rows[0]["selected_targets"].append(
+                "p::invented"
+            )
         )
+
+    def test_required_report_rejects_missing_stale_or_incomplete_standing_coverage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "standing coverage"):
+            owned.validate_change_owned_report(self.plan, self.receipts(), None)
+        mutations = (
+            lambda coverage: coverage.update(candidate_sha="d" * 40),
+            lambda coverage: coverage.update(config_digest="d" * 64),
+            lambda coverage: coverage["execution"].update(profile="ci-full"),
+            lambda coverage: coverage.update(executed_targets=[]),
+            lambda coverage: coverage.update(executed_tests=[]),
+            lambda coverage: coverage.update(
+                success=False, failures=["tests failed"]
+            ),
+            lambda coverage: coverage["selected_tests"].append(
+                "p::smoke::missing_result"
+            ),
+        )
+        for mutate in mutations:
+            coverage = self.standing_coverage()
+            mutate(coverage)
+            owned.attach_standing_coverage_digest(coverage)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                owned.validate_change_owned_report(
+                    self.plan,
+                    self.receipts(),
+                    coverage,
+                )
+
+    def test_standing_coverage_digest_rejects_tampering(self) -> None:
+        coverage = self.standing_coverage()
+        coverage["executed_tests"] = []
+        with self.assertRaisesRegex(ValueError, "coverage digest mismatch"):
+            owned.validate_change_owned_report(
+                self.plan,
+                self.receipts(),
+                coverage,
+            )
 
     def test_informational_summary_records_failures_but_does_not_raise(self) -> None:
         self.plan["package_expansion"] = ["p::default_gated"]

@@ -43,8 +43,9 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 2
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 RECEIPT_VERSION = 1
+STANDING_COVERAGE_VERSION = 1
 SHARDS = tuple(range(4))
 LANE_KEYS = {
     "change-owned": "change_owned",
@@ -64,6 +65,12 @@ SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
 SOFT_BUDGET_SECONDS = 15 * 60
 EXPANSION_EXECUTION_SECONDS = 16 * 60
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+STANDING_EXECUTION = {
+    "profile": "ci-fast",
+    "ignore_default_filter": True,
+    "run_ignored": "default",
+    "no_fail_fast": True,
+}
 
 
 @dataclass(frozen=True, order=True)
@@ -642,6 +649,35 @@ def _exclusion_rows(config: Config) -> tuple[list[dict[str, Any]], list[dict[str
     return target_rows, test_rows
 
 
+def config_digest(config: Config) -> str:
+    """Digest the normalized execution-relevant ownership configuration."""
+    path_rules = []
+    for rule in sorted(config.path_rules, key=lambda row: row.prefix):
+        row: dict[str, Any] = {
+            "prefix": rule.prefix,
+            "disposition": rule.disposition,
+        }
+        if rule.disposition == "packages":
+            row["packages"] = sorted(rule.packages)
+        elif rule.owner is not None:
+            row["owner"] = _owner_dict(rule.owner)
+        path_rules.append(row)
+    payload = {
+        "version": config.version,
+        "standing_targets": sorted(
+            identity.canonical for identity in config.standing_targets
+        ),
+        "manual_only_targets": _owned_target_rows(config.manual_only_targets),
+        "target_exclusions": _owned_target_rows(config.target_exclusions),
+        "test_exclusions": [
+            {"identity": identity.canonical, "owner": _owner_dict(owner)}
+            for identity, owner in sorted(config.test_exclusions.items())
+        ],
+        "path_rules": path_rules,
+    }
+    return sha256_bytes(canonical_json(payload))
+
+
 def make_plan(
     *,
     mode: str,
@@ -842,6 +878,8 @@ def make_plan(
     }
     if change_owned & expansion:
         raise ValueError("change-owned and package-expansion selections overlap")
+    standing_coverage_reuse = change_owned & set(config.standing_targets)
+    change_owned_execution = change_owned - standing_coverage_reuse
 
     target_exclusions, test_exclusions = _exclusion_rows(config)
     plan: dict[str, Any] = {
@@ -850,6 +888,7 @@ def make_plan(
         "base_sha": base_sha,
         "candidate_sha": candidate_sha,
         "event_pr_head": event_pr_head,
+        "config_digest": config_digest(config),
         "changed_records": [
             {
                 "status": record.status,
@@ -867,11 +906,14 @@ def make_plan(
         "standing_targets": sorted(
             identity.canonical for identity in config.standing_targets
         ),
+        "standing_coverage_reuse": sorted(
+            identity.canonical for identity in standing_coverage_reuse
+        ),
         "manual_only_targets": _owned_target_rows(config.manual_only_targets),
         "target_exclusions": target_exclusions,
         "test_exclusions": test_exclusions,
         "shards": {
-            "change_owned": shard_map(change_owned),
+            "change_owned": shard_map(change_owned_execution),
             "package_expansion": shard_map(expansion),
         },
     }
@@ -932,6 +974,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "base_sha",
         "candidate_sha",
         "event_pr_head",
+        "config_digest",
         "changed_records",
         "path_dispositions",
         "target_dispositions",
@@ -940,6 +983,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "change_owned",
         "package_expansion",
         "standing_targets",
+        "standing_coverage_reuse",
         "manual_only_targets",
         "target_exclusions",
         "test_exclusions",
@@ -959,6 +1003,10 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     for key in ("base_sha", "candidate_sha"):
         if not isinstance(plan.get(key), str) or not SHA.fullmatch(plan[key]):
             raise ValueError(f"plan {key} must be a full commit SHA")
+    if not isinstance(plan.get("config_digest"), str) or not DIGEST.fullmatch(
+        plan["config_digest"]
+    ):
+        raise ValueError("plan config_digest must be a SHA-256 digest")
     event_head = plan.get("event_pr_head")
     if plan["mode"] == "pull_request":
         if not isinstance(event_head, str) or not SHA.fullmatch(event_head):
@@ -981,11 +1029,17 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     eligible = set(_identity_list(plan, "eligible_targets"))
     change_owned = set(_identity_list(plan, "change_owned"))
     expansion = set(_identity_list(plan, "package_expansion"))
-    _identity_list(plan, "standing_targets")
+    standing = set(_identity_list(plan, "standing_targets"))
+    standing_reuse = set(_identity_list(plan, "standing_coverage_reuse"))
     if change_owned & expansion:
         raise ValueError("plan lanes overlap")
     if not (change_owned | expansion) <= eligible:
         raise ValueError("plan lane contains an ineligible target")
+    if standing_reuse != change_owned & standing:
+        raise ValueError(
+            "plan standing coverage reuse must exactly match "
+            "change-owned standing targets"
+        )
     for key, parser in (
         ("manual_only_targets", Identity.parse),
         ("target_exclusions", Identity.parse),
@@ -1008,7 +1062,6 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     }
     if not manual_only <= eligible:
         raise ValueError("plan manual-only targets must be eligible")
-    standing = set(_identity_list(plan, "standing_targets"))
     target_exclusions = {
         row["identity"] for row in plan["target_exclusions"]
     }
@@ -1043,7 +1096,12 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
                         f"plan {lane_key} identity is in the wrong shard: {canonical}"
                     )
             flattened.extend(rows)
-        if sorted(flattened) != sorted(plan[lane_key]):
+        expected_lane = (
+            change_owned - standing_reuse
+            if lane_key == "change_owned"
+            else expansion
+        )
+        if sorted(flattened) != sorted(expected_lane):
             raise ValueError(f"plan {lane_key} shards do not exactly cover the lane")
     if not isinstance(plan.get("plan_digest"), str) or not DIGEST.fullmatch(
         plan["plan_digest"]
@@ -1170,6 +1228,165 @@ def verify_receipt_digest(receipt: Mapping[str, Any]) -> None:
             "receipt digest mismatch: "
             f"expected {expected}, got {receipt.get('receipt_digest')}"
         )
+
+
+def attach_standing_coverage_digest(coverage: dict[str, Any]) -> None:
+    coverage["coverage_digest"] = _digest_without(
+        coverage, "coverage_digest"
+    )
+
+
+def _validate_standing_coverage_shape(coverage: Mapping[str, Any]) -> None:
+    expected_keys = {
+        "version",
+        "candidate_sha",
+        "config_digest",
+        "execution",
+        "selected_targets",
+        "executed_targets",
+        "selected_tests",
+        "executed_tests",
+        "success",
+        "failures",
+        "coverage_digest",
+    }
+    if set(coverage) != expected_keys:
+        raise ValueError(
+            "standing coverage schema keys mismatch: "
+            f"missing={sorted(expected_keys - set(coverage))}, "
+            f"extra={sorted(set(coverage) - expected_keys)}"
+        )
+    if (
+        type(coverage.get("version")) is not int
+        or coverage["version"] != STANDING_COVERAGE_VERSION
+    ):
+        raise ValueError(
+            f"standing coverage version must be {STANDING_COVERAGE_VERSION}"
+        )
+    if not isinstance(coverage.get("candidate_sha"), str) or not SHA.fullmatch(
+        coverage["candidate_sha"]
+    ):
+        raise ValueError("standing coverage candidate_sha must be a full SHA")
+    if not isinstance(coverage.get("config_digest"), str) or not DIGEST.fullmatch(
+        coverage["config_digest"]
+    ):
+        raise ValueError(
+            "standing coverage config_digest must be a SHA-256 digest"
+        )
+    execution = coverage.get("execution")
+    if not isinstance(execution, dict) or execution != STANDING_EXECUTION:
+        raise ValueError(
+            "standing coverage execution configuration mismatch: "
+            f"expected={STANDING_EXECUTION}, got={execution}"
+        )
+    selected_targets = set(_identity_list(coverage, "selected_targets"))
+    executed_targets = set(_identity_list(coverage, "executed_targets"))
+    for key in ("selected_tests", "executed_tests"):
+        rows = coverage.get(key)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, str) for row in rows
+        ):
+            raise ValueError(f"standing coverage {key} must be a list")
+        parsed = [TestIdentity.parse(row) for row in rows]
+        if len(rows) != len(set(rows)):
+            raise ValueError(f"standing coverage {key} contains duplicates")
+        unknown = sorted(
+            identity.canonical
+            for identity in parsed
+            if identity.target_identity.canonical not in selected_targets
+        )
+        if unknown:
+            raise ValueError(
+                f"standing coverage {key} names unselected targets: {unknown}"
+            )
+    if not executed_targets <= selected_targets:
+        raise ValueError(
+            "standing coverage executed targets must be selected targets"
+        )
+    if type(coverage.get("success")) is not bool:
+        raise ValueError("standing coverage success must be boolean")
+    failures = coverage.get("failures")
+    if not isinstance(failures, list) or any(
+        not isinstance(failure, str) or not failure for failure in failures
+    ):
+        raise ValueError(
+            "standing coverage failures must be nonempty strings"
+        )
+    if coverage["success"] == bool(failures):
+        raise ValueError("standing coverage success and failures disagree")
+    if not isinstance(coverage.get("coverage_digest"), str) or not DIGEST.fullmatch(
+        coverage["coverage_digest"]
+    ):
+        raise ValueError("coverage_digest must be a SHA-256 digest")
+
+
+def verify_standing_coverage_digest(coverage: Mapping[str, Any]) -> None:
+    _validate_standing_coverage_shape(coverage)
+    expected = _digest_without(coverage, "coverage_digest")
+    if coverage.get("coverage_digest") != expected:
+        raise ValueError(
+            "standing coverage digest mismatch: "
+            f"expected {expected}, got {coverage.get('coverage_digest')}"
+        )
+
+
+def validate_standing_coverage(
+    plan: Mapping[str, Any],
+    coverage: Mapping[str, Any] | None,
+) -> list[str]:
+    """Return exact reused targets after validating a complete ci-fast record."""
+    verify_plan_digest(plan)
+    reused = sorted(plan["standing_coverage_reuse"])
+    if not reused:
+        return []
+    if coverage is None:
+        raise ValueError(
+            "standing coverage receipt is required for reused targets"
+        )
+    verify_standing_coverage_digest(coverage)
+    if coverage["candidate_sha"] != plan["candidate_sha"]:
+        raise ValueError(
+            "standing coverage candidate mismatch: "
+            f"expected={plan['candidate_sha']}, "
+            f"got={coverage['candidate_sha']}"
+        )
+    if coverage["config_digest"] != plan["config_digest"]:
+        raise ValueError(
+            "standing coverage configuration mismatch: "
+            f"expected={plan['config_digest']}, "
+            f"got={coverage['config_digest']}"
+        )
+    expected_targets = sorted(plan["standing_targets"])
+    if sorted(coverage["selected_targets"]) != expected_targets:
+        raise ValueError(
+            "standing coverage selected targets mismatch: "
+            f"expected={expected_targets}, "
+            f"got={sorted(coverage['selected_targets'])}"
+        )
+    if sorted(coverage["executed_targets"]) != expected_targets:
+        raise ValueError(
+            "standing coverage executed targets mismatch: "
+            f"expected={expected_targets}, "
+            f"got={sorted(coverage['executed_targets'])}"
+        )
+    if coverage["success"] is not True:
+        raise ValueError(
+            f"standing coverage did not succeed: {coverage['failures']}"
+        )
+    selected_tests = sorted(coverage["selected_tests"])
+    executed_tests = sorted(coverage["executed_tests"])
+    if selected_tests != executed_tests:
+        raise ValueError(
+            "standing coverage selected test coverage mismatch: "
+            f"selected={selected_tests}, executed={executed_tests}"
+        )
+    for target in expected_targets:
+        prefix = f"{target}::"
+        if not any(test.startswith(prefix) for test in selected_tests):
+            raise ValueError(
+                f"standing coverage has no complete test results for {target}"
+            )
+    return reused
 
 
 def shard_for(identity: Identity) -> int:
@@ -1387,6 +1604,151 @@ def target_command(
     return command
 
 
+def execution_groups(
+    plan: Mapping[str, Any],
+    *,
+    lane: str,
+    selected: Sequence[str],
+) -> list[tuple[Identity, ...]]:
+    """Batch ordinary manual-expansion targets by package."""
+    identities = [Identity.parse(canonical) for canonical in selected]
+    if lane != "package-expansion":
+        return [(identity,) for identity in identities]
+    manual_only = {
+        row["identity"] for row in plan["manual_only_targets"]
+    }
+    excluded_targets = {
+        TestIdentity.parse(row["identity"]).target_identity
+        for row in plan["test_exclusions"]
+    }
+    groups: list[list[Identity]] = []
+    ordinary_by_package: dict[str, int] = {}
+    for identity in identities:
+        special = (
+            identity.canonical in manual_only
+            or identity in excluded_targets
+        )
+        if special:
+            groups.append([identity])
+            continue
+        index = ordinary_by_package.get(identity.package)
+        if index is None:
+            ordinary_by_package[identity.package] = len(groups)
+            groups.append([identity])
+        else:
+            groups[index].append(identity)
+    return [tuple(group) for group in groups]
+
+
+def target_group_command(
+    identities: Sequence[Identity],
+    exclusions: Mapping[TestIdentity, Any],
+    *,
+    list_only: bool,
+    manual_only: bool = False,
+) -> list[str]:
+    if not identities:
+        raise ValueError("target command group must not be empty")
+    if len(identities) == 1:
+        return target_command(
+            identities[0],
+            exclusions,
+            list_only=list_only,
+            manual_only=manual_only,
+        )
+    packages = {identity.package for identity in identities}
+    if len(packages) != 1:
+        raise ValueError("target command group must name one exact package")
+    if manual_only:
+        raise ValueError("manual-only targets must execute in singleton groups")
+    if any(
+        exclusion.target_identity in identities for exclusion in exclusions
+    ):
+        raise ValueError(
+            "targets with exact test exclusions must execute in singleton groups"
+        )
+    action = "list" if list_only else "run"
+    command = [
+        "cargo",
+        "nextest",
+        action,
+        "-p",
+        identities[0].package,
+    ]
+    for identity in identities:
+        command.extend(["--test", identity.target])
+    command.extend(
+        [
+            "--locked",
+            "--profile",
+            "ci-full",
+            "--ignore-default-filter",
+        ]
+    )
+    if list_only:
+        command.extend(["--message-format", "json"])
+    else:
+        command.append("--no-fail-fast")
+    return command
+
+
+def _listing_tests_for_group(
+    data: Mapping[str, Any],
+    identities: Sequence[Identity],
+    exclusions: Mapping[TestIdentity, Any],
+    *,
+    manual_only: bool = False,
+) -> list[str]:
+    suites = data.get("rust-suites")
+    if not isinstance(suites, dict):
+        raise ValueError("nextest listing has no rust-suites object")
+    expected = {identity.canonical for identity in identities}
+    if set(suites) != expected:
+        raise ValueError(
+            "package-scoped listing mismatch for target group: "
+            f"expected={sorted(expected)}, got={sorted(suites)}"
+        )
+    selected = []
+    for identity in identities:
+        selected.extend(
+            _listing_tests(
+                {"rust-suites": {identity.canonical: suites[identity.canonical]}},
+                identity,
+                exclusions,
+                manual_only=manual_only,
+            )
+        )
+    if len(selected) != len(set(selected)):
+        raise ValueError("target group listing contains duplicate tests")
+    return sorted(selected)
+
+
+def _junit_tests_for_group(
+    path: Path,
+    identities: Sequence[Identity],
+) -> list[str]:
+    expected = {identity.canonical for identity in identities}
+    tests = []
+    observed_targets = set()
+    for case in ET.parse(path).iter("testcase"):
+        classname = case.get("classname")
+        name = case.get("name")
+        if classname not in expected:
+            raise ValueError(
+                f"JUnit testcase has unexpected target {classname!r}: {path}"
+            )
+        if not name:
+            raise ValueError(f"JUnit testcase has no name: {path}")
+        require_executed_junit_case(case, path)
+        observed_targets.add(classname)
+        tests.append(f"{classname}::{name}")
+    if len(tests) != len(set(tests)):
+        raise ValueError(f"JUnit contains duplicate test results: {path}")
+    if not observed_targets <= expected:
+        raise ValueError(f"JUnit target mismatch: {path}")
+    return sorted(tests)
+
+
 def _listing_tests(
     data: Mapping[str, Any],
     identity: Identity,
@@ -1462,8 +1824,23 @@ def _junit_tests(path: Path, identity: Identity) -> list[str]:
         name = case.get("name")
         if not name:
             raise ValueError(f"JUnit testcase has no name: {path}")
+        require_executed_junit_case(case, path)
         tests.append(f"{identity.canonical}::{name}")
     return sorted(tests)
+
+
+def require_executed_junit_case(case: ET.Element, path: Path) -> None:
+    """Reject a selected test that nextest reported as skipped."""
+    if case.find("skipped") is not None:
+        classname = case.get("classname")
+        name = case.get("name")
+        identity = "::".join(
+            value for value in (classname, name) if value
+        ) or "<unknown>"
+        raise ValueError(
+            f"JUnit testcase was skipped rather than executed: "
+            f"{identity} ({path})"
+        )
 
 
 def _write_junit(path: Path, suite_documents: Sequence[Path]) -> None:
@@ -1557,19 +1934,15 @@ def execute_shard(
     executed_tests: list[str] = []
     executed_targets: list[str] = []
     failures: list[str] = []
-    command_started = False
 
     def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        nonlocal deadline_exhausted, command_started
-        command_started = False
+        nonlocal deadline_exhausted
         if deadline is None:
-            command_started = True
             return runner(command, **kwargs)
         remaining = deadline - time.monotonic()
         try:
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, 0, output="", stderr="")
-            command_started = True
             return runner(command, timeout=remaining, **kwargs)
         except subprocess.TimeoutExpired as error:
             deadline_exhausted = True
@@ -1656,13 +2029,18 @@ def execute_shard(
         }
 
     if build_succeeded:
-        for canonical in selected:
+        groups = execution_groups(plan, lane=lane, selected=selected)
+        for group_index, identities in enumerate(groups):
             if deadline_exhausted:
                 break
-            identity = Identity.parse(canonical)
-            manual_only = canonical in manual_only_targets
-            list_command = target_command(
-                identity,
+            canonicals = [identity.canonical for identity in identities]
+            label = ", ".join(canonicals)
+            manual_only = (
+                len(identities) == 1
+                and identities[0].canonical in manual_only_targets
+            )
+            list_command = target_group_command(
+                identities,
                 exclusions,
                 list_only=True,
                 manual_only=manual_only,
@@ -1678,16 +2056,19 @@ def execute_shard(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
-                listed_tests = _listing_tests(
+                listed_tests = _listing_tests_for_group(
                     json.loads(listed.stdout),
-                    identity,
+                    identities,
                     exclusions,
                     manual_only=manual_only,
                 )
                 selected_tests.extend(listed_tests)
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "list",
                         "argv": list_command,
                         "started_at": list_started_at,
@@ -1703,10 +2084,13 @@ def execute_shard(
                 json.JSONDecodeError,
                 subprocess.CalledProcessError,
             ) as error:
-                failures.append(f"{canonical}: list failed: {error}")
+                failures.append(f"{label}: list failed: {error}")
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "list",
                         "argv": list_command,
                         "started_at": list_started_at,
@@ -1716,19 +2100,22 @@ def execute_shard(
                         "stderr": getattr(error, "stderr", "") or str(error),
                     }
                 )
-                target_timings[canonical] = {
-                    "list_started_at": list_started_at,
-                    "list_finished_at": commands[-1]["finished_at"],
-                    "list_seconds": round(time.monotonic() - started, 3),
-                    "run_started_at": None,
-                    "run_finished_at": None,
-                    "run_seconds": 0.0,
-                }
+                for canonical in canonicals:
+                    target_timings[canonical] = {
+                        "command_group": canonicals,
+                        "list_started_at": list_started_at,
+                        "list_finished_at": commands[-1]["finished_at"],
+                        "list_seconds": round(time.monotonic() - started, 3),
+                        "run_started_at": None,
+                        "run_finished_at": None,
+                        "run_seconds": 0.0,
+                    }
                 continue
             list_seconds = round(time.monotonic() - started, 3)
+            list_finished_at = commands[-1]["finished_at"]
 
-            run_command = target_command(
-                identity,
+            run_command = target_group_command(
+                identities,
                 exclusions,
                 list_only=False,
                 manual_only=manual_only,
@@ -1747,7 +2134,10 @@ def execute_shard(
                 )
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "run",
                         "argv": run_command,
                         "started_at": run_started_at,
@@ -1759,11 +2149,14 @@ def execute_shard(
                 )
             except subprocess.CalledProcessError as error:
                 failures.append(
-                    f"{canonical}: test run failed with {error.returncode}"
+                    f"{label}: test run failed with {error.returncode}"
                 )
                 commands.append(
                     {
-                        "identity": canonical,
+                        "identity": (
+                            canonicals[0] if len(canonicals) == 1 else None
+                        ),
+                        "identities": canonicals,
                         "kind": "run",
                         "argv": run_command,
                         "started_at": run_started_at,
@@ -1773,36 +2166,59 @@ def execute_shard(
                         "stderr": error.stderr or "",
                     }
                 )
-            if command_started:
-                executed_targets.append(canonical)
             run_seconds = round(time.monotonic() - started, 3)
-            target_timings[canonical] = {
-                "list_started_at": list_started_at,
-                "list_finished_at": commands[-2]["finished_at"],
-                "list_seconds": list_seconds,
-                "run_started_at": run_started_at,
-                "run_finished_at": commands[-1]["finished_at"],
-                "run_seconds": run_seconds,
-            }
+            for canonical in canonicals:
+                target_timings[canonical] = {
+                    "command_group": canonicals,
+                    "list_started_at": list_started_at,
+                    "list_finished_at": list_finished_at,
+                    "list_seconds": list_seconds,
+                    "run_started_at": run_started_at,
+                    "run_finished_at": commands[-1]["finished_at"],
+                    "run_seconds": run_seconds,
+                }
             if produced_junit.is_file():
-                target_junit = scratch / (
-                    identity.package.replace("/", "_")
-                    + "__"
-                    + identity.target.replace("/", "_")
-                    + ".xml"
-                )
+                target_junit = scratch / f"group-{group_index}.xml"
                 shutil.copyfile(produced_junit, target_junit)
                 try:
-                    executed_tests.extend(_junit_tests(target_junit, identity))
+                    group_executed_tests = (
+                        _junit_tests(target_junit, identities[0])
+                        if len(identities) == 1
+                        else _junit_tests_for_group(
+                            target_junit,
+                            identities,
+                        )
+                    )
                 except (ValueError, ET.ParseError) as error:
-                    failures.append(f"{canonical}: malformed JUnit: {error}")
+                    failures.append(f"{label}: malformed JUnit: {error}")
                 else:
+                    executed_tests.extend(group_executed_tests)
+                    for canonical in canonicals:
+                        prefix = f"{canonical}::"
+                        target_selected = sorted(
+                            test
+                            for test in listed_tests
+                            if test.startswith(prefix)
+                        )
+                        target_executed = sorted(
+                            test
+                            for test in group_executed_tests
+                            if test.startswith(prefix)
+                        )
+                        if target_selected == target_executed:
+                            executed_targets.append(canonical)
+                        else:
+                            failures.append(
+                                f"{canonical}: incomplete test results: "
+                                f"selected={target_selected}, "
+                                f"executed={target_executed}"
+                            )
                     # A deadline may interrupt nextest's XML write. Keep that
                     # failure, but merge only validated suites so receipt
                     # finalization still preserves earlier completed evidence.
                     suite_documents.append(target_junit)
             else:
-                failures.append(f"{canonical}: test run produced no JUnit")
+                failures.append(f"{label}: test run produced no JUnit")
 
     _write_junit(junit_output, suite_documents)
     shard_finished_at = _utc_timestamp()
@@ -1865,6 +2281,38 @@ def execute_shard(
     receipt_output.write_bytes(canonical_json(receipt))
     shutil.rmtree(scratch)
     return receipt
+
+
+def prepare_shard(
+    plan: Mapping[str, Any],
+    *,
+    lane: str,
+    shard: int,
+    output: Path,
+    github_output: Path,
+    repo: Path = ROOT,
+) -> dict[str, Any] | None:
+    """Write an empty receipt or tell the hosted worker to prepare execution."""
+    verify_plan_digest(plan)
+    if lane not in LANE_KEYS:
+        raise ValueError(f"unsupported lane: {lane}")
+    if shard not in SHARDS:
+        raise ValueError(f"shard must be one of {SHARDS}")
+    selected = plan["shards"][LANE_KEYS[lane]][str(shard)]
+    has_targets = bool(selected)
+    github_output.parent.mkdir(parents=True, exist_ok=True)
+    github_output.write_text(
+        f"has_targets={'true' if has_targets else 'false'}\n"
+    )
+    if has_targets:
+        return None
+    return execute_shard(
+        plan,
+        lane=lane,
+        shard=shard,
+        output=output,
+        repo=repo,
+    )
 
 
 def _report_findings(
@@ -1937,7 +2385,11 @@ def _report_findings(
                 f"{receipt['elapsed_seconds']}s"
             )
 
-    expected_targets = sorted(plan[lane_key])
+    expected_targets = sorted(
+        identity
+        for rows in plan["shards"][lane_key].values()
+        for identity in rows
+    )
     if sorted(all_selected_targets) != expected_targets:
         findings.append(
             "selected target coverage mismatch: "
@@ -1975,8 +2427,10 @@ def _report_findings(
 def validate_change_owned_report(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
+    standing_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     findings = _report_findings(plan, receipts, "change-owned")
+    reused_targets = validate_standing_coverage(plan, standing_coverage)
     if findings:
         raise ValueError("; ".join(findings))
     return {
@@ -1987,6 +2441,7 @@ def validate_change_owned_report(
         "observed_success": True,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["change_owned"]),
+        "standing_reused_targets": reused_targets,
         "failures": [],
     }
 
@@ -2004,6 +2459,7 @@ def summarize_package_expansion(
         "observed_success": not findings,
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["package_expansion"]),
+        "standing_reused_targets": [],
         "failures": findings,
     }
 
@@ -2045,6 +2501,8 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"- Observed success: {str(report['observed_success']).lower()}",
         f"- Plan digest: `{report['plan_digest']}`",
         f"- Covered targets: {len(report['covered_targets'])}",
+        f"- Reused standing targets: "
+        f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
     for finding in report["failures"]:
@@ -2074,10 +2532,27 @@ def build_parser() -> argparse.ArgumentParser:
     run_shard.add_argument("--shard", type=int, choices=SHARDS, required=True)
     run_shard.add_argument("--output", type=Path, required=True)
 
+    prepare_shard_parser = subparsers.add_parser(
+        "prepare-shard",
+        help="emit empty evidence or select a shard for hosted preparation",
+    )
+    prepare_shard_parser.add_argument("--plan", type=Path, required=True)
+    prepare_shard_parser.add_argument(
+        "--lane", choices=tuple(LANE_KEYS), required=True
+    )
+    prepare_shard_parser.add_argument(
+        "--shard", type=int, choices=SHARDS, required=True
+    )
+    prepare_shard_parser.add_argument("--output", type=Path, required=True)
+    prepare_shard_parser.add_argument(
+        "--github-output", type=Path, required=True
+    )
+
     report = subparsers.add_parser("report", help="validate or summarize receipts")
     report.add_argument("--plan", type=Path, required=True)
     report.add_argument("--lane", choices=tuple(LANE_KEYS), required=True)
     report.add_argument("--receipts-root", type=Path, required=True)
+    report.add_argument("--standing-coverage", type=Path)
     report.add_argument("--output", type=Path, required=True)
     report.add_argument("--required", action="store_true")
     return parser
@@ -2115,6 +2590,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{'PASS' if receipt['success'] else 'FAIL'}"
         )
         return 0
+    if args.command == "prepare-shard":
+        plan = load_json(args.plan)
+        receipt = prepare_shard(
+            plan,
+            lane=args.lane,
+            shard=args.shard,
+            output=args.output,
+            github_output=args.github_output,
+        )
+        disposition = "EMPTY" if receipt is not None else "SELECTED"
+        print(f"{args.lane.upper()} SHARD {args.shard}: {disposition}")
+        return 0
 
     if args.lane == "change-owned" and not args.required:
         raise ValueError("change-owned report requires --required")
@@ -2124,7 +2611,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.lane == "change-owned":
         try:
             receipts = load_receipts(args.receipts_root)
-            result = validate_change_owned_report(plan, receipts)
+            standing_coverage = (
+                load_json(args.standing_coverage)
+                if args.standing_coverage is not None
+                else None
+            )
+            result = validate_change_owned_report(
+                plan,
+                receipts,
+                standing_coverage,
+            )
         except (
             ValueError,
             KeyError,
@@ -2140,6 +2636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observed_success": False,
                 "plan_digest": plan.get("plan_digest"),
                 "covered_targets": [],
+                "standing_reused_targets": [],
                 "failures": [str(error)],
             }
             _write_report_files(args.output, result)
@@ -2164,6 +2661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observed_success": False,
                 "plan_digest": plan.get("plan_digest"),
                 "covered_targets": [],
+                "standing_reused_targets": [],
                 "failures": [f"informational report validation failed: {error}"],
             }
     _write_report_files(args.output, result)
