@@ -100,6 +100,24 @@ fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
 }
 
 #[test]
+fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
+    let text = deep_text("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)");
+    assert!(
+        text.matches("(t-prim {} f32)").count() == 3 && !text.contains("(t-var {} f32)"),
+        "an explicit binder list must not rebind an active primitive:\n{text}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_does_not_rebind_a_reserved_sig_binder_name() {
+    let text = deep_text("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)");
+    assert!(
+        text.matches("(t-prim {} u8)").count() == 3 && !text.contains("(t-var {} u8)"),
+        "an explicit binder list must not turn a reserved dtype into a type variable:\n{text}"
+    );
+}
+
+#[test]
 fn a_declaration_without_a_bound_emits_no_bound_metadata() {
     // Canonical Deep for every pre-existing declaration is unchanged.
     let text = deep_text("def id[p](x: p) -> p = x");

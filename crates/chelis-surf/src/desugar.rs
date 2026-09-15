@@ -170,6 +170,14 @@ struct DesugarCtx {
 
 impl DesugarCtx {
     fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+        // spec/02 §P4b: a quantifier list overrides the lexical
+        // type-variable case split, not active primitive or rejected dtype
+        // spellings. Keep that category decision at the body lookup as well
+        // as type desugaring, so an explicit `sig f[f32]` or `sig f[u8]`
+        // cannot turn a cast target into `(t-var ...)`.
+        if canonical_primitive_name(name).is_some() || is_reserved_dtype_name(name) {
+            return None;
+        }
         self.current_type_binders.borrow().get(name).copied()
     }
 
