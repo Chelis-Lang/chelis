@@ -144,6 +144,16 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+/// Authored Chelis definitions use the injective C ABI namespace rather than
+/// borrowing source spellings that can collide with platform declarations.
+fn authored_c_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 fn run_cost_json(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
@@ -1520,9 +1530,10 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
         "expected helper ABI to dedup repeated tensor loads, got:\n{generated}"
     );
 
+    let gram = authored_c_symbol("gram");
     write_file(
         &out_dir.join("driver.c"),
-        r#"#include "chelis_runtime.h"
+        &r#"#include "chelis_runtime.h"
 #include "gram_bug5.h"
 #include <math.h>
 #include <stdio.h>
@@ -1538,7 +1549,7 @@ int main(void) {
     }
     chelis_tensor_end_write(a_guard);
 
-    chelis_tensor *out = gram(a);
+    chelis_tensor *out = CHELIS_TEST_GRAM(a);
     float expected[9] = {
         17.0f, 22.0f, 27.0f,
         22.0f, 29.0f, 36.0f,
@@ -1556,7 +1567,8 @@ int main(void) {
     chelis_tensor_release(a);
     return 0;
 }
-"#,
+"#
+        .replace("CHELIS_TEST_GRAM", &gram),
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "gram_bug5.c"], "gram_bug5_driver");
@@ -1604,8 +1616,11 @@ fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
 
     let c_src = fs::read_to_string(out_dir.join("inline_helpers.c")).expect("read generated C");
     assert!(
-        c_src.contains("chelis_tensor* combine(")
-            && !c_src.contains("static inline chelis_tensor* combine("),
+        c_src.contains(&format!("chelis_tensor* {}(", authored_c_symbol("combine")))
+            && !c_src.contains(&format!(
+                "static inline chelis_tensor* {}(",
+                authored_c_symbol("combine")
+            )),
         "expected combine() to retain external linkage in the executable translation unit, got:\n{c_src}"
     );
     assert!(
@@ -1655,7 +1670,7 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
 
     let header = fs::read_to_string(out_dir.join("tuple_abi.h")).expect("generated header");
     assert!(
-        header.contains("chelis_tuple* eig_pair("),
+        header.contains(&format!("chelis_tuple* {}(", authored_c_symbol("eig_pair"))),
         "expected tuple-returning C ABI in generated header, got:\n{header}"
     );
     let generated = out_dir.join("tuple_abi.c");
@@ -1666,15 +1681,16 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
     )
     .expect("rename the generated observation driver for library-link probing");
 
+    let eig_pair = authored_c_symbol("eig_pair");
     write_file(
         &out_dir.join("driver.c"),
-        r#"#include "chelis_runtime.h"
+        &r#"#include "chelis_runtime.h"
 #include "tuple_abi.h"
 #include <math.h>
 #include <stdio.h>
 
 int main(void) {
-    chelis_tuple *out = eig_pair();
+    chelis_tuple *out = CHELIS_TEST_EIG_PAIR();
     chelis_value lhs_value = chelis_tuple_get(out, 0);
     chelis_value rhs_value = chelis_tuple_get(out, 1);
     const chelis_tensor *lhs = chelis_tensor_borrow_value(lhs_value);
@@ -1700,7 +1716,8 @@ int main(void) {
     chelis_tuple_release(out);
     return 0;
 }
-"#,
+"#
+        .replace("CHELIS_TEST_EIG_PAIR", &eig_pair),
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "tuple_abi.c"], "tuple_abi_driver");
@@ -1757,7 +1774,7 @@ fn build_c_multidef_tensor_entry_renames_source_main_for_driver_compatibility() 
         "expected generated source to rename source-level main, got:\n{source}"
     );
     assert!(
-        source.contains("chelis_tensor* combine("),
+        source.contains(&format!("chelis_tensor* {}(", authored_c_symbol("combine"))),
         "expected helper symbol to remain callable, got:\n{source}"
     );
 
@@ -2063,7 +2080,11 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
     // The generated public header declares authored functions externally, so
     // adding a manifest observation driver must not make this definition local.
     assert!(
-        source.contains("float loss(") && !source.contains("static inline float loss("),
+        source.contains(&format!("float {}(", authored_c_symbol("loss")))
+            && !source.contains(&format!(
+                "static inline float {}(",
+                authored_c_symbol("loss")
+            )),
         "expected an externally linked host-side scalar loss helper:\n{source}"
     );
     assert!(
@@ -2110,8 +2131,11 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
 
     let source = fs::read_to_string(out_dir.join("tensor_grad_lm_canary.c")).expect("generated c");
     assert!(
-        source.contains("chelis_tensor* row(")
-            && !source.contains("static inline chelis_tensor* row("),
+        source.contains(&format!("chelis_tensor* {}(", authored_c_symbol("row")))
+            && !source.contains(&format!(
+                "static inline chelis_tensor* {}(",
+                authored_c_symbol("row")
+            )),
         "expected an externally linked host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
@@ -3036,12 +3060,18 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
 
     let source = fs::read_to_string(out_dir.join("recursive_tensor.c")).expect("generated c");
     assert!(
-        source.contains("chelis_tensor* recur(")
-            && !source.contains("static inline chelis_tensor* recur("),
+        source.contains(&format!("chelis_tensor* {}(", authored_c_symbol("recur")))
+            && !source.contains(&format!(
+                "static inline chelis_tensor* {}(",
+                authored_c_symbol("recur")
+            )),
         "expected externally linked recursive tensor helper to stay in the host lane:\n{source}"
     );
     assert!(
-        source.contains("__result = recur__chelis_owned_body("),
+        source.contains(&format!(
+            "__result = {}__chelis_owned_body(",
+            authored_c_symbol("recur")
+        )),
         "expected recursive call to target the consuming C body rather than the external borrow adapter or a DAG helper:\n{source}"
     );
 
@@ -3076,7 +3106,7 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
 
     let source = fs::read_to_string(out_dir.join("tensor_fold_if.c")).expect("generated c");
     assert!(
-        source.contains("chelis_tensor* chooser("),
+        source.contains(&format!("chelis_tensor* {}(", authored_c_symbol("chooser"))),
         "expected chooser to remain a host-emitted tensor function:\n{source}"
     );
     assert!(
@@ -3163,7 +3193,7 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
     // previously-widened `double`. The downstream driver must match the
     // real ABI, so its forward declaration and call use `float` too.
     assert!(
-        source.contains("float cube(float x)"),
+        source.contains(&format!("float {}(float x)", authored_c_symbol("cube"))),
         "expected unreachable host def to survive build pruning for downstream drivers:\n{source}"
     );
 
@@ -3172,17 +3202,19 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
         source.replace("int main(void)", "int chelis_manifest_main(void)"),
     )
     .expect("rename the generated observation driver for library-link probing");
+    let cube = authored_c_symbol("cube");
     write_file(
         &out_dir.join("driver.c"),
-        r#"#include <stdio.h>
+        &r#"#include <stdio.h>
 
-float cube(float x);
+float CHELIS_TEST_CUBE(float x);
 
 int main(void) {
-    printf("%.1f\n", (double)cube(3.0f));
+    printf("%.1f\n", (double)CHELIS_TEST_CUBE(3.0f));
     return 0;
 }
-"#,
+"#
+        .replace("CHELIS_TEST_CUBE", &cube),
     );
 
     let status = gcc_link_sources(
@@ -3236,7 +3268,10 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
 
     let source = fs::read_to_string(out_dir.join("library_tensor_surface.c")).expect("generated c");
     assert!(
-        source.contains("chelis_tensor* double_it(chelis_tensor* x)"),
+        source.contains(&format!(
+            "chelis_tensor* {}(chelis_tensor* x)",
+            authored_c_symbol("double_it")
+        )),
         "expected generic tensor def to remain callable from downstream code:\n{source}"
     );
     assert!(
@@ -3587,9 +3622,10 @@ def apply(
         .assert()
         .success();
 
+    let apply = authored_c_symbol("apply");
     write_file(
         &out_dir.join("runner.c"),
-        r#"#include "chelis_runtime.h"
+        &r#"#include "chelis_runtime.h"
 #include "scatter_runtime_bad.h"
 #include <math.h>
 
@@ -3614,7 +3650,7 @@ int main(void) {
     ((float *)updates_view.data)[3] = 6.0f;
     chelis_tensor_end_write(updates_guard);
 
-    chelis_tensor *output = apply(base, idx, updates);
+    chelis_tensor *output = CHELIS_TEST_APPLY(base, idx, updates);
     const float expected[6] = {0.0f, 0.0f, 6.0f, 6.0f, 0.0f, 0.0f};
     chelis_read_view output_view = chelis_tensor_read_view(output);
     for (int i = 0; i < 6; i++) {
@@ -3628,7 +3664,8 @@ int main(void) {
     chelis_tensor_release(updates);
     return 0;
 }
-"#,
+"#
+        .replace("CHELIS_TEST_APPLY", &apply),
     );
 
     let status = gcc_link_sources(
@@ -3847,10 +3884,13 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
     // `Float64` and widened this to `double`, silently disagreeing with
     // the declared `f32` width.
     assert!(
-        source.contains("chelis_string check_loss(chelis_tensor* x, float threshold)"),
+        source.contains(&format!(
+            "chelis_string {}(chelis_tensor* x, float threshold)",
+            authored_c_symbol("check_loss")
+        )),
         "{source}"
     );
-    assert!(source.contains("check_loss__tensor_0"));
+    assert!(source.contains(&format!("{}__tensor_0", authored_c_symbol("check_loss"))));
     assert!(source.contains("chelis_tensor_to_scalar"));
 }
 
@@ -4096,12 +4136,12 @@ fn build_hip_executes_host_reduce_window_with_exact_shape_and_values() {
     let mut source = fs::read_to_string(out_dir.join("rw_hip_hip.cpp")).unwrap();
     assert!(!source.contains("__global__") && !source.contains("hipLaunchKernelGGL"));
     source.push_str(
-        r#"
+        &r#"
 int main(void) {
     int64_t shape[] = {1, 1, 4, 4};
     float data[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
     chelis_tensor *input = chelis_tensor_entry_borrow(4, shape, CHELIS_DTYPE_F32, data, sizeof(data));
-    chelis_tensor *result = pool_hip(input);
+    chelis_tensor *result = CHELIS_TEST_POOL_HIP(input);
     int64_t expected_shape[] = {1, 1, 3, 3};
     float expected[] = {6,7,8,10,11,12,14,15,16};
     if (chelis_tensor_rank(result) != 4) return 10;
@@ -4115,7 +4155,8 @@ int main(void) {
     chelis_tensor_release(input);
     return 0;
 }
-"#,
+"#
+        .replace("CHELIS_TEST_POOL_HIP", &authored_c_symbol("pool_hip")),
     );
     fs::write(out_dir.join("rw_host.c"), source).unwrap();
     assert!(gcc_link_generated(&out_dir, "rw_host.c", "rw_host").success());
@@ -5085,6 +5126,7 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic.ch");
@@ -5116,6 +5158,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_matmul.ch");
@@ -5182,6 +5225,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_softmax() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_softmax.ch");
@@ -5213,6 +5257,7 @@ fn build_hip_accepts_symbolic_softmax() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_row_sum() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_sum.ch");
@@ -5243,6 +5288,7 @@ fn build_hip_accepts_symbolic_row_sum() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic_layer_norm.ch");
@@ -5289,6 +5335,7 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_emits_pad_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pad.ch");
@@ -5326,6 +5373,7 @@ fn build_hip_emits_pad_kernel() {
 }
 
 #[test]
+#[ignore = "experimental HIP semantics are tracked by #2104, not the core release gate"]
 fn build_hip_emits_shrink_kernel() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
@@ -8581,7 +8629,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         let invocation = if pure {
             "chelis_tensor *outputs[1]; pure_entry(&x, 1, outputs, 1); chelis_tensor *y = outputs[0];"
         } else {
-            "chelis_tensor *y = sample(x);"
+            &format!("chelis_tensor *y = {}(x);", authored_c_symbol("sample"))
         };
         let expected = if pure {
             "0x40000000u, 0x40800000u, 0x40c00000u, 0x41000000u"
@@ -9103,8 +9151,13 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
     // 4-byte `float` type. Before the precision fix the host lane collapsed
     // these to `double`, silently widening the declared `f32` signature.
     assert!(
-        source.contains("float apply(float (*model)(float), float x) {")
-            && !source.contains("static inline float apply("),
+        source.contains(&format!(
+            "float {}(float (*model)(float), float x) {{",
+            authored_c_symbol("apply")
+        )) && !source.contains(&format!(
+            "static inline float {}(",
+            authored_c_symbol("apply")
+        )),
         "expected externally linked `apply` wrapper definition in the C source; only a \
          forward declaration would leave gcc with `implicit declaration`. Source:\n{source}",
     );

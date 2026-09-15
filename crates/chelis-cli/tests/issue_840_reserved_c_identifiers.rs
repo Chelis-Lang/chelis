@@ -1,13 +1,12 @@
 //! chelis#840 - reserved-C-identifier mangling on the host build lane.
 //!
-//! A chelis-legal snake_case def name that is a C keyword (`double`) or
-//! an included typedef (`int8_t`) previously emitted verbatim into a
-//! translation unit that could not compile (`static inline int32_t
-//! double(...)`), while `chelis build` reported success. Bindings and
-//! parameters already routed through the #379 `chelis_user__` mapping
-//! (`c_ident`); def names now route through the same mapping, and the
-//! stdint/stddef typedef names join the shared reserved list. The eval
-//! lane never emits C and is unaffected.
+//! A chelis-legal source def name that is a C keyword (`double`) or an
+//! included typedef (`int8_t`) previously emitted verbatim into a translation
+//! unit that could not compile (`static inline int32_t double(...)`), while
+//! `chelis build` reported success. Authored defs now use an injective private
+//! `chelis_fn_<utf8-hex>` namespace; bindings and parameters retain the
+//! narrower #379 `chelis_user__` mapping (`c_ident`). The eval lane never
+//! emits C and is unaffected.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -90,8 +89,8 @@ fn a_def_named_double_builds_with_a_mangled_c_identifier() {
     )
     .expect("a C-keyword def name must build via the #379 mapping");
     assert!(
-        source.contains("chelis_user__double"),
-        "the def must declare and reference through the mangled name:\n{source}"
+        source.contains("chelis_fn_646f75626c65"),
+        "the def must declare and reference through its private name:\n{source}"
     );
     assert!(
         !source.contains("int32_t double("),
@@ -112,8 +111,8 @@ fn a_def_named_double_survives_the_named_callback_position() {
     )
     .expect("a C-keyword named callback must build via the #379 mapping");
     assert!(
-        source.contains("chelis_user__double"),
-        "callback references must use the mangled name:\n{source}"
+        source.contains("chelis_fn_646f75626c65"),
+        "callback references must use the private emitted name:\n{source}"
     );
     assert!(
         !source.contains("int32_t double("),
@@ -158,8 +157,8 @@ fn a_def_named_int8_t_builds_with_a_mangled_c_identifier() {
     )
     .expect("an included-typedef def name must build via the #379 mapping");
     assert!(
-        source.contains("chelis_user__int8_t"),
-        "the def must declare and reference through the mangled name:\n{source}"
+        source.contains("chelis_fn_696e74385f74"),
+        "the def must declare and reference through the private name:\n{source}"
     );
     if c_toolchain_available() {
         assert_eq!(link_and_run(&out_dir, "kw_typedef"), "42");
@@ -218,27 +217,26 @@ fn a_reserved_callback_parameter_name_stays_consistent_at_the_call_site() {
     }
 }
 
-/// chelis#840 review, finding 2: two defs landing on the same emitted C
-/// symbol (`double` mangles onto a literal `chelis_user__double`) must
-/// reject loudly instead of emitting a whole-TU redefinition from a
-/// build that reported success.
+/// chelis#840 review, finding 2: source spellings that previously collided
+/// through the non-injective `chelis_user__` escape now remain distinct in
+/// the private function namespace.
 #[test]
-fn colliding_user_spelling_of_the_mangled_name_rejects_loudly() {
-    let err = c_build_source(
+fn source_spellings_that_resembled_the_old_escape_remain_distinct() {
+    let (source, _dir, out_dir) = c_build_source(
         "def double(x: int32) -> int32 = mul(x, 2)\n\
          def chelis_user__double(x: int32) -> int32 = add(x, 100)\n\
          out = print(add(double(21), chelis_user__double(0)))\n",
         "kw_collision",
     )
-    .expect_err("a duplicate emitted symbol must not report build success");
+    .expect("the private namespace is injective");
     assert!(
-        err.contains("unsupported:") && err.contains("colliding emitted C symbol"),
-        "the rejection must carry the frozen branded shape:\n{err}"
+        source.contains("chelis_fn_646f75626c65")
+            && source.contains("chelis_fn_6368656c69735f757365725f5f646f75626c65"),
+        "the two source names must have distinct private emitted symbols:\n{source}"
     );
-    assert!(
-        err.contains("chelis_user__double"),
-        "the diagnostic must name the colliding symbol:\n{err}"
-    );
+    if c_toolchain_available() {
+        assert_eq!(link_and_run(&out_dir, "kw_collision"), "142");
+    }
 }
 
 /// chelis#840 review, finding 2 control: the eval lane still computes
@@ -277,8 +275,8 @@ fn a_def_named_int_fast8_t_builds_with_a_mangled_c_identifier() {
     )
     .expect("a least/fast typedef def name must build via the #379 mapping");
     assert!(
-        source.contains("chelis_user__int_fast8_t"),
-        "the def must declare and reference through the mangled name:\n{source}"
+        source.contains("chelis_fn_696e745f66617374385f74"),
+        "the def must declare and reference through the private name:\n{source}"
     );
     if c_toolchain_available() {
         assert_eq!(link_and_run(&out_dir, "kw_fast_typedef"), "42");

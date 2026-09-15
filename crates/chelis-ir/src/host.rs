@@ -4238,6 +4238,55 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     walk.expr(body)
 }
 
+/// Whether `expr` applies a callable that is itself a computed value rather
+/// than one of the callee forms the host lowering has a direct representation
+/// for. This is checked before staged/kernel lowering as well as by the
+/// admission walk: otherwise a tensor helper may beta-reduce the inner call
+/// and erase the outer function application before the C ABI can fence it
+/// (#1951).
+fn contains_computed_callable_application(expr: &Expr) -> bool {
+    fn recognized_callee(expr: &Expr) -> bool {
+        match expr {
+            Expr::MetaExpr(meta, _) => recognized_callee(&meta.expr),
+            Expr::List(list, _) => {
+                matches!(
+                    tag(list),
+                    Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
+                ) || list.unknown_tag_symbol() == Some("vmap-grad")
+            }
+            Expr::Node(node, _) => {
+                matches!(
+                    node.tag(),
+                    DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap
+                )
+            }
+            Expr::UnknownForm(data) => data.head == "vmap-grad",
+            Expr::Atom(_, _) | Expr::Map(_, _) | Expr::BareList(_, _) => false,
+        }
+    }
+
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => false,
+        Expr::MetaExpr(meta, _) => contains_computed_callable_application(&meta.expr),
+        Expr::BareList(items, _) => items.iter().any(contains_computed_callable_application),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .any(contains_computed_callable_application),
+        Expr::Node(node, span) => {
+            contains_computed_callable_application(&Expr::List(node.to_list(*span), *span))
+        }
+        Expr::List(list, _) => {
+            let kids = children(list);
+            (tag(list) == Some(DeepTag::App)
+                && kids
+                    .first()
+                    .is_some_and(|callee| !recognized_callee(callee)))
+                || kids.iter().any(contains_computed_callable_application)
+        }
+    }
+}
+
 /// Lexical scopes retain constructor scrutinees (chelis#520 D1) and direct
 /// concat input facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
@@ -4372,6 +4421,32 @@ impl UncarriableWalk<'_> {
                 }
             }
             Some(DeepTag::App) => {
+                // A C tensor helper can only call a direct named/local
+                // callable, an inline lambda, or a transform form that the
+                // host lowerer recognizes in callee position.  A computed
+                // callee such as `(pick(h))(x)` is a first-class function
+                // value: admitting it to the helper path erases the
+                // application and can return `x` unchanged (#1951). Keep it
+                // on the host path, where the existing unspellable callable
+                // marker reaches the C ABI's typed #879 rejection before
+                // artifact emission.
+                if let Some(callee) = kids.first() {
+                    let callee_tag = stamped_parts(callee).map(|(tag, _, _)| tag);
+                    let recognized_callee = matches!(
+                        callee_tag,
+                        Some(DeepTag::Var | DeepTag::Fn | DeepTag::Grad | DeepTag::Vmap)
+                    ) || matches!(
+                        callee,
+                        Expr::UnknownForm(data) if data.head == "vmap-grad"
+                    );
+                    if !recognized_callee {
+                        return Some(
+                            "an application whose callee is a computed function value, which \
+                             the C host ABI rejects rather than erasing (chelis#1951)"
+                                .to_string(),
+                        );
+                    }
+                }
                 if let Some(callee) = kids.first().and_then(as_list)
                     && tag(callee) == Some(DeepTag::Var)
                     && let Some(name) = children(callee).first().and_then(symbol_name)
@@ -4884,6 +4959,12 @@ fn def_body_decision_impl(
     if def_effect_row_forbids_kernel(program, &signature.name) {
         return Ok(DefBodyDecision::Host);
     }
+    // A computed function value has no tensor-helper representation. Keep it
+    // in the host lane before any DAG path can erase the outer application;
+    // the C ABI then emits its typed unsupported-callable fence (#1951).
+    if contains_computed_callable_application(body_expr) {
+        return Ok(DefBodyDecision::Host);
+    }
     // A form the kernel lowering cannot carry keeps the def in host code on
     // both lanes, decided here rather than discovered by a failed lowering
     // (chelis#1277 B2h; the classes the byte-identity corpus found).
@@ -4948,6 +5029,13 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    // A returned/dynamically-computed callable has no C value ABI. Do not
+    // let a staged or tensor helper erase its outer application; the host
+    // lowering route emits the existing unspellable marker, and the C ABI
+    // turns that into the typed #879 rejection before artifacts exist.
+    if contains_computed_callable_application(&signature.body_expr) {
+        return Ok(None);
+    }
     let transfer_literal_result_claims =
         top_level_fn_transfers_literal_result_claims(program, &signature.name);
     match staged_def_kernel(program, signature, None)? {
@@ -6033,6 +6121,14 @@ fn lower_tensor_helper_with<T>(
     program: &HostLoweringSession<'_>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
+    // Do not lower a returned/dynamically-computed callable through the DAG:
+    // that path beta-reduces the inner application and loses the outer call.
+    // The caller falls back to host lowering, which preserves the unsupported
+    // callable marker for the C ABI fence (#1951).
+    if contains_computed_callable_application(expr) {
+        record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
+        return None;
+    }
     let defs = cached_program_defs(program);
     // chelis#631: never swallow a fail-reaching FORWARD body into a
     // tensor helper. The DAG lane lowers `fail` to a mask-selected zero
@@ -6105,6 +6201,14 @@ fn lower_tensor_helper_product(
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
+    // The fixed-control execution branch below lowers directly rather than
+    // passing through `lower_tensor_helper_with`. Keep the #1951 fence at
+    // this common entry so neither route can beta-reduce a returned callable
+    // and erase its application.
+    if contains_computed_callable_application(expr) {
+        record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
+        return None;
+    }
     if collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = collect_tensor_scope(scope).into_sorted();

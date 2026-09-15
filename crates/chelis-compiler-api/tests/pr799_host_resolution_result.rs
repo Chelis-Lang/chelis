@@ -163,7 +163,7 @@ fn bf16_callback_uses_exact_typed_carrier_without_placeholder() {
     assert!(
         generated_c
             .contents
-            .contains("uint16_t apply(uint16_t (*f)(uint16_t), uint16_t x)"),
+            .contains("uint16_t chelis_fn_6170706c79(uint16_t (*f)(uint16_t), uint16_t x)"),
         "bf16 callback parameters and results must use the exact tagged-width carrier:\n{}",
         generated_c.contents
     );

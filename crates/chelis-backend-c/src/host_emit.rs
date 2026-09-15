@@ -607,19 +607,24 @@ fn emitted_function_name(program_name: &str, function_name: &str) -> String {
     if function_name == "main" {
         format!("{program_name}__main")
     } else {
-        // chelis#840: def names are C identifiers too. Route them through
-        // the same #379 mapping as bindings and parameters so a def named
-        // `double` declares, references, and prototypes consistently as
-        // `chelis_user__double` instead of emitting a C keyword verbatim.
-        c_ident(function_name).into_owned()
+        // Authored Chelis definitions are exported through the generated
+        // header, but in a compiler-reserved C namespace rather than under a
+        // source spelling. Encode their UTF-8 bytes injectively. That
+        // structurally prevents both C keyword/typedef collisions (#840) and
+        // platform-library collisions such as `read` from unistd.h (#1957);
+        // a source name that resembles this prefix encodes to another symbol.
+        let mut emitted = "chelis_fn_".to_string();
+        for byte in function_name.bytes() {
+            emitted.push_str(&format!("{byte:02x}"));
+        }
+        emitted
     }
 }
 
-/// Reject the program when two defs land on the same emitted C symbol
-/// (chelis#840 review, finding 2): the `chelis_user__` mapping is not
-/// collision-free, so `def double` next to `def chelis_user__double`
-/// would otherwise emit a whole-TU symbol redefinition from a build that
-/// reported success.
+/// Defense in depth for compiler-owned names. Authored definitions use the
+/// injective `chelis_fn_<utf8-hex>` namespace above, so two source spellings
+/// cannot collide; this remains a hard gate if a future internal naming path
+/// accidentally overlaps an emitted public or owned-body symbol.
 fn reject_duplicate_emitted_function_names(
     emitted_names: &UnordMap<String, String>,
 ) -> Result<(), Unsupported> {
@@ -650,9 +655,8 @@ fn reject_duplicate_emitted_function_names(
         Stage::Codegen("c"),
         chelis_types::deliberate_rejection!(
             "[01-CID-1]",
-            "the reserved-word mapping prefixes with `chelis_user__` and cannot disambiguate a \
-             definition that literally spells the mangled name; rename one definition \
-             (chelis#840)"
+            "generated C symbols must remain one-to-one; an internal naming path overlapped \
+             another emitted definition (chelis#840)"
         ),
     ))
 }

@@ -783,29 +783,10 @@ fn a_three_member_result_only_binder_is_absorbed_on_both_lanes() {
     );
 }
 
-/// DISPOSITION LOCK, not a receipt, and deliberately not a corpus row.
-///
-/// `(pick(h))(g(t))` with `pick(f) = f` returns a first-class function from an
-/// application and then applies it. chelis#1925's round 3 measured what this
-/// change does to it: base published `() -> tensor[d0, f32]` and dropped the
-/// root from both lanes, and the absorption makes it executable, at which
-/// point the two lanes print DIFFERENT VALUES at exit 0. Eval applies `h` and
-/// renders `[4.0, 6.0]`; C does not, and renders `[2.0, 3.0]`.
-///
-/// The C mis-lowering is older than this change and is chelis#1951. The
-/// attribution is measured, not argued: `a_nested_application_divergence_is_older_than_this_change`
-/// below replaces the runtime extent with a literal so that base publishes
-/// `tensor[2, f32]` and executes the same program, and base and this head then
-/// render the same two disagreeing values. What this change does is route a
-/// program base dropped in silence into a defect that was already there,
-/// turning a silent drop into a silent wrong answer.
-///
-/// The lock asserts BOTH measured values so that no later change can record
-/// this program as executing exactly while the lanes still disagree. When
-/// chelis#1951 is fixed, this test fails and is replaced by a cross-lane
-/// receipt asserting one rendering.
+/// A computed callable has no C ABI representation. Eval remains supported;
+/// C must refuse it instead of emitting the historical wrong answer.
 #[test]
-fn a_nested_application_root_is_executable_and_the_lanes_still_disagree() {
+fn a_nested_application_root_is_fenced_on_c() {
     let source = format!(
         "{POLY_HELPERS}\
          def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
@@ -838,31 +819,19 @@ fn a_nested_application_root_is_executable_and_the_lanes_still_disagree() {
     let out_dir = dir.path().join("nested-application-out");
     let build = build_c(&path, &out_dir);
     assert!(
-        build.status.success(),
+        !build.status.success(),
+        "C must refuse a computed callable rather than guess"
+    );
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("unresolved function value"),
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let compiled = compile_and_run_c(&out_dir, "nested_application_root");
-    assert!(
-        compiled.status.success(),
-        "C exits 0 here, which is the problem: {}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&compiled.stdout).trim_end(),
-        "main = tensor(shape=[2], data=[2.0, 3.0])",
-        "chelis#1951: C does not apply the picked function, and says so at exit 0"
-    );
 }
 
-/// The attribution control for the lock above, and a disposition lock in its
-/// own right. Replacing the runtime extent with a literal gives a program base
-/// publishes as `tensor[2, f32]` and executes on both lanes, so this change
-/// does not touch it. Base and this head both render `[4.0, 6.0]` on eval and
-/// `[2.0, 3.0]` on C, measured with two binaries: the divergence is
-/// chelis#1951's and predates this change entirely.
+/// The fence applies even when the callable's tensor extent is concrete.
 #[test]
-fn a_nested_application_divergence_is_older_than_this_change() {
+fn a_nested_application_with_concrete_result_is_fenced_on_c() {
     let source = format!(
         "{POLY_HELPERS}\
          def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
@@ -890,15 +859,13 @@ fn a_nested_application_divergence_is_older_than_this_change() {
     let out_dir = dir.path().join("nested-application-concrete-out");
     let build = build_c(&path, &out_dir);
     assert!(
-        build.status.success(),
+        !build.status.success(),
+        "C must refuse a computed callable rather than guess"
+    );
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("unresolved function value"),
         "{}",
         String::from_utf8_lossy(&build.stderr)
-    );
-    let compiled = compile_and_run_c(&out_dir, "nested_application_concrete");
-    assert_eq!(
-        String::from_utf8_lossy(&compiled.stdout).trim_end(),
-        "main = tensor(shape=[2], data=[2.0, 3.0])",
-        "chelis#1951 on a program this change does not touch"
     );
 }
 

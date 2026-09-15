@@ -1492,8 +1492,9 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // body carries the entry guard (`seed`'s own sub-expression is another
     // `run__tensor_M`, called before the print in both variants).
     let trap = "chelis_numeric_trap(\"numeric trap: domain in load at int64\")";
+    let kernel_prefix = format!("static void {}__tensor_", authored_c_symbol("run"));
     let (kernel_name, kernel) = emitted
-        .match_indices("static void run__tensor_")
+        .match_indices(&kernel_prefix)
         .map(|(at, _)| {
             let rest = &emitted[at..];
             let name_end = rest.find('(').expect("kernel signature");
@@ -1511,7 +1512,10 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
         guard_at < alloc_at,
         "the entry guard precedes the kernel's first allocation"
     );
-    let body = host_body_definition(emitted, "run__chelis_owned_body");
+    let body = host_body_definition(
+        emitted,
+        &format!("{}__chelis_owned_body", authored_c_symbol("run")),
+    );
     let print_at = body
         .find("chelis_string_from_cstr(\"effect\")")
         .expect("the print is emitted in the host body (chelis#1528)");
@@ -8425,6 +8429,14 @@ const DISAGREEING_X: &str = "[1.0, 2.0, 3.0]";
 const AGREEING_X: &str = "[1.0, 2.0]";
 const TWO_BY_TWO_Y: &str = "[[1.0, 2.0], [3.0, 4.0]]";
 
+fn authored_c_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 /// entry.host_tuple.repeated_binder.eval. REGRESSION TEST on the RENDERING.
 /// Measured on `0820ee28e`, eval refused with the private sentence
 /// ``dimension binder `seq` has inconsistent runtime witnesses: 3 and 2``,
@@ -8628,6 +8640,7 @@ fn literal_parameter_obligations_keep_the_existing_helper_order() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
+    let both = authored_c_symbol("both");
     for (name, x0, y1, agrees) in [
         ("both_refuted", 3, 2, false),
         ("literal_refuted", 3, 3, false),
@@ -8638,7 +8651,7 @@ fn literal_parameter_obligations_keep_the_existing_helper_order() {
              int main(void) {{\n\
              chelis_tensor *x = chelis_alloc(2, (int64_t[]){{{x0}, 3}}, CHELIS_DTYPE_F32);\n\
              chelis_tensor *y = chelis_alloc(2, (int64_t[]){{2, {y1}}}, CHELIS_DTYPE_F32);\n\
-             chelis_tuple *result = both(x, y);\n\
+             chelis_tuple *result = {both}(x, y);\n\
              chelis_tuple_release(result);\n\
              chelis_tensor_release(x); chelis_tensor_release(y);\n\
              puts(\"completed\"); return 0;\n}}\n"
@@ -8684,6 +8697,7 @@ fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
+    let both = authored_c_symbol("both");
     for (name, xr, x0, yr, y0, expected) in [
         ("agreeing", 1, 2, 1, 2, "completed"),
         (
@@ -8704,7 +8718,7 @@ fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
              int main(void) {{\n\
              chelis_tensor *x = chelis_alloc({xr}, (int64_t[]){{{x0}, 1}}, CHELIS_DTYPE_F32);\n\
              chelis_tensor *y = chelis_alloc({yr}, (int64_t[]){{{y0}, 1}}, CHELIS_DTYPE_F32);\n\
-             chelis_tuple *result = both(x, y);\n\
+             chelis_tuple *result = {both}(x, y);\n\
              chelis_tuple_release(result);\n\
              chelis_tensor_release(x); chelis_tensor_release(y);\n\
              puts(\"completed\"); return 0;\n}}\n"
