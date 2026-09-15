@@ -82,7 +82,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "stdlib-v15-key-input.bin",
             "stdlib-v15.tc",
             b"chelis_std_typecheck_v".as_slice(),
-            20_u32,
+            21_u32,
             stdlib_cache_key_input_bytes(&std_decls, [0x5a; 32]),
             std_key,
         ),

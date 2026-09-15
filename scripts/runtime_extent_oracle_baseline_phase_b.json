@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "78e9685c95429b6a0e9a819ac8cb6f4da6ece0f65b97dc59752550b6bdcdfaa5",
+  "corpus_sha256": "0d42c36924377a9bd5b1417ae0a8f02a12b6fe8ba3a818717df2ff3096c11c16",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -603,6 +603,42 @@
       "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
     },
     {
+      "id": "grad.independent_calls.agree.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.agree.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
       "id": "grad.wrt_aggregate.multi.dead_forward.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -611,7 +647,7 @@
     {
       "id": "grad.wrt_aggregate.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -623,7 +659,7 @@
     {
       "id": "grad.wrt_aggregate.single.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
     },
     {
@@ -635,7 +671,7 @@
     {
       "id": "grad.wrt_prim_scalar.multi.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -647,7 +683,7 @@
     {
       "id": "grad.wrt_prim_scalar.single.dead_forward.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
     },
     {
@@ -659,7 +695,7 @@
     {
       "id": "grad.wrt_tensor.multi.dead_forward.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
     },
     {

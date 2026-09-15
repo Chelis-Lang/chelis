@@ -108,7 +108,18 @@ pub fn vectorize_axis0_with_node_map(
                 requirements,
                 claims,
             } => RiscOp::ExtentWitness {
-                site: *site,
+                site: match site {
+                    crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim,
+                        axis: RtAxis::Lit(axis),
+                    } => crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim: claim.clone(),
+                        axis: RtAxis::Lit(
+                            axis.checked_add(1).expect("vmap result axis fits int32"),
+                        ),
+                    },
+                    other => other.clone(),
+                },
                 parameter: parameter.clone(),
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
                 requirements: requirements.clone(),

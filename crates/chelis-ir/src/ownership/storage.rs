@@ -792,7 +792,7 @@ fn extend_lifetimes(
         if matches!(placements[node.id.0], StoragePlacement::Skipped) {
             continue;
         }
-        let effective_inputs = match &node.op {
+        let mut effective_inputs = match &node.op {
             RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
                 if let Some(input) = node.inputs.first().copied()
                     && matches!(placements[input.0], StoragePlacement::Skipped)
@@ -811,6 +811,10 @@ fn extend_lifetimes(
             },
             _ => node.inputs.clone(),
         };
+        // Ownership borrows shape dependencies as well as value inputs. A
+        // result-claim witness stores the canonical scalar the producer reads;
+        // reusing its allocation earlier changes the obligation itself.
+        effective_inputs.extend(node.shape_deps.iter().copied());
         for input in effective_inputs {
             if let Some(owner) = owner_of[input.0]
                 && let Some(requirement) = requirements.get_mut(&owner)

@@ -7,7 +7,7 @@ use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
 use chelis_ir::host::RandomLoweringState;
-use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
+use chelis_ir::lower::SubexprLoweringContext;
 use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
 use super::host_ops::terminal_name_matches;
@@ -399,33 +399,39 @@ impl<'a> EvalContext<'a> {
         }
 
         let profile = self.execution_profile(&app_expr, &program_defs);
+        // #1821/#1920: inference renames result dimensions (n -> d43),
+        // while invocation witnesses retain the authored parameter binders.
+        // Give both routes the declared signature alongside checked types,
+        // so the result claim still refers to its activation's witness.
+        let lowering = SubexprLoweringContext::new(
+            self.type_env.clone(),
+            program_defs,
+            self.declared_signatures.clone(),
+        );
         let mut execution_plan = None;
         let lower_result = if profile == EvaluationProfile::FixedControl {
             let context = RandomExecutionContext::new(RandomLoweringState {
                 seed: self.random_seed,
                 counter: self.random_counter,
             });
-            chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-                &app_expr,
-                scoped_types,
-                self.type_env.clone(),
-                program_defs,
-                &context,
-            )
-            .map(|plan| {
-                let dag = plan.dag_for_inspection().clone();
-                execution_plan = Some(plan);
-                (dag, self.random_counter)
-            })
+            lowering
+                .lower_evaluation_plan(&app_expr, scoped_types, &context)
+                .map(|plan| {
+                    let dag = plan.dag_for_inspection().clone();
+                    execution_plan = Some(plan);
+                    (dag, self.random_counter)
+                })
         } else {
-            try_lower_subexpr_program_with_random_state_progress(
-                &app_expr,
-                scoped_types,
-                self.type_env.clone(),
-                program_defs,
-                self.random_seed,
-                self.random_counter,
-            )
+            lowering
+                .lower_with_random_state(
+                    &app_expr,
+                    scoped_types,
+                    RandomLoweringState {
+                        seed: self.random_seed,
+                        counter: self.random_counter,
+                    },
+                )
+                .map(|(dag, random)| (dag, random.counter))
         };
         let (dag, next_random_counter) = match lower_result {
             Ok(result) => result,
