@@ -129,5 +129,5 @@ binding = use_pair
   display_signature = Fn([], Prim(Int32))
 
 == infer stats ==
-typed_nodes = 21
-total_nodes = 21
+typed_nodes = 22
+total_nodes = 22

@@ -407,6 +407,17 @@ pub(super) fn infer_vmap(
         Ok(None) => 0,
         Err(witness) => return propagate(&witness),
     };
+    // chelis#1603: reading the axis child is not admitting it. `infer_lit`
+    // owns [04-LIT-1]'s atom/primitive matrix for every `lit` the walk
+    // VISITS, and `infer_app` visits each operand, so a bool-stamped `1` is
+    // already rejected in a builtin's axis operand. `vmap` reads its axis
+    // through the slot seam and never visits the child, so the same node
+    // reached axis 1 here with no diagnostic. Visit it so the one boundary
+    // that owns the rule decides, rather than re-deriving the matrix at this
+    // reader.
+    if let Some(child) = kids.get(1) {
+        infer_expr(child, env, vg, subst, adt_reg, errors, product);
+    }
     if axis < 0 {
         return report(
             errors,

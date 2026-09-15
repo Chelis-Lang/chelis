@@ -212,6 +212,12 @@ name = "infer_module_parity"
 package = "chelis-types"
 name = "issue_1107_stamped_node_ingress_parity"
 
+# chelis#1603: a lit node's declared type stamp must agree with its atom at
+# both checker ingresses (vmap axis and tuple-get index admission).
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1603_literal_stamp_compatibility"
+
 [[standing_target]]
 package = "chelis-types"
 name = "unresolved_operand_census"

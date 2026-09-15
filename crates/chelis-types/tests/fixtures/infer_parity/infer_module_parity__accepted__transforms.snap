@@ -98,5 +98,5 @@ binding = process
   param[0] name = x; written = true; inferred_read_only = false; checked_type = Tensor([Name("features")], Concrete(F32)); display_type = Tensor([Name("features")], Concrete(F32))
 
 == infer stats ==
-typed_nodes = 7
-total_nodes = 7
+typed_nodes = 8
+total_nodes = 8
