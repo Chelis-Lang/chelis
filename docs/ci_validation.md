@@ -13,6 +13,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
 | `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of persistent candidate-lifecycle, protected-test and frozen-contract acknowledgement lines; no compiler build |
 | `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
+| `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned shadow receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; it does not alter required CI |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
 | `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
@@ -49,6 +50,34 @@ change-owned topology and hosted-coverage unit suites in the detector job. A
 failure is recorded as `candidate_preflight=failure`; expensive CI and Hull
 build work is suppressed, while the required Docs and Hull contexts run a cheap
 failure step rather than reporting skipped success.
+
+CI and Hull each publish an immutable identity for the synthetic candidate they
+checked out. The identity records the exact two parents, and describes the PR
+patch from `merge-base(base, head)..head`; using `base..head` would incorrectly
+count unrelated target-branch advances as pull-request changes. It also records
+the stable patch id, an exact normalized-diff digest that retains added and
+removed bytes, and the changed paths and their digest. These producer artifacts
+are candidate-controlled inputs, not receipts.
+
+The default branch's `workflow_run` collector fetches the named Git objects
+without checking out or executing pull-request content and recomputes every
+identity field itself. It requires CI and Hull to name the same synthetic
+candidate, reads the current branch-protection set, and binds every required
+context to its expected workflow file and exact job id. An unknown required
+context, a stale head, mismatched workflow provenance, missing artifact,
+non-green latest check, or contradictory candidate identity withholds or fails
+the receipt. The receipt also marks workflow, CI-policy, agent-contract and
+CI-script changes as ineligible for later evidence reuse; their green state is
+recorded, but candidate-controlled validation logic cannot authorize its own
+reuse. A successful `pr-candidate-receipt-<head-sha>` artifact is therefore
+trusted shadow evidence keyed to the exact prior head for a later targeted-rebase
+lane. In this foundation slice it does not
+skip, cancel, or satisfy any required check, and no PR workflow can issue its
+own trusted receipt. The collector currently issues receipts only for ordinary
+`pull_request` candidates. A base-retarget candidate is validated by trusted
+dispatch and coordinator paths that this receipt schema does not yet model, so
+its absent receipt must remain a full-validation fallback rather than reusable
+evidence.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
 

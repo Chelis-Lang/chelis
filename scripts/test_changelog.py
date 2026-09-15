@@ -49,7 +49,11 @@ class ChangelogTests(unittest.TestCase):
         self.write("CHANGELOG.md", HISTORY)
         self.write("Cargo.toml", '[workspace.package]\nversion = "0.2.0"\n')
         self.write("changelog.d/README.md", "# Fragments\n")
-        for name in ("changelog.py", "ci_detect_docs_only.py"):
+        for name in (
+            "changelog.py",
+            "ci_contract_paths.py",
+            "ci_detect_docs_only.py",
+        ):
             target = self.root / "scripts" / name
             target.parent.mkdir(exist_ok=True)
             shutil.copyfile(Path(__file__).with_name(name), target)

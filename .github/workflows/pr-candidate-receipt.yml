@@ -1,0 +1,65 @@
+name: PR Candidate Receipt
+
+# This workflow runs the default branch's collector after any workflow that
+# can finish the required-check set. The pull request's workflows provide only
+# candidate commit identities. This trusted copy re-derives their workflow and
+# job provenance from the API, fetches the named Git objects without checking
+# out pull-request content, recomputes the patch identity, and issues a receipt
+# only when every current required context is green.
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Hull Conformance
+      - Changelog
+      - PR Contract Acknowledgements
+      - PR Base Retarget Validation
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    name: Collect trusted PR candidate receipt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - name: Check out the trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: trusted
+
+      - name: Collect the exact required-check evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 trusted/scripts/ci_candidate_receipt.py
+          --repository "${{ github.repository }}"
+          --trigger-run-id "${{ github.event.workflow_run.id }}"
+          --receipt-run-id "${{ github.run_id }}"
+          --repository-path trusted
+          --output trusted/target/ci-candidate-receipt/receipt.json
+
+      - name: Upload trusted candidate receipt when complete
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}
+          path: trusted/target/ci-candidate-receipt/receipt.json
+          if-no-files-found: ignore
+          retention-days: 30
