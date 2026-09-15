@@ -67,9 +67,12 @@ fn source_name_for_c_symbol(symbol: &str) -> String {
     let Some(hex) = symbol.strip_prefix("chelis_fn_") else {
         return symbol.to_string();
     };
-    let bytes = hex
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return symbol.to_string();
+    }
+    let bytes = pairs
+        .iter()
         .map(|pair| {
             std::str::from_utf8(pair)
                 .ok()

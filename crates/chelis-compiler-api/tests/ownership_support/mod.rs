@@ -13,6 +13,10 @@ fn root() -> PathBuf {
 }
 
 /// Authored Chelis definitions use an injective compiler namespace in C.
+#[allow(
+    dead_code,
+    reason = "integration-test binaries share this helper module but use distinct helpers"
+)]
 pub fn authored_c_symbol(name: &str) -> String {
     let mut symbol = "chelis_fn_".to_string();
     for byte in name.bytes() {
