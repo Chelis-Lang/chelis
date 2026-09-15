@@ -1369,22 +1369,16 @@ impl InferenceProduct {
                     ("scatter_elements".to_string(), false)
                 }
                 DeferredShapeRule::ShapeRoute { route, .. } => (route.builtin(), false),
-                // chelis#1512: a collection, host or string route's operand is
-                // NOT required to be a tensor carrying a shape, so an operand
-                // that never binds is not an error here. A polymorphic
-                // definition legitimately calls `dict_of`, `len` or `where`
-                // over a value that acquires its constructor per call site,
-                // and the replay discharges the route's own validation at each
-                // of those bindings. The eager pass already published the
-                // unconstrained result this arm published before the repair,
-                // so discharging the obligation silently leaves the program
-                // exactly as it was.
+                // A deferred PostApp route that binds at a local monomorphic
+                // application is replayed and validated before this boundary.
+                // Still-unresolved non-contract PostApp routes retain their
+                // existing non-tensor disposition below.
                 //
-                // The rules above keep the rejection because their operand
-                // must be a tensor with a shape: without one, no result type
-                // can be derived at all, which is the acceptance boundary the
-                // shape-computed builtins have carried since chelis#1489.
-                //
+                // [04-INF-9] is narrower: an authored generic wrapper may not
+                // publish a body-inferred collection operation contract. A
+                // still-unresolved `len`, `index`, `append`, or `concat`
+                // obligation therefore falls through to the declaration-
+                // boundary rejection rather than being discharged silently.
                 DeferredShapeRule::PostApp { func_name, .. }
                     if matches!(func_name.as_str(), "len" | "index" | "append" | "concat") =>
                 {
