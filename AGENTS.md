@@ -167,11 +167,11 @@ obligations.
   dispatch `PR Package Expansion` with the pull request number and exact head SHA.
   Start it alongside the final required implementation checks rather than waiting for
   them; merge only after both the required checks and the expansion report have been
-  inspected. Record the reviewed SHA and run link in the pull request. A content change,
-  hand-resolved conflict, base-changing rebase, or base-branch retarget creates a new
-  synthetic candidate and requires a fresh dispatch. Do not create that invalidation
-  merely to refresh a branch after `origin/main` advances: when GitHub can merge the
-  exact reviewed head safely, preserve that head and its evidence as
+  inspected. Record the reviewed SHA and run link in the pull request. Any candidate change
+  that alters the synthetic candidate—a content change, hand-resolved conflict,
+  base-changing rebase, or base-branch retarget—requires a fresh dispatch. Do not create
+  that invalidation merely to refresh a branch after `origin/main` advances: when GitHub
+  can merge the exact reviewed head safely, preserve that head and its evidence as
   [Worktree And Branch Discipline](#worktree-and-branch-discipline) requires. Resolve
   failures introduced by the candidate; identify inherited failures and any missing,
   timed-out or otherwise incomplete coverage explicitly.
