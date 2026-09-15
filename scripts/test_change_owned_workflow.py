@@ -135,6 +135,68 @@ def assert_change_owned_topology(
     test.assertIn("scripts/ci_change_owned.py report", summary_commands)
     test.assertIn("--lane package-expansion", summary_commands)
     test.assertNotIn("--required", summary_commands)
+    summary_checkouts = [
+        step
+        for step in summary["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    test.assertEqual(len(summary_checkouts), 2)
+    trusted_checkout, candidate_checkout = summary_checkouts
+    test.assertEqual(
+        trusted_checkout.get("with", {}).get("ref"),
+        "${{ github.event.repository.default_branch }}",
+    )
+    test.assertEqual(trusted_checkout.get("with", {}).get("path"), "trusted")
+    test.assertEqual(
+        candidate_checkout.get("with", {}).get("ref"),
+        "refs/pull/${{ inputs.pr_number }}/merge",
+    )
+    test.assertEqual(candidate_checkout.get("with", {}).get("path"), "candidate")
+    test.assertEqual(candidate_checkout.get("with", {}).get("fetch-depth"), 0)
+    summary_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Summarize the informational package expansion"
+    )
+    test.assertEqual(summary_step.get("working-directory"), "candidate")
+    test.assertIn(
+        "python3 ../trusted/scripts/ci_validate_pr_candidate.py",
+        summary_step["run"],
+    )
+    test.assertIn(
+        ".venv/bin/python scripts/ci_change_owned.py report",
+        summary_step["run"],
+    )
+    test.assertIn("--expected-base-sha", summary_step["run"])
+    test.assertIn("--validate-checkout", summary_step["run"])
+    candidate_validation = summary_step["run"].split("report_status=0", 1)[0]
+    test.assertNotIn("--plan ", candidate_validation)
+    venv_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Create uv-managed venv"
+    )
+    test.assertEqual(venv_step.get("working-directory"), "candidate")
+    publish_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Publish informational package-expansion summary"
+    )
+    test.assertEqual(publish_step.get("working-directory"), "candidate")
+    upload_step = next(
+        step
+        for step in summary["steps"]
+        if step.get("name") == "Upload informational package-expansion summary"
+    )
+    test.assertEqual(
+        upload_step["with"]["path"],
+        "candidate/target/integration-change/package-expansion-summary",
+    )
+    for step in summary["steps"]:
+        if step.get("uses", "").startswith("actions/download-artifact@"):
+            test.assertTrue(
+                step["with"]["path"].startswith("candidate/target/integration-change")
+            )
 
 
 class ChangeOwnedWorkflowTests(unittest.TestCase):
@@ -196,6 +258,80 @@ class ChangeOwnedWorkflowTests(unittest.TestCase):
             ):
                 assert_change_owned_topology(
                     self, workflow, self.expansion_workflow
+                )
+
+    def test_expansion_summary_cannot_mix_trusted_and_candidate_tools(self) -> None:
+        for mutation in (
+            "main-validator",
+            "trusted-reporter",
+            "unbound-checkout",
+            "missing-candidate",
+            "missing-venv-directory",
+            "wrong-upload",
+        ):
+            expansion_workflow = copy.deepcopy(self.expansion_workflow)
+            summary = expansion_workflow["jobs"]["package-expansion-summary"]
+            if mutation == "main-validator":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Summarize the informational package expansion"
+                )
+                step["run"] = step["run"].replace(
+                    "python3 ../trusted/scripts/ci_validate_pr_candidate.py",
+                    ".venv/bin/python scripts/ci_validate_pr_candidate.py",
+                )
+            elif mutation == "trusted-reporter":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Summarize the informational package expansion"
+                )
+                step["run"] = step["run"].replace(
+                    ".venv/bin/python scripts/ci_change_owned.py report",
+                    "python3 ../trusted/scripts/ci_change_owned.py report",
+                )
+            elif mutation == "unbound-checkout":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Summarize the informational package expansion"
+                )
+                step["run"] = step["run"].replace(
+                    "--validate-checkout 2>&1",
+                    "2>&1",
+                )
+            elif mutation == "missing-candidate":
+                summary["steps"] = [
+                    step
+                    for step in summary["steps"]
+                    if step.get("with", {}).get("path") != "candidate"
+                ]
+            elif mutation == "missing-venv-directory":
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name") == "Create uv-managed venv"
+                )
+                step.pop("working-directory")
+            else:
+                step = next(
+                    step
+                    for step in summary["steps"]
+                    if step.get("name")
+                    == "Upload informational package-expansion summary"
+                )
+                step["with"]["path"] = (
+                    "trusted/target/integration-change/package-expansion-summary"
+                )
+            with self.subTest(mutation=mutation), self.assertRaises(
+                AssertionError
+            ):
+                assert_change_owned_topology(
+                    self, self.workflow, expansion_workflow
                 )
 
 

@@ -159,29 +159,42 @@ jobs:
     needs: [integration-plan, package-expansion-shard]
     if: ${{ always() }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout trusted candidate validator
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+
+      - name: Checkout the requested pull request merge candidate
+        uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/merge
+          path: candidate
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv
         run: uv venv --python 3.11
+        working-directory: candidate
 
       - name: Download integration change plan
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           name: integration-change-plan
-          path: target/integration-change
+          path: candidate/target/integration-change
 
       - name: Download available package-expansion receipts
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
           pattern: integration-package-expansion-*
-          path: target/integration-change/receipts/package-expansion
+          path: candidate/target/integration-change/receipts/package-expansion
 
       - name: Summarize the informational package expansion
+        working-directory: candidate
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -193,12 +206,16 @@ jobs:
           mkdir -p target/integration-change/package-expansion-summary
           if [ -f target/integration-change/plan.json ]; then
             candidate_status=0
+            expected_base_sha=$(
+              jq -r '.base_sha // empty' target/integration-change/plan.json
+            )
             candidate_output=$(
-              .venv/bin/python scripts/ci_validate_pr_candidate.py \
+              python3 ../trusted/scripts/ci_validate_pr_candidate.py \
                 --repository "$REPOSITORY" \
                 --pr-number "$PR_NUMBER" \
                 --expected-head-sha "$EXPECTED_HEAD_SHA" \
-                --plan target/integration-change/plan.json 2>&1
+                --expected-base-sha "$expected_base_sha" \
+                --validate-checkout 2>&1
             ) || candidate_status=$?
             report_status=0
             .venv/bin/python scripts/ci_change_owned.py report \
@@ -235,6 +252,7 @@ jobs:
 
       - name: Publish informational package-expansion summary
         if: always()
+        working-directory: candidate
         run: |
           if [ -f target/integration-change/package-expansion-summary/summary.md ]; then
             cat target/integration-change/package-expansion-summary/summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -245,6 +263,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: integration-package-expansion-summary
-          path: target/integration-change/package-expansion-summary
+          path: candidate/target/integration-change/package-expansion-summary
           if-no-files-found: error
           retention-days: 14
