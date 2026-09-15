@@ -1,5 +1,7 @@
 name: Hull Conformance
 
+run-name: ${{ inputs.retarget_token != '' && format('Retarget Hull {0}', inputs.retarget_token) || github.workflow }}
+
 # The Hull Phase 5b conformance gate: runs the frozen, version-stamped Hull
 # conformance corpus (tests/conformance/hull/) against the just-built chelis
 # binary and FAILS on any CompilerUnsound, unexplained Disagree, or EvalDisagree.
@@ -18,13 +20,33 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose synthetic merge must be tested
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact open pull-request head
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact retargeted base commit
+        required: true
+        type: string
+      retarget_token:
+        description: Unique coordinator token
+        required: true
+        type: string
 
 concurrency:
-  group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,29 +64,66 @@ jobs:
     name: Detect docs-only changes (conformance)
     runs-on: ubuntu-latest
     outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
-      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
-      # expressions have no arithmetic. See ci.yml's changes job.
-      - name: Checkout
-        if: github.event_name == 'pull_request'
+      - name: Checkout trusted retarget validator
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.expected_base_sha }}
+          path: trusted
           fetch-depth: 1
+
+      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
+      # expressions have no arithmetic. See ci.yml's changes job.
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          path: candidate
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+
+      - name: Validate exact retarget candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: >-
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py
+          --repository "${{ github.repository }}"
+          --pr-number "${{ inputs.pr_number }}"
+          --expected-head-sha "${{ inputs.expected_head_sha }}"
+          --expected-base-sha "${{ inputs.expected_base_sha }}"
+          --validate-checkout
+
+      - name: Record exact candidate
+        id: candidate
+        working-directory: candidate
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
       - name: Compute docs_only
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
+        working-directory: candidate
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          else
+            git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+          fi
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
@@ -89,6 +148,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py). This

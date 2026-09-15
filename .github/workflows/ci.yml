@@ -1,17 +1,39 @@
 name: CI
 
+run-name: ${{ inputs.retarget_token != '' && format('Retarget CI {0}', inputs.retarget_token) || github.workflow }}
+
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose synthetic merge must be tested
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact open pull-request head
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact retargeted base commit
+        required: true
+        type: string
+      retarget_token:
+        description: Unique coordinator token
+        required: true
+        type: string
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Generic PR edits never enter this workflow. Exact-base retarget dispatches
+  # and normal PR updates share the implementation group for the same PR.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-implementation
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,29 +55,64 @@ jobs:
   changes:
     name: Detect docs-only changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
       diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
     steps:
-      # Shallow checkout (depth 1); the detect step deepens to the PR
-      # commit range. GitHub Actions expressions have no arithmetic, so
-      # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
-      # On push the detect step short-circuits without needing history.
-      - name: Checkout
-        if: github.event_name == 'pull_request'
+      - name: Checkout trusted retarget validator
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.expected_base_sha }}
+          path: trusted
           fetch-depth: 1
+
+      # Shallow checkout (depth 1); the detect step deepens to the PR
+      # commit range. A retarget dispatch fetches the exact synthetic merge
+      # with full parents so the trusted validator can bind both sides.
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha }}
+          path: candidate
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+
+      - name: Validate exact retarget candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: >-
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py
+          --repository "${{ github.repository }}"
+          --pr-number "${{ inputs.pr_number }}"
+          --expected-head-sha "${{ inputs.expected_head_sha }}"
+          --expected-base-sha "${{ inputs.expected_base_sha }}"
+          --validate-checkout
+
+      - name: Record exact candidate
+        id: candidate
+        working-directory: candidate
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
       - name: Compute docs_only
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
+        working-directory: candidate
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             # push-to-main (or any non-PR event) always runs the full
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -68,7 +125,11 @@ jobs:
           # base tip's parent so base..head resolves), then backstop-fetch
           # the base commit so it is present as an object even on a stale
           # count (force-push between the event and the run).
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+          else
+            git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+          fi
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
@@ -82,13 +143,14 @@ jobs:
     name: Rejection Authority Liveness
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
     permissions:
       contents: read
       issues: read
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       - name: Install uv
@@ -103,7 +165,7 @@ jobs:
       - name: Validate rejection issue authorities against GitHub
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/validate_rejection_issue_manifest.py --pr-head "$PR_HEAD"
 
   # C2.2's producer seal depends on same-crate privacy, which an external
@@ -114,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
     permissions:
       contents: read
     env:
@@ -123,6 +185,8 @@ jobs:
       CARGO_TARGET_DIR: target/diagnostic-kind-oracle
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -166,6 +230,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -234,6 +300,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Small compiler fixtures remain here; full C6 execution is nightly-owned.
       - name: Install Rust toolchain
@@ -278,6 +346,8 @@ jobs:
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Require every lint and unit worker
         run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
@@ -314,6 +384,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo + cvc5 build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -473,6 +545,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # m4 is required by GMP's configure; cmake/g++/libclang support the cvc5
       # source build. The pinned snapshot makes package indices and payloads
@@ -568,6 +642,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -632,6 +708,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
@@ -646,10 +723,10 @@ jobs:
 
       - name: Derive the change-owned and package-expansion plan
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name == 'workflow_dispatch' && 'pull_request' || github.event_name }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
+          AFTER: ${{ needs.changes.outputs.candidate_sha }}
         run: >-
           .venv/bin/python scripts/ci_change_owned.py plan
           --event-name "$EVENT_NAME"
@@ -683,6 +760,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -746,6 +825,8 @@ jobs:
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -806,154 +887,14 @@ jobs:
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Require all integration legs
         run: >-
           python3 scripts/ci_require_success.py
           ci-fast=${{ needs.ci-fast.result }}
           change-owned-report=${{ needs.change-owned-report.result }}
-
-  package-expansion-shard:
-    name: Informational Package Expansion (bucket ${{ matrix.shard }})
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, integration-plan, change-owned-report]
-    if: ${{ !cancelled() && needs.change-owned-report.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Restore cargo registry and build cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          save-if: false
-
-      - name: Install Python binding dependencies
-        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      # Cache restoration can replace target/; install the current plan last.
-      - name: Download integration change plan
-        uses: actions/download-artifact@v7
-        with:
-          name: integration-change-plan
-          path: target/integration-change
-
-      - name: Execute the informational package-expansion shard
-        env:
-          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: >-
-          .venv/bin/python scripts/ci_change_owned.py run-shard
-          --plan target/integration-change/plan.json
-          --lane package-expansion
-          --shard ${{ matrix.shard }}
-          --output target/integration-change/package-expansion-${{ matrix.shard }}
-
-      - name: Upload package-expansion shard receipt
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: integration-package-expansion-${{ matrix.shard }}
-          path: target/integration-change/package-expansion-${{ matrix.shard }}
-          if-no-files-found: warn
-          retention-days: 14
-
-  package-expansion-summary:
-    name: Informational Package Expansion Summary
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, integration-plan, change-owned-report, package-expansion-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv
-        run: uv venv --python 3.11
-
-      - name: Download integration change plan
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          name: integration-change-plan
-          path: target/integration-change
-
-      - name: Download available package-expansion receipts
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          pattern: integration-package-expansion-*
-          path: target/integration-change/receipts/package-expansion
-
-      - name: Summarize the informational package expansion
-        env:
-          PLANNER_RESULT: ${{ needs.integration-plan.result }}
-          REQUIRED_RESULT: ${{ needs.change-owned-report.result }}
-          EXPANSION_RESULT: ${{ needs.package-expansion-shard.result }}
-        run: |
-          mkdir -p target/integration-change/package-expansion-summary
-          if [ -f target/integration-change/plan.json ]; then
-            .venv/bin/python scripts/ci_change_owned.py report \
-              --plan target/integration-change/plan.json \
-              --lane package-expansion \
-              --receipts-root target/integration-change/receipts/package-expansion \
-              --output target/integration-change/package-expansion-summary
-          else
-            {
-              echo "# Informational package expansion"
-              echo
-              echo "Planner: ${PLANNER_RESULT}"
-              echo "Required change-owned report: ${REQUIRED_RESULT}"
-              echo "Expansion workers: ${EXPANSION_RESULT}"
-              echo
-              echo "No plan artifact was available, so package expansion did not run."
-            } > target/integration-change/package-expansion-summary/summary.md
-          fi
-
-      - name: Publish informational package-expansion summary
-        if: always()
-        run: |
-          if [ -f target/integration-change/package-expansion-summary/summary.md ]; then
-            cat target/integration-change/package-expansion-summary/summary.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload informational package-expansion summary
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: integration-package-expansion-summary
-          path: target/integration-change/package-expansion-summary
-          if-no-files-found: error
-          retention-days: 14
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
@@ -968,6 +909,8 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.ci-fast.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -1014,6 +957,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -1043,6 +988,8 @@ jobs:
   no-ai-authorship:
     name: No AI authorship markers
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() }}
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
       # repo history (chelis#421). GitHub Actions expressions have no
@@ -1053,19 +1000,26 @@ jobs:
       # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 1
 
       - name: Check commits for AI authorship markers
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ] ||
+             [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Deepen head to the PR commit range, then backstop-fetch the
             # base commit so `base..head` resolves at the shallow boundary
             # (both no-ops if already present).
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            else
+              git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+            fi
             git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
@@ -1111,6 +1065,8 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() }}
     # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     # This job compiles the chelis-e2e skill-suite test binary.
     env:
@@ -1128,6 +1084,7 @@ jobs:
       # green for the right reason.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
 
       # Free ~25-30 GB before the cargo build; see
@@ -1150,15 +1107,8 @@ jobs:
       - name: Report Phase 3 required-test changes
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
-
-      - name: Require protected-test acknowledgements
-        if: github.event_name == 'pull_request'
-        env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: .venv/bin/python scripts/phase3_test_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase3-test-changes.json
 
       - name: Publish Phase 3 required-test changes
         if: ${{ always() }}
@@ -1171,7 +1121,7 @@ jobs:
       - name: Report Phase 4B contract changes
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
 
       - name: Publish Phase 4B contract changes
@@ -1208,20 +1158,6 @@ jobs:
       # contract diff without requiring a pull request body.
       - name: Validate the chelis#729 Phase 4B freeze
         run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py
-
-      # The enforcing half. Each changed contract file, atom and region must
-      # be named by its exact `Frozen-contract-change:` address in the body.
-      # The body is untrusted text written by the PR author, so it is passed
-      # through the environment and never interpolated into a shell command.
-      #
-      # Validate the event head against the synthetic merge's second parent
-      # and compare with its actual first parent, as the published report does.
-      - name: Require frozen contract acknowledgements
-        if: github.event_name == 'pull_request'
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY
 
       - name: Install mdBook
         uses: taiki-e/install-action@v2
