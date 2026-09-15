@@ -8230,6 +8230,13 @@ fn check_fences_non_direct_transform_targets() {
             "grad",
         ),
         (
+            "grad_top_level_alias",
+            "def loss(x: f32) -> f32 = mul(x, x)\n\
+             g = loss\n\
+             out = grad(g)(1.0f32)\n",
+            "grad",
+        ),
+        (
             "grad_shadowed_lambda",
             "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
              out = {\n\
