@@ -70,10 +70,11 @@ impl TypeUseSite {
     }
 }
 
-/// Source location owned by one type-resolution root. Explicit producer span
+/// Source location owned by one type-resolution node. Explicit producer span
 /// metadata wins; otherwise the structural AST range is retained and exposed
 /// through a stable `source:<start>..<end>` identifier as well as the byte
-/// offset. The value is copied out of the AST so resolver reuse is safe.
+/// offset. A nested node with an explicitly unknown `0..0` span remains
+/// unknown rather than inheriting its parent's location.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeDiagnosticLocation {
     span_offset: Option<usize>,
@@ -501,13 +502,15 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     fn enter_expr(&mut self, expr: &deep::Expr) {
-        self.current_location = TypeDiagnosticLocation::from_expr(expr)
-            .or_else(|| self.resolution_location.clone())
-            .or_else(|| self.owner_location.clone());
+        // `Some(default)` is an intentional unknown-location sentinel. It
+        // prevents `diagnostic_location` from falling through to the root or
+        // owner after a legacy child explicitly says its token span is unknown.
+        self.current_location = Some(TypeDiagnosticLocation::from_expr(expr).unwrap_or_default());
     }
 
     fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
-        self.recover_type(expr).into_result()
+        let (form, tag, children) = self.type_form_expr(expr)?;
+        self.recover_parts(form, tag, children).into_result()
     }
 
     fn resolve_atomic_type(

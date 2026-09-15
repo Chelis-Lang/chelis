@@ -350,6 +350,10 @@ impl std::fmt::Display for DimensionLiteral {
 }
 
 /// A tensor precision spelling with the exact token span that authored it.
+///
+/// Direct human-readable Serde of [`TypeExpr`] accepts the former string field
+/// as a compatibility input. The compiler API's separate `surf_ast` wire type
+/// remains string-valued and is not this Rust AST representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TensorPrecision {
     name: String,
@@ -379,18 +383,29 @@ impl<'de> Deserialize<'de> for TensorPrecision {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        struct Current {
+            name: String,
+            span: Span,
+        }
+
+        if !deserializer.is_human_readable() {
+            let Current { name, span } = Current::deserialize(deserializer)?;
+            return Ok(Self { name, span });
+        }
+
+        #[derive(Deserialize)]
         #[serde(untagged)]
         enum Representation {
-            Current { name: String, span: Span },
+            Current(Current),
             Legacy(String),
         }
 
         match Representation::deserialize(deserializer)? {
-            Representation::Current { name, span } => Ok(Self { name, span }),
+            Representation::Current(Current { name, span }) => Ok(Self { name, span }),
             Representation::Legacy(name) => Ok(Self {
                 name,
-                // The former serialized field carried only the spelling, so
-                // no exact token location can be reconstructed honestly.
+                // The former human-readable field carried only the spelling,
+                // so no exact token location can be reconstructed honestly.
                 span: Span::new(0, 0),
             }),
         }

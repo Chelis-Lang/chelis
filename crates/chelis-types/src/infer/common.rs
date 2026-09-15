@@ -2514,7 +2514,7 @@ pub(super) fn infer_top_level(
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
 ) -> Option<(String, Type)> {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
+    let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
         // `((var {} f) (var {} x))` was never type-checked while the
@@ -2657,9 +2657,14 @@ pub(super) fn infer_top_level(
         let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
+            let property_parameter_annotations_are_copies = declaration_meta
+                .chelis_role()
+                .is_some_and(|role| role.value() == "property")
+                && declaration_meta.property_quantifiers().is_some();
             let inferred = infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
+                property_parameter_annotations_are_copies,
                 &mut body_env,
                 vg,
                 subst,

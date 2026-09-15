@@ -94,6 +94,7 @@ pub(super) fn infer_fn(
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
     decl_ty: &Type,
+    property_parameter_annotations_are_copies: bool,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -123,7 +124,19 @@ pub(super) fn infer_def_body_with_sig(
         };
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
+    let params = if property_parameter_annotations_are_copies {
+        // Surf properties retain typed `property_quantifiers`, and Deep
+        // requires the copied fn parameter carrier to match them. The adjacent
+        // defsig is the semantic type owner, exactly as for an ordinary
+        // inline-typed def; resolving the copied carrier again would report
+        // one authored quantifier twice.
+        extract_param_names(&kids[0])
+            .into_iter()
+            .map(|name| (name, None))
+            .collect()
+    } else {
+        extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env))
+    };
     let mut param_types = Vec::with_capacity(params.len());
     let mut fn_env = env.clone();
     for (index, (pname, ty_ann)) in params.iter().enumerate() {
@@ -172,6 +185,32 @@ pub(super) fn infer_def_body_with_sig(
     let resolved_body = subst.apply(&body_ty);
 
     Type::Fn(resolved_params, Box::new(resolved_body))
+}
+
+fn extract_param_names(expr: &deep::Expr) -> Vec<String> {
+    let elems = match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
+        deep::Expr::List(list, _) => list.elements.as_slice(),
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return Vec::new(),
+    };
+    elems
+        .iter()
+        .filter_map(|expr| match expr {
+            deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
+            deep::Expr::MetaExpr(meta, _) => symbol_name(&meta.expr).map(str::to_string),
+            deep::Expr::List(list, _) => list
+                .elements
+                .first()
+                .and_then(symbol_name)
+                .map(str::to_string),
+            deep::Expr::BareList(elements, _) => {
+                elements.first().and_then(symbol_name).map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).

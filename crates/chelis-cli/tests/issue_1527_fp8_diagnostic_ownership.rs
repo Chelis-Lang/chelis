@@ -15,6 +15,7 @@ struct CheckOutput {
 enum DiagnosticKind {
     UnsupportedTensorPrecision,
     DimensionMismatch,
+    TypeMismatch,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +88,32 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
     }
 }
 
+fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
+    let temp = tempdir().expect("create fixture directory");
+    let path = temp.path().join("main.ch");
+    fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("find CLI")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("prove")
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .expect("run prove");
+    let records = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!(
+                    "parse prove record: {error}; line={line:?}; stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+        })
+        .collect();
+    (output.status.code().unwrap_or(-1), records)
+}
+
 #[test]
 fn one_reserved_parameter_site_produces_one_cli_error() {
     for name in ["f8e4m3", "f8e5m2"] {
@@ -94,6 +121,68 @@ fn one_reserved_parameter_site_produces_one_cli_error() {
             &format!("def classify(x: {name}) -> int32 = 0i32\n"),
             &[name],
         );
+    }
+}
+
+#[test]
+fn no_clause_inline_precision_accepts_and_explicit_clauses_remain_authoritative() {
+    for source in [
+        "def inspect(x: tensor[3, p]) -> tensor[3, p] = x\n",
+        "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
+    ] {
+        let (success, report, _) = check(source);
+        assert!(success, "{source}: {report:?}");
+        assert_eq!(report.score, 1.0, "{source}: {report:?}");
+        assert!(report.errors.is_empty(), "{source}: {report:?}");
+    }
+
+    let (success, report, _) = check("def inspect[q](x: tensor[3, p]) -> tensor[3, p] = x\n");
+    assert!(!success, "{report:?}");
+    assert!(report.score < 1.0, "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.message.contains("`p`")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn property_quantifier_reserved_types_produce_one_check_error() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for ty in [name.to_string(), format!("tensor[3, {name}]")] {
+            assert_rejected_sites(
+                &format!("@property classify forall(x: {ty}):\n  true\n"),
+                &[name],
+            );
+        }
+    }
+}
+
+#[test]
+fn property_quantifier_reserved_types_produce_one_prove_check_diagnostic() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for ty in [name.to_string(), format!("tensor[3, {name}]")] {
+            let source = format!("@property classify forall(x: {ty}):\n  true\n");
+            let (code, records) = prove(&source);
+            assert_eq!(code, 3, "{source}: {records:#?}");
+            let check_errors = records
+                .iter()
+                .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+                .collect::<Vec<_>>();
+            assert_eq!(check_errors.len(), 1, "{source}: {records:#?}");
+            let diagnostics = check_errors[0]["diagnostics"]
+                .as_array()
+                .expect("prove check error carries diagnostics");
+            assert_eq!(diagnostics.len(), 1, "{source}: {records:#?}");
+            assert!(
+                diagnostics[0]
+                    .as_str()
+                    .is_some_and(|text| text.contains(name)),
+                "{source}: {records:#?}"
+            );
+        }
     }
 }
 

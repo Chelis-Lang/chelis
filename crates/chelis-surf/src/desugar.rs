@@ -1306,10 +1306,7 @@ impl DesugarCtx {
         // than `(t-prim {} <name>)`. The same identifier may also act
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
-        // the tensor type, not by per-name kind tracking. When
-        // `type_binders` is empty, a parameter's unbound precision remains
-        // a primitive spelling. Moving its type into a generated signature
-        // does not grant it the standalone signature's binding context.
+        // the tensor type, not by per-name kind tracking.
         let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
         let synthesize_signature = (params.iter().any(|param| param.ty.is_some())
@@ -1369,10 +1366,10 @@ impl DesugarCtx {
         // positions are all wildcards still reports a bound naming a binder
         // the declaration never uses.
         if synthesize_signature {
-            // The result retains its signature context. Parameter types use
-            // param_ann_tvar_set instead, because each keeps its original
-            // inline context under Surf §P4b. A generated signature must not
-            // silently turn an invalid parameter precision into a binder.
+            // An explicit clause is authoritative. With no clause, P4b applies
+            // WS-A5 implicit collection to the entire synthesized signature,
+            // including its parameter positions. Reserved dtype spellings are
+            // already excluded by `collect_sig_type_vars`.
             let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
                 dim_set.clone()
             } else {
@@ -1390,7 +1387,7 @@ impl DesugarCtx {
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
-                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &param_ann_tvar_set),
+                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                     None => node(DeepTag::TVar, vec![sym("_")]),
                 })
                 .collect();

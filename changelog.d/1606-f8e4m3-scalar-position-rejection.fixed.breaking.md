@@ -9,9 +9,11 @@ Body annotations use inference holes instead of duplicate type syntax.
 Standalone signatures and independently authored parameter annotations remain independent.
 
 Rust callers constructing `TypeExpr::Tensor` now pass `TensorPrecision` rather than
-`String`. Serialized Surf AST tensor precisions now use `{name, span}`; the prior
-string form remains accepted during deserialization with an unknown `0..0` token
-span, while current payloads preserve exact spans across serialization round trips.
+`String`. Direct human-readable Serde for the Rust `chelis_surf::TypeExpr` AST now
+uses `{name, span}` and accepts the prior string input with an unknown `0..0` token
+span. Current binary Serde round-trips the structured form; no legacy binary format
+is promised. The compiler API's separate structured `surf_ast` wire remains a
+string-valued precision field.
 
 Addresses [#1606](https://github.com/Chelis-Lang/chelis/issues/1606) and
 [#1527](https://github.com/Chelis-Lang/chelis/issues/1527).

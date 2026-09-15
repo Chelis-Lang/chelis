@@ -649,7 +649,8 @@ fn deferred_tensor_precision_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
         "(def {} f (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 2) \
            (t-prim {} f8e4m3))})) (var {} x)))",
-        "tensor element precision `f8e4m3` is deferred",
+        "cannot use `f8e4m3` as a tensor element dtype: f8e4m3 is deferred per \
+         spec/04-type-system.md §1.1.1",
         "t-tensor with f8e4m3 element precision",
     );
 }

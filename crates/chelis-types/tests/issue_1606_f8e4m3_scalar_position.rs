@@ -15,6 +15,7 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_surf::resugar::resugar_program;
 use chelis_types::{check_ir_program, check_typed_program};
+use serde_json::Value;
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
@@ -99,10 +100,123 @@ fn assert_one_report_per_site(source: &str, names: &[&str]) {
     }
 }
 
+fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_deep::Expr> {
+    let decls = parse_str(source).expect("parse current Surf AST");
+    let mut encoded = serde_json::to_value(decls).expect("serialize Surf AST");
+    let precision = &mut encoded[0]["TypeAlias"]["ty"]["Tensor"][1];
+    assert_eq!(
+        precision["name"],
+        Value::String(name.to_string()),
+        "fixture must select the tensor precision child"
+    );
+    *precision = Value::String(name.to_string());
+    let legacy: Vec<chelis_surf::ast::Decl> =
+        serde_json::from_value(encoded).expect("decode legacy precision string");
+    desugar_program(&legacy)
+}
+
 #[test]
 fn a_reserved_parameter_site_reports_once_at_both_entries() {
     for name in ["f8e4m3", "f8e5m2"] {
         assert_one_report_per_site(&format!("def classify(x: {name}) -> int32 = 0i32"), &[name]);
+    }
+}
+
+#[test]
+fn no_clause_inline_tensor_precision_uses_implicit_signature_collection() {
+    let source = "def inspect(x: tensor[3, p]) -> tensor[3, p] = x";
+    let program = surf_to_deep(source);
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        result.expect("the no-clause synthesized signature implicitly binds and links `p`");
+    }
+
+    let explicit = surf_to_deep("def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x");
+    for result in [check_ir_program(&explicit), check_typed_program(&explicit)] {
+        result.expect("an explicit matching clause remains valid");
+    }
+
+    let excluded = surf_to_deep("def inspect[q](x: tensor[3, p]) -> tensor[3, p] = x");
+    for result in [check_ir_program(&excluded), check_typed_program(&excluded)] {
+        let report = result.expect_err("an explicit clause is authoritative over `p`");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains("`p`")),
+            "{:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn property_quantifier_reserved_types_have_one_semantic_diagnostic_owner() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for ty in [name.to_string(), format!("tensor[3, {name}]")] {
+            assert_one_report_per_site(
+                &format!("@property classify forall(x: {ty}):\n  true"),
+                &[name],
+            );
+        }
+    }
+}
+
+#[test]
+fn property_quantifier_recovery_keeps_an_independent_body_error() {
+    use chelis_types::errors::CheckErrorKind;
+
+    let program = surf_to_deep("@property classify forall(x: f8e4m3):\n  0i32");
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        let report = result.expect_err("the binder and non-bool body must both reject");
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision))
+                .count(),
+            1,
+            "{:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+            "{:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let source = format!("type Rejected = tensor[3, {name}]");
+        let program = surf_with_legacy_tensor_precision(&source, name);
+        for (entry, result) in [
+            ("ir", check_ir_program(&program)),
+            ("typed", check_typed_program(&program)),
+        ] {
+            let report = result.expect_err("legacy reserved precision must reject");
+            assert_eq!(
+                report.errors.len(),
+                1,
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+            let error = &report.errors[0];
+            assert!(
+                matches!(
+                    error.kind,
+                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                ),
+                "{entry}/{name}: {error:?}"
+            );
+            assert_eq!(error.span_offset, None, "{entry}/{name}: {error:?}");
+            assert_eq!(error.span_id, None, "{entry}/{name}: {error:?}");
+        }
     }
 }
 
@@ -574,16 +688,17 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
 }
 
 #[test]
-fn signature_ownership_does_not_activate_an_unbound_inline_precision() {
-    for (binders, accepted) in [("", false), ("[p]", true)] {
+fn signature_ownership_respects_implicit_fallback_and_explicit_authority() {
+    for (binders, accepted) in [("", true), ("[p]", true), ("[q]", false)] {
         let program = surf_to_deep(&format!(
             "def inspect{binders}(x: tensor[3, p]) -> int32 = 0i32"
         ));
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             if accepted {
-                result.expect("an explicit precision binder remains valid");
+                result.expect("the applicable precision binder remains valid");
             } else {
-                let report = result.expect_err("an unbound inline precision remains invalid");
+                let report =
+                    result.expect_err("a precision outside the explicit clause remains invalid");
                 assert!(
                     report
                         .errors
