@@ -5,10 +5,11 @@ use chelis_compiler_api::schema::numbers::{
     NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, UnitInterval,
 };
 use chelis_compiler_api::schema::{
-    ArtifactAbiVersion, CheckResult, CompileTarget, CompiledArtifactManifest, DiagnosticSpan,
-    EvalResult, EvaluatedRoot, FitnessComponents, GradResult, LowerResult, NumericScalar,
-    OrderedInferredParameters, Span, TensorValue, WireApiEnvelope, WireBatchResult,
-    WireCheckResult, WireDag, WireDagNode, WireInferredDim, WireInferredParameter,
+    ApiEnvelope, ArtifactAbiVersion, CheckResult, CompileRequest, CompileTarget,
+    CompiledArtifactManifest, Diagnostic, DiagnosticSpan, EvalResult, EvaluatedRoot,
+    FitnessComponents, GradResult, LowerResult, NumericScalar, OrderedInferredParameters,
+    SourceKind, Span, TensorValue, WireApiEnvelope, WireBatchResult, WireCheckResult, WireDag,
+    WireDagNode, WireDeepErrorPath, WireDiagnostic, WireInferredDim, WireInferredParameter,
     WireInferredPrecision, WireInferredSignature, WireInferredType,
 };
 use chelis_types::{ElementRef, ScalarValue, TensorStorage};
@@ -345,6 +346,84 @@ fn artifact_manifest(request: &Request) -> Result<Value, String> {
     };
     serde_json::to_value(manifest).map_err(|e| e.to_string())
 }
+
+fn diagnostic_value(diagnostic: &WireDiagnostic) -> Value {
+    json!({"kind": diagnostic.kind, "message": diagnostic.message,
+        "severity": diagnostic.severity, "expected": diagnostic.expected,
+        "got": diagnostic.got, "suggestions": diagnostic.suggestions,
+        "span": diagnostic.span, "deep_path": diagnostic.deep_path,
+        "span_id": diagnostic.span_id})
+}
+
+fn schema_fields<T: schemars::JsonSchema>() -> Vec<String> {
+    let schema = schemars::schema_for!(T);
+    schema
+        .schema
+        .object
+        .expect("diagnostic object schema")
+        .properties
+        .into_keys()
+        .collect()
+}
+
+fn diagnostic_projection(request: &Request) -> Result<Value, String> {
+    if request.codec == "json" {
+        let decoded: WireDiagnostic = decode(request)?;
+        return Ok(json!({"wire": diagnostic_value(&decoded),
+            "severity_bits": format!("{:016x}", decoded.severity.get().to_bits())}));
+    }
+    if request.codec != "construct" {
+        return Err("unknown diagnostic codec".into());
+    }
+    let severity = UnitInterval::new(
+        serde_json::from_str(&request.input).map_err(|error| error.to_string())?,
+    )?;
+    let error = chelis_compiler_api::compiler::compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+                 reduce_window_max(x, [w], [s])\n\
+                 out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n"
+            .into(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .expect_err("runtime window list must produce its typed unsupported diagnostic");
+    let mut diagnostic = error.errors.into_iter().next().expect("one diagnostic");
+    let identity = diagnostic
+        .unsupported_identity()
+        .ok_or("missing internal identity")?;
+    let internal_identity =
+        identity.payload.tracking_issue.map(|issue| issue.number()) == Some(1058);
+    diagnostic.severity = severity;
+    diagnostic.expected = Some("literal window".into());
+    diagnostic.got = Some("runtime window".into());
+    diagnostic.suggestions = vec!["use literals".into()];
+    diagnostic.span = Some(DiagnosticSpan::Range {
+        offset: 9007199254740993,
+        len: 0,
+    });
+    diagnostic.deep_path = Some(WireDeepErrorPath {
+        def_qualified_name: "f".into(),
+        path: "0.1".into(),
+    });
+    diagnostic.span_id = Some("projection-witness".into());
+    let wire = serde_json::to_value(&diagnostic).map_err(|error| error.to_string())?;
+    let decoded: WireDiagnostic =
+        serde_json::from_value(wire.clone()).map_err(|error| error.to_string())?;
+    if diagnostic_value(&decoded) != wire {
+        return Err("diagnostic producer and consumer observations disagree".into());
+    }
+    let envelope =
+        serde_json::to_value(ApiEnvelope::<()>::failure("lower".into(), vec![diagnostic]))
+            .map_err(|error| error.to_string())?;
+    Ok(
+        json!({"wire": wire, "severity_bits": format!("{:016x}", decoded.severity.get().to_bits()),
+        "internal_identity": internal_identity, "envelope_matches": envelope["errors"][0] == wire,
+        "producer_schema_fields": schema_fields::<Diagnostic>(),
+        "consumer_schema_fields": schema_fields::<WireDiagnostic>()}),
+    )
+}
+
 fn main() {
     let mut output = io::BufWriter::new(io::stdout().lock());
     writeln!(output, "{}", json!({"schema_probe": 1})).expect("write probe header");
@@ -374,6 +453,7 @@ fn main() {
             "WireInferredDim" => observed_json::<WireInferredDim>(&request),
             "EvaluatedRoot" => observed_json::<EvaluatedRoot>(&request),
             "DiagnosticLocation" => source_location(&request),
+            "Diagnostic" => diagnostic_projection(&request),
             "WireApiEnvelope<EvalResult>" => {
                 decode::<WireApiEnvelope<EvalResult>>(&request).map(|v| {
                     envelope(v, |v| {
