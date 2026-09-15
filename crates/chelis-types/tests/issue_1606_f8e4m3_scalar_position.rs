@@ -326,6 +326,31 @@ fn checked_parameters_receive_their_actual_declared_types() {
 }
 
 #[test]
+fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
+    let source = "def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])";
+    let desugared = surf_to_deep(source);
+    let text = chelis_deep::printer::print_canonical_flat(&desugared);
+    let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
+    for (carrier, expressions) in [("desugared", desugared), ("stamped", stamped)] {
+        let report = check_ir_program(&expressions)
+            .expect_err("the zero-stride validator must retain declared tensor shapes");
+        assert_eq!(report.errors.len(), 1, "{carrier}: {:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("positive stride"),
+            "{carrier}: {:?}",
+            report.errors
+        );
+        assert!(
+            !report.errors[0]
+                .message
+                .contains("requires concrete tensor argument metadata"),
+            "{carrier}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
 fn source_annotation_presence_and_read_only_inference_survive_transport() {
     let program = surf_to_deep("def readonly(x, y: tensor[4, f32]) = add(x, y)");
     let text = chelis_deep::printer::print_canonical_flat(&program);

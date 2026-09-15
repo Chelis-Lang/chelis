@@ -1406,6 +1406,14 @@ pub(super) fn extend_ir_env_with_fn_params(
         let Some(ty) = meta.ty() else {
             continue;
         };
+        // An inline parameter whose generated `defsig` owns the real type
+        // carries a whole-slot hole here. The enclosing `Def` arm has already
+        // installed that signature type in this scope; replacing it with `_`
+        // would erase concrete shape evidence before validation. A real
+        // independently authored annotation still overrides as before.
+        if is_wildcard_tvar_expr(ty.expression()) {
+            continue;
+        }
         scoped.insert(name.to_string(), ty.expression().clone());
     }
     scoped

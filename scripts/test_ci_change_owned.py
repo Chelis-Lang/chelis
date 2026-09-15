@@ -337,6 +337,12 @@ class SchemaTests(unittest.TestCase):
         by_path = {rule.prefix: rule for rule in config.path_rules}
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
+        deep_spec = by_path["spec/03-deep-syntax.md"]
+        self.assertEqual(deep_spec.disposition, "packages")
+        self.assertEqual(
+            deep_spec.packages,
+            ("chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"),
+        )
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(

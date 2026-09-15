@@ -135,12 +135,7 @@ pub(super) fn infer_def_body_with_sig(
             .clone()
             .or_else(|| decl_args.get(index).cloned())
             .unwrap_or_else(|| vg.fresh_type());
-        product.record_inferred_contract(
-            &format!("function parameter `{pname}`"),
-            &ty,
-            env,
-            subst,
-        );
+        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
