@@ -1283,6 +1283,20 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_return_boundary.c_shared_callee_result_claims_are_invocation_scoped",
         ),
+        # #1771/#1945 continuation: measured eval and linked C baselines
+        # silently accept inherited claims across the pure-helper route.
+        _row(
+            "return.pure_helper.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_pure_helper.eval_inherited_result_claim_enters_pure_helpers",
+        ),
+        _row(
+            "return.pure_helper.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_pure_helper.c_inherited_result_claim_enters_pure_helpers",
+        ),
         # chelis#1923 and chelis#1791: pipe application semantics.
         # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument
         # insertion, and every consumer that met a `pipe` node reconstructed

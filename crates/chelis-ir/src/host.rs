@@ -751,6 +751,7 @@ impl HostExecutionPlan {
 
 #[derive(Debug)]
 struct TensorHelperSink {
+    transferred_result_claim_axes: Vec<crate::dag::RtAxis>,
     helpers: Vec<HostTensorHelper>,
     products: Vec<HelperExecutionProduct>,
     collect_execution: bool,
@@ -766,6 +767,7 @@ struct LoweredHostFunction {
 impl TensorHelperSink {
     fn new(collect_execution: bool, collect_trace: bool) -> Self {
         Self {
+            transferred_result_claim_axes: Vec::new(),
             helpers: Vec::new(),
             products: Vec::new(),
             collect_execution,
@@ -868,6 +870,9 @@ pub enum HostFunctionOrigin {
 
 #[derive(Debug, Clone)]
 pub struct HostFunction<T = HostTypeTerm> {
+    /// Exact authored literal axes whose obligations lowering installed in
+    /// this body's tensor helpers. Empty means the host owns those claims.
+    pub helper_result_claim_axes: Vec<crate::dag::RtAxis>,
     pub name: String,
     pub params: Vec<HostParam<T>>,
     pub ret_ty: T,
@@ -1753,6 +1758,7 @@ fn resolve_host_function(
     function: HostFunction,
 ) -> Result<ConcreteHostFunction, crate::HostTypeResolutionError> {
     Ok(ConcreteHostFunction {
+        helper_result_claim_axes: function.helper_result_claim_axes,
         name: function.name,
         params: function
             .params
@@ -3904,6 +3910,8 @@ fn host_def_kernel_product(
         return Ok(None);
     };
     let name = canonical;
+    let transfer_literal_result_claims =
+        top_level_fn_transfers_literal_result_claims(program, name);
     // A generic definition has no standalone kernel. Its checked application
     // supplies the precision/rank bindings, including when its result is bool
     // and would otherwise look concrete enough to classify as a kernel.
@@ -3967,14 +3975,27 @@ fn host_def_kernel_product(
     };
     let plan = if profile == crate::evaluation::EvaluationProfile::FixedControl {
         let context = cached_subexpr_lowering_context(program);
-        let plan = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
-            &signature.body_expr,
-            kernel_scope_types(&signature.scope, Some(&signature.params)),
-            &context,
-            Some(&expected),
-            true,
-            execution.expect("fixed profile is only selected by the evaluator"),
-        )?;
+        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
+        let execution = execution.expect("fixed profile is only selected by the evaluator");
+        let plan = if transfer_literal_result_claims {
+            crate::lower::try_lower_tensor_helper_evaluation_with_ordered_inputs(
+                &signature.body_expr,
+                scoped,
+                &context,
+                Some(&expected),
+                true,
+                execution,
+            )?
+        } else {
+            crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                &signature.body_expr,
+                scoped,
+                &context,
+                Some(&expected),
+                true,
+                execution,
+            )?
+        };
         let rebound =
             remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), &signature.scope, &expected);
         Some(
@@ -3995,6 +4016,7 @@ fn host_def_kernel_product(
             Some(&signature.params),
             &expected,
             random,
+            transfer_literal_result_claims,
         )?
     };
     if let Some(builtin) = kernel_dag_loads_builtin(&dag, &signature.scope) {
@@ -4114,7 +4136,10 @@ fn staged_def_kernel_product(
         program,
         &context,
         expected,
-        random,
+        crate::lower::StagedHostRegionLoweringOptions::for_declaration(
+            random,
+            top_level_fn_transfers_literal_result_claims(program, &signature.name),
+        ),
         execution_out,
     );
     let lowered = match lowered {
@@ -4923,6 +4948,8 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let transfer_literal_result_claims =
+        top_level_fn_transfers_literal_result_claims(program, &signature.name);
     match staged_def_kernel(program, signature, None)? {
         staged::StagingAttempt::Ready(kernel) => {
             return lower_staged_host_plan(
@@ -4931,7 +4958,10 @@ fn lower_def_body_kernel(
                 &signature.scope,
                 tensor_helpers,
             )
-            .map(Some);
+            .map(|body| {
+                record_literal_result_transfer(signature, tensor_helpers);
+                Some(body)
+            });
         }
         staged::StagingAttempt::HostControlBoundary => return Ok(None),
         staged::StagingAttempt::NotApplicable => {}
@@ -4957,7 +4987,18 @@ fn lower_def_body_kernel(
                 counter: 0,
             });
             #[cfg(feature = "lowering-trace")]
-            let (plan, trace) = if tensor_helpers.collect_trace {
+            let (plan, trace) = if tensor_helpers.collect_trace && transfer_literal_result_claims {
+                let (plan, trace) =
+                    crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
+                        &signature.body_expr,
+                        scoped,
+                        &context,
+                        Some(&expected),
+                        true,
+                        &planning,
+                    )?;
+                (plan, Some(trace))
+            } else if tensor_helpers.collect_trace {
                 let (plan, trace) =
                     crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
                         &signature.body_expr,
@@ -4968,6 +5009,18 @@ fn lower_def_body_kernel(
                         &planning,
                     )?;
                 (plan, Some(trace))
+            } else if transfer_literal_result_claims {
+                (
+                    crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
+                        &signature.body_expr,
+                        scoped,
+                        &context,
+                        Some(&expected),
+                        true,
+                        &planning,
+                    )?,
+                    None,
+                )
             } else {
                 (
                     crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
@@ -4982,14 +5035,25 @@ fn lower_def_body_kernel(
                 )
             };
             #[cfg(not(feature = "lowering-trace"))]
-            let plan = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
-                &signature.body_expr,
-                scoped,
-                &context,
-                Some(&expected),
-                true,
-                &planning,
-            )?;
+            let plan = if transfer_literal_result_claims {
+                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    &planning,
+                )?
+            } else {
+                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    &planning,
+                )?
+            };
             let rebound = remap_tensor_helper_dim_symbols(
                 plan.dag_for_inspection(),
                 &signature.scope,
@@ -5005,6 +5069,7 @@ fn lower_def_body_kernel(
                 trace.record_dimension_rebinding(plan.dag_for_inspection());
             }
             let (dag, execution) = plan.into_parts();
+            record_literal_result_transfer(signature, tensor_helpers);
             return Ok(Some(finish_tensor_helper_product(
                 dag,
                 Some(execution),
@@ -5017,7 +5082,20 @@ fn lower_def_body_kernel(
         }
     }
     #[cfg(feature = "lowering-trace")]
-    let lowered = if tensor_helpers.collect_trace {
+    let lowered = if tensor_helpers.collect_trace && transfer_literal_result_claims {
+        let context = cached_subexpr_lowering_context(program);
+        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
+        crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
+            &signature.body_expr,
+            scoped,
+            &context,
+            Some(&expected),
+            None,
+            0,
+            true,
+        )
+        .map(|(dag, _, trace)| ((dag, None), Some(trace)))
+    } else if tensor_helpers.collect_trace {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
         crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
@@ -5038,6 +5116,7 @@ fn lower_def_body_kernel(
             Some(&signature.params),
             &expected,
             None,
+            transfer_literal_result_claims,
         )
         .map(|lowered| (lowered, None))
     };
@@ -5049,6 +5128,7 @@ fn lower_def_body_kernel(
         Some(&signature.params),
         &expected,
         None,
+        transfer_literal_result_claims,
     );
     let (dag, _trace) = match lowered {
         #[cfg(feature = "lowering-trace")]
@@ -5081,6 +5161,7 @@ fn lower_def_body_kernel(
         return Ok(None);
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
+    record_literal_result_transfer(signature, tensor_helpers);
     Ok(Some(finish_tensor_helper_product(
         dag,
         None,
@@ -5090,6 +5171,18 @@ fn lower_def_body_kernel(
         tensor_helpers,
         expected,
     )))
+}
+
+fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
+    sink.transferred_result_claim_axes = tensor_type_from_host_input(&signature.ret_ty)
+        .into_iter()
+        .flat_map(|ty| ty.dims.into_iter().enumerate())
+        .filter_map(|(axis, dim)| {
+            matches!(dim, crate::dag::DimInfo::Lit(_)).then(|| {
+                crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits int32"))
+            })
+        })
+        .collect();
 }
 
 /// A `Load` named after a builtin means the lowerer treated a host-lane
@@ -5123,33 +5216,57 @@ fn lower_kernel_dag(
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     random: Option<RandomLoweringState>,
+    transfer_literal_result_claims: bool,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
     let scope_types = kernel_scope_types(scope, declaring_params);
     let (dag, next_random_counter) = match random {
-        None => (
-            crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-                expr,
-                scope_types,
-                &context,
-                declaring_params.is_some().then_some(expected),
-                None,
-                0,
-                declaring_params.is_some(),
-            )?
-            .0,
-            None,
-        ),
+        None => {
+            let lowered = if transfer_literal_result_claims {
+                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+                    expr,
+                    scope_types,
+                    &context,
+                    declaring_params.is_some().then_some(expected),
+                    None,
+                    0,
+                    declaring_params.is_some(),
+                )?
+            } else {
+                crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                    expr,
+                    scope_types,
+                    &context,
+                    declaring_params.is_some().then_some(expected),
+                    None,
+                    0,
+                    declaring_params.is_some(),
+                )?
+            };
+            (lowered.0, None)
+        }
         Some(state) => {
-            let (dag, counter) = crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-                expr,
-                scope_types,
-                &context,
-                declaring_params.is_some().then_some(expected),
-                state.seed,
-                state.counter,
-                declaring_params.is_some(),
-            )?;
+            let (dag, counter) = if transfer_literal_result_claims {
+                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+                    expr,
+                    scope_types,
+                    &context,
+                    declaring_params.is_some().then_some(expected),
+                    state.seed,
+                    state.counter,
+                    declaring_params.is_some(),
+                )?
+            } else {
+                crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                    expr,
+                    scope_types,
+                    &context,
+                    declaring_params.is_some().then_some(expected),
+                    state.seed,
+                    state.counter,
+                    declaring_params.is_some(),
+                )?
+            };
             (dag, Some(counter))
         }
     };
@@ -5343,9 +5460,11 @@ fn lower_host_function(
     } else {
         ret_ty
     };
+    let helper_result_claim_axes = tensor_helpers.transferred_result_claim_axes.clone();
     let (tensor_helpers, products) = tensor_helpers.into_parts();
     Ok(Some(LoweredHostFunction {
         function: HostFunction {
+            helper_result_claim_axes,
             name: name.to_string(),
             params,
             ret_ty,
@@ -5955,7 +6074,17 @@ fn lower_tensor_helper_dag(
     expected: &TensorType,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
-        lower_kernel_dag(expr, program, scope, None, expected, None).map(|(dag, _)| dag)
+        let context = cached_subexpr_lowering_context(program);
+        let (dag, _) = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+            expr,
+            collect_tensor_scope(scope).into_sorted(),
+            &context,
+            None,
+            None,
+            0,
+            false,
+        )?;
+        Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
     })
 }
 
@@ -5988,7 +6117,7 @@ fn lower_tensor_helper_product(
             });
             #[cfg(feature = "lowering-trace")]
             let lowered = if collect_trace {
-                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
+                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
                     expr,
                     scoped,
                     &context,
@@ -5998,7 +6127,7 @@ fn lower_tensor_helper_product(
                 )
                 .map(|(plan, trace)| (plan, Some(trace)))
             } else {
-                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
                     expr,
                     scoped,
                     &context,
@@ -6009,7 +6138,7 @@ fn lower_tensor_helper_product(
                 .map(|plan| (plan, None))
             };
             #[cfg(not(feature = "lowering-trace"))]
-            let lowered = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+            let lowered = crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
                 expr,
                 scoped,
                 &context,
@@ -6053,7 +6182,7 @@ fn lower_tensor_helper_product(
             let context = cached_subexpr_lowering_context(program);
             let scoped = collect_tensor_scope(scope).into_sorted();
             let (dag, _, trace) =
-                crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
+                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
                     expr, scoped, &context, None, None, 0, false,
                 )?;
             let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
@@ -6733,6 +6862,33 @@ fn summarize_sparse_helper_from_parts(
     try_summarize_sparse_helper(dag, inputs, output).ok()
 }
 
+fn literal_result_claim_owner_input<'a>(
+    dag: &'a crate::Dag,
+    root: &'a crate::dag::DagNode,
+    literal_result_claim_producers: &[bool],
+) -> Option<&'a crate::dag::DagNode> {
+    if !matches!(root.op, RiscOp::Copy)
+        || root.inputs.len() != 1
+        || root.shape_deps.is_empty()
+        || !root.shape_deps.iter().all(|dependency| {
+            matches!(
+                dag.get(*dependency).map(|node| &node.op),
+                Some(RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                })
+            ) || literal_result_claim_producers
+                .get(dependency.0)
+                .copied()
+                .unwrap_or(false)
+        })
+    {
+        return None;
+    }
+    let input = dag.get(root.inputs[0])?;
+    (input.output_type == root.output_type).then_some(input)
+}
+
 /// Derive a sparse-op summary for a helper whose DAG is a single
 /// `RiscOp::Gather`, `RiscOp::ScatterAdd`, or `RiscOp::Scatter` root
 /// whose operands are direct `RiscOp::Load`s referencing helper
@@ -6746,8 +6902,10 @@ fn summarize_sparse_helper_from_parts(
 ///
 /// * `MultipleRoots` — helper body has more than one DAG root.
 /// * `WildcardDim` — helper input/output carries a `Named("*", None)` wildcard.
-/// * `PostProcessingAfterSparseOp` — root op is not sparse but a sparse op
-///   appears in the body.
+/// * `PostProcessingAfterSparseOp` — the semantic root op is not sparse but a
+///   sparse op appears in the body. A compiler-internal `Copy` whose only
+///   shape dependencies are literal-result declaration tokens is an ownership
+///   carrier, not a semantic root.
 /// * `NonLoadOperand` — a sparse-op operand is not a direct `RiscOp::Load`, or
 ///   its `Load` does not match a helper input by name + type (rank / type
 ///   mismatch surfaces here until a dedicated `RankMismatch` check is added).
@@ -6800,11 +6958,11 @@ fn try_summarize_sparse_helper(
         .roots()
         .first()
         .expect("checked roots().len() == 1 above");
-    let root = match dag.get(root_id) {
+    let returned_root = match dag.get(root_id) {
         Some(node) => node,
         None => return Err(SparseSummaryAttempt::NotEligible),
     };
-    if root.output_type != *output {
+    if returned_root.output_type != *output {
         // Output-type mismatch is a structural shape issue — treat as
         // NotEligible to avoid emitting a diagnostic for cases that
         // are routed through a different specialization path.
@@ -6818,10 +6976,19 @@ fn try_summarize_sparse_helper(
         }));
     }
     let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
+    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
+    let mut root = returned_root;
+    while let Some(input) =
+        literal_result_claim_owner_input(dag, root, &literal_result_claim_producers)
+    {
+        root = input;
+    }
 
-    // Root must itself be a sparse op. If a sparse op exists deeper in
-    // the body but the root is something else, the recognizer rejects
-    // with `PostProcessingAfterSparseOp` (and names the tail op).
+    // The semantic root must itself be a sparse op. The lowerer may install a
+    // chain of same-typed Copies above it solely to retain a literal-result
+    // producer and its token through nested lowering boundaries; the helper
+    // above peels only those exact carriers. Any ordinary Copy or other op
+    // remains post-processing.
     let root_sparse_kind = sparse_op_kind(&root.op);
     if root_sparse_kind.is_none() {
         return Err(SparseSummaryAttempt::Rejected(HelperSummaryRejection {
@@ -12482,6 +12649,7 @@ fn lower_mono_specialized_function(
     let (tensor_helpers, products) = fn_tensor_helpers.into_parts();
     Ok(LoweredHostFunction {
         function: HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: symbol.to_string(),
             params,
             ret_ty,
@@ -13000,6 +13168,22 @@ fn top_level_fn_call_graph(
         .collect();
     *program.facts.call_graph.borrow_mut() = Some(graph.clone());
     graph
+}
+
+/// A pure declaration used from another declaration is a private tensor
+/// helper. Its authored literal result obligations transfer into that helper's
+/// DAG. Effecting definitions and definitions reached only from top-level
+/// roots retain the legacy direct lowering contract.
+fn top_level_fn_transfers_literal_result_claims(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> bool {
+    cached_def_effect_rows(program)
+        .get(name)
+        .is_some_and(|effects| effects.is_empty())
+        && top_level_fn_call_graph(program)
+            .iter()
+            .any(|(caller, callees)| caller != name && callees.contains(name))
 }
 
 fn recursive_top_level_fn_names_from_graph(
@@ -13583,6 +13767,41 @@ fn remap_tensor_helper_dim_symbols(
         })
     }
 
+    let mut expected_output = expected_output.clone();
+    if let Some(mut returned) = dag.roots().first().copied() {
+        loop {
+            let node = dag.get(returned).expect("helper root belongs to DAG");
+            for dependency in &node.shape_deps {
+                if let Some(crate::dag::DagNode {
+                    op:
+                        crate::dag::RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            axis: crate::dag::RtAxis::Lit(axis),
+                            ..
+                        },
+                    ..
+                }) = dag.get(*dependency)
+                    && let Some(dim) = expected_output.dims.get_mut(*axis as usize)
+                    && matches!(dim, crate::dag::DimInfo::Lit(_))
+                {
+                    *dim = crate::dag::DimInfo::Named("*".into(), None);
+                }
+            }
+            if !matches!(
+                node.op,
+                crate::dag::RiscOp::Copy
+                    | crate::dag::RiscOp::Cast { .. }
+                    | crate::dag::RiscOp::CastTrunc { .. }
+            ) {
+                break;
+            }
+            let Some(input) = node.inputs.first() else {
+                break;
+            };
+            returned = *input;
+        }
+    }
+    let expected_output = &expected_output;
     let formal_inputs = tensor_helper_inputs(dag);
     let mut actual_inputs = formal_inputs
         .iter()
@@ -18122,6 +18341,24 @@ mod tests {
     }
 
     #[test]
+    fn literal_result_claim_transfer_requires_a_pure_called_helper() {
+        let checked = surf_check(
+            "def pure(x: tensor[n, f32]) -> tensor[2, f32] = \
+                 shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             def random(x: tensor[n, f32]) -> tensor[2, f32] = \
+                 dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
+             def caller(x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        assert!(top_level_fn_transfers_literal_result_claims(
+            &session, "pure"
+        ));
+        assert!(!top_level_fn_transfers_literal_result_claims(
+            &session, "random"
+        ));
+    }
+
+    #[test]
     fn concat_admission_uses_static_named_extent_metadata() {
         let body = parse_one_expr(
             "(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))",
@@ -18565,6 +18802,7 @@ def bad[b](box: Box[b]) -> bool =
             symbol_keys: UnordMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
             functions: vec![LoweredHostFunction {
                 function: HostFunction {
+                    helper_result_claim_axes: Vec::new(),
                     name: "seeded__mono_0123456789abcdef".to_string(),
                     params: Vec::new(),
                     ret_ty: HostTypeTerm::Unit,
@@ -18790,6 +19028,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             })
         };
         HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: name.to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),

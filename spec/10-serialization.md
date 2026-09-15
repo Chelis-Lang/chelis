@@ -23,16 +23,16 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 12 is explicitly
+WireDag JSON is an exact-version contract. Schema version 13 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 11, and every future version are decode errors before any IR
+versions 1 through 12, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
 `WireRiscOp::ExtentWitness { site, parameter, axis, requirements, claims }`
 preserves a
 call's shape observation, its literal requirements and its named requirements
-separately. It has one
+separately. An observing witness has one
 tensor input followed by one earlier `ExtentWitness` input per named claim, and a
 rank-zero `int64` output. The normalized `int32` axis must
 be within the tensor input's rank. Every requirement uses the exact
@@ -53,6 +53,28 @@ The producer must support observing that axis before allocation; the token's
 node identity, not the label, identifies the required extent. Missing or
 inconsistent declaring dependencies, entry obligations on a result token,
 and unsupported producing axes are encoding and decoding errors.
+
+Its distinct `literal_result_claim` role retains one declaration's literal
+requirement independently of every other declaration. It has no value inputs,
+no shape dependencies of its own, empty `parameter` and `claims`, exactly one
+`NonnegativeExtent` in `requirements`, and a rank-zero `int64` output containing
+that requirement. Its normalized `RtAxis` identifies the returned axis of the
+producing operation that retains the token through `shape_deps`. The token's
+node identity identifies the declaration; equal literal values do not identify
+or discharge another declaration's obligation.
+
+The retaining operation preserves the primitive that produced the declared
+result. A cast retains its own primitive attribution and takes its input's
+placement under section 4.7 of the type system. The requirement must be
+available at that placement; an obligation imposed on an already-produced
+value executes at the declaring invocation boundary. A transformation that
+replaces a producing operation preserves its guard's primitive attribution and
+placement, or retains the guard-bearing operation. Declaration execution order
+is carried by the producer's ordered obligation dependencies; token allocation
+order and node numbers do not determine first failure. Missing or extra literal
+requirements, observing inputs, entry claims, invalid axes, unsupported producer
+relationships, and invalid dependency ordering are encoding and decoding errors.
+The observing `result_claim` role retains its exact declaring-witness contract.
 `parameter` is diagnostic text, not dimension identity. The node's source
 provenance and invocation dependencies survive transport as ordinary node
 fields and edges. Requirement order and duplicates are preserved; an empty

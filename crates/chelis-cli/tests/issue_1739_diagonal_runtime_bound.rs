@@ -317,9 +317,10 @@ fn eval_traps_when_the_declared_literal_is_spelled_through_an_alias() {
 /// behaviour, which is the property P1 broke.
 #[test]
 fn the_c_lane_traps_when_the_declared_literal_is_spelled_through_an_alias() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_alias", &alias_root(3, TWO_BY_FOUR));
     assert!(!ran, "the C lane must abort through the alias: {output}");
@@ -339,9 +340,10 @@ fn both_lanes_execute_exactly_through_an_alias_when_the_extents_agree() {
         stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
         "the satisfied aliased claim must produce its exact result, got {stdout}"
     );
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_alias_equal", &source);
     assert!(ran, "the C lane must execute: {output}");
     assert!(
@@ -376,9 +378,10 @@ fn eval_traps_on_a_block_bodied_return() {
 /// exited zero, and the two lanes agreed on the wrong answer.
 #[test]
 fn the_c_lane_traps_on_a_block_bodied_return() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_block", &block_bodied_root(3, TWO_BY_FOUR));
     assert!(
@@ -402,9 +405,10 @@ fn both_lanes_execute_exactly_on_an_agreeing_block_bodied_return() {
         stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
         "the satisfied block-bodied claim must produce its exact result, got {stdout}"
     );
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_block_equal", &source);
     assert!(ran, "the C lane must execute: {output}");
     assert!(
@@ -439,9 +443,10 @@ fn eval_traps_on_a_call_bodied_return() {
 /// `assert_bound_trap`'s own assertion.
 #[test]
 fn the_c_lane_traps_on_a_call_bodied_return() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_call", &call_bodied_root(3, TWO_BY_FOUR));
     assert!(!ran, "the C lane must abort through the callee: {output}");
@@ -460,9 +465,10 @@ fn both_lanes_execute_exactly_on_an_agreeing_call_bodied_return() {
         stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
         "the satisfied call-bodied claim must produce its exact result, got {stdout}"
     );
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_call_equal", &source);
     assert!(ran, "the C lane must execute: {output}");
     assert!(
@@ -494,9 +500,10 @@ fn eval_traps_before_an_effect_that_follows_the_producing_operation() {
 /// linked binary printed `after` and exited zero.
 #[test]
 fn the_c_lane_traps_before_an_effect_that_follows_the_producing_operation() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_effect", &effect_order_root(3, TWO_BY_FOUR));
     assert!(!ran, "the C lane must abort: {output}");
@@ -521,9 +528,10 @@ fn both_lanes_observe_the_following_effect_when_the_guard_passes() {
             && stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
         "a passing guard observes the following effect and returns its result, got {stdout}"
     );
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_effect_equal", &source);
     assert!(ran, "the C lane must execute: {output}");
     assert!(
@@ -572,7 +580,11 @@ fn value_aliases_keep_the_guard_at_the_original_producer() {
             } else {
                 assert_bound_trap(&stderr, 3, 0, 2, "eval");
             }
-            if gcc_available() {
+            {
+                assert!(
+                    gcc_available(),
+                    "the required compiled C receipt must execute"
+                );
                 let (ok, output) = build_link_run(&dir, "alias-producer-c", &source);
                 assert_eq!(ok, agrees, "{source}\n{output}");
                 assert!(output.contains("before"), "{output}");
@@ -608,9 +620,10 @@ fn an_effect_inside_the_callee_after_the_producing_operation_is_suppressed() {
         !stdout.contains("inside-after"),
         "the callee's following effect must be suppressed, got {stdout}"
     );
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_residual_callee_effect", &source);
     assert!(!ran, "the C lane traps through the callee too: {output}");
     assert_bound_trap(&output, 3, 0, 2, "the C lane");
@@ -630,9 +643,10 @@ fn a_branchy_tail_checks_its_selected_producer() {
     let (ok, stdout, stderr) = eval_source(&dir, "residual-branchy", &source);
     assert!(!ok, "the selected branch must trap, got {stdout}");
     assert_bound_trap(&stderr, 3, 0, 2, "eval");
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let (ran, output) = build_link_run(&dir, "c_residual_branchy", &source);
     assert!(!ran, "the selected C branch must trap: {output}");
     assert_bound_trap(&output, 3, 0, 2, "C");
@@ -705,9 +719,10 @@ fn canonical_fixture(dir: &TempDir, source: &str) -> String {
 }
 
 fn assert_selected_branch(form: &str, c_lane: bool) {
-    if c_lane && !gcc_available() {
-        return;
-    }
+    assert!(
+        !c_lane || gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     for second in [false, true] {
         for agrees in [false, true] {
             let dir = tempdir().expect("tempdir");
@@ -781,9 +796,10 @@ fn c_selected_match_result_claims() {
 }
 
 fn assert_shared_callee_claims(c_lane: bool) {
-    if c_lane && !gcc_available() {
-        return;
-    }
+    assert!(
+        !c_lane || gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     for agrees in [false, true] {
         let dir = tempdir().expect("tempdir");
         let last = if agrees { THREE_BY_FOUR } else { TWO_BY_FOUR };
@@ -842,9 +858,10 @@ fn c_shared_callee_result_claims_are_invocation_scoped() {
 /// `main = tensor(shape=[2], data=[1.0, 6.0])` and exited zero.
 #[test]
 fn the_c_lane_traps_when_the_runtime_extent_is_below_the_declared_literal() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_below", &binding_root(3, TWO_BY_FOUR));
     assert!(!ran, "the C lane must abort: {output}");
@@ -854,9 +871,10 @@ fn the_c_lane_traps_when_the_runtime_extent_is_below_the_declared_literal() {
 /// REGRESSION TEST, C lane, inlined `main` root.
 #[test]
 fn the_c_lane_traps_on_the_inlined_main_root() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_below_main", &inlined_main_root(3, TWO_BY_FOUR));
     assert!(!ran, "the C lane must abort: {output}");
@@ -898,9 +916,10 @@ fn eval_executes_exactly_when_the_literal_axis_wins_the_minimum() {
 /// DISPOSITION LOCK, C lane, equality.
 #[test]
 fn the_c_lane_executes_exactly_when_the_extents_agree() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_equal", &binding_root(3, THREE_BY_FOUR));
     assert!(ran, "the C lane must execute: {output}");
@@ -913,9 +932,10 @@ fn the_c_lane_executes_exactly_when_the_extents_agree() {
 /// DISPOSITION LOCK, C lane, the bound reached from above.
 #[test]
 fn the_c_lane_executes_exactly_when_the_literal_axis_wins_the_minimum() {
-    if !gcc_available() {
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "the required compiled C receipt must execute"
+    );
     let dir = tempdir().expect("tempdir");
     let (ran, output) = build_link_run(&dir, "c_wins", &binding_root(4, FIVE_BY_FOUR));
     assert!(ran, "the C lane must execute: {output}");

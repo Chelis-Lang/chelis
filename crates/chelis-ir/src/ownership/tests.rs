@@ -1695,6 +1695,7 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
 fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
     let host = ConcreteHostProgram {
         functions: vec![ConcreteHostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "identity".into(),
             params: Vec::new(),
             ret_ty: ConcreteHostType::Unit,

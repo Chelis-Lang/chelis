@@ -5966,7 +5966,26 @@ fn eval_stage_error(message: String) -> CompilerError {
     } else {
         GeneralKind::EvalError
     };
-    let cast_domain = message.contains("numeric trap: domain in cast at");
+    // A declared literal result guard attributes its trap to the producing
+    // cast, but it did not reject an element conversion. Recognize the exact
+    // extent context and canonical line before attaching conversion advice.
+    let extent_cast = (|| {
+        let mut lines = message.lines();
+        let context = lines.next()?.strip_prefix("extent `")?;
+        let (claim, comparison) = context.split_once("`: claimed = ")?;
+        let (required, observation) = comparison.split_once(", cast axis ")?;
+        let (axis, observed) = observation.split_once(" = ")?;
+        required.parse::<u64>().ok()?;
+        axis.parse::<usize>().ok()?;
+        observed.parse::<usize>().ok()?;
+        Some(
+            claim == required
+                && lines.next() == Some("numeric trap: domain in cast at int64")
+                && lines.next().is_none(),
+        )
+    })()
+    .unwrap_or(false);
+    let cast_domain = !extent_cast && message.contains("numeric trap: domain in cast at");
     let mut error = stage_error("eval", message, kind);
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
@@ -6951,6 +6970,9 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             claims,
         } => WireRiscOp::ExtentWitness {
             site: match site {
+                chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    WireExtentWitnessSite::LiteralResultClaim
+                }
                 chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
                 chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
                     WireExtentWitnessSite::LocalExpand
@@ -7262,7 +7284,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 12);
+        assert_eq!(json["schema_version"], 13);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

@@ -549,12 +549,12 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 21);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 22);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 21);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 22);
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let context = build_stdlib_context(&decls).expect("sample context must build");
         let current_path = stdlib_cache_path(dir.path(), current_key);
-        for version in [19, 20] {
+        for version in [19, 20, 21] {
             let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, version);
             assert_ne!(current_key, preceding_key);
             let preceding_path = stdlib_cache_path(dir.path(), preceding_key);

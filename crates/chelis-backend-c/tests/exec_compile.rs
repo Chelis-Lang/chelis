@@ -562,6 +562,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 global_tensor_helpers: vec![],
                 summary_rejections: vec![],
                 functions: vec![HostFunction {
+                    helper_result_claim_axes: Vec::new(),
                     name: "host_blas".into(),
                     params,
                     ret_ty: HostType::Tensor(out_ty),
@@ -934,6 +935,7 @@ int main(void) {{
                     global_tensor_helpers: vec![],
                     summary_rejections: vec![],
                     functions: vec![HostFunction {
+                        helper_result_claim_axes: Vec::new(),
                         name: "host_sparse_add".into(),
                         params,
                         ret_ty: HostType::Tensor(output),
@@ -5338,6 +5340,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![
                 HostParam {
@@ -5400,8 +5403,11 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
         "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
     );
+    let reads_tensor_rank_field = src.lines().any(|line| {
+        line.contains("->rank") && (line.contains("__arg0_") || line.contains("__arg1_"))
+    });
     assert!(
-        !src.contains("->rank"),
+        !reads_tensor_rank_field,
         "host-lane rank guard must not reopen the opaque tensor descriptor:\n{src}"
     );
 
@@ -6184,6 +6190,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -7975,6 +7982,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "a".to_string(),

@@ -379,6 +379,7 @@ fn project_function(
         }
     }
     Ok(HostAbiFunction {
+        helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
         name: function.name().to_string(),
         params: function
             .params()

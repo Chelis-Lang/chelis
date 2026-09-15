@@ -456,6 +456,17 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                ..
+            } => {
+                if arity != 0 {
+                    errors.push(format!(
+                        "literal result claim at node {} must have no inputs",
+                        node.id.0
+                    ));
+                }
+            }
             RiscOp::ExtentWitness { claims, .. } => {
                 if arity != claims.len() + 1 {
                     errors.push(format!(
@@ -621,86 +632,138 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             ..
         } = &node.op
         {
-            if let crate::dag::ExtentWitnessSite::ResultClaim {
-                claim,
-                axis: crate::dag::RtAxis::Lit(result_axis),
-            } = site
-                && (claim.is_empty()
-                    || *result_axis < 0
-                    || !requirements.is_empty()
-                    || !claims.is_empty())
-            {
-                errors.push(format!("result claim witness at node {} requires a nonempty label, normalized axis, and no entry obligations", node.id.0));
-            }
-            if matches!(site, crate::dag::ExtentWitnessSite::ResultClaim { .. }) {
-                let declared = node
-                    .shape_deps
-                    .as_slice()
-                    .first()
-                    .and_then(|required| dag.get(*required));
-                let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
+            if matches!(site, crate::dag::ExtentWitnessSite::LiteralResultClaim) {
+                let owners = dag
+                    .nodes()
+                    .iter()
+                    .filter(|owner| owner.shape_deps.contains(&node.id))
+                    .count();
+                if owners != 1 {
+                    errors.push(format!(
+                        "literal result claim at node {} requires exactly one producing owner",
+                        node.id.0
+                    ));
+                }
+                let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
+                    unreachable!()
+                };
+                if *axis < 0
+                    || !parameter.is_empty()
+                    || !claims.is_empty()
+                    || !node.inputs.is_empty()
+                    || !node.shape_deps.is_empty()
+                    || requirements.len() != 1
+                    || requirements.first().is_none_or(|value| {
+                        value.prim() != Prim::Int64
+                            || value.as_i64_exact().is_none_or(|value| value < 0)
+                    })
+                    || !node.output_type.dims.is_empty()
+                    || node.output_type.precision != Prim::Int64
+                {
+                    errors.push(format!("literal result claim at node {} requires one nonnegative int64 literal, normalized axis, scalar output, and no observing or entry dependencies", node.id.0));
+                }
+            } else {
+                if let crate::dag::ExtentWitnessSite::ResultClaim {
+                    claim,
+                    axis: crate::dag::RtAxis::Lit(result_axis),
+                } = site
+                    && (claim.is_empty()
+                        || *result_axis < 0
+                        || !requirements.is_empty()
+                        || !claims.is_empty())
+                {
+                    errors.push(format!("result claim witness at node {} requires a nonempty label, normalized axis, and no entry obligations", node.id.0));
+                }
+                if matches!(site, crate::dag::ExtentWitnessSite::ResultClaim { .. }) {
+                    let declared = node
+                        .shape_deps
+                        .as_slice()
+                        .first()
+                        .and_then(|required| dag.get(*required));
+                    let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
                     matches!(declared.op, RiscOp::ExtentWitness { site: crate::dag::ExtentWitnessSite::Caller, axis: crate::dag::RtAxis::Lit(observed), .. } if observed == *axis)
                         && declared.inputs.first() == node.inputs.first()
                         && declared.id.0 < node.id.0
                 });
-                if !same_observation {
-                    errors.push(format!("result claim witness at node {} requires its exact earlier declaring observation", node.id.0));
+                    if !same_observation {
+                        errors.push(format!("result claim witness at node {} requires its exact earlier declaring observation", node.id.0));
+                    }
                 }
-            }
-            // chelis#1374: a named claim's diagnostic reads the DECLARING
-            // parameter and axis off the requirement's own node, so the edge
-            // must be a witness and not merely an int64 scalar. The edge is
-            // also strictly earlier, which is what keeps the check due "at
-            // the later of its two witnesses" (spec/04 §4.7) and the topology
-            // acyclic.
-            if arity == claims.len() + 1 {
-                for edge in node.inputs.iter().skip(1) {
-                    let earlier = edge.0 < node.id.0;
-                    let witness = dag.get(*edge).is_some_and(|edge| {
-                        matches!(edge.op, RiscOp::ExtentWitness { .. })
-                            && edge.output_type.dims.is_empty()
-                            && edge.output_type.precision == Prim::Int64
-                    });
-                    if !earlier || !witness {
-                        errors.push(format!(
+                // chelis#1374: a named claim's diagnostic reads the DECLARING
+                // parameter and axis off the requirement's own node, so the edge
+                // must be a witness and not merely an int64 scalar. The edge is
+                // also strictly earlier, which is what keeps the check due "at
+                // the later of its two witnesses" (spec/04 §4.7) and the topology
+                // acyclic.
+                if arity == claims.len() + 1 {
+                    for edge in node.inputs.iter().skip(1) {
+                        let earlier = edge.0 < node.id.0;
+                        let witness = dag.get(*edge).is_some_and(|edge| {
+                            matches!(edge.op, RiscOp::ExtentWitness { ref site, .. } if !matches!(site, crate::dag::ExtentWitnessSite::LiteralResultClaim))
+                                && edge.output_type.dims.is_empty()
+                                && edge.output_type.precision == Prim::Int64
+                        });
+                        if !earlier || !witness {
+                            errors.push(format!(
                             "extent witness at node {} requires each named claim to name an earlier rank-0 int64 extent witness",
                             node.id.0
                         ));
+                        }
                     }
                 }
-            }
-            if claims.iter().any(|claim| claim.claim.is_empty()) {
-                errors.push(format!(
-                    "extent witness at node {} requires a nonempty binder for each named claim",
-                    node.id.0
-                ));
-            }
-            if arity >= 1
-                && let Some(input) = dag.get(node.inputs[0])
-                && usize::try_from(*axis).map_or(true, |axis| axis >= input.output_type.dims.len())
-            {
-                errors.push(format!(
-                    "extent witness at node {} has an invalid input axis",
-                    node.id.0
-                ));
-            }
-            if !node.output_type.dims.is_empty() || node.output_type.precision != Prim::Int64 {
-                errors.push(format!(
-                    "extent witness at node {} must produce a rank-0 int64 scalar",
-                    node.id.0
-                ));
-            }
-            if requirements.iter().any(|value| {
-                value.prim() != Prim::Int64 || value.as_i64_exact().is_none_or(|value| value < 0)
-            }) {
-                errors.push(format!(
-                    "extent witness at node {} requires nonnegative int64 literals",
-                    node.id.0
-                ));
+                if claims.iter().any(|claim| claim.claim.is_empty()) {
+                    errors.push(format!(
+                        "extent witness at node {} requires a nonempty binder for each named claim",
+                        node.id.0
+                    ));
+                }
+                if arity >= 1
+                    && let Some(input) = dag.get(node.inputs[0])
+                    && usize::try_from(*axis)
+                        .map_or(true, |axis| axis >= input.output_type.dims.len())
+                {
+                    errors.push(format!(
+                        "extent witness at node {} has an invalid input axis",
+                        node.id.0
+                    ));
+                }
+                if !node.output_type.dims.is_empty() || node.output_type.precision != Prim::Int64 {
+                    errors.push(format!(
+                        "extent witness at node {} must produce a rank-0 int64 scalar",
+                        node.id.0
+                    ));
+                }
+                if requirements.iter().any(|value| {
+                    value.prim() != Prim::Int64
+                        || value.as_i64_exact().is_none_or(|value| value < 0)
+                }) {
+                    errors.push(format!(
+                        "extent witness at node {} requires nonnegative int64 literals",
+                        node.id.0
+                    ));
+                }
             }
         }
 
         for required in &node.shape_deps {
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: crate::dag::RtAxis::Lit(axis),
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                if required.0 >= node.id.0
+                    || usize::try_from(*axis)
+                        .map_or(true, |axis| axis >= node.output_type.dims.len())
+                {
+                    errors.push(format!("literal result claim at node {} requires an earlier token and a valid producing axis", node.id.0));
+                }
+                continue;
+            }
             let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {

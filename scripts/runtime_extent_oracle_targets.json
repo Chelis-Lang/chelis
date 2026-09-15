@@ -829,6 +829,7 @@
         "host_emit::entry::tests::dominating_signature_discharges_the_exact_helper_comparison",
         "host_emit::entry::tests::every_helper_call_must_be_dominated_before_a_check_is_removed",
         "host_emit::entry::tests::helper_projection_removes_only_discharged_checks_and_keeps_standalone_entry",
+        "host_emit::entry::tests::lowered_mixed_result_claim_delegates_the_following_rows_guard",
         "host_emit::entry::tests::shadowing_a_witness_keeps_the_helper_check",
         "host_emit::entry::tests::unused_canonical_witness_discharges_other_pairs_transitively"
       ],
@@ -909,9 +910,45 @@
         "mode": "exact"
       },
       "expected": [
+        "literal_result_role_roundtrips_without_an_observing_input_and_rejects_malformed_roles",
         "result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport"
       ],
-      "note": "Exact ResultClaim site identity round-trips through versioned wire transport; malformed fields and relationships cannot enter a graph."
+      "note": "Named and literal result-claim sites round-trip through versioned wire transport; malformed fields and relationships cannot enter a graph."
+    },
+    {
+      "phase": "b",
+      "id": "cli_result_pure_helper",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1771_pure_helper_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_inherited_result_claim_enters_pure_helpers",
+        "c_literal_result_claim_survives_zero_and_unused_cotangents",
+        "c_literal_result_precondition_precedes_element_failure",
+        "eval_inherited_result_claim_enters_pure_helpers",
+        "eval_literal_result_claim_survives_zero_and_unused_cotangents",
+        "eval_literal_result_precondition_precedes_element_failure"
+      ],
+      "note": "Inherited literal claims cross pure helpers with exact producing primitives, helper-local claims and source effect order. Native receipts require a compiler and execute the generated binary. Callback and selected-alias continuations are separately enrolled when implemented."
+    },
+    {
+      "phase": "b",
+      "id": "ir_literal_result_claim",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1771_literal_result_tokens.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "administrative_copies_preserve_literal_producer_through_fusion",
+        "distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds",
+        "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
+      ],
+      "note": "Literal declarations retain distinct token identities, inner-before-outer guard order and primitive attribution through rebuilds; malformed role payloads and observing inputs are refused."
     }
   ]
 }

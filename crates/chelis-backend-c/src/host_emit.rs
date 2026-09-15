@@ -354,13 +354,16 @@ pub(crate) fn emit_host_abi_program(
             .get(&function.name)
             .expect("host function emitted name");
         let mut fn_buf: Vec<String> = Vec::new();
-        let helper_output_counts = (0..function.tensor_helpers.len())
+        let verified_helpers = (0..function.tensor_helpers.len())
             .map(|helper| {
-                let verified = projected
+                projected
                     .function_tensor_helper(function_index, helper)
-                    .expect("projected function helper retains verified child");
-                CEmitter::output_labels(verified.dag()).len().max(1)
+                    .expect("projected function helper retains verified child")
             })
+            .collect::<Vec<_>>();
+        let helper_output_counts = verified_helpers
+            .iter()
+            .map(|verified| CEmitter::output_labels(verified.dag()).len().max(1))
             .collect::<Vec<_>>();
         match emit_function(
             &mut fn_buf,
@@ -376,6 +379,7 @@ pub(crate) fn emit_host_abi_program(
                 .function_owner_bindings(function_index)
                 .expect("projected function retains verified body-owner bindings"),
             &helper_output_counts,
+            &verified_helpers,
             external_helpers,
             #[cfg(feature = "native-random-observer")]
             &source_sites
@@ -409,7 +413,14 @@ pub(crate) fn emit_host_abi_program(
             // (possibly unemittable) tensor helpers entirely.
             continue;
         }
-        let entry_coverage = entry::helper_coverage(function);
+        let verified_helpers = (0..function.tensor_helpers.len())
+            .map(|helper| {
+                projected
+                    .function_tensor_helper(function_index, helper)
+                    .expect("projected function helper retains verified child")
+            })
+            .collect::<Vec<_>>();
+        let entry_coverage = entry::helper_coverage_with_verified(function, &verified_helpers);
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
@@ -1654,7 +1665,7 @@ fn append_helper(
         out.push(format!(
             "static void {}({}) {{",
             helper_name,
-            private_random_params(
+            private_host_params(
                 "chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out"
             ),
         ));
@@ -1663,6 +1674,7 @@ fn append_helper(
         out.push("    (void)__chelis_rng;".to_string());
         #[cfg(feature = "native-random-observer")]
         out.push("    (void)__chelis_observer;".to_string());
+        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at int64\");".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -1932,7 +1944,13 @@ impl HostResultClaim {
             .iter()
             .enumerate()
             .filter_map(|(axis, dim)| match dim {
-                DimInfo::Lit(required) => Some((axis, *required)),
+                DimInfo::Lit(required)
+                    if !function.helper_result_claim_axes.contains(
+                        &chelis_ir::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                    ) =>
+                {
+                    Some((axis, *required))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1973,6 +1991,23 @@ fn append_host_result_claim_support(out: &mut Vec<String>) {
     const int64_t (*axes)[2];
 } __chelis_host_result_claim;
 
+static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
+    for (; claims != NULL; claims = claims->next) {
+        if (rank != claims->rank) continue;
+        for (int64_t i = 0; i < claims->count; ++i) {
+            for (int64_t j = 0; j < count; ++j) {
+                if (claims->axes[i][0] != observations[j][0]) continue;
+                int64_t required = claims->axes[i][1];
+                int64_t observed = observations[j][2];
+                if (required != observed) {
+                    fprintf(stderr, "extent `%lld`: claimed = %lld, %s axis %lld = %lld\n", (long long)required, (long long)required, op, (long long)observations[j][1], (long long)observed);
+                    chelis_numeric_trap(trap);
+                }
+            }
+        }
+    }
+}
+
 static void __chelis_check_host_result_claims(const __chelis_host_result_claim *claims, const chelis_tensor *value, const char *op, const char *trap) {
     for (; claims != NULL; claims = claims->next) {
         if (chelis_tensor_rank(value) != claims->rank) continue;
@@ -2007,6 +2042,7 @@ fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
+    delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len() {
@@ -2039,7 +2075,11 @@ fn signature_entry_lines(
             axis,
         )
     };
-    for guard in plan.guards() {
+    for guard in plan
+        .guards()
+        .iter()
+        .filter(|guard| !delegated.contains(guard))
+    {
         let (left, right, context) = match guard {
             EntryExtentGuard::Named {
                 claim,
@@ -2083,6 +2123,7 @@ fn emit_function(
     ownership_sites: &[ProjectedHostSite<'_>],
     owner_bindings: &[(VerifiedOwnerId, String)],
     helper_output_counts: &[usize],
+    verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
@@ -2118,7 +2159,7 @@ fn emit_function(
         helper_output_counts,
         ownership_sites,
     );
-    emitter.entry_projection = entry::helper_coverage(function);
+    emitter.entry_projection = entry::helper_coverage_with_verified(function, verified_helpers);
     emitter.external_helpers = external_helpers.clone();
     #[cfg(feature = "native-random-observer")]
     {
@@ -2180,10 +2221,12 @@ fn emit_function(
         .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
         .map(|param| c_ident(&param.name).into_owned())
         .collect::<Vec<_>>();
+    let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
     emitter.lines.extend(signature_entry_lines(
         &entry_plan,
         &entry_args,
         &emitter.indent,
+        &delegated_entry_guards,
     )?);
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
@@ -4277,7 +4320,13 @@ impl<'a> HostEmitter<'a> {
                             "signature entry projection",
                         )
                     })?;
-                self.assign_tensor_call(target, *helper, variant, args, ty)?;
+                self.assign_tensor_call(
+                    (target, ty),
+                    *helper,
+                    variant,
+                    args,
+                    result_claims.as_deref(),
+                )?;
             }
             HostExprKind::SignatureEntry { plan, args } => {
                 require_same_abi_type(ty, &HostType::Unit, "signature entry")?;
@@ -4288,7 +4337,7 @@ impl<'a> HostEmitter<'a> {
                     actuals.push(temp);
                 }
                 self.lines
-                    .extend(signature_entry_lines(plan, &actuals, &self.indent)?);
+                    .extend(signature_entry_lines(plan, &actuals, &self.indent, &[])?);
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
             HostExprKind::Unit => {
@@ -6238,12 +6287,13 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_call(
         &mut self,
-        target: &str,
+        destination: (&str, &HostType),
         helper: usize,
         entry_variant: usize,
         args: &[HostExpr],
-        ty: &HostType,
+        result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
+        let (target, ty) = destination;
         if let Some(host_helper) = self.tensor_helpers.get(helper) {
             match host_helper.specialization.as_ref() {
                 Some(HostTensorSpecialization::BlasMatmul(summary)) => {
@@ -6367,6 +6417,9 @@ impl<'a> HostEmitter<'a> {
             root_count.to_string(),
         ];
         append_private_context_args(&mut helper_args);
+        if !self.external_helpers.contains(&base) {
+            helper_args.push(result_claims.unwrap_or("NULL").to_string());
+        }
         self.lines.push(format!(
             "{}{}({});",
             self.indent,

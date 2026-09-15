@@ -1468,6 +1468,15 @@ mutation; it adds no public ABI or numeric carrier exception. The
 load-store-template mutations continue to reject any unregistered owner. The
 combined Phase 0 foundation contains 366 rows, including 252 active-debt rows.
 
+Pure-helper result claims add the private
+`CEmitter::emit_inherited_result_guards` load/store owner and move the
+evaluator's existing path-random-counter arithmetic into
+`eval_tensor_internal_with_result_claims`. The append-only foundation extends
+from 366 to 368 rows; replacement of the old evaluator owner plus the new
+emitter owner moves active debt from 252 to 253. Both remain implementation
+internals with no public ABI or carrier change, and the existing mutations
+continue to reject an unregistered successor.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
