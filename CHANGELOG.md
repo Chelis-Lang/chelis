@@ -4,6 +4,78 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.10] - 2026-09-15
+
+### Changed
+
+- **BREAKING:** Generic function bodies must satisfy their declared dtype-family bounds: an
+  unbounded or `Numeric` binder cannot use a float-only operation without a
+  sufficient `Float` contract. Omitting a signature does not publish an inferred
+  generic admission contract; local inference holes must bind within their
+  enclosing declaration or be justified by its declared bounds. Checked
+  operation-family restrictions now survive function values and transitive
+  calls. The specialized `reduce_window_*` shape path consumes those same
+  contracts: `reduce_window_mean` requires `Float`, while window sum, max and min
+  require `Numeric`. Older checked-context caches and package shells must be
+  rebuilt.
+
+- Move broad PR package expansion to an exact-head manual dispatch and validate
+  PR contract acknowledgements without restarting compiler CI. Base retargets
+  hold a required exact-head/exact-base implementation receipt. Directly changed
+  all-ignored integration targets can now opt into required complete ignored-suite
+  execution with exact per-test receipts. Empty integration shards skip build
+  setup, exact standing receipts prevent duplicate execution, and manual
+  expansion batches ordinary targets by package without losing per-test identity.
+
+- The release workflow extracts the tagged release notes in a preflight job
+  before any platform build starts, so a tag whose commit still carries
+  `changelog.d/` fragments fails within a minute instead of after the builds.
+  Previously the check ran only in the publish job, and the v0.18.8 tag failed
+  there about 37 minutes in. See
+  [#2058](https://github.com/Chelis-Lang/chelis/pull/2058).
+
+### Fixed
+
+- Preserve literal result claims and producing-operation attribution across pure tensor helper calls.
+
+- Check host literal result extents in the selected `if` or `match` branch and carry callers' claims into shared host callees, preserving primitive attribution and suppressing effects after a failing producer on eval and compiled C.
+
+- Host signature extent checks cover every declared tensor parameter before the body, even when tensor helpers own only part of the signature. Literal dimensions and repeated binders retain parameter/axis order, and supported higher-order and inline callback invocations preserve their entry checks in C. Private helper schedules avoid repeating checks already discharged at the invocation (#1788).
+
+- Preserve authored named-extent claims when evaluating gradients of tensor, aggregate and primitive scalar targets, including multiple targets and unused zero cotangents. A rejected forward activation reports its required extent failure instead of producing a gradient.
+
+  Independent calls retain distinct extent claims, including computed result extents. Their guards keep the original producer attribution and preserve the claimed value until the guard executes in generated C.
+
+- Keep final PR package-expansion reporting on the exact candidate schema while
+  retaining trusted stale-head, base, and synthetic-merge validation.
+
+- Compiled C gradients accept primitive scalar targets alongside tensor and
+  aggregate targets, retain forward extent failures even for zero cotangents,
+  and reconstruct complete results in written target order, including repeated
+  selectors. Primitive scalars and rank-zero tensor results keep their distinct
+  public types. Fixes [#1934](https://github.com/Chelis-Lang/chelis/issues/1934).
+
+- The wire census validates diagnostics with internal rejection metadata without treating that metadata as serialized numeric data, fixing the missing `NonZeroU32` artifact failure tracked in [#2048](https://github.com/Chelis-Lang/chelis/issues/2048).
+
+- The interpreter classifies a closure body's execution profile against the
+  program's top-level definitions on every application. It now builds that sorted
+  definition snapshot once per evaluation and reuses it, instead of re-cloning
+  every definition on each call. A `chelis test` run over a package with many
+  definitions and a fold-heavy test is back to its former speed, dropping from
+  tens of seconds to about one, matching 0.18.6. See
+  [#2059](https://github.com/Chelis-Lang/chelis/pull/2059).
+
+- The native C backend no longer rejects a by-value scalar that a tail-position
+  user-function call uses in more than one argument slot. Ownership lowering
+  moved the single owner on the first slot and then read it dead on the second,
+  failing with `owner %N is not live` (for example `g(x) = f3(x, x)`). A Copy
+  scalar owns no resource, so each slot now duplicates it and the original stays
+  live; heap values still move on their last use, so a genuine use-after-move of
+  an owned resource stays rejected. See
+  [#2068](https://github.com/Chelis-Lang/chelis/pull/2068).
+
+- Preserve completed test evidence when optional CI package expansion exhausts its execution budget, while reporting unfinished coverage as unsuccessful.
+
 ## [0.18.9] - 2026-09-14
 
 ### Added
