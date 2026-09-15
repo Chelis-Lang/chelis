@@ -252,6 +252,21 @@ jobs:
             --github-output "$GITHUB_OUTPUT"; then
             record_full "trusted rebase verifier failed closed"
           fi
+
+      - name: Publish targeted rebase decision for review
+        if: always()
+        run: |
+          decision="$RUNNER_TEMP/rebase-reuse/decision.json"
+          if [ -f "$decision" ]; then
+            {
+              echo "### Targeted rebase decision"
+              echo
+              echo '```json'
+              cat "$decision"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install uv for CI contract preflight
         if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
         uses: astral-sh/setup-uv@v8.1.0

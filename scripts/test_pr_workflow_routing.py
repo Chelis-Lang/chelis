@@ -139,6 +139,17 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("--timeline", reuse["run"])
     test.assertIn("--github-output", reuse["run"])
     test.assertIn("rebase_contract_changed=false", reuse["run"])
+    publish = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Publish targeted rebase decision for review"
+    )
+    test.assertEqual(publish["if"], "always()")
+    test.assertIn("decision.json", publish["run"])
+    test.assertIn("GITHUB_STEP_SUMMARY", publish["run"])
+    test.assertLess(
+        changes["steps"].index(reuse), changes["steps"].index(publish)
+    )
     lifecycle = next(
         step
         for step in changes["steps"]
