@@ -66,7 +66,7 @@ standing lane.
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
 | Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The base manifest has 73 package/target identities at `b38efcfbe`; this implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the candidate standing set to 75. |
 | New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
-| Explicit hosted package expansion | After reviews, repairs and required implementation checks complete, agents dispatch separate workers for the final PR head. They run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale candidates. |
+| Explicit hosted package expansion | After reviews and repairs fix the intended content, agents dispatch separate workers alongside the final required implementation checks. They run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. The workflow accepts a PR number and expected head SHA and rejects stale dispatches. Do not create a new synthetic candidate merely to refresh a ready branch after `main` advances; preserve the exact reviewed head when its prospective merge is safe. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
 | macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
 
@@ -185,13 +185,18 @@ before dependency installation or cache restoration.
 
 Package expansion runs only through a separate four-shard manual workflow with
 its own 20-minute hard timeout and 15-minute soft telemetry budget. Agents
-dispatch it after required implementation checks on the final candidate and
-record the exact reviewed SHA and run link. Its summary records missing shards,
-timeouts, test failures, exclusions, timings, and receipts but does not replace
-a branch-protection context. A candidate change invalidates the run. Introduced
-failures are repaired; inherited failures and incomplete coverage are named
-explicitly. A package-expansion timeout or failure cannot cancel, starve, or
-change the verdict of required change-owned execution.
+dispatch it alongside the final required implementation checks once reviews and
+repairs have fixed the intended content, then record the exact reviewed SHA and
+run link. Its summary records missing shards, timeouts, test failures,
+exclusions, timings, and receipts but does not replace a branch-protection
+context. A content change or hand-resolved conflict invalidates the run. A
+base-changing rebase or base-branch retarget does too because it changes the
+synthetic candidate. Agents do not rebase a ready pull request merely because
+`main` advanced; they preserve the exact reviewed head when its prospective
+merge is safe. Introduced failures are repaired; inherited failures and
+incomplete coverage are named explicitly. A package-expansion timeout or
+failure cannot cancel, starve, or change the verdict of required change-owned
+execution.
 
 The expansion executor has a separate 16-minute deadline, measured from its
 start and shared by the product build, target listings and test commands. On
