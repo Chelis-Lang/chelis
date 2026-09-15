@@ -106,7 +106,10 @@ class PullRequestLivenessTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         step = commands[0]
         self.assertEqual(step["run"], COMMAND + ' --pr-head "$PR_HEAD"')
-        self.assertEqual(step["env"]["PR_HEAD"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(
+            step["env"]["PR_HEAD"],
+            "${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}",
+        )
         self.assertEqual(step["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertNotIn("if", step)
         self.assertNotIn("shell", step)

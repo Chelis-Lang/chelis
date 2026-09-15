@@ -508,7 +508,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         step = reports[0]
         self.assertEqual(step["run"], self.command)
-        self.assertEqual(step["env"], {"BASE_REF": "${{ github.event_name == 'push' && github.event.before || '' }}", "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
+        self.assertEqual(
+            step["env"],
+            {
+                "BASE_REF": "${{ github.event_name == 'push' && github.event.before || '' }}",
+                "PR_HEAD": "${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}",
+            },
+        )
         for key in ("if", "continue-on-error", "shell"):
             self.assertNotIn(key, step)
         artifact = next(s for s in steps if s.get("with", {}).get("name") == "phase4b-contract-changes")

@@ -408,7 +408,10 @@ class WorkflowTests(unittest.TestCase):
         step = reports[0]
         self.assertEqual(step["run"], self.command)
         self.assertEqual(step["env"]["BASE_REF"], "${{ github.event_name == 'push' && github.event.before || '' }}")
-        self.assertEqual(step["env"]["PR_HEAD"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(
+            step["env"]["PR_HEAD"],
+            "${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}",
+        )
         self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("shell", step)

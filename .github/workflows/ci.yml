@@ -165,7 +165,7 @@ jobs:
       - name: Validate rejection issue authorities against GitHub
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/validate_rejection_issue_manifest.py --pr-head "$PR_HEAD"
 
   # C2.2's producer seal depends on same-crate privacy, which an external
@@ -1107,7 +1107,7 @@ jobs:
       - name: Report Phase 3 required-test changes
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
 
       - name: Publish Phase 3 required-test changes
@@ -1121,7 +1121,7 @@ jobs:
       - name: Report Phase 4B contract changes
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
         run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
 
       - name: Publish Phase 4B contract changes
