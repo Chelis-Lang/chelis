@@ -1146,6 +1146,13 @@ pub(super) struct ResolvedDeclaredType {
     pub(super) type_names: UnordMap<TypeVar, String>,
 }
 
+pub(super) struct RejectedDeclaredType {
+    recovery: crate::deep_type::RejectedSignatureType,
+    bounds: Vec<(TypeVar, TypeVarRestriction)>,
+    dim_names: UnordMap<DimVar, String>,
+    type_names: UnordMap<TypeVar, String>,
+}
+
 pub(super) fn resolve_deep_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
@@ -1162,7 +1169,8 @@ pub(super) fn resolve_deep_type(
         binder_mode,
         UnordMap::new(),
         errors,
-    )?;
+    )
+    .map_err(|rejected| rejected.recovery.witness)?;
     Ok(resolved.ty)
 }
 
@@ -1190,23 +1198,42 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     binder_mode: BinderMode<'_>,
     dtype_bounds: UnordMap<String, TypeVarRestriction>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<ResolvedDeclaredType, ErrorWitness> {
-    let (ty, bounds, dim_names, type_names) = {
+) -> Result<ResolvedDeclaredType, Box<RejectedDeclaredType>> {
+    let (resolution, bound_result, bounds, dim_names, type_names) = {
         let mut resolver =
             DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
                 .with_dtype_bounds(dtype_bounds);
-        let ty = resolver.resolve(expr)?.into_type();
+        let resolution = resolver.resolve_signature(expr);
         let dim_names = resolver.dim_var_names();
         let type_names = resolver.type_var_names();
-        let bounds = resolver.finish_dtype_bounds()?;
-        (ty, bounds, dim_names, type_names)
+        let bounds = resolver.resolved_dtype_bounds();
+        let bound_result = resolver.finish_dtype_bounds();
+        (resolution, bound_result, bounds, dim_names, type_names)
     };
-    Ok(ResolvedDeclaredType {
-        ty: resolve_type_aliases(&ty, adt_reg, vg),
+    let recovery = match (resolution, bound_result) {
+        (Ok(resolved), Ok(bounds)) => {
+            return Ok(ResolvedDeclaredType {
+                ty: resolve_type_aliases(&resolved.into_type(), adt_reg, vg),
+                bounds,
+                dim_names,
+                type_names,
+            });
+        }
+        (Ok(resolved), Err(witness)) => {
+            crate::deep_type::RejectedSignatureType::from_resolved(resolved.into_type(), witness)
+        }
+        // Both boundaries already reported their independent failures. The
+        // first witness marks the rejected declaration without another report.
+        (Err(recovery), _) => recovery,
+    };
+    let mut recovery = recovery;
+    recovery.ty = resolve_type_aliases(&recovery.ty, adt_reg, vg);
+    Err(Box::new(RejectedDeclaredType {
+        recovery,
         bounds,
         dim_names,
         type_names,
-    })
+    }))
 }
 
 /// Decode a declaration node's `dtype_bounds` metadata into checker
@@ -2044,25 +2071,42 @@ pub(super) fn collect_declarations(
                     dtype_bounds,
                     errors,
                 );
-                let installed = match &resolved {
-                    Ok(resolved) => install_declared_bounds(&resolved.bounds, subst, name, errors),
-                    Err(_) => Ok(()),
+                let bounds = match &resolved {
+                    Ok(resolved) => &resolved.bounds,
+                    Err(rejected) => &rejected.bounds,
                 };
+                let installed = install_declared_bounds(bounds, subst, name, errors);
                 subst.leave_level(signature_level, vg);
-                if let (Ok(resolved), Ok(())) = (resolved, installed) {
-                    let scheme = env.generalize(&resolved.ty, subst);
-                    env.bind(name.to_string(), scheme);
-                    // chelis#260: keep the source names of the declared dim
-                    // and type parameters. This is the only point where `n`,
-                    // `m` and `t` are still associated with their variables.
-                    env.record_declared_dim_names(name, resolved.dim_names);
-                    // chelis#1486 / [04-INF-6]: the type-name recording has a
-                    // second consumer. It covers authored binders, explicit
-                    // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
-                    // alike, so the post-body rigidity check can name `a`
-                    // rather than `t44`. An inference hole never reaches this
-                    // map ([04-INF-5]).
-                    env.record_declared_type_names(name, resolved.type_names);
+                match (resolved, installed) {
+                    (Ok(resolved), Ok(())) => {
+                        let scheme = env.generalize(&resolved.ty, subst);
+                        env.bind(name.to_string(), scheme);
+                        // chelis#260: keep the source names of the declared dim
+                        // and type parameters. This is the only point where `n`,
+                        // `m` and `t` are still associated with their variables.
+                        env.record_declared_dim_names(name, resolved.dim_names);
+                        // chelis#1486 / [04-INF-6]: the type-name recording has a
+                        // second consumer. It covers authored binders, explicit
+                        // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
+                        // alike, so the post-body rigidity check can name `a`
+                        // rather than `t44`. An inference hole never reaches this
+                        // map ([04-INF-5]).
+                        env.record_declared_type_names(name, resolved.type_names);
+                    }
+                    (Ok(resolved), Err(witness)) => {
+                        let recovery = crate::deep_type::RejectedSignatureType::from_resolved(
+                            resolved.ty,
+                            witness,
+                        );
+                        env.bind_rejected_signature(name.to_string(), recovery, subst);
+                        env.record_declared_dim_names(name, resolved.dim_names);
+                        env.record_declared_type_names(name, resolved.type_names);
+                    }
+                    (Err(rejected), _) => {
+                        env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
+                        env.record_declared_dim_names(name, rejected.dim_names);
+                        env.record_declared_type_names(name, rejected.type_names);
+                    }
                 }
             }
         }
@@ -2470,7 +2514,7 @@ pub(super) fn infer_top_level(
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
 ) -> Option<(String, Type)> {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
+    let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
         // `((var {} f) (var {} x))` was never type-checked while the
@@ -2526,28 +2570,33 @@ pub(super) fn infer_top_level(
         // variables long after this instantiation, so the composed map is
         // parked on `Env` below.
         let mut declared_type_names: UnordMap<TypeVar, String> = UnordMap::new();
-        let declared_ty = if provisional_recursive_type.is_none() {
-            env.lookup(&name).map(|s| {
-                let s = s.clone();
-                // All three renamings: the type mapping validates in-group
-                // recursive calls and names this signature's authored type
-                // binders, and the dim mapping names its declared dimension
-                // parameters. A recursive `def` can collapse two rigid dims or
-                // two rigid type binders exactly like a non-recursive one, so
-                // neither branch may be the one that falls back to the internal
-                // id (spec/04 [04-FIT-9], [04-INF-6]).
-                let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
-                declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
-                declared_type_names = env.declared_type_names_for(&name, &mapping);
-                if recursion::group_member(&name) {
-                    recursion_caller_guard = recursion::begin_caller(
-                        &name,
-                        declared_signatures.get(&name).map(|m| &m.binders),
-                        &mapping,
-                    );
-                }
-                ty
-            })
+        let rejected_signature = env.rejected_signature(&name).cloned();
+        let declared_ty = if provisional_recursive_type.is_none() || rejected_signature.is_some() {
+            rejected_signature
+                .as_ref()
+                .map(|rejected| &rejected.scheme)
+                .or_else(|| env.lookup(&name))
+                .map(|s| {
+                    let s = s.clone();
+                    // All three renamings: the type mapping validates in-group
+                    // recursive calls and names this signature's authored type
+                    // binders, and the dim mapping names its declared dimension
+                    // parameters. A recursive `def` can collapse two rigid dims or
+                    // two rigid type binders exactly like a non-recursive one, so
+                    // neither branch may be the one that falls back to the internal
+                    // id (spec/04 [04-FIT-9], [04-INF-6]).
+                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
+                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
+                    declared_type_names = env.declared_type_names_for(&name, &mapping);
+                    if recursion::group_member(&name) {
+                        recursion_caller_guard = recursion::begin_caller(
+                            &name,
+                            declared_signatures.get(&name).map(|m| &m.binders),
+                            &mapping,
+                        );
+                    }
+                    ty
+                })
         } else {
             if recursion::group_member(&name) {
                 recursion_caller_guard = recursion::begin_caller(&name, None, &[]);
@@ -2608,22 +2657,18 @@ pub(super) fn infer_top_level(
         let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
-            let inferred = infer_def_body_with_sig(
+            infer_declared_def_body(
                 &kids[1],
                 decl_ty,
+                declaration_meta,
+                declared_signatures.get(&name),
                 &mut body_env,
                 vg,
                 subst,
                 adt_reg,
                 errors,
                 product,
-            );
-            product.record_bypass(
-                &kids[1],
-                inferred.clone(),
-                "declared-signature function inference",
-            );
-            inferred
+            )
         } else {
             infer_expr(&kids[1], &mut body_env, vg, subst, adt_reg, errors, product)
         };
@@ -2894,6 +2939,13 @@ pub(super) fn infer_top_level(
             subst,
             errors,
         );
+
+        // The private frame constrains this body, but never replaces the
+        // rejected declaration with a callable public signature.
+        let scheme_body = match rejected_signature {
+            Some(rejected) => propagate(&rejected.witness),
+            None => scheme_body,
+        };
 
         if let Some(level) = ordinary_level {
             subst.leave_level(level, vg);

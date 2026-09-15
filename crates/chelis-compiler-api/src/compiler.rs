@@ -6653,7 +6653,7 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
         },
         TypeExpr::Tensor(dims, precision, s) => WireSurfTypeExpr::Tensor {
             dims: dims.iter().map(wire_type_expr).collect(),
-            precision: precision.clone(),
+            precision: precision.to_string(),
             span: span(*s),
         },
         TypeExpr::Arrow(args, ret, s) => WireSurfTypeExpr::Arrow {

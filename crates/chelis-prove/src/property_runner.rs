@@ -26,7 +26,8 @@ use std::{
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, Metadata};
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TypeExpr,
+    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TensorPrecision,
+    TypeExpr,
 };
 
 mod smt_lower;
@@ -4451,7 +4452,11 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(TypeExpr::Tensor(dims, precision.to_string(), span))
+            Some(TypeExpr::Tensor(
+                dims,
+                TensorPrecision::new(precision, span),
+                span,
+            ))
         }
         _ => None,
     }

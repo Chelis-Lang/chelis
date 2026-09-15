@@ -1,5 +1,5 @@
 use chelis_deep::{DtypeFamily, Span};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// One entry of a declaration's bracketed binder list
 /// (`spec/02-surf-syntax.md` §P4b/§P4c).
@@ -349,17 +349,106 @@ impl std::fmt::Display for DimensionLiteral {
     }
 }
 
+/// A tensor precision spelling with the exact token span that authored it.
+///
+/// Direct human-readable Serde of [`TypeExpr`] accepts the former string field
+/// as a compatibility input. The compiler API's separate `surf_ast` wire type
+/// remains string-valued and is not this Rust AST representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TensorPrecision {
+    name: String,
+    span: Span,
+}
+
+impl TensorPrecision {
+    pub fn new(name: impl Into<String>, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            span,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl<'de> Deserialize<'de> for TensorPrecision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Current {
+            name: String,
+            span: Span,
+        }
+
+        if !deserializer.is_human_readable() {
+            let Current { name, span } = Current::deserialize(deserializer)?;
+            return Ok(Self { name, span });
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            Current(Current),
+            Legacy(String),
+        }
+
+        match Representation::deserialize(deserializer)? {
+            Representation::Current(Current { name, span }) => Ok(Self { name, span }),
+            Representation::Legacy(name) => Ok(Self {
+                name,
+                // The former human-readable field carried only the spelling,
+                // so no exact token location can be reconstructed honestly.
+                span: Span::new(0, 0),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for TensorPrecision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(formatter)
+    }
+}
+
+impl std::ops::Deref for TensorPrecision {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for TensorPrecision {
+    fn eq(&self, other: &str) -> bool {
+        self.name == other
+    }
+}
+
+impl PartialEq<&str> for TensorPrecision {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
-    Named(String, Span),                       // f32, bool, MyType
-    DimensionLiteral(DimensionLiteral, Span),  // integer only in Name[...]
-    Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
-    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
-    Ref(Box<TypeExpr>, Span),                  // &T
-    App(String, Vec<TypeExpr>, Span),          // Option f32
-    Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
-    Infer(Span),                               // _
-    RankSpread(String, Span),                  // ..r (rank variable; whole-shape spread)
+    Named(String, Span),                          // f32, bool, MyType
+    DimensionLiteral(DimensionLiteral, Span),     // integer only in Name[...]
+    Tensor(Vec<TypeExpr>, TensorPrecision, Span), // tensor[batch, hidden, f32]
+    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span),    // A -> B -> C (flat)
+    Ref(Box<TypeExpr>, Span),                     // &T
+    App(String, Vec<TypeExpr>, Span),             // Option f32
+    Tuple(Vec<TypeExpr>, Span),                   // (f32, f32)
+    Infer(Span),                                  // _
+    RankSpread(String, Span),                     // ..r (rank variable; whole-shape spread)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

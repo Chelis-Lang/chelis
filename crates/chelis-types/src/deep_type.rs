@@ -3,8 +3,12 @@
 //! This is the single boundary that may translate Deep type syntax into the
 //! checker's internal [`Type`]. Resolution is context-sensitive: declarations
 //! choose how names become binders, while ordinary source annotations are
-//! closed. A failure reports exactly once and returns an [`ErrorWitness`]
-//! instead of inventing a variable, wildcard, or partial type.
+//! closed. A failure returns an [`ErrorWitness`], never a successful partial
+//! type. Private rejected-signature frames preserve valid constraints for body
+//! checks. Known constructors inspect all sibling components before failure.
+
+mod recovery;
+pub(crate) use recovery::RejectedSignatureType;
 
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
@@ -66,10 +70,11 @@ impl TypeUseSite {
     }
 }
 
-/// Source location owned by one type-resolution root. Explicit producer span
+/// Source location owned by one type-resolution node. Explicit producer span
 /// metadata wins; otherwise the structural AST range is retained and exposed
 /// through a stable `source:<start>..<end>` identifier as well as the byte
-/// offset. The value is copied out of the AST so resolver reuse is safe.
+/// offset. A nested node with an explicitly unknown `0..0` span remains
+/// unknown rather than inheriting its parent's location.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeDiagnosticLocation {
     span_offset: Option<usize>,
@@ -310,6 +315,11 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         Ok(std::mem::take(&mut self.installed_bounds))
     }
 
+    /// Retain the usable bounds even if a different declared bound is invalid.
+    pub(crate) fn resolved_dtype_bounds(&self) -> Vec<(TypeVar, TypeVarRestriction)> {
+        self.installed_bounds.clone()
+    }
+
     /// Provide the source construct that owns this resolver use site. The
     /// resolved type expression remains the preferred location; this owner is
     /// the fallback for synthesized children such as a Surf cast target.
@@ -321,6 +331,27 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     pub(crate) fn resolve(&mut self, expr: &deep::Expr) -> Result<ResolvedDeepType, ErrorWitness> {
         self.begin_resolution(expr);
         self.resolve_type(expr).map(ResolvedDeepType)
+    }
+
+    /// Parse a parameter annotation as a real constraint or an inference hole.
+    /// A whole-slot hole adds no constraint. The caller supplies its declared
+    /// slot, or a fresh body-local variable when no signature exists.
+    pub(crate) fn resolve_parameter(
+        &mut self,
+        expr: &deep::Expr,
+    ) -> Result<Option<ResolvedDeepType>, ErrorWitness> {
+        self.begin_resolution(expr);
+        let (form, tag, children) = self.type_form_expr(expr)?;
+        if form == Some(DeepTag::TVar) && self.one_symbol(tag, children)? == "_" {
+            return if self.allows_hole() {
+                Ok(None)
+            } else {
+                Err(self.unbound("type", "_"))
+            };
+        }
+        self.recover_parts(form, tag, children)
+            .into_result()
+            .map(|ty| Some(ResolvedDeepType(ty)))
     }
 
     /// Resolve cast-target syntax through this boundary before semantic cast
@@ -471,19 +502,39 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     fn enter_expr(&mut self, expr: &deep::Expr) {
-        self.current_location = TypeDiagnosticLocation::from_expr(expr)
-            .or_else(|| self.resolution_location.clone())
-            .or_else(|| self.owner_location.clone());
+        // `Some(default)` is an intentional unknown-location sentinel. It
+        // prevents `diagnostic_location` from falling through to the root or
+        // owner after a legacy child explicitly says its token span is unknown.
+        self.current_location = Some(TypeDiagnosticLocation::from_expr(expr).unwrap_or_default());
     }
 
     fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
-        self.enter_expr(expr);
-        let (form_tag, tag, children) = self.type_form_expr(expr)?;
+        let (form, tag, children) = self.type_form_expr(expr)?;
+        self.recover_parts(form, tag, children).into_result()
+    }
+
+    fn resolve_atomic_type(
+        &mut self,
+        form_tag: Option<DeepTag>,
+        tag: &str,
+        children: &[deep::Expr],
+    ) -> Result<Type, ErrorWitness> {
         match form_tag {
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
                 if let Some(prim) = Prim::parse_name(name) {
-                    return Ok(Type::Prim(prim));
+                    if prim.is_admissible_active() {
+                        return Ok(Type::Prim(prim));
+                    }
+                    // chelis#1606: an internal Prim variant does not imply
+                    // an admitted source type. Resolve every type position
+                    // through the same [04-DTYPE-1] rejection.
+                    let tensor = self.resolving_tensor_precision;
+                    let diagnostic = f8e4m3_diagnostic(tensor);
+                    let diagnostic = self
+                        .diagnostic_location()
+                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+                    return Err(report_witness(self.errors, diagnostic));
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -520,142 +571,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
                 self.resolve_type_var(name).map(Type::Var)
-            }
-            Some(DeepTag::TFn) => {
-                if children.is_empty() {
-                    return Err(self.malformed(format!(
-                        "malformed `t-fn` in {}: expected at least a return type",
-                        self.use_site.label()
-                    )));
-                }
-                let mut parts = Vec::with_capacity(children.len());
-                for child in children {
-                    parts.push(self.resolve_type(child)?);
-                }
-                let ret = parts.pop().expect("non-empty checked above");
-                Ok(Type::Fn(parts, Box::new(ret)))
-            }
-            Some(DeepTag::TRef) => {
-                self.exact_arity(tag, children, 1)?;
-                Ok(Type::Ref(Box::new(self.resolve_type(&children[0])?)))
-            }
-            Some(DeepTag::TTensor) => {
-                if children.is_empty() {
-                    return Err(self.malformed(format!(
-                        "malformed `t-tensor` in {}: expected dimensions followed by a precision",
-                        self.use_site.label()
-                    )));
-                }
-                let mut dims = Vec::with_capacity(children.len().saturating_sub(1));
-                for child in &children[..children.len() - 1] {
-                    dims.push(self.resolve_dim(child)?);
-                }
-                // The trailing child is the precision slot, whose reserved-name
-                // diagnostic belongs to `validate_tensor_precisions_in_program`
-                // rather than to the `t-prim` arm above (chelis#1593).
-                let resolved_precision = {
-                    let outer = std::mem::replace(&mut self.resolving_tensor_precision, true);
-                    let resolved = self.resolve_type(&children[children.len() - 1]);
-                    self.resolving_tensor_precision = outer;
-                    resolved?
-                };
-                let precision = match resolved_precision {
-                    Type::Prim(prim) => TensorPrec::Concrete(prim),
-                    Type::Var(var) => TensorPrec::Var(var),
-                    other => {
-                        return Err(self.type_error(format!(
-                            "tensor precision in {} must be `t-prim` or a legal `t-var`, got `{other}`",
-                            self.use_site.label()
-                        )));
-                    }
-                };
-                Ok(Type::Tensor(dims, precision))
-            }
-            Some(DeepTag::TAdt) => {
-                let Some(name) = children.first().and_then(symbol_name) else {
-                    return Err(self.malformed(format!(
-                        "malformed `t-adt` in {}: expected a nominal type name followed by type arguments",
-                        self.use_site.label()
-                    )));
-                };
-                let Some(param_kinds) = self.headers.param_kinds(name) else {
-                    return Err(self.type_error(format!(
-                        "unknown nominal type `{name}` in {}",
-                        self.use_site.label()
-                    )));
-                };
-                let actual = children.len() - 1;
-                if actual != param_kinds.len() {
-                    return Err(self.type_error(format!(
-                        "nominal type `{name}` in {} expects {} argument(s), got {actual}",
-                        self.use_site.label(),
-                        param_kinds.len()
-                    )));
-                }
-                let mut args = Vec::with_capacity(actual);
-                for (index, (child, kind)) in children[1..].iter().zip(param_kinds).enumerate() {
-                    let (child_tag, _, child_children) = self.type_form_expr(child)?;
-                    match kind {
-                        NominalParamKind::Type => {
-                            if matches!(
-                                child_tag,
-                                Some(
-                                    DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
-                                )
-                            ) {
-                                return Err(self.type_error(format!(
-                                    "nominal type `{name}` argument {} expects a type, got a dimension",
-                                    index + 1
-                                )));
-                            }
-                            args.push(NominalArg::Type(self.resolve_type(child)?));
-                        }
-                        NominalParamKind::Dimension => {
-                            let dim = match child_tag {
-                                Some(DeepTag::DName | DeepTag::DVar | DeepTag::DLit) => {
-                                    self.resolve_dim(child)?
-                                }
-                                // Surf cannot know the target header while desugaring
-                                // `Frame[n]`, so symbolic nominal arguments arrive as
-                                // `t-var`; the checker-owned header gives them their
-                                // dimension meaning here.
-                                Some(DeepTag::TVar) => {
-                                    let child_name = self.one_symbol("t-var", child_children)?;
-                                    Dim::Var(self.resolve_dim_var(child_name)?)
-                                }
-                                _ => {
-                                    return Err(self.type_error(format!(
-                                        "nominal type `{name}` argument {} expects a dimension, got a type",
-                                        index + 1
-                                    )));
-                                }
-                            };
-                            args.push(NominalArg::Dimension(dim));
-                        }
-                    }
-                }
-                if param_kinds.contains(&NominalParamKind::Dimension) {
-                    Ok(Type::KindedAdt(name.to_string(), args))
-                } else {
-                    Ok(Type::Adt(
-                        name.to_string(),
-                        args.into_iter()
-                            .map(|argument| match argument {
-                                NominalArg::Type(ty) => ty,
-                                NominalArg::Dimension(_) => {
-                                    unreachable!("type-only header produced a dimension argument")
-                                }
-                            })
-                            .collect(),
-                    ))
-                }
-            }
-            Some(DeepTag::TTuple) => {
-                let mut elements = Vec::with_capacity(children.len());
-                for child in children {
-                    elements.push(self.resolve_type(child)?);
-                }
-                Ok(Type::Tuple(elements))
             }
             Some(DeepTag::TUnit) => {
                 self.exact_arity(tag, children, 0)?;
@@ -1002,17 +917,19 @@ pub(crate) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<Che
     ))
 }
 
-/// True if `name` is one of the remaining reserved-but-deferred dtype
-/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
-/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
-/// the unsigned family has its own predicate above). These spellings
-/// never resolve through `Prim::parse_name`, so without a dedicated arm
-/// they would fall to the generic unknown-name rejections with no
-/// §1.1.1 citation.
+/// Reserved non-unsigned numeric names from spec/04 §1.1.1.
+/// The internal `Prim::F8e4m3` variant is also reserved as a type-variable name.
 pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
     matches!(
         name,
-        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
+        "f8e4m3"
+            | "f8e5m2"
+            | "int4"
+            | "uint4"
+            | "complex64"
+            | "complex128"
+            | "decimal128"
+            | "decimal256"
     )
 }
 
@@ -1020,6 +937,9 @@ pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
 /// appearing as a cast target or a tensor element type. Returns `None`
 /// for other names so call sites can short-circuit.
 pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if name == "f8e4m3" {
+        return Some(f8e4m3_diagnostic(tensor));
+    }
     if !is_deferred_dtype_name(name) {
         return None;
     }
@@ -1038,6 +958,25 @@ pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<Che
              {active_set} until it activates"
         )],
     ))
+}
+
+/// Preserve the existing FP8 diagnostic phrase at the shared type boundary.
+fn f8e4m3_diagnostic(tensor: bool) -> CheckError {
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `f8e4m3` as a {surface} dtype: f8e4m3 is deferred per \
+             spec/04-type-system.md §1.1.1 and is not part of the active \
+             numeric primitive set ({active_set})"
+        ),
+        vec![format!(
+            "f8e4m3 has no active backend in this cycle; pick one of \
+             {active_set}, or see spec/04-type-system.md §1.1.1 for the \
+             deferral rationale"
+        )],
+    )
 }
 
 fn symbol_name(expr: &deep::Expr) -> Option<&str> {

@@ -281,21 +281,20 @@ pub(super) fn annotate_child_for_role(
     }
 }
 
-/// True for the `(t-var _)` placeholder that `desugar_fun_def` emits
-/// in a synthesized sig for a parameter that had no declared type.
+/// True for a whole-slot inference hole in a signature or parameter annotation.
 pub(super) fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
     // chelis#1107 amendment: carrier-preserving read.
     matches!(stamped_parts(expr), Some((DeepTag::TVar, _, kids))
-        if kids.first().and_then(symbol_name) == Some("_"))
+        if matches!(kids, [name] if symbol_name(name) == Some("_")))
 }
 
 /// Rebuild a `(params ...)` node so every previously-bare parameter
 /// symbol carries a `{type: ...}` metadata entry, using the declared
 /// signature's parameter type *expressions* (`declared_param_type_exprs`).
 ///
-/// The desugarer only attaches type metadata to parameters with an
-/// inline annotation (`def f(x: T)`); parameters whose types come from
-/// a separate `sig` declaration desugar to bare symbols. IR lowering's
+/// Inline annotations now leave whole-slot holes on parameters, with the
+/// actual types in the signature. Standalone signatures can have bare
+/// parameters. Both forms need the declared type here. IR lowering's
 /// `lower_fn` reads param types straight off this node, so without this
 /// step a standalone-lowered def's params fall back to a rank-0
 /// `default_type()` and any shape-sensitive op on them panics in
@@ -306,7 +305,8 @@ pub(super) fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
 /// function type drops them, which would make the linearity checker
 /// treat a borrowed param as owned).
 ///
-/// Parameters that already carry a type annotation are left untouched.
+/// Real annotations remain untouched. Only whole-slot holes receive the
+/// corresponding declared type, with all other binder metadata intact.
 pub(super) fn annotate_params_node(
     params_expr: &deep::Expr,
     declared_param_type_exprs: &[deep::Expr],
@@ -369,11 +369,45 @@ pub(super) fn annotate_params_node(
                     None => elements.push(param.clone()),
                 }
             }
-            // Already-typed params (MetaExpr / List forms) are left as-is.
-            _ => elements.push(param.clone()),
+            _ => elements.push(
+                match declared_param_type_exprs
+                    .get(index)
+                    .filter(|ty| !is_wildcard_tvar_expr(ty))
+                {
+                    Some(declared) => annotate_parameter_hole(param, declared),
+                    None => param.clone(),
+                },
+            ),
         }
     }
     deep::Expr::List(deep::List { elements }, *span)
+}
+
+fn annotate_parameter_hole(param: &deep::Expr, declared: &deep::Expr) -> deep::Expr {
+    let mut annotated = param.clone();
+    let metadata = match &mut annotated {
+        deep::Expr::MetaExpr(meta, _) => Some(&mut meta.metadata),
+        deep::Expr::List(list, _) => match list.elements.get_mut(1) {
+            Some(deep::Expr::Map(meta, _)) => Some(meta),
+            _ => None,
+        },
+        deep::Expr::BareList(elements, _) => match elements.get_mut(1) {
+            Some(deep::Expr::Map(meta, _)) => Some(meta),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(metadata) = metadata
+        && metadata
+            .ty()
+            .is_some_and(|ty| is_wildcard_tvar_expr(ty.expression()))
+    {
+        metadata.replace(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(declared.clone())
+                .expect("declared parameter type syntax"),
+        ));
+    }
+    annotated
 }
 
 /// Annotate the children of a `(fn ...)` node.

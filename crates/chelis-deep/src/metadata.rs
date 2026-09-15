@@ -252,13 +252,29 @@ impl<'a> View<'a> {
             _ => None,
         }
     }
+    fn float(self) -> Option<f64> {
+        match self.scalar() {
+            Self::Raw(RawExpr::Atom(RawAtom::Float(v), _))
+            | Self::Ast(Expr::Atom(Atom::Float(v), _)) => Some(*v),
+            _ => None,
+        }
+    }
+    fn boolean(self) -> Option<bool> {
+        match self.scalar() {
+            Self::Raw(RawExpr::Atom(RawAtom::Bool(v), _))
+            | Self::Ast(Expr::Atom(Atom::Bool(v), _)) => Some(*v),
+            Self::True(_) => Some(true),
+            _ => None,
+        }
+    }
+    fn extension_data(self) -> Option<&'a crate::ExtensionData> {
+        match self.scalar() {
+            Self::Data(value) | Self::Raw(RawExpr::ExtensionData(value)) => Some(value),
+            _ => None,
+        }
+    }
     fn is_true(self) -> bool {
-        matches!(
-            self.scalar(),
-            Self::Raw(RawExpr::Atom(RawAtom::Bool(true), _))
-                | Self::Ast(Expr::Atom(Atom::Bool(true), _))
-                | Self::True(_)
-        )
+        self.boolean() == Some(true)
     }
     fn list(self) -> Option<Vec<Self>> {
         match self.scalar() {
@@ -379,6 +395,21 @@ impl<'a> View<'a> {
     }
     fn node(self, tag: DeepTag) -> Option<Parts<'a>> {
         self.parts().filter(|v| v.tag == Some(tag))
+    }
+    fn annotated(self) -> Option<(Entries<'a>, Self)> {
+        match self {
+            Self::Raw(RawExpr::MetaExpr { entries, expr, .. }) => Some((
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), Self::Raw(value)))
+                    .collect(),
+                Self::Raw(expr),
+            )),
+            Self::Ast(Expr::MetaExpr(value, _)) => {
+                Some((entries(&value.metadata), Self::Ast(&value.expr)))
+            }
+            _ => None,
+        }
     }
 }
 fn entries(meta: &Metadata) -> Entries<'_> {
@@ -633,43 +664,196 @@ fn type_shape_error(root: View<'_>) -> Option<String> {
     None
 }
 
-fn same_syntax(a: View<'_>, b: View<'_>) -> bool {
-    if let Some(name) = a.name() {
-        return b.name() == Some(name);
-    }
-    if let Some(text) = a.string() {
-        return b.string() == Some(text);
-    }
-    if let Some(n) = a.integer() {
-        return b.integer() == Some(n);
-    }
-    if let (Some(a), Some(b)) = (a.parts(), b.parts())
-        && a.tag.is_some()
-        && b.tag.is_some()
-    {
-        return a.tag == b.tag
-            && same_sequence(&a.children, &b.children)
-            && same_entries(&a.meta, &b.meta);
-    }
-    if let (Some(a), Some(b)) = (a.map(), b.map()) {
-        return same_entries(&a, &b);
-    }
-    if let (Some(a), Some(b)) = (a.list(), b.list()) {
-        return same_sequence(&a, &b);
-    }
-    match (a, b) {
-        (
-            View::Raw(RawExpr::Atom(RawAtom::Bool(a), _)),
-            View::Raw(RawExpr::Atom(RawAtom::Bool(b), _)),
-        ) => a == b,
-        (View::Ast(Expr::Atom(Atom::Bool(a), _)), View::Ast(Expr::Atom(Atom::Bool(b), _))) => {
-            a == b
-        }
-        _ => false,
-    }
+/// Compare two complete Deep type-syntax trees by semantic content.
+///
+/// This is the canonical generated-copy identity used by checker ownership
+/// classification. It accepts stamped `Node` trees and the exact transitional
+/// `List` carrier, rejects malformed or non-type carriers, recursively ignores
+/// AST/token spans and source-only `span`, `span_*`, `loc`, and `source`
+/// metadata, and retains every other metadata key and payload.
+pub fn same_semantic_type_syntax(left: &Expr, right: &Expr) -> bool {
+    canonical_type_syntax(left)
+        && canonical_type_syntax(right)
+        && same_syntax(View::Ast(left), View::Ast(right))
 }
-fn same_sequence(a: &[View<'_>], b: &[View<'_>]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_syntax(*a, *b))
+
+fn canonical_type_syntax(root: &Expr) -> bool {
+    use crate::role::{
+        AritySpec, TypeSyntaxRole, arity_contract, type_syntax_child_role,
+        type_syntax_role_accepts_tag,
+    };
+
+    let mut pending = vec![(root, TypeSyntaxRole::Type)];
+    while let Some((value, role)) = pending.pop() {
+        if role == TypeSyntaxRole::Name {
+            if !matches!(value, Expr::Atom(Atom::Name(_), _)) {
+                return false;
+            }
+            continue;
+        }
+        if role == TypeSyntaxRole::Integer {
+            if !matches!(value, Expr::Atom(Atom::Int(_), _)) {
+                return false;
+            }
+            continue;
+        }
+
+        let (tag, children) = match value {
+            Expr::Node(node, _) => (node.tag(), node.children_slice()),
+            Expr::List(list, _) => match list.elements.as_slice() {
+                [
+                    Expr::Atom(Atom::Tag(tag), _),
+                    Expr::Map(_, _),
+                    children @ ..,
+                ] => (*tag, children),
+                _ => return false,
+            },
+            Expr::Atom(_, _)
+            | Expr::Map(_, _)
+            | Expr::MetaExpr(_, _)
+            | Expr::BareList(_, _)
+            | Expr::UnknownForm(_) => return false,
+        };
+        if !type_syntax_role_accepts_tag(role, tag) {
+            return false;
+        }
+        let count = children.len();
+        let arity_ok = match arity_contract(tag) {
+            AritySpec::Fixed(n) => count == n,
+            AritySpec::AtLeast(n) => count >= n,
+            AritySpec::Range(low, high) => (low..=high).contains(&count),
+        };
+        if !arity_ok {
+            return false;
+        }
+        for (index, child) in children.iter().enumerate().rev() {
+            let Some(child_role) = type_syntax_child_role(tag, index, count) else {
+                return false;
+            };
+            pending.push((child, child_role));
+        }
+    }
+    true
+}
+
+fn same_syntax<'a, 'b>(a: View<'a>, b: View<'b>) -> bool {
+    let mut pending = vec![(a, b)];
+    while let Some((a, b)) = pending.pop() {
+        if let Some(name) = a.name() {
+            if b.name() != Some(name) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(text) = a.string() {
+            if b.string() != Some(text) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(n) = a.integer() {
+            if b.integer() != Some(n) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(n) = a.float() {
+            if b.float().is_none_or(|other| other.to_bits() != n.to_bits()) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(value) = a.boolean() {
+            if b.boolean() != Some(value) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(value) = a.extension_data() {
+            if !b
+                .extension_data()
+                .is_some_and(|other| value.same_payload(other))
+            {
+                return false;
+            }
+            continue;
+        }
+        if let (Some(a), Some(b)) = (a.parts(), b.parts())
+            && a.tag.is_some()
+            && b.tag.is_some()
+        {
+            if a.tag != b.tag
+                || !push_sequence(&a.children, &b.children, &mut pending)
+                || !push_entries(&a.meta, &b.meta, true, &mut pending)
+            {
+                return false;
+            }
+            continue;
+        }
+        if let (Some((a_meta, a_expr)), Some((b_meta, b_expr))) = (a.annotated(), b.annotated()) {
+            if !push_entries(&a_meta, &b_meta, true, &mut pending) {
+                return false;
+            }
+            pending.push((a_expr, b_expr));
+            continue;
+        }
+        if let (Some(a), Some(b)) = (a.map(), b.map()) {
+            if !push_entries(&a, &b, false, &mut pending) {
+                return false;
+            }
+            continue;
+        }
+        if let (Some(a), Some(b)) = (a.list(), b.list()) {
+            if !push_sequence(&a, &b, &mut pending) {
+                return false;
+            }
+            continue;
+        }
+        match (a, b) {
+            (View::Ast(Expr::Atom(Atom::Tag(a), _)), View::Ast(Expr::Atom(Atom::Tag(b), _)))
+                if a == b => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn push_sequence<'a, 'b>(
+    a: &[View<'a>],
+    b: &[View<'b>],
+    pending: &mut Vec<(View<'a>, View<'b>)>,
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    pending.extend(a.iter().copied().zip(b.iter().copied()));
+    true
+}
+
+fn push_entries<'a, 'b>(
+    a: &Entries<'a>,
+    b: &Entries<'b>,
+    metadata: bool,
+    pending: &mut Vec<(View<'a>, View<'b>)>,
+) -> bool {
+    let source_provenance =
+        |key: &str| matches!(key, "span" | "loc" | "source") || key.starts_with("span_");
+    let relevant = |key: &str| !metadata || !source_provenance(key);
+    if a.iter().filter(|(key, _)| relevant(key)).count()
+        != b.iter().filter(|(key, _)| relevant(key)).count()
+    {
+        return false;
+    }
+    for (key, value) in a.iter().filter(|(key, _)| relevant(key)) {
+        let Some((_, other)) = b
+            .iter()
+            .find(|(other_key, _)| relevant(other_key) && other_key == key)
+        else {
+            return false;
+        };
+        pending.push((*value, *other));
+    }
+    true
 }
 fn binder_signature(v: View<'_>) -> Option<(&str, Option<View<'_>>)> {
     if let Some(name) = v.name() {
@@ -710,15 +894,6 @@ fn same_params(a: View<'_>, b: View<'_>) -> bool {
             }
         })
 }
-fn same_entries(a: &Entries<'_>, b: &Entries<'_>) -> bool {
-    // Source locations are not part of the serialized binder signature.
-    let relevant = |key: &str| !matches!(key, "span" | "loc" | "source");
-    a.iter().filter(|(k, _)| relevant(k)).count() == b.iter().filter(|(k, _)| relevant(k)).count()
-        && a.iter()
-            .filter(|(k, _)| relevant(k))
-            .all(|(k, v)| value(b, k).is_some_and(|other| same_syntax(*v, other)))
-}
-
 fn shape_valid(shape: Shape, v: View<'_>) -> bool {
     // The variant and immutable payload prove local shape at construction.
     if matches!(v, View::Value(_)) {

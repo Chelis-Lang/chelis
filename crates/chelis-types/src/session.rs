@@ -135,6 +135,107 @@ mod diagnostic_checkpoint_tests {
     }
 }
 
+#[cfg(test)]
+mod rejected_signature_resolution_tests {
+    use super::*;
+    use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
+    use crate::types::{Prim, Type, VarGen};
+
+    fn resolve<T>(
+        source: &str,
+        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+    ) -> (T, Vec<CheckError>) {
+        let program = chelis_deep::parse_and_stamp_file(&format!("(defsig {{}} fixture {source})"))
+            .expect("parse declaration type");
+        let chelis_deep::Expr::Node(declaration, _) = &program[0] else {
+            panic!("a declaration is a stamped node");
+        };
+        let ty = &declaration.children_slice()[1];
+        let headers = TypeResolutionEnv::default();
+        let mut variables = VarGen::default();
+        let mut errors = Vec::new();
+        let result = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            let mut resolver = DeepTypeResolver::new(
+                TypeUseSite::Defsig,
+                BinderMode::ImplicitGeneric,
+                &headers,
+                &mut variables,
+                &mut sink,
+            );
+            operation(&mut resolver, ty)
+        };
+        (result, errors)
+    }
+
+    #[test]
+    fn ordinary_resolution_never_returns_partial_structure_as_success() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} int32) (t-prim {} f8e5m2))",
+            |resolver, ty| resolver.resolve(ty),
+        );
+        assert!(result.is_err());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].message.contains("f8e4m3"));
+        assert!(errors[1].message.contains("f8e5m2"));
+    }
+
+    #[test]
+    fn only_a_rejected_outcome_carries_partial_signature_structure() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} int32) (t-prim {} f8e5m2))",
+            |resolver, ty| resolver.resolve_signature(ty),
+        );
+        let rejected = result.expect_err("an invalid signature cannot resolve");
+        let Type::Fn(arguments, result) = rejected.ty else {
+            panic!("retain the callable structure");
+        };
+        assert_eq!(arguments.len(), 2);
+        assert!(matches!(arguments[0], Type::Error(_)));
+        assert_eq!(arguments[1], Type::Prim(Prim::Int32));
+        assert!(matches!(*result, Type::Error(_)));
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn valid_structure_resolves_without_an_error_witness() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} int32) (t-prim {} bool))",
+            |resolver, ty| resolver.resolve_signature(ty),
+        );
+        assert_eq!(
+            result.expect("valid signature").into_type(),
+            Type::Fn(
+                vec![Type::Prim(Prim::Int32)],
+                Box::new(Type::Prim(Prim::Bool))
+            )
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parameter_holes_are_distinct_from_named_binders() {
+        let (hole, errors) = resolve("(t-var {} _)", |resolver, ty| {
+            resolver.resolve_parameter(ty)
+        });
+        assert!(hole.expect("a parameter admits a hole").is_none());
+        assert!(errors.is_empty());
+        let (named, errors) = resolve("(t-var {} a)", |resolver, ty| {
+            resolver.resolve_parameter(ty)
+        });
+        assert!(matches!(
+            named
+                .expect("named binder")
+                .expect("a binder is a constraint")
+                .into_type(),
+            Type::Var(_)
+        ));
+        assert!(errors.is_empty());
+    }
+}
+
 pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
     crate::infer::run_on_grown_stack(|| {
         let mut errors = Vec::new();

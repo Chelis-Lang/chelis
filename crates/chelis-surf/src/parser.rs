@@ -3179,8 +3179,8 @@ impl Parser {
                 let end = self.expect(&TokenKind::RBracket)?;
                 // Last item should be the precision (a Named ident)
                 let precision = items.pop().unwrap();
-                let prec_name = match &precision {
-                    TypeExpr::Named(n, _) => n.clone(),
+                let (prec_name, prec_span) = match &precision {
+                    TypeExpr::Named(n, span) => (n.clone(), *span),
                     _ => {
                         return Err(ParseError::Expected {
                             expected: "precision type name".into(),
@@ -3214,7 +3214,11 @@ impl Parser {
                         seen_spreads.push(n);
                     }
                 }
-                Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
+                Ok(TypeExpr::Tensor(
+                    items,
+                    TensorPrecision::new(prec_name, prec_span),
+                    tok.span.merge(end.span),
+                ))
             }
             TokenKind::Amp => {
                 let tok = self.advance();

@@ -597,6 +597,11 @@ disposition = "packages"
 packages = ["chelis-surf", "chelis-types", "chelis-compiler-api"]
 
 [[path_rule]]
+prefix = "spec/03-deep-syntax.md"
+disposition = "packages"
+packages = ["chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"]
+
+[[path_rule]]
 prefix = "spec/04-type-system.md"
 disposition = "packages"
 packages = ["chelis-types", "chelis-compiler-api"]

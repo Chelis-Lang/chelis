@@ -18,7 +18,8 @@ use thiserror::Error;
 
 use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
-    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+    Pattern, PropertyOption, TensorPrecision, TypeBinder, TypeExpr, TypeInvariant, UnaryOp,
+    Variant, VariantFields,
 };
 
 /// Failure to structurally resugar a Deep expression.
@@ -209,9 +210,9 @@ fn reject_extensions(expr: &DeepExpr) -> Result<(), ResugarError> {
 /// an error before normalization can erase it. Exact `type` entries on a
 /// `def`, its function value, and its parameters are also removed when the
 /// immediately preceding matching `defsig` already carries the same types.
-/// Canonical Surf deliberately folds that Deep pair into one typed declaration,
-/// so desugaring necessarily recreates those redundant annotations. A
-/// disagreement is retained and therefore still fails the oracle. Property
+/// Whole-parameter inference holes also add no constraint beside that signature.
+/// Canonical Surf folds the pair into one declaration whose actual parameter
+/// types live only in its signature. A real disagreement remains visible. Property
 /// parameter types remain paired with the written `property_quantifiers`.
 ///
 /// This narrow normalization is intentionally not
@@ -474,7 +475,14 @@ fn strip_matching_type_metadata(meta: &Metadata, expected_type: &DeepExpr) -> (M
 fn strip_matching_param_type(param: &DeepExpr, expected_type: &DeepExpr) -> DeepExpr {
     match param {
         DeepExpr::MetaExpr(meta, span) => {
-            let (metadata, matched) = strip_matching_type_metadata(&meta.metadata, expected_type);
+            let (metadata, matched) = match meta.metadata.ty() {
+                Some(ty) if is_deep_inference_hole(ty.expression()) => {
+                    let mut metadata = meta.metadata.clone();
+                    metadata.remove(K::Type);
+                    (metadata, true)
+                }
+                _ => strip_matching_type_metadata(&meta.metadata, expected_type),
+            };
             if !matched {
                 return param.clone();
             }
@@ -512,7 +520,7 @@ fn strip_matching_param_type_items(
         return None;
     };
     let actual_type = meta.ty().map(|v| v.expression())?;
-    if !same_deep_shape(actual_type, expected_type) {
+    if !is_deep_inference_hole(actual_type) && !same_deep_shape(actual_type, expected_type) {
         return None;
     }
     let mut metadata = meta.clone();
@@ -1090,6 +1098,7 @@ fn resugar_definition(
                 .zip(&type_node.children[..param_count])
             {
                 if let Some(param_type) = parameter_type_metadata(raw_param)?
+                    && !is_deep_inference_hole(param_type)
                     && !same_deep_shape(param_type, ty)
                 {
                     return Err(ResugarError::InvalidChild {
@@ -1098,8 +1107,9 @@ fn resugar_definition(
                         expected: "parameter `type` metadata matching the function type",
                     });
                 }
+                let written = parameter_type_metadata(raw_param)?.is_some();
                 let ty = resugar_type(ty)?;
-                param.ty = (!is_infer_type(&ty)).then_some(ty);
+                param.ty = (written || !is_infer_type(&ty)).then_some(ty);
             }
             let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
@@ -3396,6 +3406,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             at_least(&node, 1)?;
             let (precision, dimensions) = node.children.split_last().expect("nonempty checked");
             reject_reserved_type_variable(precision)?;
+            let precision_span = precision.span();
             let precision = type_name(precision).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: node.children.len() - 1,
@@ -3406,7 +3417,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
                     .iter()
                     .map(resugar_dimension)
                     .collect::<Result<Vec<_>, _>>()?,
-                precision.to_string(),
+                TensorPrecision::new(precision, precision_span),
                 node.span,
             ))
         }
@@ -3508,6 +3519,12 @@ fn type_name(expr: &DeepExpr) -> Option<&str> {
 
 fn is_infer_type(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Infer(_))
+}
+
+fn is_deep_inference_hole(expr: &DeepExpr) -> bool {
+    node_ref(expr).is_ok_and(|node| {
+        node.tag == DeepTag::TVar && matches!(node.children, [name] if atom_name(name) == Some("_"))
+    })
 }
 
 /// Rebuild binders in first-occurrence order without dropping unused bounds.

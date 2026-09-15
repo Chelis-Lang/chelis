@@ -487,22 +487,25 @@ fn desugar_param_with_scope(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
-    match &param.ty {
+    let annotation = param
+        .ty
+        .as_ref()
+        .map(|ty| desugar_type_with_scope(ty, dim_vars, tvar_set));
+    desugar_param_with_annotation(param, annotation)
+}
+
+fn desugar_param_with_annotation(param: &Param, annotation: Option<deep::Expr>) -> deep::Expr {
+    match annotation {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                metadata: deep::Metadata::from(type_metadata(desugar_type_with_scope(
-                    ty, dim_vars, tvar_set,
-                ))),
+                metadata: deep::Metadata::from(type_metadata(ty)),
                 expr: Box::new(sym(&param.name)),
             },
             sp(),
         ),
         Some(ty) => deep::Expr::List(
             deep::List {
-                elements: vec![
-                    sym(&param.name),
-                    meta_with_type(desugar_type_with_scope(ty, dim_vars, tvar_set)),
-                ],
+                elements: vec![sym(&param.name), meta_with_type(ty)],
             },
             sp(),
         ),
@@ -817,11 +820,8 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // Primitive type names
 // ---------------------------------------------------------------------------
 
-// `f8e4m3` is intentionally absent: spec/04-type-system.md §1.1.1
-// rejects it as a deferred precision. Keeping the name out of the
-// primitives list prevents the implicit-quantifier collector from
-// treating `f8e4m3` as a fresh tvar candidate, so the type-checker's
-// §1.1.1 rejection path fires with the correct diagnostic.
+// `f8e4m3` is reserved, not active. DEFERRED_DTYPE_NAMES below keeps it
+// out of implicit quantification so the checker reports [04-DTYPE-1].
 const PRIMITIVES: &[&str] = &[
     "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
@@ -875,15 +875,10 @@ const UNSIGNED_DTYPE_NAMES: &[&str] = &[
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
 
-/// The remaining reserved-but-deferred dtype names of
-/// `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because it is a
-/// real `Prim` variant and takes the `Prim::parse_name` path). Same
-/// treatment as the unsigned family above: these must reach the
-/// type-checker's §1.1.1 rejection path as `(t-prim {} <name>)`, not be
-/// quietly absorbed as candidate quantified type variables.
-///
-/// Mirrors `chelis_types::deep_type::is_deferred_dtype_name`.
+/// Reserved dtype names must reach the checker as `t-prim`, not `t-var`.
+/// The internal `Prim::F8e4m3` variant does not authorize a Surf binder.
 const DEFERRED_DTYPE_NAMES: &[&str] = &[
+    "f8e4m3",
     "f8e5m2",
     "int4",
     "uint4",
@@ -1038,7 +1033,7 @@ fn collect_top_level_fn_tensor_param_prec(
 
 /// Return the precision name (e.g. `"f64"`, `"int32"`) for a tensor type
 /// expression, or `None` for any other shape. Tensor type expressions in
-/// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
+/// Surf carry the spelling and exact token span in `TensorPrecision`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
     match ty {
         TypeExpr::Tensor(_, prec, _) => {
@@ -1311,16 +1306,28 @@ impl DesugarCtx {
         // than `(t-prim {} <name>)`. The same identifier may also act
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
-        // the tensor type, not by per-name kind tracking. When
-        // `type_binders` is empty, the WS-A5 implicit collection on the
-        // synthesized sig is preserved and parameter annotations keep
-        // their pre-WS-A6 behavior (an unbound precision name surfaces
-        // a diagnostic via `validate_tensor_precisions_in_program`).
+        // the tensor type, not by per-name kind tracking.
         let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
+        let synthesize_signature = (params.iter().any(|param| param.ty.is_some())
+            || ret_ty.is_some()
+            || effects.is_some()
+            || declares_bound)
+            && !self.explicit_sig_names.contains(name);
         let param_names: Vec<deep::Expr> = params
             .iter()
-            .map(|param| desugar_param_with_scope(param, &dim_set, &param_ann_tvar_set))
+            .map(|param| {
+                let annotation = param.ty.as_ref().map(|ty| {
+                    if synthesize_signature {
+                        // The signature owns the actual type. This hole keeps
+                        // the source annotation's presence, but adds no constraint.
+                        node(DeepTag::TVar, vec![sym("_")])
+                    } else {
+                        desugar_type_with_scope(ty, &dim_set, &param_ann_tvar_set)
+                    }
+                });
+                desugar_param_with_annotation(param, annotation)
+            })
             .collect();
         let params_node = node(DeepTag::Params, param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
@@ -1358,24 +1365,11 @@ impl DesugarCtx {
         // else would: the bound has no other carrier, and a `defsig` whose
         // positions are all wildcards still reports a bound naming a binder
         // the declaration never uses.
-        if (params.iter().any(|p| p.ty.is_some())
-            || ret_ty.is_some()
-            || effects.is_some()
-            || declares_bound)
-            && !self.explicit_sig_names.contains(name)
-        {
-            // Tvar set for the synthesized sig:
-            //
-            // - When the def declares an explicit quantifier list
-            //   (`def f[..]`), use that list as the authoritative source
-            //   of precision tvars. Names not in the list that appear
-            //   in a precision slot stay as `t-prim` and the validator
-            //   surfaces the unbound-name diagnostic; this matches the
-            //   WS-A6 rule in spec/02-surf-syntax.md §P4b.
-            // - When the def has no explicit quantifier list, fall back
-            //   to the WS-A5 implicit collection over typed params and
-            //   the return type (spec/04-type-system.md §5.8) so a
-            //   bare `def f(x: tensor[3, p])` continues to work.
+        if synthesize_signature {
+            // An explicit clause is authoritative. With no clause, P4b applies
+            // WS-A5 implicit collection to the entire synthesized signature,
+            // including its parameter positions. Reserved dtype spellings are
+            // already excluded by `collect_sig_type_vars`.
             let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
                 dim_set.clone()
             } else {
@@ -2659,7 +2653,7 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
             // names themselves are handled by the d-name / d-var
             // contextual rules elsewhere and are not type variables.
             if is_candidate_tvar_name(precision) {
-                out.insert(precision.clone());
+                out.insert(precision.to_string());
             }
         }
         TypeExpr::Arrow(params, ret, _) => {
@@ -2859,7 +2853,7 @@ fn desugar_type_with_scope_mode(
                 // checker surfaces its unknown-primitive diagnostic.
                 None => node(DeepTag::TPrim, vec![sym(precision)]),
             };
-            children.push(prec_node);
+            children.push(with_structural_span(prec_node, precision.span()));
             node(DeepTag::TTensor, children)
         }
 
@@ -3324,7 +3318,7 @@ mod tests {
         );
         assert_eq!(
             nodes[1],
-            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))"
+            "(def {} f (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))"
         );
     }
 
@@ -3344,13 +3338,13 @@ mod tests {
                 "x",
                 Some(TypeExpr::Tensor(
                     vec![named_ty("batch"), named_ty("hidden")],
-                    "f32".to_string(),
+                    TensorPrecision::new("f32", s()),
                     s(),
                 )),
             )],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("hidden"), named_ty("batch")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3402,7 +3396,7 @@ mod tests {
                     "x",
                     Some(TypeExpr::Tensor(
                         vec![named_ty("n")],
-                        "f32".to_string(),
+                        TensorPrecision::new("f32", s()),
                         s(),
                     )),
                 ),
@@ -3411,12 +3405,16 @@ mod tests {
                     "f",
                     Some(TypeExpr::Arrow(
                         vec![
-                            TypeExpr::Tensor(vec![named_ty("n")], "f32".to_string(), s()),
+                            TypeExpr::Tensor(
+                                vec![named_ty("n")],
+                                TensorPrecision::new("f32", s()),
+                                s(),
+                            ),
                             named_ty("P"),
                         ],
                         Box::new(TypeExpr::Tensor(
                             vec![named_ty("n")],
-                            "f32".to_string(),
+                            TensorPrecision::new("f32", s()),
                             s(),
                         )),
                         s(),
@@ -3425,7 +3423,7 @@ mod tests {
             ],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("n")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3477,7 +3475,7 @@ mod tests {
                     "x",
                     Some(TypeExpr::Tensor(
                         vec![named_ty("n")],
-                        "f32".to_string(),
+                        TensorPrecision::new("f32", s()),
                         s(),
                     )),
                 ),
@@ -3485,7 +3483,7 @@ mod tests {
             ],
             ret_ty: Some(TypeExpr::Tensor(
                 vec![named_ty("n")],
-                "f32".to_string(),
+                TensorPrecision::new("f32", s()),
                 s(),
             )),
             effects: None,
@@ -3756,7 +3754,7 @@ mod tests {
     fn test_type_tensor() {
         let ty = TypeExpr::Tensor(
             vec![named_ty("batch"), named_ty("hidden")],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(
@@ -3769,7 +3767,7 @@ mod tests {
     fn test_type_tensor_with_literal_dims() {
         let ty = TypeExpr::Tensor(
             vec![named_ty("32"), named_ty("784")],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(
@@ -3817,7 +3815,7 @@ mod tests {
         // `tensor[..r, f32]` desugars to a sole `(d-rank {} r)` dim node.
         let ty = TypeExpr::Tensor(
             vec![TypeExpr::RankSpread("r".to_string(), s())],
-            "f32".to_string(),
+            TensorPrecision::new("f32", s()),
             s(),
         );
         assert_eq!(

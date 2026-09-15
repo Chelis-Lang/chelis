@@ -99,6 +99,13 @@ struct ConstructorBinding {
     scheme: Scheme,
 }
 
+/// Private structure used only to check the body of a rejected declaration.
+#[derive(Debug, Clone)]
+pub(crate) struct RejectedSignature {
+    pub(crate) scheme: Scheme,
+    pub(crate) witness: crate::errors::ErrorWitness,
+}
+
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
@@ -129,6 +136,10 @@ pub struct Env {
     /// nested lexical clones, and omitted from cached checker state.
     #[serde(skip)]
     type_resolution_scope: TypeResolutionScope,
+    /// Rejected declarations still have usable body constraints. These frames
+    /// belong to this check only and never become cached/public signatures.
+    #[serde(skip)]
+    rejected_signatures: UnordMap<String, Arc<RejectedSignature>>,
     /// Declared result trusted only while checking a linker-reserved
     /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
     /// #1298. Never serialized or exposed to entry source.
@@ -395,12 +406,38 @@ impl Env {
 
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
+        self.rejected_signatures.remove(&name);
         self.bindings.insert(name, Arc::new(scheme));
+    }
+
+    pub(crate) fn bind_rejected_signature(
+        &mut self,
+        name: String,
+        recovery: crate::deep_type::RejectedSignatureType,
+        subst: &mut Subst,
+    ) {
+        let scheme = self.generalize(&recovery.ty, subst);
+        self.bind(
+            name.clone(),
+            Scheme::mono(crate::errors::propagate(&recovery.witness)),
+        );
+        self.rejected_signatures.insert(
+            name,
+            Arc::new(RejectedSignature {
+                scheme,
+                witness: recovery.witness,
+            }),
+        );
+    }
+
+    pub(crate) fn rejected_signature(&self, name: &str) -> Option<&RejectedSignature> {
+        self.rejected_signatures.get(name).map(Arc::as_ref)
     }
 
     /// Bind a constructor in both structural constructor position and the
     /// ordinary value environment used by bare/nullary references.
     pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
+        self.rejected_signatures.remove(&name);
         self.bindings.insert(name.clone(), Arc::new(scheme.clone()));
         let candidates = self.constructor_bindings.entry(name).or_default();
         candidates.retain(|candidate| candidate.owner != owner);

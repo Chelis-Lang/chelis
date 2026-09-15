@@ -8,7 +8,7 @@ use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, Tenso
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, Metadata};
 #[cfg(not(feature = "chelis-prove"))]
 use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
-use chelis_surf::ast::{Decl, Expr, Literal, Param, TypeExpr};
+use chelis_surf::ast::{Decl, Expr, Literal, Param, TensorPrecision, TypeExpr};
 use serde_json::json;
 use walkdir::WalkDir;
 
@@ -2442,7 +2442,11 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()?;
-                Some(TypeExpr::Tensor(dims, precision.to_string(), *span))
+                Some(TypeExpr::Tensor(
+                    dims,
+                    TensorPrecision::new(precision, *span),
+                    *span,
+                ))
             }
             _ => None,
         },
@@ -2488,7 +2492,11 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()?;
-                Some(TypeExpr::Tensor(dims, precision.to_string(), *span))
+                Some(TypeExpr::Tensor(
+                    dims,
+                    TensorPrecision::new(precision, *span),
+                    *span,
+                ))
             }
             _ => None,
         },

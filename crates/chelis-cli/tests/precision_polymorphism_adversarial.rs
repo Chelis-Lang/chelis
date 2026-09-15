@@ -394,34 +394,22 @@ fn unbound_precision_name_in_let_now_rejected() {
 }
 
 #[test]
-fn unbound_precision_in_def_param_now_rejected() {
-    // `def f(x: tensor[3, weirdname]) -> tensor[3, weirdname] = x`
-    // The desugarer treats this as an implicit sig, so `weirdname`
-    // gets collected as an implicit quantifier and the SIG ends up
-    // polymorphic. The DEF param annotation, however, is desugared
-    // with an empty quantifier scope, so it becomes `(t-prim {}
-    // weirdname)`. The F3 fall-through in
-    // `validate_tensor_precisions_in_program` now flags the name
-    // explicitly rather than letting it collapse to `Type::Error` and
-    // pass silently.
+fn no_clause_precision_in_def_param_is_implicitly_bound() {
+    // Surf P4b applies WS-A5 implicit collection to the complete
+    // synthesized signature, including inline parameter types. The
+    // parameter and result therefore share one implicit `weirdname`
+    // binder. F3 still rejects unbound precision names in value-local
+    // annotations, where no synthesized signature owns them.
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("unbound_p_in_def.ch");
+    let path = dir.path().join("implicit_p_in_def.ch");
     write_file(
         &path,
         "def f(x: tensor[3, weirdname]) -> tensor[3, weirdname] = x\n",
     );
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unsupported_prec = errors.iter().any(|e| {
-        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        kind == "UnsupportedTensorPrecision" && msg.contains("`weirdname`")
-    });
-    assert!(
-        has_unsupported_prec,
-        "F3 fix: an unbound precision name in a def-param annotation \
-         must be rejected. Got {errors:?}"
-    );
+    assert!(errors.is_empty(), "implicit binder must check: {json:#?}");
+    assert_eq!(json["score"].as_f64(), Some(1.0), "{json:#?}");
 }
 
 #[test]
