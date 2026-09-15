@@ -333,6 +333,19 @@ class SchemaTests(unittest.TestCase):
         by_path = {rule.prefix: rule for rule in config.path_rules}
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
+        for path in (
+            ".github/workflows/conformance.yml",
+            ".github/workflows/pr-base-retarget.yml",
+            "scripts/ci_retarget_validation.py",
+            "scripts/test_ci_retarget_validation.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
 
     def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
         from scripts import bump_compiler_pins as bump

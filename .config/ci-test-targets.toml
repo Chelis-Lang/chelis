@@ -626,6 +626,24 @@ reason = "the change-owned workflow graph and command spellings are locked by sc
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = ".github/workflows/conformance.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "generic-edit exclusion and exact-base Hull dispatch are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-base-retarget.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "trusted base-retarget coordination and its required receipt are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = ".github/workflows/pr-contract-acknowledgements.yml"
 disposition = "owner"
 workflow = "ci.yml"
@@ -729,12 +747,30 @@ reason = "the exact-head and planned-base manual dispatch validator is locked by
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "exact-base dispatch, polling and head-receipt failure controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_ci_validate_pr_candidate.py"
 disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "the manual dispatch validator's positive and stale-candidate controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "retarget success, stale, duplicate, missing and failed receipt controls execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
