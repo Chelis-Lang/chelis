@@ -208,13 +208,13 @@ impl DeepTypeResolver<'_, '_, '_> {
             )));
         };
         let actual = children.len() - 1;
-        if actual != kinds.len() {
-            return TypeResolution::failed(self.type_error(format!(
+        let arity_failure = (actual != kinds.len()).then(|| {
+            self.type_error(format!(
                 "nominal type `{name}` in {} expects {} argument(s), got {actual}",
                 self.use_site.label(),
                 kinds.len()
-            )));
-        }
+            ))
+        });
         let mut arguments = Vec::with_capacity(actual);
         let mut failure = None;
         let mut incomplete = false;
@@ -266,6 +266,9 @@ impl DeepTypeResolver<'_, '_, '_> {
                     }
                 }
             }
+        }
+        if let Some(witness) = arity_failure {
+            return TypeResolution::failed(witness);
         }
         if incomplete {
             return TypeResolution::failed(

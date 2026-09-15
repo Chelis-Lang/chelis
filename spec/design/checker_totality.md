@@ -142,16 +142,20 @@ The current implementation has one explicit ownership chain:
    or post-inference deduplication decide ownership. Property quantifiers retain
    the typed copies required by the Deep metadata contract. The checker treats
    those parameter annotations as generated copies only after their complete
-   Deep type syntax matches the adjacent `defsig` slots through the Deep
-   metadata layer's canonical semantic view. That comparison recursively
+   Deep type syntax matches the adjacent `defsig` slot at the same canonical
+   parameter position through the Deep metadata layer's canonical semantic
+   view. Ownership is position-local: a mismatch, missing parameter, malformed
+   annotation, or extra parameter remains independently checked without
+   revoking a verified neighboring copy. A malformed outer parameter carrier
+   remains wholly unverified and fails closed. The semantic comparison recursively
    erases AST and metadata-token spans plus the source-only `span`, `span_*`,
    `loc`, and `source` metadata namespaces at enclosing metadata maps; the same
    spellings inside extension-data maps or preserved payloads remain opaque
    data. It retains every other metadata key and payload, accepts the stamped
    `Node` and exact transitional `List` carriers, and rejects malformed or
-   non-type carriers. A disagreement remains an
-   independently checked annotation constraint. For a verified copy, the
-   `defsig` is the one semantic diagnostic owner. The canonical form survives
+   non-type carriers. A disagreement remains an independently checked
+   annotation constraint. For each verified slot, the `defsig` is the one
+   semantic diagnostic owner. The canonical form survives
    Deep print/parse and direct `chelis_surf::TypeExpr` Serde.
    The compiler API's separate structured `surf_ast` wire continues to carry a
    string precision field. Surf §0.1 and Deep §6.3.2 own the corresponding
@@ -416,7 +420,11 @@ crate boundary is `Result<ResolvedDeepType, ErrorWitness>`:
   type/dimension/rank variables;
 - declaration headers are precollected before bodies, preserving legal self
   and forward ADT/alias references while rejecting unknown names and wrong
-  arities before a context can be cached. That explicit header environment is
+  arities before a context can be cached. A wrong nominal arity retains one
+  arity witness but does not return before recursively resolving every supplied
+  argument whose position has a header-defined type or dimension kind. Missing
+  positions and surplus positions beyond the header invent no child role. That
+  explicit header environment is
   carried for the whole check unit (including body annotations), not rebuilt
   mid-check from the subset of bodies that registered successfully. A failed
   declaration therefore owns its one resolution diagnostic without downstream

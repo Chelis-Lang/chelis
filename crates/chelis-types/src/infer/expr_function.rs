@@ -80,12 +80,32 @@ pub(super) fn infer_fn(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
-/// Whether an annotated `def` parameter is an independent contract or a
+/// Whether one annotated `def` parameter is an independent contract or a
 /// structurally verified copy of its adjacent signature slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DefParameterAnnotationOwnership {
+enum DefParameterSlotOwnership {
     Independent,
-    VerifiedSignatureCopies,
+    VerifiedSignatureCopy,
+}
+
+/// Position-aligned ownership for the supplied parameters of one `def`.
+///
+/// An absent entry is independent. That makes a malformed outer carrier fail
+/// closed, while an arity disagreement cannot revoke ownership already proved
+/// for another canonical parameter position.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct DefParameterAnnotationOwnership {
+    slots: Vec<DefParameterSlotOwnership>,
+}
+
+impl DefParameterAnnotationOwnership {
+    fn independent() -> Self {
+        Self::default()
+    }
+
+    fn is_verified_signature_copy(&self, index: usize) -> bool {
+        self.slots.get(index) == Some(&DefParameterSlotOwnership::VerifiedSignatureCopy)
+    }
 }
 
 /// Classify generated property copies from their raw Deep syntax.
@@ -97,27 +117,71 @@ pub(super) fn classify_property_parameter_annotations(
     declared_param_types: &[deep::Expr],
 ) -> DefParameterAnnotationOwnership {
     let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(body) else {
-        return DefParameterAnnotationOwnership::Independent;
+        return DefParameterAnnotationOwnership::independent();
     };
     let Some(params) = fn_children.first().and_then(canonical_parameter_elements) else {
-        return DefParameterAnnotationOwnership::Independent;
+        return DefParameterAnnotationOwnership::independent();
     };
-    if params.len() != declared_param_types.len() {
-        return DefParameterAnnotationOwnership::Independent;
-    }
-    if params
+    let slots = params
         .iter()
-        .zip(declared_param_types)
-        .all(|(param, declared)| {
-            parameter_type_syntax(param).is_some_and(|annotation| {
-                chelis_deep::metadata::same_semantic_type_syntax(annotation, declared)
-            })
+        .enumerate()
+        .map(|(index, param)| {
+            let verified = declared_param_types.get(index).is_some_and(|declared| {
+                parameter_type_syntax(param).is_some_and(|annotation| {
+                    chelis_deep::metadata::same_semantic_type_syntax(annotation, declared)
+                })
+            });
+            if verified {
+                DefParameterSlotOwnership::VerifiedSignatureCopy
+            } else {
+                DefParameterSlotOwnership::Independent
+            }
         })
-    {
-        DefParameterAnnotationOwnership::VerifiedSignatureCopies
+        .collect();
+    DefParameterAnnotationOwnership { slots }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_declared_def_body(
+    body: &deep::Expr,
+    decl_ty: &Type,
+    declaration_meta: &deep::Metadata,
+    declared_signature: Option<&DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    let property_has_quantifier_carriers = declaration_meta
+        .chelis_role()
+        .is_some_and(|role| role.value() == "property")
+        && declaration_meta.property_quantifiers().is_some();
+    let parameter_annotation_ownership = if property_has_quantifier_carriers {
+        declared_signature.map_or_else(DefParameterAnnotationOwnership::independent, |signature| {
+            classify_property_parameter_annotations(body, &signature.param_types)
+        })
     } else {
-        DefParameterAnnotationOwnership::Independent
-    }
+        DefParameterAnnotationOwnership::independent()
+    };
+    let inferred = infer_def_body_with_sig(
+        body,
+        decl_ty,
+        &parameter_annotation_ownership,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+    );
+    product.record_bypass(
+        body,
+        inferred.clone(),
+        "declared-signature function inference",
+    );
+    inferred
 }
 
 /// WS-A7: infer a `def`'s body when a declared signature is available, seeding
@@ -134,7 +198,7 @@ pub(super) fn classify_property_parameter_annotations(
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
     decl_ty: &Type,
-    parameter_annotation_ownership: DefParameterAnnotationOwnership,
+    parameter_annotation_ownership: &DefParameterAnnotationOwnership,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -164,21 +228,14 @@ pub(super) fn infer_def_body_with_sig(
         };
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = if parameter_annotation_ownership
-        == DefParameterAnnotationOwnership::VerifiedSignatureCopies
-    {
-        // Surf properties retain typed `property_quantifiers`, and Deep
-        // requires the copied fn parameter carrier to match them. The adjacent
-        // defsig is the semantic type owner only after the raw parameter type
-        // syntax has been verified equal to its signature slot. Resolving that
-        // verified copy again would report one authored quantifier twice.
-        extract_param_names(&kids[0])
-            .into_iter()
-            .map(|name| (name, None))
-            .collect()
-    } else {
-        extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env))
-    };
+    let params = extract_params_with_ownership(
+        &kids[0],
+        parameter_annotation_ownership,
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+    );
     let mut param_types = Vec::with_capacity(params.len());
     let mut fn_env = env.clone();
     for (index, (pname, ty_ann)) in params.iter().enumerate() {
@@ -266,33 +323,29 @@ fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
     }
 }
 
-fn extract_param_names(expr: &deep::Expr) -> Vec<String> {
-    let Some(elems) = parameter_elements(expr) else {
-        return Vec::new();
-    };
-    elems
-        .iter()
-        .filter_map(|expr| match expr {
-            deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
-            deep::Expr::MetaExpr(meta, _) => symbol_name(&meta.expr).map(str::to_string),
-            deep::Expr::List(list, _) => list
-                .elements
-                .first()
-                .and_then(symbol_name)
-                .map(str::to_string),
-            deep::Expr::BareList(elements, _) => {
-                elements.first().and_then(symbol_name).map(str::to_string)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
 /// Each param can be a bare symbol, a metadata-annotated symbol, or a legacy
 /// `(name {type: T})` helper pair.
 pub(super) fn extract_params(
     expr: &deep::Expr,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    binder_mode: BinderMode<'_>,
+) -> Vec<(String, Option<Type>)> {
+    extract_params_with_ownership(
+        expr,
+        &DefParameterAnnotationOwnership::independent(),
+        vg,
+        adt_reg,
+        errors,
+        binder_mode,
+    )
+}
+
+fn extract_params_with_ownership(
+    expr: &deep::Expr,
+    ownership: &DefParameterAnnotationOwnership,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
@@ -315,7 +368,8 @@ pub(super) fn extract_params(
         };
     let mut params = Vec::with_capacity(elems.len());
 
-    for expr in elems {
+    for (index, expr) in elems.iter().enumerate() {
+        let verified_copy = ownership.is_verified_signature_copy(index);
         match expr {
             deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 params.push((name.to_string(), None));
@@ -324,10 +378,13 @@ pub(super) fn extract_params(
                 let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     continue;
                 };
-                let annotation = meta
-                    .metadata
-                    .ty()
-                    .and_then(|value| resolve_annotation(value.expression()));
+                let annotation = (!verified_copy)
+                    .then(|| {
+                        meta.metadata
+                            .ty()
+                            .and_then(|value| resolve_annotation(value.expression()))
+                    })
+                    .flatten();
                 params.push((name.to_string(), annotation));
             }
             deep::Expr::List(param_list, _) => {
@@ -335,24 +392,28 @@ pub(super) fn extract_params(
                 let Some(name) = param_list.elements.first().and_then(symbol_name) else {
                     continue;
                 };
-                let annotation = match param_list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .ty()
-                        .and_then(|value| resolve_annotation(value.expression())),
-                    _ => None,
-                };
+                let annotation = (!verified_copy)
+                    .then(|| match param_list.elements.get(1) {
+                        Some(deep::Expr::Map(meta, _)) => meta
+                            .ty()
+                            .and_then(|value| resolve_annotation(value.expression())),
+                        _ => None,
+                    })
+                    .flatten();
                 params.push((name.to_string(), annotation));
             }
             deep::Expr::BareList(elements, _) => {
                 let Some(name) = elements.first().and_then(symbol_name) else {
                     continue;
                 };
-                let annotation = match elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .ty()
-                        .and_then(|value| resolve_annotation(value.expression())),
-                    _ => None,
-                };
+                let annotation = (!verified_copy)
+                    .then(|| match elements.get(1) {
+                        Some(deep::Expr::Map(meta, _)) => meta
+                            .ty()
+                            .and_then(|value| resolve_annotation(value.expression())),
+                        _ => None,
+                    })
+                    .flatten();
                 params.push((name.to_string(), annotation));
             }
             _ => {}

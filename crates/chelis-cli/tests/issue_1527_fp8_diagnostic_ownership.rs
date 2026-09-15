@@ -16,6 +16,9 @@ enum DiagnosticKind {
     UnsupportedTensorPrecision,
     DimensionMismatch,
     TypeMismatch,
+    UnknownForm,
+    MalformedForm,
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,7 +112,7 @@ fn assert_rejected_sites(source: &str, names: &[&str]) {
     }
 }
 
-fn prove_file(source: &str, extension: &str) -> (i32, Vec<serde_json::Value>) {
+fn prove_file_detailed(source: &str, extension: &str) -> (i32, Vec<serde_json::Value>, String) {
     let temp = tempdir().expect("create fixture directory");
     let path = temp.path().join(format!("main.{extension}"));
     fs::write(&path, source).expect("write fixture");
@@ -132,7 +135,16 @@ fn prove_file(source: &str, extension: &str) -> (i32, Vec<serde_json::Value>) {
             })
         })
         .collect();
-    (output.status.code().unwrap_or(-1), records)
+    (
+        output.status.code().unwrap_or(-1),
+        records,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn prove_file(source: &str, extension: &str) -> (i32, Vec<serde_json::Value>) {
+    let (code, records, _) = prove_file_detailed(source, extension);
+    (code, records)
 }
 
 fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
@@ -147,17 +159,103 @@ fn hand_authored_deep_property(signature_type: &str, parameter_type: &str) -> St
 }
 
 fn hand_authored_deep_property_types(signature_type: &str, parameter_type: &str) -> String {
+    hand_authored_deep_property_slots(
+        &[signature_type.to_string()],
+        &[parameter_type.to_string()],
+        "(lit {} true)",
+    )
+}
+
+fn hand_authored_deep_property_slots(
+    signature_types: &[String],
+    parameter_types: &[String],
+    body: &str,
+) -> String {
+    let parameter_names = ["x", "y", "z", "w", "v", "u"];
+    assert!(
+        signature_types.len() <= parameter_names.len()
+            && parameter_types.len() <= parameter_names.len()
+    );
+    let signature = signature_types.join(" ");
+    let quantifiers = parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("({} {{type: {ty}}})", parameter_names[index]))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "(defsig {{}} classify \
-           (t-fn {{}} {signature_type} (t-prim {{}} bool)))\n\
+           (t-fn {{}} {signature} (t-prim {{}} bool)))\n\
          (def {{chelis_role: \"property\", property_source_kind: \"user\", \
                 property_quantifiers: \
-                  (params {{}} (x {{type: {parameter_type}}})), \
+                  (params {{}} {quantifiers}), \
                 property_preconditions: (tuple {{}})}} \
            classify \
-           (fn {{}} (params {{}} (x {{type: {parameter_type}}})) \
-             (lit {{}} true)))\n"
+           (fn {{}} (params {{}} {quantifiers}) {body}))\n"
     )
+}
+
+fn hand_authored_nominal_property(application: &str) -> String {
+    format!(
+        "(deftype {{}} Pair (a b) \
+           (variant {{}} Pair \
+             (field {{}} left (t-var {{}} a)) \
+             (field {{}} right (t-var {{}} b))))\n\
+         (defsig {{}} inspect (t-fn {{}} {application} (t-prim {{}} bool)))\n\
+         (def {{}} inspect (fn {{}} (params {{}} x) (lit {{}} true)))\n"
+    )
+}
+
+fn assert_cli_diagnostic_counts(source: &str, reserved: usize, mismatches: usize, label: &str) {
+    let (success, report) = check_deep(source);
+    assert!(!success, "{label}: {report:?}");
+    assert!(report.score < 1.0, "{label}: {report:?}");
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .filter(|error| error.kind == DiagnosticKind::UnsupportedTensorPrecision)
+            .count(),
+        reserved,
+        "{label}: {report:?}"
+    );
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .filter(|error| error.kind == DiagnosticKind::TypeMismatch)
+            .count(),
+        mismatches,
+        "{label}: {report:?}"
+    );
+
+    let (code, records, stderr) = prove_file_detailed(source, "dp");
+    assert_eq!(code, 3, "{label}: {records:#?}\nstderr: {stderr}");
+    let diagnostics = records
+        .iter()
+        .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+        .flat_map(|record| {
+            record["diagnostics"]
+                .as_array()
+                .expect("prove check error carries diagnostics")
+        })
+        .filter_map(|diagnostic| diagnostic.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|text| {
+                text.contains("cannot use") && (text.contains("f8e4m3") || text.contains("f8e5m2"))
+            })
+            .count(),
+        reserved,
+        "{label}: {records:#?}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        diagnostics.len(),
+        reserved + mismatches,
+        "{label}: {records:#?}\nstderr: {stderr}"
+    );
 }
 
 #[test]
@@ -368,6 +466,207 @@ fn property_copy_cli_ownership_preserves_semantic_metadata_differences() {
             ),
         ] {
             assert_deep_property_has_reserved_owner(&signature, &parameter, name, 2);
+        }
+    }
+}
+
+#[test]
+fn property_copy_cli_ownership_is_classified_per_parameter_slot() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for reserved in [
+            format!("(t-prim {{}} {name})"),
+            format!("(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))"),
+        ] {
+            for (signature, parameter) in [
+                (
+                    vec![reserved.clone(), "(t-prim {} f64)".to_string()],
+                    vec![reserved.clone(), "(t-prim {} f32)".to_string()],
+                ),
+                (
+                    vec!["(t-prim {} f64)".to_string(), reserved.clone()],
+                    vec!["(t-prim {} f32)".to_string(), reserved.clone()],
+                ),
+            ] {
+                let source =
+                    hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
+                assert_cli_diagnostic_counts(
+                    &source,
+                    1,
+                    1,
+                    &format!("{name}/{signature:?}/{parameter:?}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn property_copy_cli_ownership_handles_multiple_and_arity_disagreements() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let scalar = format!("(t-prim {{}} {name})");
+        let tensor = format!("(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))");
+        for (signature, parameter, reserved, label) in [
+            (
+                vec![
+                    scalar.clone(),
+                    "(t-prim {} f64)".to_string(),
+                    tensor.clone(),
+                    "(t-prim {} int64)".to_string(),
+                ],
+                vec![
+                    scalar.clone(),
+                    "(t-prim {} f32)".to_string(),
+                    tensor.clone(),
+                    "(t-prim {} bool)".to_string(),
+                ],
+                2,
+                "multiple matching and disagreeing slots",
+            ),
+            (
+                vec![scalar.clone(), "(t-prim {} f32)".to_string()],
+                vec![scalar.clone()],
+                1,
+                "missing parameter",
+            ),
+            (
+                vec![scalar.clone()],
+                vec![scalar.clone(), "(t-prim {} f32)".to_string()],
+                1,
+                "extra parameter",
+            ),
+        ] {
+            let source = hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
+            assert_cli_diagnostic_counts(&source, reserved, 1, label);
+        }
+    }
+}
+
+#[test]
+fn property_copy_cli_ownership_fails_closed_per_invalid_slot() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let reserved = format!("(t-prim {{}} {name})");
+        let source = hand_authored_deep_property_slots(
+            &[reserved.clone(), "(t-prim {} f32)".to_string()],
+            &[reserved, "(t-prim {} madeup)".to_string()],
+            "(lit {} true)",
+        );
+        let (success, report) = check_deep(&source);
+        assert!(!success, "{name}: {report:?}");
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .filter(|error| error.kind == DiagnosticKind::UnsupportedTensorPrecision)
+                .count(),
+            1,
+            "{name}: {report:?}"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains("madeup")),
+            "{name}: {report:?}"
+        );
+
+        let (code, records) = prove_file(&source, "dp");
+        assert_eq!(code, 3, "{name}: {records:#?}");
+        let diagnostics = records
+            .iter()
+            .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+            .flat_map(|record| {
+                record["diagnostics"]
+                    .as_array()
+                    .expect("prove check error carries diagnostics")
+            })
+            .filter_map(|diagnostic| diagnostic.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|text| text.contains(name))
+                .count(),
+            1,
+            "{name}: {records:#?}"
+        );
+        assert!(
+            diagnostics.iter().any(|text| text.contains("madeup")),
+            "{name}: {records:#?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_property_parameter_carriers_fail_closed_at_cli_ingress() {
+    let source = hand_authored_deep_property_slots(
+        &[
+            "(t-prim {} f8e4m3)".to_string(),
+            "(t-prim {} f32)".to_string(),
+        ],
+        &[
+            "(t-prim {} f8e4m3)".to_string(),
+            "(unknown-type {})".to_string(),
+        ],
+        "(lit {} true)",
+    );
+    let (success, report) = check_deep(&source);
+    assert!(!success, "{report:?}");
+    assert_eq!(report.score, 0.0, "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].kind, DiagnosticKind::Other);
+    assert!(report.errors[0].message.contains("type-expression node"));
+
+    let (code, records, stderr) = prove_file_detailed(&source, "dp");
+    assert_ne!(code, 0, "{records:#?}\nstderr: {stderr}");
+    assert!(
+        records.is_empty() && stderr.contains("type-expression node"),
+        "{records:#?}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn nominal_arity_cli_recovery_keeps_nested_rejections_and_the_arity_witness() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let other = if name == "f8e4m3" { "f8e5m2" } else { "f8e4m3" };
+        for (application, reserved, label) in [
+            (
+                format!("(t-adt {{}} Pair (t-tuple {{}} (t-prim {{}} {name})))"),
+                1,
+                "too few with one nested rejection",
+            ),
+            (
+                format!(
+                    "(t-adt {{}} Pair \
+                       (t-prim {{}} {name}) \
+                       (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {other})) \
+                       (t-prim {{}} f32))"
+                ),
+                2,
+                "too many with two nested rejections",
+            ),
+            (
+                format!(
+                    "(t-adt {{}} Pair \
+                       (t-tuple {{}} (t-prim {{}} {name}) (t-prim {{}} {other})) \
+                       (t-ref {{}} (t-prim {{}} {name})) \
+                       (t-prim {{}} f32))"
+                ),
+                3,
+                "nested composites",
+            ),
+            (
+                "(t-adt {} Pair (t-prim {} f32))".to_string(),
+                0,
+                "valid too-few control",
+            ),
+            (
+                "(t-adt {} Pair (t-prim {} f32) (t-prim {} f64) (t-prim {} bool))".to_string(),
+                0,
+                "valid too-many control",
+            ),
+        ] {
+            let source = hand_authored_nominal_property(&application);
+            assert_cli_diagnostic_counts(&source, reserved, 1, label);
         }
     }
 }

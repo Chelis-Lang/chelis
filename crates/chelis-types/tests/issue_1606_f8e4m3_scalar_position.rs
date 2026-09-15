@@ -41,19 +41,99 @@ fn hand_authored_deep_property_types(
     signature_type: &str,
     parameter_type: &str,
 ) -> Vec<chelis_deep::Expr> {
-    let source = format!(
-        "(defsig {{}} classify \
-           (t-fn {{}} {signature_type} (t-prim {{}} bool)))\n\
-         (def {{chelis_role: \"property\", property_source_kind: \"user\", \
-                property_quantifiers: \
-                  (params {{}} (x {{type: {parameter_type}}})), \
-                property_preconditions: (tuple {{}})}} \
-           classify \
-           (fn {{}} (params {{}} (x {{type: {parameter_type}}})) \
-             (lit {{}} true)))"
-    );
+    hand_authored_deep_property_slots(
+        &[signature_type.to_string()],
+        &[parameter_type.to_string()],
+        "(lit {} true)",
+    )
+}
+
+fn hand_authored_deep_property_slots(
+    signature_types: &[String],
+    parameter_types: &[String],
+    body: &str,
+) -> Vec<chelis_deep::Expr> {
+    let source = hand_authored_deep_property_slots_source(signature_types, parameter_types, body);
     chelis_deep::parse_and_stamp_file(&source)
         .unwrap_or_else(|error| panic!("valid hand-authored Deep property:\n{source}\n{error:?}"))
+}
+
+fn hand_authored_deep_property_slots_source(
+    signature_types: &[String],
+    parameter_types: &[String],
+    body: &str,
+) -> String {
+    let parameter_names = ["x", "y", "z", "w", "v", "u"];
+    assert!(
+        signature_types.len() <= parameter_names.len()
+            && parameter_types.len() <= parameter_names.len()
+    );
+    let signature = signature_types.join(" ");
+    let quantifiers = parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("({} {{type: {ty}}})", parameter_names[index]))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(defsig {{}} classify \
+           (t-fn {{}} {signature} (t-prim {{}} bool)))\n\
+         (def {{chelis_role: \"property\", property_source_kind: \"user\", \
+                property_quantifiers: \
+                  (params {{}} {quantifiers}), \
+                property_preconditions: (tuple {{}})}} \
+           classify \
+           (fn {{}} (params {{}} {quantifiers}) {body}))"
+    )
+}
+
+fn hand_authored_nominal_property(application: &str) -> Vec<chelis_deep::Expr> {
+    let source = format!(
+        "(deftype {{}} Pair (a b) \
+           (variant {{}} Pair \
+             (field {{}} left (t-var {{}} a)) \
+             (field {{}} right (t-var {{}} b))))\n\
+         (defsig {{}} inspect (t-fn {{}} {application} (t-prim {{}} bool)))\n\
+         (def {{}} inspect (fn {{}} (params {{}} x) (lit {{}} true)))"
+    );
+    chelis_deep::parse_and_stamp_file(&source)
+        .unwrap_or_else(|error| panic!("valid nominal recovery fixture:\n{source}\n{error:?}"))
+}
+
+fn assert_api_diagnostic_counts(
+    program: &[chelis_deep::Expr],
+    reserved: usize,
+    mismatches: usize,
+    label: &str,
+) {
+    use chelis_types::errors::CheckErrorKind;
+
+    for (entry, result) in [
+        ("ir", check_ir_program(program)),
+        ("typed", check_typed_program(program)),
+    ] {
+        let report = result.expect_err("the adversarial property must reject");
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision))
+                .count(),
+            reserved,
+            "{entry}/{label}: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::TypeMismatch))
+                .count(),
+            mismatches,
+            "{entry}/{label}: {:?}",
+            report.errors
+        );
+    }
 }
 
 fn legacy_list_root(expr: &chelis_deep::Expr) -> chelis_deep::Expr {
@@ -93,6 +173,54 @@ fn defsig_parameter_as_legacy_list(mut program: Vec<chelis_deep::Expr>) -> Vec<c
     program.insert(
         0,
         chelis_deep::Expr::node(defsig_tag, defsig_meta, defsig_children, defsig_span),
+    );
+    program
+}
+
+fn fn_params_as_bare_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_deep::Expr> {
+    let def_index = program
+        .iter()
+        .position(|expr| expr.tag() == Some(chelis_deep::DeepTag::Def))
+        .expect("fixture contains a property def");
+    let chelis_deep::Expr::Node(def, def_span) = program.remove(def_index) else {
+        panic!("property def is a stamped node");
+    };
+    let (def_tag, def_meta, mut def_children) = def.into_parts();
+    let chelis_deep::Expr::Node(function, function_span) = def_children.remove(1) else {
+        panic!("property body is a stamped fn");
+    };
+    let (function_tag, function_meta, mut function_children) = function.into_parts();
+    let chelis_deep::Expr::Node(params, params_span) = function_children.remove(0) else {
+        panic!("function params are a stamped node");
+    };
+    function_children.insert(
+        0,
+        chelis_deep::Expr::BareList(params.children_slice().to_vec(), params_span),
+    );
+    let mut function_elements = vec![
+        chelis_deep::Expr::Atom(chelis_deep::Atom::Tag(function_tag), function_span),
+        chelis_deep::Expr::Map(function_meta, function_span),
+    ];
+    function_elements.extend(function_children);
+    def_children.push(chelis_deep::Expr::List(
+        chelis_deep::List {
+            elements: function_elements,
+        },
+        function_span,
+    ));
+    let mut def_elements = vec![
+        chelis_deep::Expr::Atom(chelis_deep::Atom::Tag(def_tag), def_span),
+        chelis_deep::Expr::Map(def_meta, def_span),
+    ];
+    def_elements.extend(def_children);
+    program.insert(
+        def_index,
+        chelis_deep::Expr::List(
+            chelis_deep::List {
+                elements: def_elements,
+            },
+            def_span,
+        ),
     );
     program
 }
@@ -362,6 +490,208 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                     "{entry}/{name}: {report:?}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn property_copy_ownership_is_classified_per_parameter_slot() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for reserved in [
+            format!("(t-prim {{}} {name})"),
+            format!("(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))"),
+        ] {
+            for (signature, parameter) in [
+                (
+                    vec![reserved.clone(), "(t-prim {} f64)".to_string()],
+                    vec![reserved.clone(), "(t-prim {} f32)".to_string()],
+                ),
+                (
+                    vec!["(t-prim {} f64)".to_string(), reserved.clone()],
+                    vec!["(t-prim {} f32)".to_string(), reserved.clone()],
+                ),
+            ] {
+                let program =
+                    hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
+                assert_api_diagnostic_counts(
+                    &program,
+                    1,
+                    1,
+                    &format!("{name}/{signature:?}/{parameter:?}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn property_copy_ownership_keeps_mixed_slot_dispositions_independent() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let scalar = format!("(t-prim {{}} {name})");
+        let tensor = format!("(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {name}))");
+        let signature = vec![
+            scalar.clone(),
+            "(t-prim {} f64)".to_string(),
+            tensor.clone(),
+            "(t-prim {} int64)".to_string(),
+        ];
+        let parameter = vec![
+            scalar,
+            "(t-prim {} f32)".to_string(),
+            tensor,
+            "(t-prim {} bool)".to_string(),
+        ];
+        let program = hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
+        assert_api_diagnostic_counts(&program, 2, 1, name);
+    }
+}
+
+#[test]
+fn property_copy_ownership_is_per_slot_when_parameter_arity_disagrees() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let reserved = format!("(t-prim {{}} {name})");
+        for (signature, parameter, label) in [
+            (
+                vec![reserved.clone(), "(t-prim {} f32)".to_string()],
+                vec![reserved.clone()],
+                "missing parameter",
+            ),
+            (
+                vec![reserved.clone()],
+                vec![reserved.clone(), "(t-prim {} f32)".to_string()],
+                "extra parameter",
+            ),
+        ] {
+            let program =
+                hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
+            assert_api_diagnostic_counts(&program, 1, 1, &format!("{name}/{label}"));
+        }
+    }
+}
+
+#[test]
+fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
+    use chelis_types::errors::CheckErrorKind;
+
+    for name in ["f8e4m3", "f8e5m2"] {
+        let reserved = format!("(t-prim {{}} {name})");
+        let invalid = hand_authored_deep_property_slots(
+            &[reserved.clone(), "(t-prim {} f32)".to_string()],
+            &[reserved.clone(), "(t-prim {} madeup)".to_string()],
+            "(lit {} true)",
+        );
+        for (entry, result) in [
+            ("ir", check_ir_program(&invalid)),
+            ("typed", check_typed_program(&invalid)),
+        ] {
+            let report = result.expect_err("the invalid neighboring slot must reject");
+            assert_eq!(
+                report
+                    .errors
+                    .iter()
+                    .filter(|error| matches!(
+                        error.kind,
+                        CheckErrorKind::UnsupportedTensorPrecision
+                    ))
+                    .count(),
+                1,
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.message.contains("madeup")),
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+        }
+
+        let noncanonical = fn_params_as_bare_list(hand_authored_deep_property_slots(
+            std::slice::from_ref(&reserved),
+            std::slice::from_ref(&reserved),
+            "(lit {} true)",
+        ));
+        for (entry, result) in [
+            ("ir", check_ir_program(&noncanonical)),
+            ("typed", check_typed_program(&noncanonical)),
+        ] {
+            let report = result.expect_err("a noncanonical params carrier must fail closed");
+            assert_eq!(
+                report.errors.len(),
+                1,
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+            assert!(
+                matches!(report.errors[0].kind, CheckErrorKind::MalformedForm),
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+            assert!(
+                report.errors[0].message.contains("property_quantifiers"),
+                "{entry}/{name}: {:?}",
+                report.errors
+            );
+        }
+
+        let malformed_source = hand_authored_deep_property_slots_source(
+            &[reserved.clone(), "(t-prim {} f32)".to_string()],
+            &[reserved.clone(), "(unknown-type {})".to_string()],
+            "(lit {} true)",
+        );
+        assert!(
+            chelis_deep::parse_and_stamp_file(&malformed_source).is_err(),
+            "a malformed type carrier must fail closed at Deep ingress"
+        );
+    }
+}
+
+#[test]
+fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let other = if name == "f8e4m3" { "f8e5m2" } else { "f8e4m3" };
+        let cases = [
+            (
+                format!("(t-adt {{}} Pair (t-tuple {{}} (t-prim {{}} {name})))"),
+                1,
+                "too few with one nested rejection",
+            ),
+            (
+                format!(
+                    "(t-adt {{}} Pair \
+                       (t-prim {{}} {name}) \
+                       (t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {other})) \
+                       (t-prim {{}} f32))"
+                ),
+                2,
+                "too many with two nested rejections",
+            ),
+            (
+                format!(
+                    "(t-adt {{}} Pair \
+                       (t-tuple {{}} (t-prim {{}} {name}) (t-prim {{}} {other})) \
+                       (t-ref {{}} (t-prim {{}} {name})) \
+                       (t-prim {{}} f32))"
+                ),
+                3,
+                "nested composites preserve every authored rejection",
+            ),
+            (
+                "(t-adt {} Pair (t-prim {} f32))".to_string(),
+                0,
+                "valid supplied child still leaves the arity witness",
+            ),
+            (
+                "(t-adt {} Pair (t-prim {} f32) (t-prim {} f64) (t-prim {} bool))".to_string(),
+                0,
+                "valid extra-arity control",
+            ),
+        ];
+        for (application, reserved, label) in cases {
+            let program = hand_authored_nominal_property(&application);
+            assert_api_diagnostic_counts(&program, reserved, 1, &format!("{name}/{label}"));
         }
     }
 }
