@@ -3406,6 +3406,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             at_least(&node, 1)?;
             let (precision, dimensions) = node.children.split_last().expect("nonempty checked");
             reject_reserved_type_variable(precision)?;
+            let precision_span = precision.span();
             let precision = type_name(precision).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: node.children.len() - 1,
@@ -3416,7 +3417,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
                     .iter()
                     .map(resugar_dimension)
                     .collect::<Result<Vec<_>, _>>()?,
-                TensorPrecision::new(precision, node.span),
+                TensorPrecision::new(precision, precision_span),
                 node.span,
             ))
         }

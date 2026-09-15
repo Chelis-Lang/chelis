@@ -13,6 +13,7 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
+use chelis_surf::resugar::resugar_program;
 use chelis_types::{check_ir_program, check_typed_program};
 
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
@@ -249,6 +250,54 @@ fn a_tensor_element_reserved_site_has_one_located_owner() {
             format!("def classify(x: tensor[3,   {name}  ]) -> int32 = 0i32"),
         ] {
             assert_one_report_per_site(&source, &[name]);
+        }
+    }
+}
+
+#[test]
+fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let source = format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32");
+        let original = desugar_program(&parse_str(&source).expect("parse source"));
+        let restored =
+            desugar_program(&resugar_program(&original).expect("resugar direct Deep program"));
+        let offset = source.find(name).expect("reserved precision site");
+        let expected_span = format!("source:{offset}..{}", offset + name.len());
+
+        for (carrier, program) in [
+            ("original", original.as_slice()),
+            ("restored", restored.as_slice()),
+        ] {
+            for (entry, result) in [
+                ("ir", check_ir_program(program)),
+                ("typed", check_typed_program(program)),
+            ] {
+                let report = result.expect_err("reserved precision must reject");
+                assert_eq!(
+                    report.errors.len(),
+                    1,
+                    "{carrier}/{entry}/{name}: {:?}",
+                    report.errors
+                );
+                let error = &report.errors[0];
+                assert!(
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    ),
+                    "{carrier}/{entry}/{name}: {error:?}"
+                );
+                assert_eq!(
+                    error.span_offset,
+                    Some(offset),
+                    "{carrier}/{entry}/{name}: {error:?}"
+                );
+                assert_eq!(
+                    error.span_id.as_deref(),
+                    Some(expected_span.as_str()),
+                    "{carrier}/{entry}/{name}: {error:?}"
+                );
+            }
         }
     }
 }

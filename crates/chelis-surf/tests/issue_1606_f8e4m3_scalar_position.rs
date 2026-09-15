@@ -14,8 +14,10 @@
 //! Mirrors `issue_1593_unsigned_scalar_position.rs`'s structure for the one
 //! name that repair could not cover.
 
+use chelis_deep::Span;
 use chelis_deep::parser::parse_and_stamp_file;
 use chelis_deep::printer::print_canonical_flat;
+use chelis_surf::ast::{TensorPrecision, TypeExpr};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_source;
 use chelis_surf::parser::parse_str;
@@ -184,4 +186,38 @@ fn the_formatter_leaves_f8e4m3_unchanged() {
     );
     let twice = format_source(&once).expect("format twice");
     assert_eq!(once, twice, "formatter idempotence on `f8e4m3`");
+}
+
+#[test]
+fn tensor_precision_serde_preserves_current_spans_and_accepts_legacy_strings() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        let current = TypeExpr::Tensor(
+            Vec::new(),
+            TensorPrecision::new(name, Span::new(26, name.len())),
+            Span::new(16, 17),
+        );
+        let encoded = serde_json::to_value(&current).expect("serialize current Surf AST");
+        assert_eq!(encoded["Tensor"][1]["name"], name);
+        assert_eq!(encoded["Tensor"][1]["span"]["offset"], 26);
+        assert_eq!(encoded["Tensor"][1]["span"]["len"], name.len());
+        let decoded: TypeExpr =
+            serde_json::from_value(encoded).expect("deserialize current Surf AST");
+        assert_eq!(decoded, current, "same-version spans must round-trip");
+
+        let legacy = serde_json::json!({
+            "Tensor": [
+                [],
+                name,
+                {"offset": 16, "len": 17}
+            ]
+        });
+        let decoded: TypeExpr =
+            serde_json::from_value(legacy).expect("deserialize legacy string precision");
+        let TypeExpr::Tensor(_, precision, span) = decoded else {
+            panic!("legacy tensor AST decoded to the wrong variant");
+        };
+        assert_eq!(precision.as_str(), name);
+        assert_eq!(precision.span(), Span::new(0, 0));
+        assert_eq!(span, Span::new(16, 17));
+    }
 }

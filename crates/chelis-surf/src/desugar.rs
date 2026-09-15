@@ -1033,7 +1033,7 @@ fn collect_top_level_fn_tensor_param_prec(
 
 /// Return the precision name (e.g. `"f64"`, `"int32"`) for a tensor type
 /// expression, or `None` for any other shape. Tensor type expressions in
-/// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
+/// Surf carry the spelling and exact token span in `TensorPrecision`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
     match ty {
         TypeExpr::Tensor(_, prec, _) => {

@@ -1,5 +1,5 @@
 use chelis_deep::{DtypeFamily, Span};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// One entry of a declaration's bracketed binder list
 /// (`spec/02-surf-syntax.md` §P4b/§P4c).
@@ -350,7 +350,7 @@ impl std::fmt::Display for DimensionLiteral {
 }
 
 /// A tensor precision spelling with the exact token span that authored it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TensorPrecision {
     name: String,
     span: Span,
@@ -370,6 +370,30 @@ impl TensorPrecision {
 
     pub fn span(&self) -> Span {
         self.span
+    }
+}
+
+impl<'de> Deserialize<'de> for TensorPrecision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            Current { name: String, span: Span },
+            Legacy(String),
+        }
+
+        match Representation::deserialize(deserializer)? {
+            Representation::Current { name, span } => Ok(Self { name, span }),
+            Representation::Legacy(name) => Ok(Self {
+                name,
+                // The former serialized field carried only the spelling, so
+                // no exact token location can be reconstructed honestly.
+                span: Span::new(0, 0),
+            }),
+        }
     }
 }
 
