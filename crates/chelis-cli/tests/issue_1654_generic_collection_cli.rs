@@ -20,7 +20,14 @@ fn check_path(path: &Path) -> CheckResult {
         .expect("run chelis check");
     CheckResult {
         status: output.status,
-        report: serde_json::from_slice(&output.stdout).expect("check JSON"),
+        report: serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "check JSON: {error}; status={:?}; stdout={}; stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }),
     }
 }
 
@@ -245,6 +252,23 @@ fn higher_order_and_aggregate_transport_remain_checked() {
 }
 
 #[test]
+fn same_scc_return_transport_is_checked_at_the_cli() {
+    assert_rejected(
+        "def left(n) = if n == 0i32 then len else right(n - 1i32)\n\
+         def right(n) = if n == 0i32 then left(0i32) else left(n - 1i32)\n\
+         measure = right(1i32)\n\
+         out = measure(1i64)\n",
+        "len",
+    );
+    assert_accepted(
+        "def left(n) = if n == 0i32 then len else right(n - 1i32)\n\
+         def right(n) = if n == 0i32 then left(0i32) else left(n - 1i32)\n\
+         measure = right(1i32)\n\
+         out = measure([1i64])\n",
+    );
+}
+
+#[test]
 fn imported_checked_values_keep_their_collection_contract() {
     let directory = tempdir().expect("tempdir");
     let dependency = directory.path().join("dep");
@@ -261,7 +285,12 @@ fn imported_checked_values_keep_their_collection_contract() {
     .expect("dependency manifest");
     fs::write(
         dependency.join("src/measure.ch"),
-        "module Contract.Measure\nexport (measure, join)\nmeasure = len\njoin = concat\n",
+        "module Contract.Measure\n\
+         export (measure, join)\n\
+         def left(n) = if n == 0i32 then len else right(n - 1i32)\n\
+         def right(n) = if n == 0i32 then left(0i32) else left(n - 1i32)\n\
+         measure = right(1i32)\n\
+         join = concat\n",
     )
     .expect("dependency source");
     fs::write(

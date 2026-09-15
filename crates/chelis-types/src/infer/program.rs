@@ -178,6 +178,197 @@ impl ComponentLevelScope {
     }
 }
 
+/// Re-infer one clean cyclic component against its prior complete schemes so
+/// contracts returned across sibling edges travel through the ordinary
+/// instantiate/application/generalize lifecycle. Each batch sweep sees only
+/// the preceding batch, and a component of N members therefore gets at most N
+/// further sweeps.
+#[allow(clippy::too_many_arguments)]
+fn sweep_recursive_collection_contracts(
+    recursive_function_indices: &[usize],
+    items: &[(Option<String>, &deep::Expr)],
+    cycle_precedence_names: &[String],
+    env: &mut Env,
+    var_gen: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    user_def_names: &UnordSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+) {
+    let members = recursive_function_indices
+        .iter()
+        .filter_map(|&index| {
+            let expr = items[index].1;
+            matches!(stamped_parts(expr), Some((DeepTag::Def, _, _)))
+                .then(|| top_level_decl_name(expr).map(|name| (index, name.to_string())))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    // The function-plan projection is authoritative. A cyclic full-reference
+    // component with no recursive function component, including eager/mixed
+    // value cycles, retains its existing one-pass schedule.
+    if members.is_empty() || members.len() != recursive_function_indices.len() {
+        return;
+    }
+
+    let mut prior_schemes = UnordMap::new();
+    for (_, name) in &members {
+        let Some(scheme) = env.lookup(name).cloned() else {
+            return;
+        };
+        prior_schemes.insert(name.clone(), scheme);
+    }
+    // [04-INF-9] forbids manufacturing a checked operation contract from an
+    // authored body. The sweep only closes transport edges from an already
+    // checked seed, so the overwhelmingly common seedless recursive SCC needs
+    // no replay.
+    if prior_schemes
+        .to_sorted()
+        .into_iter()
+        .map(|(_, scheme)| scheme)
+        .all(|scheme| scheme.constraints.is_empty())
+    {
+        return;
+    }
+
+    for sweep_index in 0..members.len() {
+        let final_confirmation = sweep_index + 1 == members.len();
+        let sweep_checkpoint = errors.checkpoint();
+        let component_scope = ComponentLevelScope::enter(
+            recursive_function_indices,
+            items,
+            cycle_precedence_names,
+            env,
+            var_gen,
+            subst,
+        );
+        super::recursion::begin_group(
+            members.iter().map(|(_, name)| {
+                let authored = declared_signatures
+                    .get(name)
+                    .is_some_and(|metadata| !metadata.binders.is_empty());
+                (name.as_str(), authored)
+            }),
+            env,
+        );
+        let mut scratch = InferenceProduct::default();
+        scratch.type_headers = adt_reg.resolution_env().clone();
+        scratch.adt_registry = adt_reg.clone();
+        let mut deferred_bindings = Vec::with_capacity(members.len());
+        let mut diagnosed = false;
+
+        for (declaration_index, name) in &members {
+            if crate::cancel::cancellation_requested() {
+                component_scope.abort(env, var_gen, subst);
+                return;
+            }
+            let (module, expr) = &items[*declaration_index];
+            scratch.begin_root(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
+                Some(name.clone()),
+            );
+            env.set_current_declaration_ordinal(Some(*declaration_index));
+            let expected = prior_schemes
+                .get(name)
+                .expect("recursive sweep snapshots every member scheme");
+            if let Some(binding) = infer_top_level(
+                expr,
+                env,
+                var_gen,
+                subst,
+                adt_reg,
+                errors,
+                &mut scratch,
+                None,
+                Some(recursion::RecursiveExpected::Published(expected)),
+                true,
+                user_def_names,
+                declared_signatures,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            scratch.finish_deferred_shape_checks(Some(name), var_gen, subst, adt_reg, errors);
+            scratch.finish_root(subst, errors);
+            validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
+            validate_deferred_tensor_operands(subst, env.active_declared_type_names(), errors);
+            validate_deferred_opaque_uses(subst, adt_reg, errors);
+            if errors.iter_since(sweep_checkpoint).next().is_some() {
+                diagnosed = true;
+                break;
+            }
+        }
+
+        if diagnosed || deferred_bindings.len() != members.len() {
+            component_scope.abort(env, var_gen, subst);
+            return;
+        }
+
+        super::recursion::finish_group(subst, errors);
+        if errors.iter_since(sweep_checkpoint).next().is_some() {
+            component_scope.abort(env, var_gen, subst);
+            return;
+        }
+        component_scope.complete(env, var_gen, subst);
+        let schemes = deferred_bindings
+            .into_iter()
+            .map(|(name, ty, owned_contracts)| {
+                let scheme = env.generalize_with_collection_contracts(&ty, subst, &owned_contracts);
+                (name, scheme)
+            })
+            .collect::<Vec<_>>();
+        debug_assert!(schemes.iter().all(|(name, scheme)| {
+            scheme.constraints.len()
+                >= prior_schemes
+                    .get(name)
+                    .expect("recursive sweep retains every member")
+                    .constraints
+                    .len()
+        }));
+        let changed = schemes.iter().any(|(name, scheme)| {
+            scheme.constraints.len()
+                > prior_schemes
+                    .get(name)
+                    .expect("recursive sweep retains every member")
+                    .constraints
+                    .len()
+        });
+        if final_confirmation && changed {
+            for (name, scheme) in prior_schemes.to_sorted() {
+                env.bind(name.clone(), scheme.clone());
+            }
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                format!(
+                    "internal: recursive collection-contract closure for [{}] added a relation \
+                     on its final member-count confirmation sweep",
+                    members
+                        .iter()
+                        .map(|(_, name)| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                vec![
+                    "The checker rejected this program rather than publishing an incomplete \
+                     recursive operation contract closure."
+                        .to_string(),
+                ],
+            ));
+            return;
+        }
+        let mut published_schemes = UnordMap::new();
+        for (name, scheme) in schemes {
+            env.bind(name.clone(), scheme.clone());
+            published_schemes.insert(name, scheme);
+        }
+        if !changed {
+            return;
+        }
+        prior_schemes = published_schemes;
+    }
+}
+
 /// Front-end cancellation gate for a check unit (chelis#930).
 ///
 /// Placed between the passes of every public check entry. When the thread's
@@ -292,6 +483,7 @@ pub(super) fn infer_program_with_product_in_session(
         if cancelled() {
             break;
         }
+        let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
         let cycle_precedence_names = if cyclic {
@@ -345,7 +537,7 @@ pub(super) fn infer_program_with_product_in_session(
             );
         }
         let mut deferred_bindings = Vec::new();
-        for declaration_index in group.indices {
+        for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut env, &vg, &mut subst);
@@ -380,7 +572,9 @@ pub(super) fn infer_program_with_product_in_session(
                 errors,
                 &mut product,
                 external_input_failure.as_ref(),
-                provisional_types.get(&declaration_index),
+                provisional_types
+                    .get(&declaration_index)
+                    .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
@@ -436,6 +630,25 @@ pub(super) fn infer_program_with_product_in_session(
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 env.bind(name, scheme);
+            }
+            if recursion_active
+                && errors
+                    .iter_since(component_diagnostic_checkpoint)
+                    .next()
+                    .is_none()
+            {
+                sweep_recursive_collection_contracts(
+                    &group.recursive_function_indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut env,
+                    &mut vg,
+                    &mut subst,
+                    &adt_reg,
+                    errors,
+                    &user_def_names,
+                    &declared_signatures,
+                );
             }
         }
     }
@@ -1372,14 +1585,19 @@ pub(super) fn infer_ir_program_with_state(
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
     'schedule: for group in inference_groups {
+        let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
-        let mut component_scope = cyclic.then(|| {
-            let cycle_precedence_names = top_level_references
+        let cycle_precedence_names = if cyclic {
+            top_level_references
                 .cycle_precedence_targets(&group.indices)
                 .into_iter()
                 .map(|target| top_level_references.definition(target).name.clone())
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut component_scope = cyclic.then(|| {
             ComponentLevelScope::enter(
                 &group.indices,
                 &items,
@@ -1421,7 +1639,7 @@ pub(super) fn infer_ir_program_with_state(
             );
         }
         let mut deferred_bindings = Vec::new();
-        for declaration_index in group.indices {
+        for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
@@ -1458,7 +1676,9 @@ pub(super) fn infer_ir_program_with_state(
                 errors,
                 &mut product,
                 prebound_type_failures.get(&declaration_index),
-                provisional_types.get(&declaration_index),
+                provisional_types
+                    .get(&declaration_index)
+                    .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
@@ -1527,6 +1747,25 @@ pub(super) fn infer_ir_program_with_state(
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 state.env.bind(name, scheme);
+            }
+            if recursion_active
+                && errors
+                    .iter_since(component_diagnostic_checkpoint)
+                    .next()
+                    .is_none()
+            {
+                sweep_recursive_collection_contracts(
+                    &group.recursive_function_indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut state.env,
+                    &mut state.var_gen,
+                    &mut state.subst,
+                    &state.adt_reg,
+                    errors,
+                    &user_def_names,
+                    &declared_signatures,
+                );
             }
         }
     }

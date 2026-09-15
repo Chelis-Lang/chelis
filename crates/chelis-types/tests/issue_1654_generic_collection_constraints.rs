@@ -187,10 +187,10 @@ fn explicit_list_and_dict_contracts_are_sufficient() {
     );
     accepts(
         "explicit collection relations",
-        "def at[a](xs: List[a], i: int32) -> a = index(xs, i)\n\
+        "def at[a](xs: List[a], i: int64) -> a = index(xs, i)\n\
          def push[a](xs: List[a], x: a) -> List[a] = append(xs, x)\n\
          def join[a](lhs: List[a], rhs: List[a]) -> List[a] = concat(lhs, rhs)\n\
-         first = at([1i64], 0i32)\n\
+         first = at([1i64], 0i64)\n\
          more = push([1i64], 2i64)\n\
          all = join([1i64], [2i64])\n",
     );
@@ -541,5 +541,53 @@ fn recursive_indirect_calls_keep_the_checked_contract() {
            if n == 0i32 then f(x) else invoke(n - 1i32, f, x)\n\
          out = invoke(1i32, len, 1i64)\n",
         "len",
+    );
+}
+
+#[test]
+fn same_scc_returns_propagate_checked_collection_contracts() {
+    let mutual_scalar = "def left(n) = if n == 0i32 then len else right(n - 1i32)\n\
+         def right(n) = if n == 0i32 then left(0i32) else left(n - 1i32)\n\
+         measure = right(1i32)\n\
+         out = measure(1i64)\n";
+    let mutual_list = "def left(n) = if n == 0i32 then len else right(n - 1i32)\n\
+         def right(n) = if n == 0i32 then left(0i32) else left(n - 1i32)\n\
+         measure = right(1i32)\n\
+         out = measure([1i64])\n";
+    rejects(
+        "mutual recursion retains returned len contract",
+        mutual_scalar,
+        "len",
+    );
+    accepts("mutual recursion accepts matching List call", mutual_list);
+    let errors = serialized_context(mutual_scalar).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch) && error.message.contains("len")
+        }),
+        "{}",
+        rendered(&errors).join("\n")
+    );
+    serialized_context(mutual_list)
+        .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));
+
+    rejects(
+        "four-member recursion propagates returned len contract",
+        "def first(n) = if n == 0i32 then len else fourth(n - 1i32)\n\
+         def second(n) = if n == 0i32 then first(0i32) else first(n - 1i32)\n\
+         def third(n) = if n == 0i32 then second(0i32) else second(n - 1i32)\n\
+         def fourth(n) = if n == 0i32 then third(0i32) else third(n - 1i32)\n\
+         measure = fourth(1i32)\n\
+         out = measure(1i64)\n",
+        "len",
+    );
+    accepts(
+        "four-member recursion accepts matching List call",
+        "def first(n) = if n == 0i32 then len else fourth(n - 1i32)\n\
+         def second(n) = if n == 0i32 then first(0i32) else first(n - 1i32)\n\
+         def third(n) = if n == 0i32 then second(0i32) else second(n - 1i32)\n\
+         def fourth(n) = if n == 0i32 then third(0i32) else third(n - 1i32)\n\
+         measure = fourth(1i32)\n\
+         out = measure([1i64])\n",
     );
 }

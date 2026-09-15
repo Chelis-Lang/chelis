@@ -3812,7 +3812,26 @@ transported contracts without inspecting the callee body.
    Thus transport does not become body-inferred wrapper publication. Projecting
    or returning a result that no longer contains the function-bearing subvalue
    removes its detached transport instance.
-4. Direct syntactic calls keep `app_post.rs`'s operation-specific rules and
+4. After a clean recursive-function component is first inferred, generalized,
+   and published as one batch, the checker may run at most one further batch
+   sweep per recursive member. The function-plan's actual recursive subset is
+   authoritative; eager or mixed value cycles do not enter this replay. Each
+   sweep resolves in-group references from the preceding complete batch,
+   reuses ordinary `infer_top_level`, scheme instantiation, application
+   consumption, uniform-recursion validation, and generalization, then
+   publishes every member together. A component whose initial complete schemes
+   contain no checked relation skips replay: under [04-INF-9], closure cannot
+   create a relation without a checked seed. It stops when a batch adds no
+   relation or when the first new diagnostic appears. For N members, at most
+   N-1 propagation edges are possible, so sweep N must be the stable
+   confirmation; growth on that final sweep rejects with one internal checker
+   diagnostic instead of publishing an unverified incomplete closure. The
+   prior complete scheme is a compiler-owned expected type and does not make an
+   unsigned member authored; a member that already owns a `defsig` retains its
+   ordinary signature checks. There is no separate AST contract flow walk,
+   body-derived contract synthesis, alpha-variable rewrite, or second contract
+   representation.
+5. Direct syntactic calls keep `app_post.rs`'s operation-specific rules and
    diagnostics. The scheme copy is discarded for that call. Before an indirect
    call unifies its arguments, its exact consumed tensor-`concat` instance
    receives that application's axis value, literal element shapes, or
@@ -3826,7 +3845,7 @@ transported contracts without inspecting the callee body.
    consumed by the outer call. Explicit failed-call cleanup prevents axis or
    extent evidence from leaking into later calls or independently specialized
    aliases.
-5. Serialized TypeEnv checker reuse and published package identities both
+6. Serialized TypeEnv checker reuse and published package identities both
    include the relation. TypeEnv format 3 follows #2071's format 2 and is the
    source-free checker-reuse path exercised here. CHB format 5 follows #2071's
    format 4, and Reef schema format 3 follows schema format 2; those two
