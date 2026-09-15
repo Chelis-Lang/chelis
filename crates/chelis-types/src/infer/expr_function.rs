@@ -109,8 +109,9 @@ pub(super) fn classify_property_parameter_annotations(
         .iter()
         .zip(declared_param_types)
         .all(|(param, declared)| {
-            parameter_type_syntax(param)
-                .is_some_and(|annotation| same_deep_syntax(annotation, declared))
+            parameter_type_syntax(param).is_some_and(|annotation| {
+                chelis_deep::metadata::same_semantic_type_syntax(annotation, declared)
+            })
         })
     {
         DefParameterAnnotationOwnership::VerifiedSignatureCopies
@@ -262,46 +263,6 @@ fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
             meta.ty().map(|value| value.expression())
         }),
         _ => None,
-    }
-}
-
-fn same_deep_syntax(left: &deep::Expr, right: &deep::Expr) -> bool {
-    stack_guard!("same_deep_syntax", left, false);
-    if let (
-        Some((left_tag, left_meta, left_children)),
-        Some((right_tag, right_meta, right_children)),
-    ) = (stamped_parts(left), stamped_parts(right))
-    {
-        return left_tag == right_tag
-            && left_meta == right_meta
-            && left_children.len() == right_children.len()
-            && left_children
-                .iter()
-                .zip(right_children)
-                .all(|(left, right)| same_deep_syntax(left, right));
-    }
-    match (left, right) {
-        (deep::Expr::Atom(left, _), deep::Expr::Atom(right, _)) => left == right,
-        (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => left == right,
-        (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
-            left.metadata == right.metadata && same_deep_syntax(&left.expr, &right.expr)
-        }
-        (deep::Expr::BareList(left, _), deep::Expr::BareList(right, _)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| same_deep_syntax(left, right))
-        }
-        (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
-            left.elements.len() == right.elements.len()
-                && left
-                    .elements
-                    .iter()
-                    .zip(&right.elements)
-                    .all(|(left, right)| same_deep_syntax(left, right))
-        }
-        _ => false,
     }
 }
 

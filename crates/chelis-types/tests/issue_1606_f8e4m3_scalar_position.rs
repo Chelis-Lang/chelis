@@ -31,18 +31,70 @@ fn hand_authored_deep_property(
     signature_type: &str,
     parameter_type: &str,
 ) -> Vec<chelis_deep::Expr> {
-    chelis_deep::parse_and_stamp_file(&format!(
+    hand_authored_deep_property_types(
+        &format!("(t-prim {{}} {signature_type})"),
+        &format!("(t-prim {{}} {parameter_type})"),
+    )
+}
+
+fn hand_authored_deep_property_types(
+    signature_type: &str,
+    parameter_type: &str,
+) -> Vec<chelis_deep::Expr> {
+    let source = format!(
         "(defsig {{}} classify \
-           (t-fn {{}} (t-prim {{}} {signature_type}) (t-prim {{}} bool)))\n\
+           (t-fn {{}} {signature_type} (t-prim {{}} bool)))\n\
          (def {{chelis_role: \"property\", property_source_kind: \"user\", \
                 property_quantifiers: \
-                  (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})), \
+                  (params {{}} (x {{type: {parameter_type}}})), \
                 property_preconditions: (tuple {{}})}} \
            classify \
-           (fn {{}} (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})) \
+           (fn {{}} (params {{}} (x {{type: {parameter_type}}})) \
              (lit {{}} true)))"
-    ))
-    .expect("valid hand-authored Deep property")
+    );
+    chelis_deep::parse_and_stamp_file(&source)
+        .unwrap_or_else(|error| panic!("valid hand-authored Deep property:\n{source}\n{error:?}"))
+}
+
+fn legacy_list_root(expr: &chelis_deep::Expr) -> chelis_deep::Expr {
+    let chelis_deep::Expr::Node(node, span) = expr else {
+        panic!("fixture must be a stamped node: {expr:?}");
+    };
+    let mut elements = vec![
+        chelis_deep::Expr::Atom(
+            chelis_deep::Atom::Tag(node.tag()),
+            chelis_deep::Span::new(span.offset + 1, 1),
+        ),
+        chelis_deep::Expr::Map(
+            node.meta().clone(),
+            chelis_deep::Span::new(span.offset + 2, 2),
+        ),
+    ];
+    elements.extend(node.children_slice().iter().cloned());
+    chelis_deep::Expr::List(chelis_deep::List { elements }, *span)
+}
+
+fn defsig_parameter_as_legacy_list(mut program: Vec<chelis_deep::Expr>) -> Vec<chelis_deep::Expr> {
+    let chelis_deep::Expr::Node(defsig, defsig_span) = program.remove(0) else {
+        panic!("fixture starts with defsig");
+    };
+    let (defsig_tag, defsig_meta, mut defsig_children) = defsig.into_parts();
+    let chelis_deep::Expr::Node(signature, signature_span) = defsig_children.remove(1) else {
+        panic!("defsig type is a stamped function type");
+    };
+    let (signature_tag, signature_meta, mut signature_children) = signature.into_parts();
+    signature_children[0] = legacy_list_root(&signature_children[0]);
+    defsig_children.push(chelis_deep::Expr::node(
+        signature_tag,
+        signature_meta,
+        signature_children,
+        signature_span,
+    ));
+    program.insert(
+        0,
+        chelis_deep::Expr::node(defsig_tag, defsig_meta, defsig_children, defsig_span),
+    );
+    program
 }
 
 fn assert_rejected(src: &str, position: &str) {
@@ -214,6 +266,135 @@ fn matching_hand_authored_property_parameter_contract_remains_valid() {
         result.unwrap_or_else(|report| {
             panic!("{entry}: matching authored property contracts must pass: {report:?}")
         });
+    }
+}
+
+#[test]
+fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
+    use chelis_types::errors::CheckErrorKind;
+
+    for name in ["f8e4m3", "f8e5m2"] {
+        for ty in [
+            format!("(t-prim {{doc: \"same\"}} {name})"),
+            format!(
+                "(t-tensor {{doc: \"same\"}} \
+                   (d-lit {{doc: \"dimension\"}} 3) \
+                   (t-prim {{doc: \"precision\"}} {name}))"
+            ),
+            format!(
+                "(t-prim {{doc: \"same\", span: \"parameter\", \
+                   loc: (loc \"parameter.dp\" 9 8), source: (parameter copy)}} {name})"
+            ),
+            format!(
+                "(t-prim {{doc: \"same\", \
+                   tool_data: {{nested: (payload \"same\")}}}} {name})"
+            ),
+            format!(
+                "(t-prim {{doc: \"same\", span_start: 7, span_end: 13, \
+                   span_file: \"parameter.dp\"}} {name})"
+            ),
+        ] {
+            let signature = ty
+                .replace("span: \"parameter\"", "span: \"signature\"")
+                .replace("parameter.dp", "signature.dp")
+                .replace("(parameter copy)", "(signature copy)")
+                .replace("span_start: 7", "span_start: 70")
+                .replace("span_end: 13", "span_end: 130");
+            let program = hand_authored_deep_property_types(&signature, &ty);
+            for (entry, result) in [
+                ("ir", check_ir_program(&program)),
+                ("typed", check_typed_program(&program)),
+            ] {
+                let report = result.expect_err("the reserved dtype must reject");
+                assert_eq!(report.errors.len(), 1, "{entry}/{name}/{ty}: {report:?}");
+                assert!(
+                    matches!(
+                        report.errors[0].kind,
+                        CheckErrorKind::UnsupportedTensorPrecision
+                    ),
+                    "{entry}/{name}/{ty}: {report:?}"
+                );
+                assert!(
+                    report.errors[0].message.contains(name),
+                    "{entry}/{name}/{ty}: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn property_copy_ownership_preserves_semantic_metadata_differences() {
+    use chelis_types::errors::CheckErrorKind;
+
+    for name in ["f8e4m3", "f8e5m2"] {
+        for (signature, parameter) in [
+            (
+                format!("(t-prim {{doc: \"signature\"}} {name})"),
+                format!("(t-prim {{doc: \"parameter\"}} {name})"),
+            ),
+            (
+                format!(
+                    "(t-tensor {{doc: \"signature\"}} \
+                       (d-lit {{}} 3) (t-prim {{}} {name}))"
+                ),
+                format!(
+                    "(t-tensor {{doc: \"parameter\"}} \
+                       (d-lit {{}} 3) (t-prim {{}} {name}))"
+                ),
+            ),
+        ] {
+            let program = hand_authored_deep_property_types(&signature, &parameter);
+            for (entry, result) in [
+                ("ir", check_ir_program(&program)),
+                ("typed", check_typed_program(&program)),
+            ] {
+                let report = result.expect_err("both independent reserved sites must reject");
+                assert_eq!(
+                    report
+                        .errors
+                        .iter()
+                        .filter(|error| {
+                            matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision)
+                        })
+                        .count(),
+                    2,
+                    "{entry}/{name}: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn property_copy_ownership_accepts_the_transitional_list_type_carrier() {
+    use chelis_types::errors::CheckErrorKind;
+
+    for name in ["f8e4m3", "f8e5m2"] {
+        for ty in [
+            format!("(t-prim {{doc: \"same\"}} {name})"),
+            format!(
+                "(t-tensor {{doc: \"same\"}} \
+                   (d-lit {{}} 3) (t-prim {{}} {name}))"
+            ),
+        ] {
+            let program =
+                defsig_parameter_as_legacy_list(hand_authored_deep_property_types(&ty, &ty));
+            for (entry, result) in [
+                ("ir", check_ir_program(&program)),
+                ("typed", check_typed_program(&program)),
+            ] {
+                let report = result.expect_err("the reserved dtype must reject");
+                assert_eq!(report.errors.len(), 1, "{entry}/{name}/{ty}: {report:?}");
+                assert!(
+                    matches!(
+                        report.errors[0].kind,
+                        CheckErrorKind::UnsupportedTensorPrecision
+                    ),
+                    "{entry}/{name}/{ty}: {report:?}"
+                );
+            }
+        }
     }
 }
 

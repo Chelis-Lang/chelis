@@ -140,15 +140,22 @@ fn prove(source: &str) -> (i32, Vec<serde_json::Value>) {
 }
 
 fn hand_authored_deep_property(signature_type: &str, parameter_type: &str) -> String {
+    hand_authored_deep_property_types(
+        &format!("(t-prim {{}} {signature_type})"),
+        &format!("(t-prim {{}} {parameter_type})"),
+    )
+}
+
+fn hand_authored_deep_property_types(signature_type: &str, parameter_type: &str) -> String {
     format!(
         "(defsig {{}} classify \
-           (t-fn {{}} (t-prim {{}} {signature_type}) (t-prim {{}} bool)))\n\
+           (t-fn {{}} {signature_type} (t-prim {{}} bool)))\n\
          (def {{chelis_role: \"property\", property_source_kind: \"user\", \
                 property_quantifiers: \
-                  (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})), \
+                  (params {{}} (x {{type: {parameter_type}}})), \
                 property_preconditions: (tuple {{}})}} \
            classify \
-           (fn {{}} (params {{}} (x {{type: (t-prim {{}} {parameter_type})}})) \
+           (fn {{}} (params {{}} (x {{type: {parameter_type}}})) \
              (lit {{}} true)))\n"
     )
 }
@@ -273,6 +280,96 @@ fn matching_hand_authored_deep_property_checks_cleanly() {
             .any(|record| record["kind"] == "error" && record["stage"] == "check"),
         "{records:#?}"
     );
+}
+
+fn assert_deep_property_has_reserved_owner(
+    signature_type: &str,
+    parameter_type: &str,
+    name: &str,
+    expected: usize,
+) {
+    let source = hand_authored_deep_property_types(signature_type, parameter_type);
+    let (success, report) = check_deep(&source);
+    assert!(!success, "{source}: {report:?}");
+    assert!(report.score < 1.0, "{source}: {report:?}");
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .filter(|error| error.kind == DiagnosticKind::UnsupportedTensorPrecision)
+            .count(),
+        expected,
+        "{source}: {report:?}"
+    );
+
+    let (code, records) = prove_file(&source, "dp");
+    assert_eq!(code, 3, "{source}: {records:#?}");
+    let diagnostics = records
+        .iter()
+        .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+        .flat_map(|record| {
+            record["diagnostics"]
+                .as_array()
+                .expect("prove check error carries diagnostics")
+        })
+        .filter(|diagnostic| diagnostic.as_str().is_some_and(|text| text.contains(name)))
+        .count();
+    assert_eq!(diagnostics, expected, "{source}: {records:#?}");
+}
+
+#[test]
+fn property_copy_cli_ownership_uses_spanless_semantic_type_syntax() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for parameter in [
+            format!("(t-prim {{doc: \"same\"}} {name})"),
+            format!(
+                "(t-tensor {{doc: \"same\"}} \
+                   (d-lit {{doc: \"dimension\"}} 3) \
+                   (t-prim {{doc: \"precision\"}} {name}))"
+            ),
+            format!(
+                "(t-prim {{doc: \"same\", span: \"parameter\", \
+                   loc: (loc \"parameter.dp\" 9 8), source: (parameter copy), \
+                   tool_data: {{nested: (payload \"same\")}}}} {name})"
+            ),
+            format!(
+                "(t-prim {{doc: \"same\", span_start: 7, span_end: 13, \
+                   span_file: \"parameter.dp\"}} {name})"
+            ),
+        ] {
+            let signature = parameter
+                .replace("span: \"parameter\"", "span: \"signature\"")
+                .replace("parameter.dp", "signature.dp")
+                .replace("(parameter copy)", "(signature copy)")
+                .replace("span_start: 7", "span_start: 70")
+                .replace("span_end: 13", "span_end: 130");
+            assert_deep_property_has_reserved_owner(&signature, &parameter, name, 1);
+        }
+    }
+}
+
+#[test]
+fn property_copy_cli_ownership_preserves_semantic_metadata_differences() {
+    for name in ["f8e4m3", "f8e5m2"] {
+        for (signature, parameter) in [
+            (
+                format!("(t-prim {{doc: \"signature\"}} {name})"),
+                format!("(t-prim {{doc: \"parameter\"}} {name})"),
+            ),
+            (
+                format!(
+                    "(t-tensor {{doc: \"signature\"}} \
+                       (d-lit {{}} 3) (t-prim {{}} {name}))"
+                ),
+                format!(
+                    "(t-tensor {{doc: \"parameter\"}} \
+                       (d-lit {{}} 3) (t-prim {{}} {name}))"
+                ),
+            ),
+        ] {
+            assert_deep_property_has_reserved_owner(&signature, &parameter, name, 2);
+        }
+    }
 }
 
 #[test]
