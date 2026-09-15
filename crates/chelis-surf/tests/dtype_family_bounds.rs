@@ -76,6 +76,48 @@ fn every_bounded_binder_occurrence_is_one_type_variable() {
 }
 
 #[test]
+fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
+    // chelis#1625: `recast = fn (v) -> cast(v, p)` under a standalone
+    // `sig recast: p -> p` must desugar the cast target as `(t-var {} p)`,
+    // the same spelling the `def recast(value) -> p = cast(value, p)` form
+    // produces, so the [04-DTYPE-1] classifier (which keys on a `t-var`
+    // target) recognizes it. Before the fix, this desugared to
+    // `(t-prim {} p)` and slipped past the checker at both ingresses.
+    let declarations = surf_parse("sig recast: p -> p\nrecast = fn (v) -> cast(v, p)")
+        .expect("parse signature and lambda");
+    let deep =
+        chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&desugar_program(&declarations))
+            .expect("normalize source spans");
+    let text = chelis_deep::printer::print_canonical_flat(&deep);
+    assert!(
+        text.contains("(cast {} (var {} v) (t-var {} p))"),
+        "expected the cast target to desugar as `(t-var {{}} p)`, got:\n{text}"
+    );
+    assert!(
+        !text.contains("(t-prim {} p)"),
+        "the cast target must not desugar as `(t-prim {{}} p)`:\n{text}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
+    let text = deep_text("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)");
+    assert!(
+        text.matches("(t-prim {} f32)").count() == 3 && !text.contains("(t-var {} f32)"),
+        "an explicit binder list must not rebind an active primitive:\n{text}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_does_not_rebind_a_reserved_sig_binder_name() {
+    let text = deep_text("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)");
+    assert!(
+        text.matches("(t-prim {} u8)").count() == 3 && !text.contains("(t-var {} u8)"),
+        "an explicit binder list must not turn a reserved dtype into a type variable:\n{text}"
+    );
+}
+
+#[test]
 fn a_declaration_without_a_bound_emits_no_bound_metadata() {
     // Canonical Deep for every pre-existing declaration is unchanged.
     let text = deep_text("def id[p](x: p) -> p = x");
@@ -183,6 +225,10 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         "def arange_values[p: Int](current: p, stop: p) -> p = current",
         "def scale[n, p: Float](x: tensor[n, p], k: p) -> tensor[n, p] = x",
         "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))",
+        // chelis#1625: a lambda-valued top-level binding whose type comes
+        // from a standalone bounded sig must round-trip the same as the
+        // equivalent `def` spelling.
+        "sig recast[p: Float]: p -> p\nrecast = fn (v) -> cast(v, p)",
     ] {
         let decls = surf_parse(source).expect("parse");
         let deep = desugar_program(&decls);

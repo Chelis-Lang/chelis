@@ -170,6 +170,14 @@ struct DesugarCtx {
 
 impl DesugarCtx {
     fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+        // spec/02 §P4b: a quantifier list overrides the lexical
+        // type-variable case split, not active primitive or rejected dtype
+        // spellings. Keep that category decision at the body lookup as well
+        // as type desugaring, so an explicit `sig f[f32]` or `sig f[u8]`
+        // cannot turn a cast target into `(t-var ...)`.
+        if canonical_primitive_name(name).is_some() || is_reserved_dtype_name(name) {
+            return None;
+        }
         self.current_type_binders.borrow().get(name).copied()
     }
 
@@ -1114,10 +1122,25 @@ impl DesugarCtx {
                 value,
                 ..
             } => {
-                vec![node(
-                    DeepTag::Def,
-                    vec![sym(name), self.desugar_expr(value)],
-                )]
+                // chelis#1625: a lambda-valued top-level binding whose type
+                // comes from a standalone `sig` must desugar `cast` targets
+                // naming that sig's binders the same way `desugar_fun_def`
+                // does for the `def f(...) = ...` spelling — as `(t-var {}
+                // <name>)`, not `(t-prim {} <name>)`. Without installing this
+                // scope, `current_type_binder` never sees the sig's binders
+                // here, so `cast(v, p)` under `sig f: p -> p` silently kept
+                // the `t-prim` default and slipped past the [04-DTYPE-1]
+                // classifier in `chelis_deep::literal_source`, which only
+                // recognizes a `t-var` cast target.
+                let restore_binders = self.current_type_binders.replace(
+                    self.declared_type_binders
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                let body = self.desugar_expr(value);
+                self.current_type_binders.replace(restore_binders);
+                vec![node(DeepTag::Def, vec![sym(name), body])]
             }
 
             Decl::MacroDef {
