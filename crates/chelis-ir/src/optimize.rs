@@ -23,6 +23,7 @@ pub fn constant_fold(dag: &mut Dag) {
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
     let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
+    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
 
     // Direct subtraction and value extrema fold through their exact typed
     // kernels below. The remaining legacy fold set computes on the f64 wide
@@ -43,7 +44,7 @@ pub fn constant_fold(dag: &mut Dag) {
     };
 
     for node in dag.nodes() {
-        if crate::axis_sources::has_literal_result_claim(dag, node.id) {
+        if literal_result_claim_producers[node.id.0] {
             continue;
         }
         if node.inputs.len() == 2 {

@@ -151,6 +151,7 @@ struct Chain {
 fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     let mut chains = Vec::new();
     let mut in_chain: Vec<bool> = vec![false; dag.len()];
+    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
 
     // Walk in topological order.
     for node in dag.nodes() {
@@ -158,9 +159,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node)
-            || crate::axis_sources::has_literal_result_claim(dag, node.id)
-        {
+        if !is_fusible_elementwise(node) || literal_result_claim_producers[node.id.0] {
             continue;
         }
 
@@ -181,10 +180,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c)
-                    if is_fusible_elementwise(c)
-                        && !crate::axis_sources::has_literal_result_claim(dag, c.id) =>
-                {
+                Some(c) if is_fusible_elementwise(c) && !literal_result_claim_producers[c.id.0] => {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)

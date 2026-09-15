@@ -15369,7 +15369,7 @@ impl<'program> LowerCtx<'program> {
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, claims, .. }
                     if !requirements.is_empty() || !claims.is_empty())
-                    || crate::axis_sources::has_literal_result_claim(&self.dag, *witness)
+                    || crate::axis_sources::directly_owns_literal_result_claim(&self.dag, *witness)
             })
             .collect::<Vec<_>>();
         if required.is_empty() {

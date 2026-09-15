@@ -53,10 +53,12 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
-        if let Some(source) = identity_source(node, dag) {
+        if let Some(source) = identity_source(node, dag, literal_result_claim_producers[node.id.0])
+        {
             let mapped = id_map[&source];
             id_map.insert(node.id, mapped);
             append_node_provenance(&mut out, mapped, node);
@@ -92,8 +94,8 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     out
 }
 
-fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
-    if crate::axis_sources::has_literal_result_claim(dag, node.id) {
+fn identity_source(node: &DagNode, dag: &Dag, owns_literal_result_claim: bool) -> Option<NodeId> {
+    if owns_literal_result_claim {
         return None;
     }
     if node.inputs.len() != 1 {

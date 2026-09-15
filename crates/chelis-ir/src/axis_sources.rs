@@ -2795,9 +2795,47 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
         .collect()
 }
 
-pub(crate) fn has_literal_result_claim(dag: &Dag, producer: NodeId) -> bool {
-    dag.nodes().iter().any(|owner| {
-        let owns_claim = owner.shape_deps.iter().any(|dependency| {
+/// Nodes an authored literal-result claim requires optimization to preserve.
+///
+/// A token is attached to the returned value's owner, while attribution and
+/// cast placement may live behind an administrative Copy/Cast chain. Compute
+/// that complete protected set once per pass instead of searching every owner
+/// again for every candidate node.
+pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
+    let mut protected = vec![false; dag.len()];
+    let mut pending = dag
+        .nodes()
+        .iter()
+        .filter(|owner| directly_owns_literal_result_claim(dag, owner.id))
+        .map(|owner| owner.id)
+        .collect::<Vec<_>>();
+
+    while let Some(current) = pending.pop() {
+        let Some(slot) = protected.get_mut(current.0) else {
+            continue;
+        };
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        let Some(node) = dag.get(current) else {
+            continue;
+        };
+        if matches!(
+            node.op,
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+        ) && let Some(input) = node.inputs.first()
+        {
+            pending.push(*input);
+        }
+    }
+
+    protected
+}
+
+pub(crate) fn directly_owns_literal_result_claim(dag: &Dag, owner: NodeId) -> bool {
+    dag.get(owner).is_some_and(|node| {
+        node.shape_deps.iter().any(|dependency| {
             matches!(
                 dag.get(*dependency).map(|node| &node.op),
                 Some(RiscOp::ExtentWitness {
@@ -2805,32 +2843,7 @@ pub(crate) fn has_literal_result_claim(dag: &Dag, producer: NodeId) -> bool {
                     ..
                 })
             )
-        });
-        if !owns_claim {
-            return false;
-        }
-        // A return carrier owns the token, but the numeric operation behind
-        // it owns attribution. Preserve both that operation and a cast's
-        // source placement when a rewrite would otherwise erase either.
-        let mut current = owner.id;
-        loop {
-            if current == producer {
-                return true;
-            }
-            let Some(node) = dag.get(current) else {
-                return false;
-            };
-            if !matches!(
-                node.op,
-                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
-            ) {
-                return false;
-            }
-            let Some(input) = node.inputs.first() else {
-                return false;
-            };
-            current = *input;
-        }
+        })
     })
 }
 
@@ -3383,6 +3396,50 @@ mod tests {
 
     fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
         TensorType { dims, precision }
+    }
+
+    #[test]
+    fn literal_result_claim_producers_cover_only_the_owned_admin_chain() {
+        let mut dag = Dag::new();
+        let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor.clone(),
+            None,
+        );
+        let producer = dag.add_node(RiscOp::Mul, vec![input, input], tensor.clone(), None);
+        let cast = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![producer],
+            tensor.clone(),
+            None,
+        );
+        let claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let owner = dag.add_node(RiscOp::Copy, vec![cast], tensor.clone(), None);
+        dag.add_shape_dep(owner, claim);
+        let unrelated = dag.add_node(RiscOp::Copy, vec![input], tensor, None);
+
+        let protected = literal_result_claim_producers(&dag);
+        assert!(protected[owner.0]);
+        assert!(protected[cast.0]);
+        assert!(protected[producer.0]);
+        assert!(!protected[input.0]);
+        assert!(!protected[claim.0]);
+        assert!(!protected[unrelated.0]);
     }
 
     #[test]

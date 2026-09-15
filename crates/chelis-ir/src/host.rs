@@ -6865,6 +6865,7 @@ fn summarize_sparse_helper_from_parts(
 fn literal_result_claim_owner_input<'a>(
     dag: &'a crate::Dag,
     root: &'a crate::dag::DagNode,
+    literal_result_claim_producers: &[bool],
 ) -> Option<&'a crate::dag::DagNode> {
     if !matches!(root.op, RiscOp::Copy)
         || root.inputs.len() != 1
@@ -6876,7 +6877,10 @@ fn literal_result_claim_owner_input<'a>(
                     site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                     ..
                 })
-            ) || crate::axis_sources::has_literal_result_claim(dag, *dependency)
+            ) || literal_result_claim_producers
+                .get(dependency.0)
+                .copied()
+                .unwrap_or(false)
         })
     {
         return None;
@@ -6972,8 +6976,11 @@ fn try_summarize_sparse_helper(
         }));
     }
     let input_tys = inputs.iter().map(|i| i.ty.clone()).collect::<Vec<_>>();
+    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
     let mut root = returned_root;
-    while let Some(input) = literal_result_claim_owner_input(dag, root) {
+    while let Some(input) =
+        literal_result_claim_owner_input(dag, root, &literal_result_claim_producers)
+    {
         root = input;
     }
 
