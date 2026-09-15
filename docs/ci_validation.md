@@ -9,7 +9,9 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 |---|---|---|
 | `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
 | `ci.yml` change-owned shards and report | PR and main push, with the existing docs-only skip | Every default-enabled integration target added or directly modified by the change, or its exact reviewed alternative owner; four deterministic shards with a 20-minute limit each |
-| `ci.yml` package-expansion shards and summary | After the required change-owned report on PR and main push | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate non-required summary |
+| `pr-package-expansion.yml` | Manual final-candidate dispatch with an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
+| `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of protected-test and frozen-contract acknowledgement lines; no compiler build |
+| `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
 | `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and rejection liveness |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
 | `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
@@ -20,9 +22,15 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 
 The Linux workspace worker passes `--ignore-default-filter` and deliberately includes the PR selection. Only `chelis-compiler-api::capacity_census_wire` and `chelis-python::capacity_census_bindings` are excluded: the dtype worker executes both. The generalization worker uses the same census exclusions; census authority is checked on the default-feature configuration. Executable listing set-math proves that workspace plus dtype still covers every non-ignored test in the unfiltered corpus, with none in neither selection and no census test in both. The two selections do overlap elsewhere: the dtype oracle also owns several non-census binaries.
 
-The regular PR planner compares Cargo metadata at the change base and candidate. On a pull request it requires the checked-out synthetic merge commit to have exactly two parents and requires the event head to be `HEAD^2`; on a main push it uses the event's before/after commits. Its rename-aware NUL-delimited diff assigns every changed path one final disposition. Package roots map through Cargo metadata, reviewed shared paths map through `path_rule` rows, and unknown, stale, duplicate, or ambiguous mappings fail planning. Added targets and targets whose exact candidate `src_path` changed enter the required change-owned set. Other eligible targets in selected packages enter the disjoint informational package-expansion set.
+The regular PR planner compares Cargo metadata at the change base and candidate. On a pull request it requires the checked-out synthetic merge commit to have exactly two parents and requires the event head to be `HEAD^2`; on a main push it uses the event's before/after commits. Its rename-aware NUL-delimited diff assigns every changed path one final disposition. Package roots map through Cargo metadata, reviewed shared paths map through `path_rule` rows, and unknown, stale, duplicate, or ambiguous mappings fail planning. Added targets and targets whose exact candidate `src_path` changed enter the required change-owned set. Other eligible targets in selected packages enter the disjoint package-expansion set, which is executed only by the explicit final-candidate dispatch.
 
 `.config/ci-test-targets.toml` is the versioned ownership manifest for this surface. `standing_target` rows feed `ci-fast`; `target_exclusion` and `test_exclusion` rows name their exact alternative workflow, job, cadence, reason, and tracking issue; and `path_rule` rows assign shared paths to exact packages or an existing automated owner. Other prose paths use the existing docs-only classifier, including its executable-document exceptions; a new changelog fragment needs no manifest row. Package qualification is retained throughout, including execution, so equal target names in different packages cannot create a Cargo selector cross product.
+
+An exact `manual_only_target` row keeps an all-ignored integration target in
+required change-owned coverage. Its plan-bound execution mode lists ignored
+tests, rejects the row if any default-enabled test appears, and runs the complete
+ignored suite with the same target and per-test receipts. It is not an exclusion
+and zero active tests do not count as success.
 
 The Linux workspace worker executes as four shards of one
 `--partition hash:${{ matrix.shard }}/4` selection rather than as a single run.
@@ -54,13 +62,24 @@ only (chelis#1781).
 
 Each worker downloads the current run's plan after Cargo cache restoration and before execution. The cache may replace `target/`, so it cannot own the plan; a missing artifact remains a job failure.
 
-Package expansion uses a separate four-shard worker pool and starts only after the required change-owned report succeeds. Its failures, missing shards, exclusions, and timing-budget overruns are recorded by `Informational Package Expansion Summary`, but neither that summary nor its workers feed `Integration Tests (Linux)`. This sequencing keeps the trial from cancelling, starving, or changing the required verdict. Nightly JUnit reports stay in their producing workflow. The Linux nightly report inspects every execution worker and opens a failure tracker on non-success; a manual branch run cannot close a main-nightly tracker.
+Package expansion uses a separate manually dispatched four-shard worker pool.
+The dispatcher accepts an open pull request number and an exact expected head
+SHA, validates both before planning, and rejects stale candidates. Its failures,
+missing shards, exclusions, and timing-budget overruns are recorded by `Manual
+Package Expansion Summary`; neither that summary nor its workers feed
+`Integration Tests (Linux)`. Agents run it after review repairs and required
+implementation checks on the final candidate, inspect the report, and record
+the reviewed SHA and run link. A changed candidate requires fresh validation.
+Introduced failures are resolved; inherited failures and incomplete coverage
+are named explicitly. Nightly JUnit reports stay in their producing workflow.
+The Linux nightly report inspects every execution worker and opens a failure
+tracker on non-success; a manual branch run cannot close a main-nightly tracker.
 
 The expansion executor stops after a shared 16-minute build/list/test budget and writes an unsuccessful receipt containing earlier results and the complete selected-target list. It terminates the active command's process group and starts no further command. Unfinished coverage remains a failure in the informational summary. The 15-minute soft-budget report and 20-minute job limit remain; the intervening time allows upload after executor expiry. Setup delays, external cancellation or runner loss can still prevent a receipt. Required change-owned execution retains its existing limit.
 
 Use `gh workflow run heavy-e2e.yml --ref BRANCH` or `gh workflow run macos-nightly.yml --ref BRANCH` for candidate validation. Full Linux execution shards, dtype, script integrations and generalization shards have 60-minute timeouts; other extended Linux workers have 45 minutes, and Darwin SMT has 60. Dtype previously exhausted 45 minutes; its 60-minute allowance preserves complete execution while census work is removed from the other Linux workers. Existing ignored/manual gates still require their documented prerequisite and explicit invocation. The stdlib self-test corpus remains explicitly invoked nightly. Existing nightly failures must be recorded against a baseline, never treated as passing evidence.
 
-The developer's `gate.py --fast`, `--local`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the standing hosted selection; the change-owned and package-expansion lanes exist only in hosted PR/main CI. Run the owning phase oracle on the candidate when claiming phase completion.
+The developer's `gate.py --fast`, `--local`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the standing hosted selection; the required change-owned lane runs in PR/main CI and package expansion runs only through its explicit PR dispatch. A title or description edit reruns the dedicated acknowledgement check and changelog policy without entering compiler or Hull workflows, so the unchanged candidate's implementation contexts are neither cancelled nor replaced. A base retarget creates a required pending head receipt, validates the open PR's exact head/base and the checked-out two-parent merge, dispatches CI and Hull from the trusted new base, and closes the receipt only after both runs succeed. Run the owning phase oracle on the candidate when claiming phase completion.
 
 ## Python execution ownership and timing
 

@@ -155,6 +155,20 @@ obligations.
   evidence from before a repair does not validate the repaired candidate.
   [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
   has the runs behind this rule.
+- `PR Contract Acknowledgements` is the required owner for pull-request-description
+  acknowledgements. A title or description edit reruns that check without cancelling
+  or replacing compiler validation for the same commit. Generic edits do not enter
+  compiler or Hull workflows. Retargeting the pull request's base is an implementation
+  change: `PR Base Retarget Validation` holds the head pending while trusted
+  coordination dispatches fresh compiler and Hull workflows against the exact new
+  synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
+  checks before proceeding.
+- After reviews and repairs are complete and the final candidate's required
+  implementation checks pass, dispatch `PR Package Expansion` with the pull request
+  number and that exact head SHA. Inspect its report and record the reviewed SHA and
+  run link in the pull request. Any candidate change invalidates the run and requires a
+  fresh dispatch. Resolve failures introduced by the candidate; identify inherited
+  failures and any missing, timed-out or otherwise incomplete coverage explicitly.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
