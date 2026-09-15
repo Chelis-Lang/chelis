@@ -131,7 +131,9 @@ fn straight_line(expr: &chelis_ir::host::ConcreteHostExpr) -> bool {
         }
         E::Tuple(items, _) => items.iter().all(straight_line),
         E::WithSeed { seed, body, .. } => matches!(seed.kind, E::Int(_)) && straight_line(body),
-        E::TensorCall { args, .. } | E::Call { args, .. } => args.iter().all(value_only),
+        E::TensorCall { args, .. } | E::Call { args, .. } | E::SignatureEntry { args, .. } => {
+            args.iter().all(value_only)
+        }
         _ => false,
     }
 }
@@ -548,6 +550,38 @@ static inline void __chelis_random_observer_record(
 #[cfg(test)]
 mod source_tests {
     use super::*;
+
+    #[test]
+    fn retained_signature_entry_preserves_straight_line_source_admission() {
+        use chelis_ir::host::{
+            ConcreteHostExpr as Expr, ConcreteHostExprKind as Kind, HostTensorInput,
+            SignatureEntryPlan,
+        };
+        let tensor = chelis_ir::TensorType {
+            dims: vec![chelis_ir::DimInfo::Lit(2)],
+            precision: chelis_types::types::Prim::F32,
+        };
+        let ty = chelis_ir::ConcreteHostType::Tensor(tensor.clone());
+        let plan = SignatureEntryPlan::new([HostTensorInput {
+            name: "x".into(),
+            ty: tensor,
+        }]);
+        let mut entry = Expr::new(Kind::SignatureEntry {
+            plan,
+            args: vec![Expr::new(Kind::Var("x".into(), ty.clone()))],
+        });
+        assert!(straight_line(&entry));
+        let Kind::SignatureEntry { args, .. } = &mut entry.kind else {
+            unreachable!()
+        };
+        args[0] = Expr::new(Kind::Call {
+            function: "effectful_producer".into(),
+            args: Vec::new(),
+            arg_tys: Vec::new(),
+            ty,
+        });
+        assert!(!straight_line(&entry));
+    }
 
     #[test]
     fn source_identity_rejects_duplicate_orphan_kind_helper_and_seed_sidecars() {

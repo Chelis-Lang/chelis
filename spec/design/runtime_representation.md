@@ -1439,6 +1439,12 @@ subdirectory closure mutations remain the negative witnesses. This amendment
 changes no public descriptor, dtype, width or numbered
 representation semantics.
 
+Complete signature-entry planning registers two typed modules in the source
+universe: `chelis-ir/src/host/signature_entry.rs` and
+`chelis-backend-c/src/host_emit/entry.rs`. They compose existing DAG witnesses
+and project already discharged helper guards. The structural scan finds no new
+representation seam; the universe contains 86 sources (75 Rust and eleven
+C/C++/Objective-C), with no foundation or mutation change.
 
 Invocation-local literal result claims extend the Phase 0 foundation with two
 `load-store-template` owners in `chelis-backend-c/src/host_emit.rs`:

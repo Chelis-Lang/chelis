@@ -871,6 +871,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     fn borrow(&mut self, value: Value) -> Result<Operand, OwnershipError> {
         match value {
             Value::Fresh(owner) => {
+                // A fresh value projected out of a nested scope carries the
+                // moved marker that suppressed that inner scope's terminal.
+                // Borrowing it in the enclosing scope transfers liveness to
+                // that scope just as binding it does, so its eventual terminal
+                // remains scheduled after the borrow.
+                self.moved.remove(&owner);
                 self.register(owner)?;
                 Ok(Operand::borrow(owner))
             }
@@ -1112,6 +1118,39 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         .collect::<Result<Vec<_>, _>>()?
                 };
                 self.lower_call(function, values, ty, tail)
+            }
+            ConcreteHostExprKind::SignatureEntry { plan, args } => {
+                if plan.observations().nodes().len() != args.len() {
+                    return Err(OwnershipError::CallArityMismatch {
+                        unit: self.unit_name.clone(),
+                        callee: "signature entry".into(),
+                        supplied: args.len(),
+                        declared: plan.observations().nodes().len(),
+                    });
+                }
+                let mut operands = Vec::with_capacity(args.len());
+                for (index, arg) in args.iter().enumerate() {
+                    let actual = expr_type(arg);
+                    if !matches!(actual, ConcreteHostType::Tensor(_)) {
+                        return Err(OwnershipError::CallArgumentType {
+                            unit: self.unit_name.clone(),
+                            callee: "signature entry".into(),
+                            argument: index,
+                            expected: "tensor observation".into(),
+                            actual: render_type(&actual),
+                        });
+                    }
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(arg, None)
+                    })?;
+                    operands.push(self.borrow(value)?);
+                }
+                self.apply(
+                    &ConcreteHostType::Unit,
+                    "signature entry".into(),
+                    vec![super::ir::OwnershipUse::Borrow; operands.len()],
+                    operands,
+                )
             }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
                 if name == "copy" && args.len() == 1 {
@@ -2415,7 +2454,9 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         ConcreteHostExprKind::Float(_) => ConcreteHostType::Float64,
         ConcreteHostExprKind::Bool(_) => ConcreteHostType::Bool,
         ConcreteHostExprKind::String(_) => ConcreteHostType::String,
-        ConcreteHostExprKind::Unit => ConcreteHostType::Unit,
+        ConcreteHostExprKind::Unit | ConcreteHostExprKind::SignatureEntry { .. } => {
+            ConcreteHostType::Unit
+        }
         ConcreteHostExprKind::List(_, ty)
         | ConcreteHostExprKind::Tuple(_, ty)
         | ConcreteHostExprKind::Var(_, ty)

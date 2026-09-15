@@ -1318,3 +1318,80 @@ fn a_dag_copy_after_store_move_is_rejected() {
     twin.add_root(copied);
     verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
 }
+
+#[test]
+fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
+    let front = front(
+        "def guarded(x: tensor[n, f32]) -> tensor[n, f32] ! { IO } = { _ = print(\"entered\")\n x }\nout = guarded(to_tensor([1.0f32, 2.0f32]))\n",
+    );
+    let mut host = front.host.clone();
+    let function = host
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "guarded")
+        .unwrap();
+    let ty = match &function.params[0].ty {
+        ConcreteHostType::Tensor(ty) => ty.clone(),
+        other => panic!("{other:?}"),
+    };
+    let plan = chelis_ir::host::SignatureEntryPlan::new([chelis_ir::host::HostTensorInput {
+        name: "x".into(),
+        ty,
+    }]);
+    function.body = HostExpr::new(HostExprKind::Let {
+        bindings: vec![chelis_ir::host::HostBinding {
+            name: "checked".into(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ConcreteHostType::Unit,
+            value: HostExpr::new(HostExprKind::SignatureEntry {
+                plan,
+                args: vec![HostExpr::new(HostExprKind::Var(
+                    "x".into(),
+                    function.params[0].ty.clone(),
+                ))],
+            }),
+        }],
+        body: Box::new(function.body.clone()),
+        ty: function.ret_ty.clone(),
+    });
+    verify_ownership(lower_host_ownership(&front.manifested, host.clone()).unwrap()).unwrap();
+    for missing in [false, true] {
+        let mut forged = host.clone();
+        let function = forged
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "guarded")
+            .unwrap();
+        let HostExprKind::Let { bindings, .. } = &mut function.body.kind else {
+            panic!("let")
+        };
+        let HostExprKind::SignatureEntry { args, .. } = &mut bindings[0].value.kind else {
+            panic!("entry")
+        };
+        if missing {
+            args.clear();
+        } else {
+            args[0] = HostExpr::new(HostExprKind::String("not a tensor".into()));
+        }
+        let error = lower_host_ownership(&front.manifested, forged).unwrap_err();
+        if missing {
+            assert!(
+                matches!(
+                    error,
+                    OwnershipError::CallArityMismatch {
+                        supplied: 0,
+                        declared: 1,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, OwnershipError::CallArgumentType { argument: 0, .. }),
+                "{error:?}"
+            );
+        }
+    }
+}

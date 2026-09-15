@@ -586,6 +586,11 @@ fn parity_checked_runtime_extents() {
 }
 
 #[test]
+fn parity_mixed_signature_extents() {
+    drive_parity(&examples_root().join("mixed_signature_extents.ch"), true);
+}
+
+#[test]
 fn parity_ordered_extent_claims() {
     drive_parity(&examples_root().join("ordered_extent_claims.ch"), true);
 }
