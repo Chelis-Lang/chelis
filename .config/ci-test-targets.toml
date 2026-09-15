@@ -689,6 +689,15 @@ cadence = "pull_request and push"
 reason = "the stale-head-rejecting manual expansion interface and worker topology are locked by script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = ".github/workflows/pr-candidate-receipt.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the trusted workflow-run receipt boundary and read-only topology are locked by script-unit"
+tracking_issue = "chelis#1824"
+
 # The release workflow is text-parsed by the script-unit suites that lock its
 # job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
 # installed-artifact canary wiring, and release-notes extraction. Sibling
@@ -721,6 +730,24 @@ reason = "script-unit validates candidate update classification and persistent d
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_candidate_identity.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates exact synthetic-candidate parents and stable PR patch identity"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_candidate_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates trusted required-check provenance and candidate receipt issuance"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_ci_change_owned.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -736,6 +763,24 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "script-unit executes candidate lifecycle graph and acknowledgement controls"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_identity.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "exact candidate-parent and patch-identity controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "receipt provenance, stale-head and tampered-artifact controls execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

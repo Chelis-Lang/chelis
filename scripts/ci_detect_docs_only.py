@@ -37,6 +37,11 @@ import os
 import sys
 from pathlib import PurePosixPath
 
+try:
+    from scripts.ci_contract_paths import ci_contract_changed
+except ModuleNotFoundError:
+    from ci_contract_paths import ci_contract_changed
+
 # Paths that are pure documentation/prose: a change confined to these is
 # safe to skip the heavy build/test jobs for. Exact-name files plus
 # suffix and directory-prefix rules. Conservative on purpose -- anything
@@ -107,29 +112,6 @@ DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
     }
 )
 
-CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
-    {
-        ".config/ci-test-targets.toml",
-        "AGENTS.md",
-        "agent-skills/redteam-exec/SKILL.md",
-        "docs/ci_validation.md",
-        "docs/guard_changes_for_pr_authors.md",
-        "spec/design/guard_artifact_proposal_assessment.md",
-        "scripts/gate.py",
-        "scripts/test_change_owned_workflow.py",
-        "scripts/test_hosted_validation.py",
-        "scripts/test_pr_workflow_routing.py",
-        "scripts/test_gate.py",
-    }
-)
-CI_CONTRACT_PREFIXES: tuple[str, ...] = (
-    ".github/actions/",
-    ".github/workflows/",
-    "scripts/ci_",
-    "scripts/test_ci_",
-)
-
-
 def is_doc_path(path: str) -> bool:
     """True if `path` is documentation/prose under the allowlist."""
     norm = path.strip().strip('"')
@@ -166,18 +148,6 @@ def diagnostic_kind_changed(paths: list[str]) -> bool:
     if not cleaned:
         return True
     return any(path in DIAGNOSTIC_KIND_PATHS for path in cleaned)
-
-
-def ci_contract_changed(paths: list[str]) -> bool:
-    """Whether cheap CI routing/contract tests must run; empty fails safe."""
-    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
-    if not cleaned:
-        return True
-    return any(
-        path in CI_CONTRACT_EXACT_PATHS
-        or any(path.startswith(prefix) for prefix in CI_CONTRACT_PREFIXES)
-        for path in cleaned
-    )
 
 
 def _emit(

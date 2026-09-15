@@ -16,9 +16,11 @@ CI = ROOT / ".github/workflows/ci.yml"
 ACKNOWLEDGEMENTS = ROOT / ".github/workflows/pr-contract-acknowledgements.yml"
 EXPANSION = ROOT / ".github/workflows/pr-package-expansion.yml"
 RETARGET = ROOT / ".github/workflows/pr-base-retarget.yml"
+RECEIPT = ROOT / ".github/workflows/pr-candidate-receipt.yml"
 HULL = ROOT / ".github/workflows/conformance.yml"
 AGENTS = ROOT / "AGENTS.md"
 AUTHOR_GUIDE = ROOT / "docs/guard_changes_for_pr_authors.md"
+CI_VALIDATION = ROOT / "docs/ci_validation.md"
 REQUIRED_IMPLEMENTATION_JOBS = {
     "lint-and-unit": "Lint and Unit Tests (Linux)",
     "integration": "Integration Tests (Linux)",
@@ -39,19 +41,16 @@ PREFLIGHT_GATED_JOBS = {
     "backend-sanitizers",
 }
 BOOTSTRAP_CONTRACT_MARKERS = {
-    ".github/actions/*",
-    ".github/workflows/*",
-    ".config/ci-test-targets.toml",
-    "AGENTS.md",
-    "agent-skills/redteam-exec/SKILL.md",
-    "docs/ci_validation.md",
-    "docs/guard_changes_for_pr_authors.md",
-    "scripts/gate.py",
-    "scripts/ci_*",
-    "scripts/test_ci_*",
-    "scripts/test_change_owned_workflow.py",
-    "scripts/test_hosted_validation.py",
-    "scripts/test_pr_workflow_routing.py",
+    "scripts/ci_contract_paths.py",
+    "git -C candidate show",
+    "BASE_SHA",
+}
+RECEIPT_TRIGGER_WORKFLOWS = {
+    "CI",
+    "Hull Conformance",
+    "Changelog",
+    "PR Contract Acknowledgements",
+    "PR Base Retarget Validation",
 }
 PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
     "content change",
@@ -187,7 +186,10 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertTrue(contract["continue-on-error"])
     test.assertIn("scripts.test_check_agent_skills", contract["run"])
+    test.assertIn("scripts.test_ci_candidate_identity", contract["run"])
+    test.assertIn("scripts.test_ci_candidate_receipt", contract["run"])
     test.assertIn("scripts.test_ci_change_owned", contract["run"])
+    test.assertIn("scripts.test_ci_contract_paths", contract["run"])
     test.assertIn("scripts.test_ci_validate_pr_candidate", contract["run"])
     test.assertIn("scripts.test_regenerate_conformance_assets", contract["run"])
     test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
@@ -218,6 +220,28 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn('if [ "$lifecycle" != "success" ]', record["run"])
     test.assertIn('if [ "$detected_contract" = "true" ]', record["run"])
     test.assertIn('[ "$bootstrap_contract" = "true" ]', record["run"])
+    identity = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Record immutable candidate identity"
+    )
+    test.assertEqual(
+        identity["if"],
+        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    )
+    test.assertEqual(identity["working-directory"], "candidate")
+    test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
+    test.assertIn("--workflow-file ci.yml", identity["run"])
+    test.assertIn("github.event.pull_request.base.sha", identity["run"])
+    upload = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Upload immutable candidate identity"
+    )
+    test.assertEqual(upload["if"], identity["if"])
+    test.assertEqual(upload["with"]["name"], "candidate-identity-ci")
+    test.assertEqual(upload["with"]["if-no-files-found"], "error")
+    test.assertIn("candidate-identity.json", upload["with"]["path"])
     test.assertIn('if [ "$contract_changed" = "true" ]', record["run"])
     docs = workflow["jobs"]["docs"]
     test.assertIn("candidate_preflight", str(docs["steps"]))
@@ -326,6 +350,26 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         "steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true'",
         contract["if"],
     )
+    identity = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Record immutable candidate identity"
+    )
+    test.assertEqual(
+        identity["if"],
+        "github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'",
+    )
+    test.assertEqual(identity["working-directory"], "candidate")
+    test.assertIn("scripts/ci_candidate_identity.py", identity["run"])
+    test.assertIn("--workflow-file conformance.yml", identity["run"])
+    upload = next(
+        step
+        for step in changes["steps"]
+        if step.get("name") == "Upload immutable candidate identity"
+    )
+    test.assertEqual(upload["if"], identity["if"])
+    test.assertEqual(upload["with"]["name"], "candidate-identity-hull")
+    test.assertEqual(upload["with"]["if-no-files-found"], "error")
     conformance = workflow["jobs"]["conformance"]
     test.assertIn(
         "needs.changes.outputs.candidate_preflight != 'success'",
@@ -506,6 +550,88 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
     )
 
 
+def assert_candidate_receipt_workflow(
+    test: unittest.TestCase, workflow: dict
+) -> None:
+    events = actions_events(workflow)
+    test.assertEqual(set(events), {"workflow_run"})
+    trigger = events["workflow_run"]
+    test.assertEqual(set(trigger["workflows"]), RECEIPT_TRIGGER_WORKFLOWS)
+    test.assertEqual(trigger["types"], ["completed"])
+    test.assertEqual(workflow["permissions"], {"contents": "read"})
+    test.assertIn(
+        "github.event.workflow_run.head_sha",
+        str(workflow["concurrency"]),
+    )
+    job = workflow["jobs"]["collect"]
+    test.assertEqual(
+        job["permissions"],
+        {
+            "actions": "read",
+            "checks": "read",
+            "contents": "read",
+            "pull-requests": "read",
+        },
+    )
+    test.assertIn(
+        "github.event.workflow_run.event == 'pull_request'",
+        job["if"],
+    )
+    test.assertIn(
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+        job["if"],
+    )
+    checkouts = [
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    test.assertEqual(len(checkouts), 1)
+    checkout = checkouts[0]
+    test.assertEqual(
+        checkout["with"]["ref"],
+        "${{ github.event.repository.default_branch }}",
+    )
+    test.assertEqual(checkout["with"]["path"], "trusted")
+    test.assertEqual(checkout["with"]["fetch-depth"], 0)
+    text = str(job)
+    test.assertNotIn("refs/pull/", text)
+    test.assertNotIn("actions/checkout@v6", text)
+    collect = next(
+        step
+        for step in job["steps"]
+        if "ci_candidate_receipt.py" in step.get("run", "")
+    )
+    test.assertIn("trusted/scripts/ci_candidate_receipt.py", collect["run"])
+    test.assertIn("github.event.workflow_run.id", str(collect))
+    test.assertIn("github.run_id", str(collect))
+    test.assertIn("GH_TOKEN", collect["env"])
+    upload = next(
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    )
+    test.assertEqual(
+        upload["with"]["name"],
+        "pr-candidate-receipt-${{ github.event.workflow_run.head_sha }}",
+    )
+    test.assertEqual(upload["with"]["if-no-files-found"], "ignore")
+    test.assertEqual(upload["with"]["retention-days"], 30)
+
+
+def assert_candidate_receipt_docs(test: unittest.TestCase) -> None:
+    text = " ".join(CI_VALIDATION.read_text().split())
+    for requirement in (
+        "default branch's `workflow_run` collector",
+        "merge-base(base, head)..head",
+        "same synthetic candidate",
+        "expected workflow file and exact job id",
+        "shadow evidence",
+        "does not skip, cancel, or satisfy any required check",
+    ):
+        test.assertIn(requirement, text)
+
+
 def assert_author_contract(test: unittest.TestCase) -> None:
     documents = {
         AGENTS: AGENTS.read_text(),
@@ -555,6 +681,10 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         )
         assert_retarget_workflow(self, yaml.safe_load(RETARGET.read_text()))
         assert_hull_retarget_dispatch(self, yaml.safe_load(HULL.read_text()))
+        assert_candidate_receipt_workflow(
+            self, yaml.safe_load(RECEIPT.read_text())
+        )
+        assert_candidate_receipt_docs(self)
         assert_author_contract(self)
 
     def test_body_edits_cannot_reenter_compiler_ci(self) -> None:
@@ -590,7 +720,8 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
                 if step.get("id") == "ci-contract-bootstrap"
             )
             bootstrap["run"] = bootstrap["run"].replace(
-                "scripts/ci_*", "scripts/no-ci-*", 1
+                "scripts/ci_contract_paths.py",
+                "scripts/no-contract-paths.py",
             )
             with self.subTest(workflow=workflow_path.name), self.assertRaises(
                 AssertionError
@@ -699,6 +830,24 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             assert_manual_expansion_workflow(self, manual)
+
+    def test_receipt_collector_cannot_checkout_or_execute_pr_content(self) -> None:
+        workflow = copy.deepcopy(yaml.safe_load(RECEIPT.read_text()))
+        workflow["jobs"]["collect"]["steps"].insert(
+            1,
+            {
+                "uses": "actions/checkout@v6",
+                "with": {"ref": "refs/pull/1/merge", "path": "candidate"},
+            },
+        )
+        with self.assertRaises(AssertionError):
+            assert_candidate_receipt_workflow(self, workflow)
+
+    def test_receipt_collector_cannot_gain_write_permissions(self) -> None:
+        workflow = copy.deepcopy(yaml.safe_load(RECEIPT.read_text()))
+        workflow["jobs"]["collect"]["permissions"]["actions"] = "write"
+        with self.assertRaises(AssertionError):
+            assert_candidate_receipt_workflow(self, workflow)
 
 
 if __name__ == "__main__":

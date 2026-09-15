@@ -743,6 +743,9 @@ NON_GATE_WORKFLOWS = {
     # dispatch. Neither is a developer gate.py stage.
     "pr-contract-acknowledgements.yml",
     "pr-base-retarget.yml",
+    # The default-branch workflow-run collector records trusted candidate
+    # evidence but neither executes candidate code nor owns a gate stage.
+    "pr-candidate-receipt.yml",
     "pr-package-expansion.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",

@@ -346,9 +346,14 @@ class SchemaTests(unittest.TestCase):
         for path in (
             ".github/workflows/conformance.yml",
             ".github/workflows/pr-base-retarget.yml",
+            ".github/workflows/pr-candidate-receipt.yml",
             "scripts/ci_candidate_lifecycle.py",
+            "scripts/ci_candidate_identity.py",
+            "scripts/ci_candidate_receipt.py",
             "scripts/ci_retarget_validation.py",
             "scripts/test_ci_candidate_lifecycle.py",
+            "scripts/test_ci_candidate_identity.py",
+            "scripts/test_ci_candidate_receipt.py",
             "scripts/test_ci_retarget_validation.py",
         ):
             with self.subTest(path=path):

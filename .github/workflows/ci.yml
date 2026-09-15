@@ -177,6 +177,7 @@ jobs:
         if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ] &&
              [ "$EVENT_NAME" != "workflow_dispatch" ]; then
@@ -184,20 +185,22 @@ jobs:
             exit 0
           fi
           paths="$RUNNER_TEMP/candidate-changed-paths.txt"
-          changed=false
           if [ ! -s "$paths" ]; then
-            changed=true
-          else
-            while IFS= read -r path; do
-              case "$path" in
-                .github/actions/*|.github/workflows/*|.config/ci-test-targets.toml|AGENTS.md|agent-skills/redteam-exec/SKILL.md|docs/ci_validation.md|docs/guard_changes_for_pr_authors.md|spec/design/guard_artifact_proposal_assessment.md|scripts/gate.py|scripts/ci_*|scripts/test_ci_*|scripts/test_change_owned_workflow.py|scripts/test_hosted_validation.py|scripts/test_pr_workflow_routing.py|scripts/test_gate.py)
-                  changed=true
-                  break
-                  ;;
-              esac
-            done < "$paths"
+            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "ci_contract_changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python3 trusted/scripts/ci_contract_paths.py < "$paths"
+            exit 0
+          fi
+          classifier="$RUNNER_TEMP/ci-contract-paths.py"
+          if ! git -C candidate show \
+            "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
+            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            python3 "$classifier" < "$paths"
+          fi
 
       - name: Install uv for CI contract preflight
         if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}
@@ -213,7 +216,10 @@ jobs:
           --with PyYAML==6.0.3 python -m unittest
           scripts.test_check_agent_skills
           scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_candidate_identity
+          scripts.test_ci_candidate_receipt
           scripts.test_ci_change_owned
+          scripts.test_ci_contract_paths
           scripts.test_ci_detect_docs_only
           scripts.test_ci_validate_pr_candidate
           scripts.test_pr_workflow_routing
@@ -253,6 +259,31 @@ jobs:
           echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
           echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
           echo "candidate lifecycle=$lifecycle, detected CI contract=$detected_contract, bootstrap CI contract=$bootstrap_contract, combined=$contract_changed, CI contract=$contract, verdict=$verdict"
+
+      - name: Record immutable candidate identity
+        if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
+        working-directory: candidate
+        run: >-
+          python3 scripts/ci_candidate_identity.py
+          --repository "${{ github.repository }}"
+          --workflow-file ci.yml
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --head-sha "${{ github.event.pull_request.head.sha }}"
+          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
+          --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
+
+      - name: Upload immutable candidate identity
+        if: github.event_name == 'pull_request' && steps.candidate-preflight.outputs.candidate_preflight == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-identity-ci
+          path: ${{ runner.temp }}/candidate-identity/candidate-identity.json
+          if-no-files-found: error
+          retention-days: 30
 
   # C2.2's producer seal depends on same-crate privacy, which an external
   # compile-fail doctest cannot distinguish from pub(crate). Run the actual
