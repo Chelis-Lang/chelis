@@ -33,10 +33,55 @@ PACKAGE_EXPANSION_INVALIDATION_CLASSES = (
     "base-changing rebase",
     "base-branch retarget",
 )
+PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES = {
+    AGENTS: "creates a new synthetic candidate and requires a fresh dispatch.",
+    AUTHOR_GUIDE: (
+        "requires a fresh package-expansion dispatch because the workflow "
+        "validates the exact synthetic candidate."
+    ),
+}
 
 
 def actions_events(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True))
+
+
+def remove_from_invalidation_clause(
+    raw_text: str, document: Path, requirement: str
+) -> str:
+    text = " ".join(raw_text.split())
+    suffix = PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES[document]
+    suffix_start = text.index(suffix)
+    clause_start = text.rfind(". ", 0, suffix_start) + 2
+    clause = text[clause_start : suffix_start + len(suffix)]
+    mutated_clause = clause.replace(requirement, "", 1)
+    if mutated_clause == clause:
+        raise AssertionError(f"{requirement!r} is absent from the invalidation clause")
+    return text[:clause_start] + mutated_clause + text[suffix_start + len(suffix) :]
+
+
+def package_expansion_invalidation_clause(
+    test: unittest.TestCase, document: Path, text: str
+) -> str:
+    suffix = PACKAGE_EXPANSION_INVALIDATION_CLAUSE_SUFFIXES[document]
+    test.assertEqual(
+        text.count(suffix),
+        1,
+        f"{document.name}: expected one package-expansion invalidation clause",
+    )
+    suffix_start = text.index(suffix)
+    sentence_boundary = text.rfind(". ", 0, suffix_start)
+    test.assertNotEqual(
+        sentence_boundary,
+        -1,
+        f"{document.name}: package-expansion invalidation clause has no boundary",
+    )
+    clause = text[sentence_boundary + 2 : suffix_start + len(suffix)]
+    test.assertTrue(
+        clause.startswith("A "),
+        f"{document.name}: malformed package-expansion invalidation clause",
+    )
+    return clause
 
 
 def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
@@ -269,20 +314,26 @@ def assert_manual_expansion_workflow(test: unittest.TestCase, workflow: dict) ->
 
 
 def assert_author_contract(test: unittest.TestCase) -> None:
-    agents = AGENTS.read_text()
-    guide = AUTHOR_GUIDE.read_text()
-    for raw_text in (agents, guide):
+    documents = {
+        AGENTS: AGENTS.read_text(),
+        AUTHOR_GUIDE: AUTHOR_GUIDE.read_text(),
+    }
+    for document, raw_text in documents.items():
         text = " ".join(raw_text.split())
         test.assertIn("PR Contract Acknowledgements", text)
         test.assertIn("PR Base Retarget Validation", text)
         test.assertIn("PR Package Expansion", text)
         test.assertIn("exact head SHA", text)
+        invalidation_clause = package_expansion_invalidation_clause(
+            test, document, text
+        )
         for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
-            test.assertIn(requirement, text)
+            test.assertIn(requirement, invalidation_clause)
         test.assertIn("inherited", text)
         test.assertIn("incomplete coverage", text)
         test.assertIn("base", text)
         test.assertIn("fresh", text)
+    guide = documents[AUTHOR_GUIDE]
     test.assertIn("gh workflow run pr-package-expansion.yml", guide)
     test.assertIn("-f pr_number=", guide)
     test.assertIn("-f expected_head_sha=", guide)
@@ -315,10 +366,12 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
         for document in originals:
             for requirement in PACKAGE_EXPANSION_INVALIDATION_CLASSES:
                 mutated = dict(originals)
-                pattern = r"\s+".join(
-                    re.escape(word) for word in requirement.split()
+                mutated[document] = (
+                    f"Unrelated note retaining the words {requirement}.\n\n"
+                    + remove_from_invalidation_clause(
+                        mutated[document], document, requirement
+                    )
                 )
-                mutated[document] = re.sub(pattern, "", mutated[document])
                 with (
                     self.subTest(document=document.name, requirement=requirement),
                     patch.object(
