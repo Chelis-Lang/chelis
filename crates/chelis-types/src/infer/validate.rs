@@ -49,8 +49,9 @@ pub(super) fn validate_ir_program(
 /// the timeless transform language contract. A named target must not alias an
 /// unshadowed top-level function declaration; local wrapper closures remain
 /// on their separately tested path. `grad` keeps its existing
-/// direct-inline-lambda path; `vmap` fences that path because its parameter can
-/// be checked against the unsliced operand. This keeps the checker from
+/// direct-inline-lambda path. `vmap` admits inline lambdas only when every
+/// parameter is explicitly typed: otherwise the inference order can bind an
+/// untyped parameter to the unsliced operand. This keeps the checker from
 /// certifying a program whose evaluator could select a different callable or
 /// whose inline-vmap parameter could have the wrong rank (#1887, #1952,
 /// #1954).
@@ -325,6 +326,23 @@ fn direct_unshadowed_top_level_function(
     })
 }
 
+/// An inline `vmap` target is safe on the release fragment when its parameter
+/// type is explicit. `infer_vmap` can then transform that type by inserting the
+/// mapped axis before the eventual application unifies it with the operand.
+/// Without an annotation, the lambda is inferred first and can instead bind to
+/// the unsliced operand (#1887).
+fn inline_vmap_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
+    let Some((DeepTag::Fn, _, children)) = target.and_then(stamped_parts) else {
+        return false;
+    };
+    let Some((DeepTag::Params, _, params)) = children.first().and_then(stamped_parts) else {
+        return false;
+    };
+    params
+        .iter()
+        .any(|param| !matches!(param_name_and_inline_type(param), Some((_, Some(_)))))
+}
+
 fn validate_core_transform_target(
     tag: DeepTag,
     target: Option<&deep::Expr>,
@@ -339,7 +357,6 @@ fn validate_core_transform_target(
             .then(|| children.first().and_then(symbol_name))
             .flatten()
     });
-    let inline_lambda = target_parts.is_some_and(|(target_tag, _, _)| target_tag == DeepTag::Fn);
     let shadows_top_level = name.is_some_and(|name| {
         top_level_functions.contains(name) && lexical_scope.local_names.contains(name)
     });
@@ -353,9 +370,15 @@ fn validate_core_transform_target(
         // path. The P1 hazards are aliases and a local binder choosing a
         // same-named global declaration, both represented as `var`.
         DeepTag::Grad => shadows_top_level || aliases_top_level_function,
-        // #1887 is specifically an inline lambda receiving the unsliced
-        // operand. Aliases get the same direct-name fence as `grad`.
-        DeepTag::Vmap => inline_lambda || shadows_top_level || aliases_top_level_function,
+        // #1887 is specifically an inline lambda whose parameter was inferred
+        // from the unsliced operand. Explicit parameter annotations provide
+        // the pre-transform function type, so they remain supported.
+        // Aliases get the same direct-name fence as `grad`.
+        DeepTag::Vmap => {
+            inline_vmap_has_untyped_parameter(target)
+                || shadows_top_level
+                || aliases_top_level_function
+        }
         _ => unreachable!("only transform tags call this validator"),
     };
     if !requires_fence {
@@ -372,11 +395,12 @@ fn validate_core_transform_target(
         format!(
             "the core transform fragment rejects this `{transform}` target: local aliases \
              and shadowing bindings must be direct, unshadowed top-level function \
-             declarations, and `vmap` does not admit inline lambdas yet \
+             declarations, and inline `vmap` parameters must be explicitly typed \
              (chelis#1887, #1952, #1954)"
         ),
         vec![
             format!("Define a top-level function and write `{transform}(that_function)`."),
+            "For an inline `vmap` lambda, give every parameter an explicit type.".to_string(),
             "The rejected callable form is outside the Chelis 0.19 core fragment.".to_string(),
         ],
     ));

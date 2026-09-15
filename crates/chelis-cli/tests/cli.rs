@@ -8187,11 +8187,12 @@ fn eval_vmap_returns_per_element_results() {
         ));
 }
 
-/// The core transform fragment is direct top-level declarations.  These
-/// controls retain the launch-supported `grad(f)` / `vmap(f)` forms while the
-/// adjacent negative cases fence dynamic callable targets before evaluation.
+/// The core transform fragment admits direct top-level declarations and typed
+/// inline `vmap` lambdas. These controls retain those supported forms while
+/// the adjacent negative cases fence dynamic callable targets before
+/// evaluation.
 #[test]
-fn check_accepts_direct_top_level_grad_and_vmap_targets() {
+fn check_accepts_supported_core_transform_targets() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("direct_transform_targets.ch");
     write_file(
@@ -8199,7 +8200,9 @@ fn check_accepts_direct_top_level_grad_and_vmap_targets() {
         "def loss(x: f32) -> f32 = mul(x, x)\n\
          def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
          gradient = grad(loss)\n\
-         mapped = vmap(reduce)\n",
+         mapped = vmap(reduce)\n\
+         def inline(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
+         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n",
     );
 
     let json = run_json_check(&path);
@@ -8211,10 +8214,10 @@ fn check_accepts_direct_top_level_grad_and_vmap_targets() {
 }
 
 /// #1887, #1952, and #1954: local aliases, shadowing local lambdas, and
-/// inline `vmap` lambdas can be accepted with a false transform contract.
-/// They are outside the documented core fragment until their independent
-/// semantics land, so `check` must reject each form loudly rather than let a
-/// later lane choose a different callable or rank.
+/// untyped inline `vmap` lambdas can be accepted with a false transform
+/// contract. They are outside the documented core fragment until their
+/// independent semantics land, so `check` must reject each form loudly rather
+/// than let a later lane choose a different callable or rank.
 #[test]
 fn check_fences_non_direct_transform_targets() {
     let cases = [
@@ -8246,7 +8249,7 @@ fn check_fences_non_direct_transform_targets() {
             "grad",
         ),
         (
-            "vmap_inline_lambda",
+            "vmap_untyped_inline_lambda",
             "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
                vmap(fn (v) -> sum(v, 0i32))(t)\n",
             "vmap",
