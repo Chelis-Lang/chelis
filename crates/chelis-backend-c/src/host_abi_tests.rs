@@ -366,6 +366,14 @@ fn emitted_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("missing emitted definition for {name}:\n{source}")
 }
 
+fn authored_function_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 #[test]
 fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let source = include_str!(
@@ -375,19 +383,20 @@ fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let emitted = crate::codegen_host_program(&verified, "recursive_depth_1")
         .unwrap()
         .c_source;
-    let body = "step__chelis_owned_body";
+    let public = authored_function_symbol("step");
+    let body = format!("{public}__chelis_owned_body");
 
-    assert!(emitted.contains("chelis_tensor* step(chelis_tensor* state"));
+    assert!(emitted.contains(&format!("chelis_tensor* {public}(chelis_tensor* state")));
     assert!(
         emitted.matches(&format!("{body}(")).count() >= 3,
         "declaration, definition, wrapper entry, and recursive body call must retain the internal symbol:\n{emitted}"
     );
     assert_eq!(
-        emitted.matches("= step(").count(),
+        emitted.matches(&format!("= {public}(")).count(),
         0,
         "internal recursion must never re-enter the external cloning adapter:\n{emitted}"
     );
-    let owned_body = emitted_function_body(&emitted, body);
+    let owned_body = emitted_function_body(&emitted, &body);
     let recursive_call = owned_body
         .find(&format!("= {body}("))
         .unwrap_or_else(|| panic!("missing recursive owned-body call:\n{owned_body}"));
@@ -481,7 +490,10 @@ fn selected_if_edges_emit_one_path_local_release_each() {
     let emitted = crate::codegen_host_program(&verified, "selected_if_edge_release")
         .unwrap()
         .c_source;
-    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+    let choose = emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol("choose")),
+    );
 
     assert_eq!(
         choose.matches("chelis_string_release(").count(),
@@ -591,7 +603,10 @@ fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
     let emitted = crate::codegen_host_program(&verified, "match_option_fresh_control")
         .expect("verified nested match terminals must survive C emission")
         .c_source;
-    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+    let choose = emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol("choose")),
+    );
 
     assert_eq!(
         choose.matches("chelis_option_release(__let_0);").count(),

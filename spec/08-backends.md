@@ -51,6 +51,12 @@ spelling as C syntax. Distinct filename stems SHALL have distinct generated modu
 symbols, including a stem that literally spells another stem's escaped symbol.
 The generated header and source SHALL use the same symbol. Default artifact filenames
 retain the source stem; an explicit output filename does not change the module symbol.
+Each authored C function export, except source-level `main`, SHALL use the
+compiler-reserved `chelis_fn_` prefix followed by the lowercase hexadecimal UTF-8 bytes
+of its Chelis name. Source-level `main` uses the module-qualified `<module>__main`
+symbol so a downstream C driver can retain its own `main`. Downstream C code SHALL call
+the declarations in the generated header rather than reconstructing symbols from Chelis
+source spellings.
 
 Current design points:
 

@@ -162,8 +162,11 @@ C builds keep the source stem in output filenames, including names such as
 an ASCII letter and contains only ASCII letters, digits and underscores keeps its
 spelling, except C keywords, `main`, and the reserved `chelis_file_` prefix.
 Other stems become `chelis_file_` followed by the hexadecimal filename bytes.
-For external calls, use the generated header's declaration. This encoding keeps
-`a-b.ch`, `a_b.ch`, and a literal `chelis_file_612d62.ch` distinct.
+For external calls, use the generated header's declaration. Authored function
+definitions use compiler-reserved `chelis_fn_` symbols followed by their lowercase
+UTF-8 bytes in hexadecimal (except source-level `main`, which is module-qualified);
+their source spelling is not a C linker name. These encodings keep `a-b.ch`, `a_b.ch`,
+and a literal `chelis_file_612d62.ch` distinct.
 
 When the compiled C program hits a runtime arithmetic trap, output from
 preceding effects is retained even when redirected to a pipe or file. The

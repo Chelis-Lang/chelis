@@ -486,6 +486,14 @@ mod tests {
         super::codegen_host_program(&verified, name)
     }
 
+    fn authored_c_symbol(name: &str) -> String {
+        let mut symbol = "chelis_fn_".to_string();
+        for byte in name.bytes() {
+            symbol.push_str(&format!("{byte:02x}"));
+        }
+        symbol
+    }
+
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
     }
@@ -844,8 +852,9 @@ mod tests {
 
         // The tensor helper must be static (internal to the TU).
         // The context-carrying helper is private to this translation unit.
+        let my_fn = authored_c_symbol("my_fn");
         assert!(
-            src.contains("static void my_fn__tensor_0__with_rng("),
+            src.contains(&format!("static void {my_fn}__tensor_0__with_rng(")),
             "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
             src
         );
@@ -853,13 +862,14 @@ mod tests {
         // The user-facing entry function must NOT be static (library mode: no globals).
         // Without globals, internal_linkage=false, so the function has external linkage.
         assert!(
-            !src.contains("static void my_fn(") && !src.contains("static inline void my_fn("),
+            !src.contains(&format!("static void {my_fn}("))
+                && !src.contains(&format!("static inline void {my_fn}(")),
             "exported entry function my_fn must not be static;\ngenerated source:\n{}",
             src
         );
         // Confirm the external-linkage definition is present.
         assert!(
-            src.contains(" my_fn("),
+            src.contains(&format!(" {my_fn}(")),
             "exported entry function my_fn must have an external-linkage definition;\ngenerated source:\n{}",
             src
         );
@@ -3882,21 +3892,22 @@ int main(void) {{
 
         let result = codegen_host_program(&program, "prog").unwrap();
         let src = &result.c_source;
+        let my_func = authored_c_symbol("my_func");
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
         assert!(
-            src.contains("static void my_func__tensor_0__with_rng("),
+            src.contains(&format!("static void {my_func}__tensor_0__with_rng(")),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
         // The published header declares this authored function external, so
         // the definition must have matching external linkage even with main.
         assert!(
-            src.contains("double my_func(double x)"),
+            src.contains(&format!("double {my_func}(double x)")),
             "authored export must keep an external definition;\ngenerated source:\n{src}"
         );
         assert!(
-            !src.contains("static inline double my_func(")
-                && !src.contains("static double my_func("),
+            !src.contains(&format!("static inline double {my_func}("))
+                && !src.contains(&format!("static double {my_func}(")),
             "authored export must not become translation-unit local;\ngenerated source:\n{src}"
         );
     }
