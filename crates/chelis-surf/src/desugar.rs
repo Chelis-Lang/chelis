@@ -487,22 +487,25 @@ fn desugar_param_with_scope(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
-    match &param.ty {
+    let annotation = param
+        .ty
+        .as_ref()
+        .map(|ty| desugar_type_with_scope(ty, dim_vars, tvar_set));
+    desugar_param_with_annotation(param, annotation)
+}
+
+fn desugar_param_with_annotation(param: &Param, annotation: Option<deep::Expr>) -> deep::Expr {
+    match annotation {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                metadata: deep::Metadata::from(type_metadata(desugar_type_with_scope(
-                    ty, dim_vars, tvar_set,
-                ))),
+                metadata: deep::Metadata::from(type_metadata(ty)),
                 expr: Box::new(sym(&param.name)),
             },
             sp(),
         ),
         Some(ty) => deep::Expr::List(
             deep::List {
-                elements: vec![
-                    sym(&param.name),
-                    meta_with_type(desugar_type_with_scope(ty, dim_vars, tvar_set)),
-                ],
+                elements: vec![sym(&param.name), meta_with_type(ty)],
             },
             sp(),
         ),
@@ -1304,15 +1307,30 @@ impl DesugarCtx {
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
         // the tensor type, not by per-name kind tracking. When
-        // `type_binders` is empty, the WS-A5 implicit collection on the
-        // synthesized sig is preserved and parameter annotations keep
-        // their pre-WS-A6 behavior (an unbound precision name surfaces
-        // a diagnostic via `validate_tensor_precisions_in_program`).
+        // `type_binders` is empty, a parameter's unbound precision remains
+        // a primitive spelling. Moving its type into a generated signature
+        // does not grant it the standalone signature's binding context.
         let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
+        let synthesize_signature = (params.iter().any(|param| param.ty.is_some())
+            || ret_ty.is_some()
+            || effects.is_some()
+            || declares_bound)
+            && !self.explicit_sig_names.contains(name);
         let param_names: Vec<deep::Expr> = params
             .iter()
-            .map(|param| desugar_param_with_scope(param, &dim_set, &param_ann_tvar_set))
+            .map(|param| {
+                let annotation = param.ty.as_ref().map(|ty| {
+                    if synthesize_signature {
+                        // The signature owns the actual type. This hole keeps
+                        // the source annotation's presence, but adds no constraint.
+                        node(DeepTag::TVar, vec![sym("_")])
+                    } else {
+                        desugar_type_with_scope(ty, &dim_set, &param_ann_tvar_set)
+                    }
+                });
+                desugar_param_with_annotation(param, annotation)
+            })
             .collect();
         let params_node = node(DeepTag::Params, param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
@@ -1350,24 +1368,11 @@ impl DesugarCtx {
         // else would: the bound has no other carrier, and a `defsig` whose
         // positions are all wildcards still reports a bound naming a binder
         // the declaration never uses.
-        if (params.iter().any(|p| p.ty.is_some())
-            || ret_ty.is_some()
-            || effects.is_some()
-            || declares_bound)
-            && !self.explicit_sig_names.contains(name)
-        {
-            // Tvar set for the synthesized sig:
-            //
-            // - When the def declares an explicit quantifier list
-            //   (`def f[..]`), use that list as the authoritative source
-            //   of precision tvars. Names not in the list that appear
-            //   in a precision slot stay as `t-prim` and the validator
-            //   surfaces the unbound-name diagnostic; this matches the
-            //   WS-A6 rule in spec/02-surf-syntax.md §P4b.
-            // - When the def has no explicit quantifier list, fall back
-            //   to the WS-A5 implicit collection over typed params and
-            //   the return type (spec/04-type-system.md §5.8) so a
-            //   bare `def f(x: tensor[3, p])` continues to work.
+        if synthesize_signature {
+            // The result retains its signature context. Parameter types use
+            // param_ann_tvar_set instead, because each keeps its original
+            // inline context under Surf §P4b. A generated signature must not
+            // silently turn an invalid parameter precision into a binder.
             let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
                 dim_set.clone()
             } else {
@@ -1385,7 +1390,7 @@ impl DesugarCtx {
             let mut type_parts: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| match &p.ty {
-                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
+                    Some(ty) => desugar_type_with_scope(ty, &dim_set, &param_ann_tvar_set),
                     None => node(DeepTag::TVar, vec![sym("_")]),
                 })
                 .collect();
@@ -3316,7 +3321,7 @@ mod tests {
         );
         assert_eq!(
             nodes[1],
-            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))"
+            "(def {} f (fn {} (params {} (x {type: (t-var {} _)})) (var {} x)))"
         );
     }
 

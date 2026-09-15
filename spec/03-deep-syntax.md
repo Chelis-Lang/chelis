@@ -820,8 +820,12 @@ the bound names.
 expansion, inferred `effects`, and `invariant_amenability` because those values
 are informational or deterministically recomputed. It may also erase
 matching `type` entries on a `def`, its `fn` value, and its function parameters
-when an adjacent matching `defsig` already carries the exact same types; a
-disagreement is never erased. For a standalone checked `def`, normalization may
+when an adjacent matching `defsig` already carries the exact same types.
+It can also erase a whole-parameter `(t-var {} _)` annotation beside that
+signature, because the hole adds no constraint. This rule does not erase a
+hole inside a structured annotation. Property parameter annotations remain
+part of their quantifier contract. A real type disagreement is never erased.
+For a standalone checked `def`, normalization may
 materialize that metadata as an adjacent `defsig` and then apply the same exact
 redundancy rule. Empty expression `tuple` and type `t-tuple` nodes normalize
 to `lit` and `t-unit`, respectively. Syntax-valued metadata containers retain

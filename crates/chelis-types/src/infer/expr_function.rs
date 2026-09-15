@@ -88,8 +88,8 @@ pub(super) fn infer_fn(
 /// (e.g. `add: (&t, &t) -> t`) into the same equivalence class.
 ///
 /// Falls back to the standard `infer_expr` path when the body is not a
-/// `(fn ...)` or the declared type is not a `Fn` of matching arity. Already-
-/// annotated params are not overridden.
+/// `(fn ...)` or the declared type is not a `Fn`. The post-body unification
+/// reports arity disagreements. Real parameter annotations are not overridden.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
@@ -124,20 +124,23 @@ pub(super) fn infer_def_body_with_sig(
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
     let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
-    if params.len() != decl_args.len() {
-        // Arity mismatch between params and sig: fall back so the post-body
-        // unify produces a clear ArityMismatch diagnostic.
-        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
-    }
-
     let mut param_types = Vec::with_capacity(params.len());
     let mut fn_env = env.clone();
-    for ((pname, ty_ann), decl_arg) in params.iter().zip(decl_args.iter()) {
-        // Annotated params keep their annotation; bare params get seeded with
-        // the declared sig type. The post-body unify still validates each
-        // path in the standard way.
-        let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
-        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
+    for (index, (pname, ty_ann)) in params.iter().enumerate() {
+        // Resolve each annotation once, even when arities disagree. Existing
+        // slots seed bare/hole parameters. An extra parameter has no declared
+        // slot, so its body determines its type. Post-body unification still
+        // reports the arity mismatch instead of replaying the function.
+        let ty = ty_ann
+            .clone()
+            .or_else(|| decl_args.get(index).cloned())
+            .unwrap_or_else(|| vg.fresh_type());
+        product.record_inferred_contract(
+            &format!("function parameter `{pname}`"),
+            &ty,
+            env,
+            subst,
+        );
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
@@ -200,6 +203,11 @@ pub(super) fn extract_params(
         vg,
         errors,
     );
+    let mut resolve_annotation =
+        |annotation: &deep::Expr| match resolver.resolve_parameter(annotation) {
+            Ok(ty) => ty.map(|ty| ty.into_type()),
+            Err(witness) => Some(propagate(&witness)),
+        };
     let mut params = Vec::with_capacity(elems.len());
 
     for expr in elems {
@@ -211,29 +219,21 @@ pub(super) fn extract_params(
                 let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     continue;
                 };
-                let annotation =
-                    meta.metadata
-                        .ty()
-                        .map(|value| match resolver.resolve(value.expression()) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        });
+                let annotation = meta
+                    .metadata
+                    .ty()
+                    .and_then(|value| resolve_annotation(value.expression()));
                 params.push((name.to_string(), annotation));
             }
             deep::Expr::List(param_list, _) => {
-                // Typed param: (name {type: T}) — elements[0] is the name symbol,
-                // elements[1] is the metadata map with type annotation.
+                // Typed param: (name {type: T}).
                 let Some(name) = param_list.elements.first().and_then(symbol_name) else {
                     continue;
                 };
                 let annotation = match param_list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => {
-                        meta.ty()
-                            .map(|value| match resolver.resolve(value.expression()) {
-                                Ok(ty) => ty.into_type(),
-                                Err(witness) => propagate(&witness),
-                            })
-                    }
+                    Some(deep::Expr::Map(meta, _)) => meta
+                        .ty()
+                        .and_then(|value| resolve_annotation(value.expression())),
                     _ => None,
                 };
                 params.push((name.to_string(), annotation));
@@ -243,13 +243,9 @@ pub(super) fn extract_params(
                     continue;
                 };
                 let annotation = match elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => {
-                        meta.ty()
-                            .map(|value| match resolver.resolve(value.expression()) {
-                                Ok(ty) => ty.into_type(),
-                                Err(witness) => propagate(&witness),
-                            })
-                    }
+                    Some(deep::Expr::Map(meta, _)) => meta
+                        .ty()
+                        .and_then(|value| resolve_annotation(value.expression())),
                     _ => None,
                 };
                 params.push((name.to_string(), annotation));

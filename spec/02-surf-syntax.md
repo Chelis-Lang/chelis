@@ -353,7 +353,9 @@ Both inline and standalone forms. All types are optional — inference fills the
 def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
 ```
 
-When a `def` has inline type annotations, the desugarer extracts a `defsig` in addition to the `def`.
+When a `def` has inline type annotations and no standalone `sig`, its generated `defsig` owns each parameter type. The corresponding `fn` parameter carries `type: (t-var {} _)`, not a second copy of that type. This inference hole adds no constraint and receives the declared slot's type before the body is checked. A parameter without an annotation remains bare. The presence of the hole preserves the source annotation's presence for signature reports.
+
+Each parameter type retains its inline binding context under §P4b, even in the generated signature. The result type retains its signature context. A standalone `sig` and any separately authored parameter annotations remain independent constraints. Anonymous lambdas and property quantifiers retain their own parameter annotations.
 
 **Standalone (for long signatures):**
 ```
@@ -1469,8 +1471,8 @@ sig f: f32 -> f32 -> f32
 
 def f(x: f32, y: f32) -> f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
-    (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})
-                           (y {type: (t-prim {} f32)}))
+    (def {} f (fn {} (params {} (x {type: (t-var {} _)})
+                           (y {type: (t-var {} _)}))
                    (app {} (var {} add) (var {} x) (var {} y))))
 
 def f(x, y) = add(x, y)

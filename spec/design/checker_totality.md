@@ -122,12 +122,30 @@ The current implementation has one explicit ownership chain:
 3. Deep type syntax crosses one located `DeepTypeResolver`. The resolver owns
    its use site, binder mode, nominal-header environment, variable generator,
    and source/owner location, reports a failure once, and returns
-   `Result<ResolvedDeepType, ErrorWitness>`. Failed signature registration
-   binds the existing witness rather than leaving an absent declaration.
-   Body inference and callers propagate that failure without resolving the
-   copied parameter annotation again. This is declaration-level propagation,
-   not deletion or deduplication of reported diagnostics. Distinct declarations
-   retain their own source locations and diagnostics (chelis#1527).
+   `Result<ResolvedDeepType, ErrorWitness>`. Known constructors check every
+   sibling type component before failure. A rejected signature retains a
+   private frame with its valid constraints and binder metadata. Error slots
+   carry existing witnesses, not invented variables or dimensions. The body
+   still receives its checks, but public name lookup retains the failure.
+
+   Surf §P4 and §5.2 give each ordinary inline parameter type one owner in
+   its generated signature. The `fn` parameter carries an inference hole,
+   which retains annotation presence without a duplicate type constraint.
+   The parameter resolver returns either a resolved constraint or a hole.
+   Signature-directed inference supplies each hole's declared slot before
+   the body receives its checks. A partial rejected frame supplies its valid
+   constraints and existing error witnesses through the same path.
+
+   Standalone signatures and independently authored parameter annotations
+   remain independent, even when their source ranges or display labels
+   coincide (chelis#1527). No diagnostic strings, spans, private source tokens,
+   or post-inference deduplication decide ownership. The canonical form survives
+   Deep print/parse and AST serialization. Surf §0.1 and Deep §6.3.2 own the
+   corresponding resugar and normalization contracts.
+
+   Recovery never turns an invalid type into a successful `ResolvedDeepType`.
+   The private frames do not enter serialized environments. No reported
+   diagnostic is deleted or deduplicated.
 4. Source binder state is lexical, not ambient. A serde-skipped
    `TypeResolutionScope` field on `Env` is installed on the cloned environment
    for one declaration and inherited only by its nested lexical clones; it

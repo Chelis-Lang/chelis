@@ -130,6 +130,381 @@ fn calls_propagate_the_failed_signature_without_a_second_report() {
 }
 
 #[test]
+fn distinct_parameter_sites_in_one_signature_each_report_once() {
+    assert_one_report_per_site(
+        "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32",
+        &["f8e4m3", "f8e5m2"],
+    );
+    assert_one_report_per_site(
+        "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32",
+        &["f8e4m3"],
+    );
+}
+
+#[test]
+fn parameter_and_return_sites_each_report_once() {
+    assert_one_report_per_site(
+        "def classify(x: f8e4m3) -> f8e5m2 = x",
+        &["f8e4m3", "f8e5m2"],
+    );
+}
+
+#[test]
+fn nested_type_components_each_report_once() {
+    for source in [
+        "def classify(x: (f8e4m3, f8e5m2)) -> int32 = 0i32",
+        "def classify(x: (f8e4m3) -> f8e5m2) -> int32 = 0i32",
+        "def classify(x: Dict[f8e4m3, f8e5m2]) -> int32 = 0i32",
+    ] {
+        assert_one_report_per_site(source, &["f8e4m3", "f8e5m2"]);
+    }
+}
+
+#[test]
+fn a_failed_signature_does_not_hide_an_independent_body_site() {
+    let source = "def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)";
+    let program = surf_to_deep(source);
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        let report = result.expect_err("both reserved sites must reject");
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        for (error, name) in report.errors.iter().zip(["f8e4m3", "f8e5m2"]) {
+            assert!(
+                matches!(
+                    error.kind,
+                    chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                ),
+                "{error:?}"
+            );
+            assert!(error.message.contains(name), "{error:?}");
+        }
+        assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+        let start = source.find("cast(").expect("cast site");
+        let expected = format!("surf:{start}..{}", source.len());
+        assert_eq!(report.errors[1].span_offset, Some(start));
+        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
+    use chelis_types::errors::CheckErrorKind;
+    for (source, expected_kind) in [
+        (
+            "def classify(x: f8e4m3) -> int32 = true",
+            CheckErrorKind::TypeMismatch,
+        ),
+        (
+            "def classify(x: f8e4m3, y: int32) -> int32 = add(y, true)",
+            CheckErrorKind::PrecisionMismatch,
+        ),
+    ] {
+        let program = surf_to_deep(source);
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            let report = result.expect_err("reserved type and independent mismatch must reject");
+            assert_eq!(report.errors.len(), 2, "{source}: {:?}", report.errors);
+            assert!(matches!(
+                report.errors[0].kind,
+                chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+            ));
+            assert!(
+                matches!(
+                    (&report.errors[1].kind, &expected_kind),
+                    (CheckErrorKind::TypeMismatch, CheckErrorKind::TypeMismatch)
+                        | (
+                            CheckErrorKind::PrecisionMismatch,
+                            CheckErrorKind::PrecisionMismatch
+                        )
+                ),
+                "{:?}",
+                report.errors
+            );
+        }
+    }
+}
+
+#[test]
+fn a_failed_signature_preserves_its_other_binder_bounds() {
+    assert_one_report_per_site(
+        "def classify[p: Float](x: f8e4m3, y: p) -> p = cast(y, p)",
+        &["f8e4m3"],
+    );
+}
+
+#[test]
+fn independent_deep_annotations_do_not_share_a_display_span_identity() {
+    for display_span in ["same", "source:16..22"] {
+        let source = format!(
+            "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} int32)))\n\
+             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{span: \"{display_span}\"}} f8e4m3)}})) (lit {{type: (t-prim {{}} int32)}} 0)))"
+        );
+        let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            let report = result.expect_err("both independently authored annotations must reject");
+            assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .all(|error| error.message.contains("f8e4m3"))
+            );
+        }
+    }
+}
+
+#[test]
+fn failed_recursive_signatures_keep_each_members_diagnostics() {
+    assert_one_report_per_site(
+        "def left(x: f8e4m3, n: int32) -> int32 = if n == 0 then 0i32 else right(x, n - 1)\n\
+         def right(x: f8e5m2, n: int32) -> int32 = if n == 0 then 0i32 else left(x, n - 1)",
+        &["f8e4m3", "f8e5m2"],
+    );
+}
+
+#[test]
+fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
+    let program = surf_to_deep("def classify(x: f8e4m3) -> int32 = cast(x, f8e5m2)");
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        let report = result.expect_err("both reserved sites must reject");
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(report.errors[0].message.contains("f8e4m3"));
+        assert!(report.errors[1].message.contains("f8e5m2"));
+    }
+}
+
+#[test]
+fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
+    for extra in ["", " y"] {
+        let program = chelis_deep::parse_and_stamp_file(&format!(
+            "(defsig {{}} classify (t-fn {{}} (t-prim {{}} f8e4m3) (t-prim {{}} int32)))\n\
+             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} int32)}} 0)))"
+        )).expect("parse independent annotations");
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            let report = result.expect_err("both reserved sites reject");
+            let reserved: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|error| {
+                    matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                    )
+                })
+                .collect();
+            assert_eq!(reserved.len(), 2, "{extra:?}: {:?}", report.errors);
+            assert!(reserved[0].message.contains("f8e4m3"));
+            assert!(reserved[1].message.contains("f8e5m2"));
+        }
+    }
+}
+
+#[test]
+fn checked_parameters_receive_their_actual_declared_types() {
+    for source in [
+        "def identity(x: f32) -> f32 = x",
+        "def add_self(x: &tensor[3, f32]) -> tensor[3, f32] = add(x, x)",
+    ] {
+        let program = surf_to_deep(source);
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            let checked = result.expect("valid declared parameter");
+            let text = chelis_deep::printer::print_canonical_flat(checked.exprs());
+            assert!(
+                !text.contains("type: (t-var {} _)"),
+                "unresolved parameter hole: {text}"
+            );
+            if source.contains("&tensor") {
+                assert!(
+                    text.contains(
+                        "(x {type: (t-ref {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)))})"
+                    ),
+                    "{text}"
+                );
+            } else {
+                assert!(text.contains("(x {type: (t-prim {} f32)})"), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn source_annotation_presence_and_read_only_inference_survive_transport() {
+    let program = surf_to_deep("def readonly(x, y: tensor[4, f32]) = add(x, y)");
+    let text = chelis_deep::printer::print_canonical_flat(&program);
+    let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
+    let encoded = serde_json::to_vec(&program).expect("encode input");
+    let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&encoded).expect("decode input");
+    for expressions in [&program, &printed, &decoded] {
+        for result in [
+            check_ir_program(expressions),
+            check_typed_program(expressions),
+        ] {
+            let checked = result.expect("read-only inference stays valid");
+            let function = checked
+                .signature_inference()
+                .functions
+                .get("readonly")
+                .expect("function report");
+            assert_eq!(function.params.len(), 2);
+            assert!(!function.params[0].written);
+            assert!(function.params[0].inferred_read_only);
+            assert!(function.params[1].written);
+            assert!(!function.params[1].inferred_read_only);
+        }
+    }
+}
+
+#[test]
+fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
+    for (body, accepted) in [("0i32", true), ("true", false)] {
+        let program = surf_to_deep(&format!(
+            "sig classify: int32 -> int32\ndef classify(x: _) = {body}"
+        ));
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            if accepted {
+                result.expect("the body agrees with the declared result");
+            } else {
+                let report = result.expect_err("the body must satisfy the declared result");
+                assert!(
+                    report.errors.iter().any(|error| matches!(
+                        error.kind,
+                        chelis_types::errors::CheckErrorKind::TypeMismatch
+                    )),
+                    "{:?}",
+                    report.errors
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multiple_reserved_sites_survive_printing_and_serialization() {
+    for (source, expected) in [
+        (
+            "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32",
+            ["f8e4m3", "f8e5m2"],
+        ),
+        (
+            "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32",
+            ["f8e4m3", "f8e4m3"],
+        ),
+        (
+            "def classify(x: f8e4m3) -> f8e5m2 = x",
+            ["f8e4m3", "f8e5m2"],
+        ),
+        (
+            "def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)",
+            ["f8e4m3", "f8e5m2"],
+        ),
+    ] {
+        let program = surf_to_deep(source);
+        let text = chelis_deep::printer::print_canonical_flat(&program);
+        let printed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed input");
+        let encoded = serde_json::to_vec(&program).expect("encode input");
+        let decoded: Vec<chelis_deep::Expr> =
+            serde_json::from_slice(&encoded).expect("decode input");
+        for expressions in [&program, &printed, &decoded] {
+            for result in [
+                check_ir_program(expressions),
+                check_typed_program(expressions),
+            ] {
+                let report = result.expect_err("all authored reserved sites reject");
+                assert_eq!(
+                    report.errors.len(),
+                    expected.len(),
+                    "{source}: {:?}",
+                    report.errors
+                );
+                for (error, name) in report.errors.iter().zip(expected) {
+                    assert!(
+                        matches!(
+                            error.kind,
+                            chelis_types::errors::CheckErrorKind::UnsupportedTensorPrecision
+                        ),
+                        "{error:?}"
+                    );
+                    assert!(error.message.contains(name), "{error:?}");
+                    assert!(error.span_offset.is_some(), "{error:?}");
+                    assert!(error.span_id.is_some(), "{error:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn signature_ownership_does_not_activate_an_unbound_inline_precision() {
+    for (binders, accepted) in [("", false), ("[p]", true)] {
+        let program = surf_to_deep(&format!(
+            "def inspect{binders}(x: tensor[3, p]) -> int32 = 0i32"
+        ));
+        for result in [check_ir_program(&program), check_typed_program(&program)] {
+            if accepted {
+                result.expect("an explicit precision binder remains valid");
+            } else {
+                let report = result.expect_err("an unbound inline precision remains invalid");
+                assert!(
+                    report
+                        .errors
+                        .iter()
+                        .any(|error| error.message.contains("primitive")
+                            && error.message.contains("`p`")),
+                    "{:?}",
+                    report.errors
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_printed_program_preserves_its_diagnostic_count() {
+    let program = surf_to_deep("def classify(x: f8e4m3) -> int32 = 0i32");
+    let text = chelis_deep::printer::print_canonical_flat(&program);
+    let reparsed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed Deep");
+    let saved = serde_json::to_vec(&program).expect("encode Deep");
+    let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&saved).expect("decode Deep");
+    let mut counts = Vec::new();
+    for (carrier, expressions) in [
+        ("desugared", &program),
+        ("printed", &reparsed),
+        ("decoded", &decoded),
+    ] {
+        for result in [
+            check_ir_program(expressions),
+            check_typed_program(expressions),
+        ] {
+            let report = result.expect_err("the reserved type must reject on every carrier");
+            counts.push((carrier, report.errors.len()));
+        }
+    }
+    assert_eq!(
+        counts,
+        vec![
+            ("desugared", 1),
+            ("desugared", 1),
+            ("printed", 1),
+            ("printed", 1),
+            ("decoded", 1),
+            ("decoded", 1)
+        ]
+    );
+}
+
+#[test]
+fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
+    let program = surf_to_deep("def classify(x: (tensor[3, p], f8e4m3)) -> int32 = 0i32");
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        let report = result.expect_err("the reserved site must reject");
+        let reserved = report
+            .errors
+            .iter()
+            .filter(|error| error.message.contains("f8e4m3"))
+            .count();
+        assert_eq!(reserved, 1, "{:?}", report.errors);
+    }
+}
+
+#[test]
 fn handwritten_deep_cannot_bypass_the_type_resolver() {
     for name in ["f8e4m3", "f8e5m2"] {
         let source = format!(

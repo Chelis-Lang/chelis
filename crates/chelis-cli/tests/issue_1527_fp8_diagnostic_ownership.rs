@@ -122,6 +122,55 @@ fn a_call_does_not_report_its_failed_signature_again() {
 }
 
 #[test]
+fn distinct_parameter_sites_in_one_signature_keep_separate_cli_errors() {
+    assert_rejected_sites(
+        "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32\n",
+        &["f8e4m3", "f8e5m2"],
+    );
+    assert_rejected_sites(
+        "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32\n",
+        &["f8e4m3"],
+    );
+}
+
+#[test]
+fn parameter_and_return_sites_keep_separate_cli_errors() {
+    assert_rejected_sites(
+        "def classify(x: f8e4m3) -> f8e5m2 = x\n",
+        &["f8e4m3", "f8e5m2"],
+    );
+}
+
+#[test]
+fn nested_type_components_keep_separate_cli_errors() {
+    for source in [
+        "def classify(x: (f8e4m3, f8e5m2)) -> int32 = 0i32\n",
+        "def classify(x: Dict[f8e4m3, f8e5m2]) -> int32 = 0i32\n",
+    ] {
+        assert_rejected_sites(source, &["f8e4m3", "f8e5m2"]);
+    }
+}
+
+#[test]
+fn a_failed_signature_does_not_hide_a_cli_body_error() {
+    let (success, report, source) =
+        check("def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)\n");
+    assert!(!success, "{report:?}");
+    assert!(report.score < 1.0, "{report:?}");
+    assert_eq!(report.errors.len(), 2, "{report:?}");
+    assert!(report.errors[0].message.contains("f8e4m3"), "{report:?}");
+    assert!(report.errors[1].message.contains("f8e5m2"), "{report:?}");
+    assert_eq!(report.errors[0].span_id, "source:16..22");
+    let start = source.find("cast(").expect("cast site");
+    let PointLocation::Point { offset } = report.errors[1].span;
+    assert_eq!(offset, start);
+    assert_eq!(
+        report.errors[1].span_id,
+        format!("surf:{start}..{}", source.trim_end().len())
+    );
+}
+
+#[test]
 fn active_float_parameters_keep_a_successful_empty_report() {
     for name in ["f32", "f64", "f16", "bf16"] {
         let (success, report, _) = check(&format!("def classify(x: {name}) -> int32 = 0i32\n"));
