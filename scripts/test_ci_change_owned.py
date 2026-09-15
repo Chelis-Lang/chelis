@@ -333,6 +333,12 @@ class SchemaTests(unittest.TestCase):
         by_path = {rule.prefix: rule for rule in config.path_rules}
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
+        remediation = by_path["spec/design/remediation_roadmap.md"]
+        self.assertEqual(remediation.disposition, "owner")
+        self.assertEqual(
+            (remediation.owner.workflow, remediation.owner.job),
+            ("ci.yml", "docs"),
+        )
         for path in (
             ".github/workflows/conformance.yml",
             ".github/workflows/pr-base-retarget.yml",
