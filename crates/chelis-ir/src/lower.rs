@@ -2083,10 +2083,14 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             seed: random_seed,
             counter: random_counter,
         },
-        authored_signature,
-        LiteralResultClaimOwnership::Legacy,
-        #[cfg(feature = "lowering-trace")]
-        None,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
     )
 }
 
@@ -2108,10 +2112,14 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
             seed: random_seed,
             counter: random_counter,
         },
-        authored_signature,
-        LiteralResultClaimOwnership::AuthoredTensorHelper,
-        #[cfg(feature = "lowering-trace")]
-        None,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
     )
 }
 
@@ -2135,9 +2143,13 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
             seed: random_seed,
             counter: random_counter,
         },
-        authored_signature,
-        LiteralResultClaimOwnership::Legacy,
-        Some(collector.clone()),
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            trace: Some(collector.clone()),
+        },
     )?;
     Ok((dag, random_counter, collector.finish_helper()))
 }
@@ -2162,9 +2174,13 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
             seed: random_seed,
             counter: random_counter,
         },
-        authored_signature,
-        LiteralResultClaimOwnership::AuthoredTensorHelper,
-        Some(collector.clone()),
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
+            trace: Some(collector.clone()),
+        },
     )?;
     Ok((dag, random_counter, collector.finish_helper()))
 }
@@ -2175,9 +2191,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
-    authored_signature: bool,
-    literal_result_claim_ownership: LiteralResultClaimOwnership,
-    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+    options: SubexprLoweringOptions,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // chelis#1923: this is the one lowering ingress that receives UNCHECKED
@@ -2198,14 +2212,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
             context,
             result_claim,
             random,
-            SubexprLoweringOptions {
-                include_list_controls: false,
-                authored_signature,
-                resource_policy: crate::evaluation::ResourcePolicy::Legacy,
-                literal_result_claim_ownership,
-                #[cfg(feature = "lowering-trace")]
-                trace,
-            },
+            options,
             None,
         );
         (dag, random_counter)
