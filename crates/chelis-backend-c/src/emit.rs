@@ -109,6 +109,10 @@ pub struct CEmitter {
     /// by axis would reorder simultaneous failures when axes are permuted.
     local_dim_guard_sites:
         chelis_unord::UnordMap<usize, Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>>,
+    /// Local obligations already emitted at an earlier ready point. A later
+    /// realized-extent fallback may observe the same semantic claim through a
+    /// different C expression, but one comparison has already discharged it.
+    emitted_local_dim_guards: Vec<(usize, usize, chelis_ir::ownership::LocalGuardClaim)>,
     /// Claim names this function actually declares as C variables. Resolved
     /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
@@ -547,6 +551,7 @@ impl CEmitter {
             slot_current_owner: BTreeMap::new(),
             runtime_dim_sites,
             local_dim_guard_sites,
+            emitted_local_dim_guards: Vec::new(),
             declared_dim_names: chelis_unord::UnordSet::new(),
             inherited_result_sites: if private_random_context && dag.roots().len() == 1 {
                 dag.result_extent_sites(dag.roots()[0])
@@ -6838,12 +6843,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // Consume claims, not axes: multiple claims on one axis can be
         // interleaved with claims on another axis in declaration order.
         for (axis, site) in sites {
+            let guard_key = (id, axis, site.clone());
+            if self.emitted_local_dim_guards.contains(&guard_key) {
+                continue;
+            }
             // Only the extent forms supported by this movement consumer are
             // supplied here. Other local source kinds retain their existing
             // ownership in runtime_extents.md B2b-0b.
             let Some((_, extent_expr)) = extents.iter().find(|(a, _)| *a == axis) else {
                 continue;
             };
+            self.emitted_local_dim_guards.push(guard_key);
             // Read the exact captured scalar, the canonical input binding,
             // or the checker-resolved literal, according to the guard plan.
             let operand = match &site.canonical {
