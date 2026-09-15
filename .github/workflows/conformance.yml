@@ -107,6 +107,37 @@ jobs:
           candidate="$(git rev-parse HEAD)"
           echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
 
+      - name: Bootstrap CI contract preflight selection
+        id: ci-contract-bootstrap
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            classifier="trusted/scripts/ci_contract_paths.py"
+          else
+            classifier="$RUNNER_TEMP/ci-contract-paths.py"
+            if ! /usr/bin/git -C candidate show \
+              "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
+              echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          set -o pipefail
+          if ! GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -C candidate \
+            -c core.quotePath=true diff --name-only --no-renames \
+            --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
+            | /usr/bin/python3 "$classifier"; then
+            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compute docs_only
         id: detect
         env:
@@ -132,7 +163,6 @@ jobs:
           fi
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
-            | tee "$RUNNER_TEMP/candidate-changed-paths.txt" \
             | python3 scripts/ci_detect_docs_only.py
 
       - name: Validate candidate lifecycle
@@ -169,36 +199,6 @@ jobs:
             git fetch origin "$BEFORE" "$HEAD" "$target_tip" 2>/dev/null || true
           fi
           python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
-
-      - name: Bootstrap CI contract preflight selection
-        id: ci-contract-bootstrap
-        if: always()
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
-        run: |
-          if [ "$EVENT_NAME" != "pull_request" ] &&
-             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
-            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          paths="$RUNNER_TEMP/candidate-changed-paths.txt"
-          if [ ! -s "$paths" ]; then
-            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            python3 trusted/scripts/ci_contract_paths.py < "$paths"
-            exit 0
-          fi
-          classifier="$RUNNER_TEMP/ci-contract-paths.py"
-          if ! git -C candidate show \
-            "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
-            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          else
-            python3 "$classifier" < "$paths"
-          fi
 
       - name: Install uv for CI contract preflight
         if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true') }}

@@ -210,6 +210,18 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertEqual(bootstrap["if"], "always()")
     for marker in BOOTSTRAP_CONTRACT_MARKERS:
         test.assertIn(marker, bootstrap["run"])
+    test.assertIn("HEAD_SHA", bootstrap["env"])
+    test.assertIn("diff --name-only --no-renames", bootstrap["run"])
+    test.assertIn("GIT_NO_REPLACE_OBJECTS=1", bootstrap["run"])
+    test.assertIn("/usr/bin/git", bootstrap["run"])
+    test.assertIn("/usr/bin/python3", bootstrap["run"])
+    test.assertNotIn("candidate-changed-paths.txt", bootstrap["run"])
+    detect = next(
+        step for step in changes["steps"] if step.get("id") == "detect"
+    )
+    test.assertLess(
+        changes["steps"].index(bootstrap), changes["steps"].index(detect)
+    )
     record = next(
         step
         for step in changes["steps"]
@@ -343,6 +355,18 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertEqual(bootstrap["if"], "always()")
     for marker in BOOTSTRAP_CONTRACT_MARKERS:
         test.assertIn(marker, bootstrap["run"])
+    test.assertIn("HEAD_SHA", bootstrap["env"])
+    test.assertIn("diff --name-only --no-renames", bootstrap["run"])
+    test.assertIn("GIT_NO_REPLACE_OBJECTS=1", bootstrap["run"])
+    test.assertIn("/usr/bin/git", bootstrap["run"])
+    test.assertIn("/usr/bin/python3", bootstrap["run"])
+    test.assertNotIn("candidate-changed-paths.txt", bootstrap["run"])
+    detect = next(
+        step for step in changes["steps"] if step.get("id") == "detect"
+    )
+    test.assertLess(
+        changes["steps"].index(bootstrap), changes["steps"].index(detect)
+    )
     contract = next(
         step for step in changes["steps"] if step.get("id") == "ci-contract"
     )
@@ -722,6 +746,26 @@ class PullRequestWorkflowRoutingTests(unittest.TestCase):
             bootstrap["run"] = bootstrap["run"].replace(
                 "scripts/ci_contract_paths.py",
                 "scripts/no-contract-paths.py",
+            )
+            with self.subTest(workflow=workflow_path.name), self.assertRaises(
+                AssertionError
+            ):
+                assertion(self, workflow)
+
+    def test_trusted_classifier_cannot_reuse_candidate_writable_paths(self) -> None:
+        for workflow_path, assertion in (
+            (CI, assert_ci_metadata_routing),
+            (HULL, assert_hull_retarget_dispatch),
+        ):
+            workflow = copy.deepcopy(yaml.safe_load(workflow_path.read_text()))
+            bootstrap = next(
+                step
+                for step in workflow["jobs"]["changes"]["steps"]
+                if step.get("id") == "ci-contract-bootstrap"
+            )
+            bootstrap["run"] += (
+                '\npython3 "$classifier" < '
+                '"$RUNNER_TEMP/candidate-changed-paths.txt"'
             )
             with self.subTest(workflow=workflow_path.name), self.assertRaises(
                 AssertionError
