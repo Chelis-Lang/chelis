@@ -802,6 +802,15 @@ reason = "canonical required-check contract path classifier parity executes in s
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/test_changelog.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the isolated changelog policy fixture executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_change_owned_workflow.py"
 disposition = "owner"
 workflow = "ci.yml"
