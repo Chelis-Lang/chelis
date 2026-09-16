@@ -35,13 +35,14 @@ Raw summed job-minutes remain finish time minus start time for every started
 runner job with valid timestamps. They are not workflow elapsed time or agent
 waiting, and concurrent jobs make them larger than workflow wall time.
 
-The cost estimate uses GitHub's standard Linux x64 rate of $0.006 per minute as
-of 2026-09-16 and rounds every started job up independently to a whole minute.
-Started cancelled and failed jobs count. Skipped jobs, attempts that never
-reached a runner, and synthetic check records with no VM count as zero.
-Included plan minutes, discounts, taxes, spending caps, and other account
-adjustments are not deducted, so this is a list-price estimate rather than an
-invoice reconstruction. Pricing source:
+The cost estimate uses GitHub's Linux x64 rates as of 2026-09-16: $0.006 per
+minute for the ordinary two-core runner and $0.002 for `ubuntu-slim`. It rounds
+every started job up independently to a whole minute and prices it at the
+recognized runner SKU. Started cancelled and failed jobs count. Skipped jobs,
+attempts that never reached a runner, and synthetic check records with no VM
+count as zero. Included plan minutes, discounts, taxes, spending caps, and
+other account adjustments are not deducted, so this is a list-price estimate
+rather than an invoice reconstruction. Pricing source:
 <https://docs.github.com/en/billing/reference/actions-minute-multipliers>.
 
 The 4.97x ratio means the final candidate's validation burden was not the main
@@ -54,9 +55,11 @@ workflow-run or metadata records retained an `unknown` semantic cause rather
 than borrowing a nearby cause without enough evidence.
 
 The first independent inventory reported 629 runs and $26.772. A later exact
-receipt-log replay found one omitted started-and-cancelled candidate-receipt job
-for #2112. The corrected totals above include its 17 seconds of raw runner time,
-one rounded billable minute, and $0.006 list-price estimate.
+receipt-log replay found that candidate-receipt run `35054718212`, triggered by
+Hull run `35054660690` for #2112, had been omitted. Its runner job
+`104662354231` started at `2026-09-16T04:12:47Z`, completed cancelled at
+`04:13:04Z`, and used `ubuntu-latest`. The corrected totals above therefore add
+17 seconds of raw runner time, one rounded billable minute, and $0.006.
 
 | Cause | Candidates | CI/Hull raw job-minutes | expansion raw job-minutes | explicit agent-wait minutes |
 | --- | ---: | ---: | ---: | ---: |
@@ -305,7 +308,16 @@ require a stable wait ID, an agent/session identity, timestamps, cause,
 evidence, at least one exact run ID, and either `head_sha` or `candidate_sha`;
 use the synthetic candidate identity when a stacked pull request keeps the same
 Git head across different tested merges. Run IDs are checked against the PR and
-supplied identity, and intervals for the same agent may not overlap.
+supplied identity, known run causes cannot disagree with the wait cause, and a
+wait must overlap at least one linked run, start after PR creation, and end no
+later than the snapshot/report evidence cutoff. Intervals for the same agent
+may not overlap.
+
+Every candidate-attribution row requires the exact synthetic candidate SHA;
+head-only wildcard rows are rejected. A run-attribution row cannot rewrite the
+GitHub head of a pull-request, pull-request-target, or push event. Live
+collection also rejects attributed runs before `--since` or outside the
+attributed PR's created-to-closed lifetime.
 
 Set `manual_run_scope_complete` only after every association-less dispatch for
 the cohort has a run row, and name that audit in

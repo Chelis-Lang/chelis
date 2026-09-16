@@ -50,6 +50,7 @@ WORKFLOW_RUN_PARENTS = {
     },
 }
 DEFAULT_LINUX_X64_RATE_USD = 0.006
+DEFAULT_LINUX_X64_SLIM_RATE_USD = 0.002
 PRICING_AS_OF = "2026-09-16"
 PRICING_SOURCE = (
     "https://docs.github.com/en/billing/reference/actions-minute-multipliers"
@@ -296,6 +297,8 @@ def _runner_kind(job: Mapping[str, Any]) -> str:
     labels = _job_labels(job)
     if "self-hosted" in labels:
         return "self-hosted"
+    if "ubuntu-slim" in labels:
+        return "linux-x64-slim"
     ubuntu = [label for label in labels if label.startswith("ubuntu-")]
     if ubuntu and not any("arm" in label for label in ubuntu):
         return "linux-x64-standard"
@@ -303,10 +306,15 @@ def _runner_kind(job: Mapping[str, Any]) -> str:
 
 
 def _job_accounting(
-    run: Mapping[str, Any], *, linux_x64_rate_usd: float
+    run: Mapping[str, Any],
+    *,
+    linux_x64_rate_usd: float,
+    linux_x64_slim_rate_usd: float,
 ) -> dict[str, int | float]:
     if linux_x64_rate_usd < 0:
         raise ReportError("Linux x64 minute rate must not be negative")
+    if linux_x64_slim_rate_usd < 0:
+        raise ReportError("Linux x64 slim minute rate must not be negative")
     result: dict[str, int | float] = {
         "started_job_count": 0,
         "skipped_job_count": 0,
@@ -315,9 +323,13 @@ def _job_accounting(
         "canceled_started_job_count": 0,
         "failed_started_job_count": 0,
         "linux_x64_started_job_count": 0,
+        "linux_x64_standard_started_job_count": 0,
+        "linux_x64_slim_started_job_count": 0,
         "self_hosted_started_job_count": 0,
         "unpriced_started_job_count": 0,
         "estimated_billable_linux_x64_minutes": 0,
+        "estimated_billable_linux_x64_standard_minutes": 0,
+        "estimated_billable_linux_x64_slim_minutes": 0,
         "estimated_list_price_usd": 0.0,
     }
     observed_attempts: set[int] = set()
@@ -352,11 +364,15 @@ def _job_accounting(
         if kind == "self-hosted":
             result["self_hosted_started_job_count"] += 1
             continue
-        if kind != "linux-x64-standard":
+        if kind not in {"linux-x64-standard", "linux-x64-slim"}:
             result["unpriced_started_job_count"] += 1
             continue
 
         result["linux_x64_started_job_count"] += 1
+        if kind == "linux-x64-slim":
+            result["linux_x64_slim_started_job_count"] += 1
+        else:
+            result["linux_x64_standard_started_job_count"] += 1
         billed_minutes = 1
         if job.get("completed_at") is not None:
             started = _timestamp(job["started_at"], "workflow job started_at")
@@ -369,14 +385,22 @@ def _job_accounting(
                     math.ceil((completed - started).total_seconds() / 60.0),
                 )
         result["estimated_billable_linux_x64_minutes"] += billed_minutes
+        if kind == "linux-x64-slim":
+            result["estimated_billable_linux_x64_slim_minutes"] += billed_minutes
+        else:
+            result[
+                "estimated_billable_linux_x64_standard_minutes"
+            ] += billed_minutes
 
     result["never_started_job_count"] += max(
         0, _attempt_count(run) - len(observed_attempts)
     )
 
     result["estimated_list_price_usd"] = round(
-        int(result["estimated_billable_linux_x64_minutes"])
-        * linux_x64_rate_usd,
+        int(result["estimated_billable_linux_x64_standard_minutes"])
+        * linux_x64_rate_usd
+        + int(result["estimated_billable_linux_x64_slim_minutes"])
+        * linux_x64_slim_rate_usd,
         6,
     )
     return result
@@ -443,7 +467,7 @@ def validate_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     candidate_attributions: list[dict[str, Any]] = []
-    candidate_keys: set[tuple[int, str, str | None]] = set()
+    candidate_keys: set[tuple[int, str, str]] = set()
     for index, raw in enumerate(
         _sequence(
             payload.get("candidate_attributions", []),
@@ -453,7 +477,7 @@ def validate_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
         row = _mapping(raw, f"candidate attribution {index}")
         pr_number = _positive_int(row.get("pr_number"), "candidate PR number")
         head_sha = _text(row.get("head_sha"), "candidate head_sha")
-        candidate_sha = _optional_text(
+        candidate_sha = _text(
             row.get("candidate_sha"), "candidate candidate_sha"
         )
         key = (pr_number, head_sha, candidate_sha)
@@ -598,10 +622,7 @@ def _candidate_attribution(
         for index, row in enumerate(ledger["candidate_attributions"])
         if row["pr_number"] == pr_number
         and row["head_sha"] == head_sha
-        and (
-            row["candidate_sha"] is None
-            or row["candidate_sha"] == candidate_sha
-        )
+        and row["candidate_sha"] == candidate_sha
     ]
     if len(matches) > 1:
         raise ReportError(
@@ -719,7 +740,11 @@ def _normalized_run(
         )
     if (
         attribution is not None
-        and run.get("event") in {"pull_request", "pull_request_target"}
+        and run.get("event") in {
+            "pull_request",
+            "pull_request_target",
+            "push",
+        }
         and isinstance(supplied_head_sha, str)
         and supplied_head_sha != attribution["head_sha"]
     ):
@@ -728,7 +753,8 @@ def _normalized_run(
         )
     if (
         attribution is not None
-        and run.get("event") in {"pull_request", "pull_request_target"}
+        and run.get("event")
+        in {"pull_request", "pull_request_target", "push"}
         and isinstance(supplied_candidate_sha, str)
         and attribution["candidate_sha"] is not None
         and supplied_candidate_sha != attribution["candidate_sha"]
@@ -777,6 +803,13 @@ def _pull_requests(
                 if pull.get("updated_at") is not None
                 else None
             ),
+            "closed_at": (
+                _timestamp_text(
+                    _timestamp(pull.get("closed_at"), "pull request closed_at")
+                )
+                if pull.get("closed_at") is not None
+                else None
+            ),
             "head_sha": _text(pull.get("head_sha"), "pull request head_sha"),
             "head_ref": _optional_text(
                 pull.get("head_ref"), "pull request head_ref"
@@ -801,6 +834,7 @@ def build_report(
     attribution_payload: Mapping[str, Any] | None = None,
     generated_at: str | None = None,
     linux_x64_rate_usd: float = DEFAULT_LINUX_X64_RATE_USD,
+    linux_x64_slim_rate_usd: float = DEFAULT_LINUX_X64_SLIM_RATE_USD,
 ) -> dict[str, Any]:
     if github_payload.get("schema") != GITHUB_SCHEMA:
         raise ReportError(f"GitHub input schema must be {GITHUB_SCHEMA}")
@@ -808,6 +842,17 @@ def build_report(
     cohort = sorted({_positive_int(value, "PR number") for value in prs})
     if not cohort:
         raise ReportError("PR cohort must not be empty")
+    generated = (
+        _timestamp(generated_at, "generated_at")
+        if generated_at is not None
+        else datetime.now(timezone.utc)
+    )
+    collected = (
+        _timestamp(github_payload.get("collected_at"), "collected_at")
+        if github_payload.get("collected_at") is not None
+        else generated
+    )
+    evidence_cutoff = min(generated, collected)
     pull_requests = _pull_requests(github_payload, cohort)
     ledger = validate_ledger(
         attribution_payload if attribution_payload is not None else _empty_ledger()
@@ -843,6 +888,39 @@ def build_report(
         for run in runs
         if run.get("pr_number") in cohort
     ]
+    collected_since = (
+        _timestamp(github_payload.get("collected_since"), "collected_since")
+        if github_payload.get("collected_since") is not None
+        else None
+    )
+    for run in runs:
+        run_id = _positive_int(run.get("id"), "workflow run id")
+        attribution = run_attributions.get(run_id)
+        if attribution is None:
+            continue
+        run_created = _run_time(run)
+        if collected_since is not None and run_created < collected_since:
+            raise ReportError(
+                f"attributed workflow run {run_id} predates collected_since"
+            )
+        pull = pull_requests[attribution["pr_number"]]
+        pull_created = _timestamp(
+            pull["created_at"],
+            f"pull request #{attribution['pr_number']} created_at",
+        )
+        pull_closed = (
+            _timestamp(
+                pull["closed_at"],
+                f"pull request #{attribution['pr_number']} closed_at",
+            )
+            if pull["closed_at"] is not None
+            else evidence_cutoff
+        )
+        if not pull_created <= run_created <= pull_closed:
+            raise ReportError(
+                f"attributed workflow run {run_id} falls outside PR "
+                f"#{attribution['pr_number']} lifetime"
+            )
 
     implementation_runs = [
         run for run in runs if _workflow_path(run) in CI_WORKFLOWS
@@ -1016,7 +1094,9 @@ def build_report(
         job_seconds = _job_seconds(run)
         wall_seconds = _workflow_wall_seconds(run)
         accounting = _job_accounting(
-            run, linux_x64_rate_usd=linux_x64_rate_usd
+            run,
+            linux_x64_rate_usd=linux_x64_rate_usd,
+            linux_x64_slim_rate_usd=linux_x64_slim_rate_usd,
         )
         run_seconds[run_id] = (job_seconds, wall_seconds)
         run_accounting[run_id] = accounting
@@ -1063,6 +1143,16 @@ def build_report(
                     if run.get("run_started_at") is not None
                     else None
                 ),
+                "completed_at": (
+                    _timestamp_text(
+                        _timestamp(
+                            run["updated_at"],
+                            "workflow run updated_at",
+                        )
+                    )
+                    if run.get("updated_at") is not None
+                    else None
+                ),
                 "cause": attribution["cause"],
                 "attribution": attribution["attribution"],
                 "evidence": attribution["evidence"],
@@ -1083,6 +1173,28 @@ def build_report(
     for row in ledger["agent_waits"]:
         if row["pr_number"] not in cohort:
             continue
+        wait_started = _timestamp(
+            row["started_at"], f"agent wait {row['wait_id']} started_at"
+        )
+        wait_ended = _timestamp(
+            row["ended_at"], f"agent wait {row['wait_id']} ended_at"
+        )
+        if wait_ended > evidence_cutoff:
+            raise ReportError(
+                f"agent wait {row['wait_id']!r} ends after the report evidence "
+                "cutoff"
+            )
+        pull_created = _timestamp(
+            pull_requests[row["pr_number"]]["created_at"],
+            f"pull request #{row['pr_number']} created_at",
+        )
+        if wait_started < pull_created:
+            raise ReportError(
+                f"agent wait {row['wait_id']!r} starts before PR "
+                f"#{row['pr_number']} was created"
+            )
+        linked_windows: list[tuple[datetime, datetime]] = []
+        linked_causes: set[str] = set()
         for run_id in row["run_ids"]:
             linked_run = run_rows_by_id.get(run_id)
             if linked_run is None:
@@ -1114,6 +1226,34 @@ def build_report(
                     f"agent wait {row['wait_id']!r} run {run_id} does not "
                     "match its candidate_sha"
                 )
+            if linked_run["cause"] != "unknown":
+                linked_causes.add(linked_run["cause"])
+            run_started = _timestamp(
+                linked_run["created_at"],
+                f"workflow run {run_id} created_at",
+            )
+            run_ended = (
+                _timestamp(
+                    linked_run["completed_at"],
+                    f"workflow run {run_id} completed_at",
+                )
+                if linked_run["completed_at"] is not None
+                else evidence_cutoff
+            )
+            linked_windows.append((run_started, run_ended))
+        if not any(
+            wait_started <= run_ended and wait_ended >= run_started
+            for run_started, run_ended in linked_windows
+        ):
+            raise ReportError(
+                f"agent wait {row['wait_id']!r} does not overlap any linked "
+                "workflow run"
+            )
+        if linked_causes and row["cause"] not in linked_causes:
+            raise ReportError(
+                f"agent wait {row['wait_id']!r} cause disagrees with every "
+                "linked workflow run"
+            )
         wait_seconds = _duration_seconds(
             row["started_at"],
             row["ended_at"],
@@ -1216,7 +1356,15 @@ def build_report(
                 ),
                 "estimated_billable_linux_x64_minutes": estimated_billable_minutes,
                 "estimated_list_price_usd": round(
-                    estimated_billable_minutes * linux_x64_rate_usd, 6
+                    sum(
+                        float(
+                            run_accounting[row["run_id"]][
+                                "estimated_list_price_usd"
+                            ]
+                        )
+                        for row in cause_runs
+                    ),
+                    6,
                 ),
             }
         )
@@ -1328,7 +1476,15 @@ def build_report(
                 ),
                 "estimated_billable_linux_x64_minutes": estimated_billable_minutes,
                 "estimated_list_price_usd": round(
-                    estimated_billable_minutes * linux_x64_rate_usd, 6
+                    sum(
+                        float(
+                            run_accounting[row["run_id"]][
+                                "estimated_list_price_usd"
+                            ]
+                        )
+                        for row in pr_runs
+                    ),
+                    6,
                 ),
                 "latest_head_sha": latest["head_sha"] if latest else None,
                 "latest_candidate_sha": (
@@ -1435,7 +1591,15 @@ def build_report(
                 ),
                 "estimated_billable_linux_x64_minutes": billable_minutes,
                 "estimated_list_price_usd": round(
-                    billable_minutes * linux_x64_rate_usd, 6
+                    sum(
+                        float(
+                            run_accounting[row["run_id"]][
+                                "estimated_list_price_usd"
+                            ]
+                        )
+                        for row in workflow_runs
+                    ),
+                    6,
                 ),
             }
         )
@@ -1446,9 +1610,9 @@ def build_report(
             "manual dispatch and other unassociated run counts are lower bounds "
             "until every cohort run has a run_attributions row."
         )
-    collected_since = github_payload.get("collected_since")
-    if collected_since is not None:
-        since = _timestamp(collected_since, "collected_since")
+    collected_since_value = github_payload.get("collected_since")
+    if collected_since_value is not None:
+        since = _timestamp(collected_since_value, "collected_since")
         truncated = [
             number
             for number in cohort
@@ -1487,7 +1651,7 @@ def build_report(
     if untimed_jobs:
         warnings.append(
             f"{untimed_jobs} non-skipped jobs lacked complete timestamps and "
-            "were excluded from raw job-minute totals; started standard Linux "
+            "were excluded from raw job-minute totals; started recognized Linux "
             "jobs contribute a one-minute minimum to the billing estimate."
         )
     timing_anomalies = sum(row["timing_anomaly_count"] for row in run_rows)
@@ -1495,7 +1659,7 @@ def build_report(
         warnings.append(
             f"{timing_anomalies} non-skipped jobs had inverted timestamps and "
             "were excluded from raw job-minute and workflow-wall totals; "
-            "started standard Linux jobs contribute a one-minute minimum to "
+            "started recognized Linux jobs contribute a one-minute minimum to "
             "the billing estimate."
         )
     unpriced_started_jobs = sum(
@@ -1505,15 +1669,10 @@ def build_report(
     if unpriced_started_jobs:
         warnings.append(
             f"{unpriced_started_jobs} started jobs did not have a recognized "
-            "standard Linux x64 label and are not included in the list-price "
+            "standard or slim Linux x64 label and are not included in the list-price "
             "estimate."
         )
 
-    generated = (
-        _timestamp(generated_at, "generated_at")
-        if generated_at is not None
-        else datetime.now(timezone.utc)
-    )
     return {
         "schema": REPORT_SCHEMA,
         "generated_at": _timestamp_text(generated),
@@ -1528,11 +1687,13 @@ def build_report(
             "pricing_as_of": PRICING_AS_OF,
             "source": PRICING_SOURCE,
             "linux_x64_minute_rate_usd": linux_x64_rate_usd,
+            "linux_x64_slim_minute_rate_usd": linux_x64_slim_rate_usd,
             "method": (
-                "Each started standard Linux x64 job is rounded up separately "
-                "to a whole minute. Skipped and never-started jobs cost zero. "
-                "Started jobs with missing or inverted completion timestamps "
-                "are estimated at one minute."
+                "Each started standard or slim Linux x64 job is rounded up "
+                "separately to a whole minute and priced at its runner SKU. "
+                "Skipped and never-started jobs cost zero. Started jobs with "
+                "missing or inverted completion timestamps are estimated at "
+                "one minute."
             ),
         },
         "definitions": {
@@ -1559,8 +1720,9 @@ def build_report(
                 "PR's latest-candidate CI/Hull raw job-minutes."
             ),
             "estimated_list_price_usd": (
-                "Estimated standard Linux x64 list price before included "
-                "minutes, discounts, taxes, or other account adjustments."
+                "Estimated standard and slim Linux x64 list price before "
+                "included minutes, discounts, taxes, or other account "
+                "adjustments."
             ),
         },
         "summary": {
@@ -1634,6 +1796,14 @@ def build_report(
                 int(accounting["linux_x64_started_job_count"])
                 for accounting in run_accounting.values()
             ),
+            "linux_x64_standard_started_job_count": sum(
+                int(accounting["linux_x64_standard_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "linux_x64_slim_started_job_count": sum(
+                int(accounting["linux_x64_slim_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
             "self_hosted_started_job_count": sum(
                 int(accounting["self_hosted_started_job_count"])
                 for accounting in run_accounting.values()
@@ -1642,8 +1812,26 @@ def build_report(
             "estimated_billable_linux_x64_minutes": (
                 all_estimated_billable_minutes
             ),
+            "estimated_billable_linux_x64_standard_minutes": sum(
+                int(
+                    accounting[
+                        "estimated_billable_linux_x64_standard_minutes"
+                    ]
+                )
+                for accounting in run_accounting.values()
+            ),
+            "estimated_billable_linux_x64_slim_minutes": sum(
+                int(
+                    accounting["estimated_billable_linux_x64_slim_minutes"]
+                )
+                for accounting in run_accounting.values()
+            ),
             "estimated_list_price_usd": round(
-                all_estimated_billable_minutes * linux_x64_rate_usd, 6
+                sum(
+                    float(accounting["estimated_list_price_usd"])
+                    for accounting in run_accounting.values()
+                ),
+                6,
             ),
         },
         "pull_requests": pr_rows,
@@ -1748,11 +1936,11 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             f"{_format_number(summary['agent_wait_minutes'])} |"
         ),
         (
-            "| Estimated billable standard-Linux minutes | "
+            "| Estimated billable recognized-Linux minutes | "
             f"{summary['estimated_billable_linux_x64_minutes']} |"
         ),
         (
-            "| Estimated standard-Linux list price | $"
+            "| Estimated recognized-Linux list price | $"
             f"{_format_number(summary['estimated_list_price_usd'])} |"
         ),
         "",
@@ -1760,7 +1948,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "minutes. Workflow wall time can overlap across workflows. Agent waiting "
         "comes only from supplied intervals and is neither of those measures. "
         f"The list-price estimate uses ${pricing['linux_x64_minute_rate_usd']}"
-        " per standard Linux x64 minute and rounds every started job separately. "
+        " per standard Linux x64 minute and "
+        f"${pricing['linux_x64_slim_minute_rate_usd']} per slim minute, and "
+        "rounds every started job separately. "
         "Skipped and never-started jobs are reported but not priced; canceled "
         "and failed jobs that started are priced. Included minutes and account "
         "discounts are not deducted.",
@@ -2349,6 +2539,7 @@ def collect_github_data(
         row["run_id"]: row for row in ledger["run_attributions"]
     }
     pulls: list[dict[str, Any]] = []
+    cohort_pr_windows: dict[int, tuple[datetime, datetime]] = {}
     cohort_head_keys: set[tuple[str, str]] = set()
     pull_windows: dict[
         tuple[str, str], list[tuple[int, datetime, datetime]]
@@ -2373,6 +2564,15 @@ def collect_github_data(
         opened_at = _timestamp(
             raw_pull.get("created_at"), f"pull request #{pr_number} created_at"
         )
+        closed_at = (
+            _timestamp(
+                raw_pull.get("closed_at"),
+                f"pull request #{pr_number} closed_at",
+            )
+            if raw_pull.get("closed_at") is not None
+            else collected_at
+        )
+        cohort_pr_windows[pr_number] = (opened_at, closed_at)
         head_key = (head_repository_name, head_ref)
         cohort_head_keys.add(head_key)
         pulls.append(
@@ -2484,11 +2684,24 @@ def collect_github_data(
         head_sha = _pull_head(run)
         if (
             head_sha is None
-            and run_pr_bases[run_id] != "attribution ledger"
             and isinstance(run.get("head_sha"), str)
+            and (
+                run_pr_bases[run_id] != "attribution ledger"
+                or run.get("event")
+                in {"pull_request", "pull_request_target", "push"}
+            )
         ):
             head_sha = run["head_sha"]
         if attribution is not None:
+            if (
+                head_sha is not None
+                and run.get("event")
+                in {"pull_request", "pull_request_target", "push"}
+                and head_sha != attribution["head_sha"]
+            ):
+                raise ReportError(
+                    f"run {run_id} ledger head disagrees with GitHub identity"
+                )
             head_sha = attribution["head_sha"]
         if head_sha is not None:
             run_heads[run_id] = head_sha
@@ -2565,6 +2778,45 @@ def collect_github_data(
         run_pr_bases[run_id] = "attribution ledger"
         run_heads[run_id] = attribution["head_sha"]
 
+    for run_id, attribution in run_attributions.items():
+        if attribution["pr_number"] not in cohort or run_id not in all_runs:
+            continue
+        run_created = _timestamp(
+            all_runs[run_id].get("created_at"),
+            f"attributed workflow run {run_id} created_at",
+        )
+        opened_at, closed_at = cohort_pr_windows[attribution["pr_number"]]
+        if run_created < since:
+            raise ReportError(
+                f"attributed workflow run {run_id} predates --since"
+            )
+        if not opened_at <= run_created <= closed_at:
+            raise ReportError(
+                f"attributed workflow run {run_id} falls outside PR "
+                f"#{attribution['pr_number']} lifetime"
+            )
+        raw = all_runs[run_id]
+        if raw.get("event") in {
+            "pull_request",
+            "pull_request_target",
+            "push",
+        }:
+            github_head = _pull_head(raw)
+            if github_head is None and isinstance(raw.get("head_sha"), str):
+                github_head = raw["head_sha"]
+            if github_head is not None and github_head != attribution["head_sha"]:
+                raise ReportError(
+                    f"run {run_id} ledger head disagrees with GitHub identity"
+                )
+            if (
+                attribution["candidate_sha"] is not None
+                and isinstance(raw.get("head_sha"), str)
+                and raw["head_sha"] != attribution["candidate_sha"]
+            ):
+                raise ReportError(
+                    f"run {run_id} ledger candidate disagrees with GitHub identity"
+                )
+
     def fetch_jobs(run_id: int) -> tuple[int, list[Mapping[str, Any]]]:
         return run_id, _jobs(api, repository=repository, run_id=run_id)
 
@@ -2598,7 +2850,8 @@ def collect_github_data(
         if (
             head_sha is not None
             and attribution is not None
-            and raw.get("event") in {"pull_request", "pull_request_target"}
+            and raw.get("event")
+            in {"pull_request", "pull_request_target", "push"}
             and head_sha != attribution["head_sha"]
         ):
             raise ReportError(
@@ -2695,6 +2948,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"(default: {DEFAULT_LINUX_X64_RATE_USD})"
         ),
     )
+    parser.add_argument(
+        "--linux-x64-slim-minute-rate-usd",
+        type=float,
+        default=DEFAULT_LINUX_X64_SLIM_RATE_USD,
+        help=(
+            "Linux x64 slim list price per rounded job-minute "
+            f"(default: {DEFAULT_LINUX_X64_SLIM_RATE_USD})"
+        ),
+    )
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, required=True)
     arguments = parser.parse_args(argv)
@@ -2744,6 +3006,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             prs=prs,
             attribution_payload=attribution,
             linux_x64_rate_usd=arguments.linux_x64_minute_rate_usd,
+            linux_x64_slim_rate_usd=(
+                arguments.linux_x64_slim_minute_rate_usd
+            ),
         )
         _write_text(
             arguments.json_output,
@@ -2761,7 +3026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{summary['package_expansion_count']} expansions, "
         f"{summary['cumulative_ci_hull_raw_job_minutes']} cumulative "
         "CI/Hull raw job-minutes, "
-        f"${summary['estimated_list_price_usd']:.2f} estimated standard-Linux "
+        f"${summary['estimated_list_price_usd']:.2f} estimated Linux "
         "list price"
     )
     return 0

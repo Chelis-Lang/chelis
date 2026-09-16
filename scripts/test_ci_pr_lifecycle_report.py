@@ -290,7 +290,7 @@ class LifecycleReportTests(unittest.TestCase):
         markdown = report.render_markdown(result)
         self.assertIn("Raw job-minutes sum job execution", markdown)
         self.assertIn("Agent waiting comes only from supplied intervals", markdown)
-        self.assertIn("Estimated standard-Linux list price", markdown)
+        self.assertIn("Estimated recognized-Linux list price", markdown)
 
     def test_unattributed_candidates_are_unknown(self) -> None:
         payload = github_fixture()
@@ -385,6 +385,61 @@ class LifecycleReportTests(unittest.TestCase):
         ):
             report.build_report(
                 github_fixture(), prs=[1], attribution_payload=unknown_run
+            )
+
+        missing_candidate_identity = attribution_fixture()
+        del missing_candidate_identity["candidate_attributions"][0][
+            "candidate_sha"
+        ]
+        with self.assertRaisesRegex(
+            report.ReportError, "candidate candidate_sha"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=missing_candidate_identity,
+            )
+
+        future_wait = attribution_fixture()
+        future_wait["agent_waits"][0]["started_at"] = "2030-01-01T00:00:00Z"
+        future_wait["agent_waits"][0]["ended_at"] = "2030-01-01T01:00:00Z"
+        with self.assertRaisesRegex(
+            report.ReportError, "after the report evidence cutoff"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=future_wait,
+                generated_at="2026-09-16T13:00:00Z",
+            )
+
+        nonoverlapping_wait = attribution_fixture()
+        nonoverlapping_wait["agent_waits"][0]["started_at"] = (
+            "2026-09-16T12:30:00Z"
+        )
+        nonoverlapping_wait["agent_waits"][0]["ended_at"] = (
+            "2026-09-16T12:45:00Z"
+        )
+        with self.assertRaisesRegex(
+            report.ReportError, "does not overlap any linked workflow run"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=nonoverlapping_wait,
+                generated_at="2026-09-16T13:00:00Z",
+            )
+
+        wrong_wait_cause = attribution_fixture()
+        wrong_wait_cause["agent_waits"][0]["cause"] = "initial-candidate"
+        with self.assertRaisesRegex(
+            report.ReportError, "cause disagrees with every linked workflow run"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=wrong_wait_cause,
+                generated_at="2026-09-16T13:00:00Z",
             )
 
     def test_attempts_and_overlapping_jobs_use_distinct_clocks(self) -> None:
@@ -550,6 +605,28 @@ class LifecycleReportTests(unittest.TestCase):
                 attribution_payload=rewritten_candidate,
             )
 
+        rewritten_push = attribution_fixture()
+        rewritten_push["run_attributions"].append(
+            {
+                "run_id": 101,
+                "pr_number": 1,
+                "head_sha": HEAD_B,
+                "candidate_sha": CANDIDATE_A,
+                "cause": "initial-candidate",
+                "evidence": "invalid push-head override",
+            }
+        )
+        push_payload = github_fixture()
+        push_payload["workflow_runs"][0]["event"] = "push"
+        with self.assertRaisesRegex(
+            report.ReportError, "head attribution disagrees"
+        ):
+            report.build_report(
+                push_payload,
+                prs=[1, 2],
+                attribution_payload=rewritten_push,
+            )
+
         missing_run = attribution_fixture()
         missing_run["run_attributions"].append(
             {
@@ -567,6 +644,41 @@ class LifecycleReportTests(unittest.TestCase):
                 github_fixture(),
                 prs=[1, 2],
                 attribution_payload=missing_run,
+            )
+
+        stale_snapshot = github_fixture()
+        stale_snapshot["collected_since"] = "2026-09-16T10:30:00Z"
+        stale_ledger = attribution_fixture()
+        stale_ledger["run_attributions"].append(
+            {
+                "run_id": 101,
+                "pr_number": 1,
+                "head_sha": HEAD_A,
+                "candidate_sha": CANDIDATE_A,
+                "cause": "initial-candidate",
+                "evidence": "run before snapshot boundary",
+            }
+        )
+        with self.assertRaisesRegex(
+            report.ReportError, "predates collected_since"
+        ):
+            report.build_report(
+                stale_snapshot,
+                prs=[1, 2],
+                attribution_payload=stale_ledger,
+            )
+
+        pre_pr_snapshot = github_fixture()
+        pre_pr_snapshot["pull_requests"][0]["created_at"] = (
+            "2026-09-16T10:30:00Z"
+        )
+        with self.assertRaisesRegex(
+            report.ReportError, "falls outside PR #1 lifetime"
+        ):
+            report.build_report(
+                pre_pr_snapshot,
+                prs=[1, 2],
+                attribution_payload=stale_ledger,
             )
 
         unused_candidate = attribution_fixture()
@@ -773,6 +885,48 @@ class LifecycleReportTests(unittest.TestCase):
         self.assertEqual(summary["estimated_billable_linux_x64_minutes"], 6)
         self.assertEqual(summary["estimated_list_price_usd"], 0.036)
         self.assertEqual(result["workflows"][0]["workflow"], "Changelog")
+
+    def test_standard_and_slim_linux_jobs_use_distinct_prices(self) -> None:
+        payload = github_fixture()
+        payload["pull_requests"] = payload["pull_requests"][:1]
+        measured = workflow_run(
+            710,
+            pr_number=1,
+            head_sha=HEAD_A,
+            candidate_sha=None,
+            path=".github/workflows/changelog.yml",
+            start="2026-09-16T10:00:00Z",
+            job_minutes=1,
+        )
+        measured["jobs"] = [
+            job(
+                7100,
+                start="2026-09-16T10:00:00Z",
+                minutes=1.01,
+                labels=["ubuntu-latest"],
+            ),
+            job(
+                7101,
+                start="2026-09-16T10:03:00Z",
+                minutes=1.01,
+                labels=["ubuntu-slim"],
+            ),
+        ]
+        payload["workflow_runs"] = [measured]
+
+        result = report.build_report(payload, prs=[1])
+        summary = result["summary"]
+
+        self.assertEqual(summary["linux_x64_standard_started_job_count"], 1)
+        self.assertEqual(summary["linux_x64_slim_started_job_count"], 1)
+        self.assertEqual(
+            summary["estimated_billable_linux_x64_standard_minutes"], 2
+        )
+        self.assertEqual(
+            summary["estimated_billable_linux_x64_slim_minutes"], 2
+        )
+        self.assertEqual(summary["estimated_billable_linux_x64_minutes"], 4)
+        self.assertEqual(summary["estimated_list_price_usd"], 0.016)
 
     def test_never_started_attempts_and_non_vm_checks_cost_zero(self) -> None:
         payload = github_fixture()
@@ -1007,6 +1161,95 @@ class LifecycleReportTests(unittest.TestCase):
         )
         self.assertEqual(by_id[302]["pr_number"], 7)
         self.assertEqual(by_id[302]["head_sha"], HEAD_B)
+
+    def test_live_ledger_runs_must_respect_identity_since_and_pr_lifetime(
+        self,
+    ) -> None:
+        ledger = {
+            "schema": report.LEDGER_SCHEMA,
+            "manual_run_scope_complete": True,
+            "manual_run_scope_evidence": "fixture dispatch inventory",
+            "candidate_attributions": [],
+            "run_attributions": [
+                {
+                    "run_id": 302,
+                    "pr_number": 7,
+                    "head_sha": HEAD_B,
+                    "cause": "package-expansion-rerun",
+                    "evidence": "fixture dispatch",
+                }
+            ],
+            "agent_waits": [],
+        }
+        pull = {
+            "number": 7,
+            "title": "Measured pull request",
+            "state": "open",
+            "created_at": "2026-09-16T12:00:00Z",
+            "updated_at": "2026-09-16T13:00:00Z",
+            "closed_at": None,
+            "head": {
+                "sha": HEAD_B,
+                "ref": "agent/measured-pr",
+                "repo": {"full_name": "Chelis-Lang/chelis"},
+            },
+            "base": {"ref": "main"},
+        }
+        branch_pulls = [
+            {
+                "number": 7,
+                "created_at": pull["created_at"],
+                "closed_at": None,
+                "head": pull["head"],
+            }
+        ]
+
+        def collect(attributed_run: dict) -> None:
+            def fake_api(endpoint: str) -> object:
+                if endpoint == "repos/Chelis-Lang/chelis/pulls/7":
+                    return pull
+                if endpoint.startswith(
+                    "repos/Chelis-Lang/chelis/pulls?state=all&"
+                ):
+                    return branch_pulls
+                if endpoint.startswith(
+                    "repos/Chelis-Lang/chelis/actions/runs?created="
+                ):
+                    return {"total_count": 0, "workflow_runs": []}
+                if endpoint == "repos/Chelis-Lang/chelis/actions/runs/302":
+                    return attributed_run
+                self.fail(f"unexpected endpoint {endpoint}")
+
+            report.collect_github_data(
+                repository="Chelis-Lang/chelis",
+                prs=[7],
+                attribution_payload=ledger,
+                since=datetime(2026, 9, 16, tzinfo=timezone.utc),
+                api=fake_api,
+            )
+
+        stale = {
+            "id": 302,
+            "path": report.EXPANSION_WORKFLOW,
+            "name": "PR Package Expansion",
+            "event": "workflow_dispatch",
+            "head_sha": HEAD_A,
+            "created_at": "2026-09-15T10:00:00Z",
+            "updated_at": "2026-09-15T10:01:00Z",
+        }
+        with self.assertRaisesRegex(report.ReportError, "predates --since"):
+            collect(stale)
+
+        mismatched_push = {
+            **stale,
+            "event": "push",
+            "created_at": "2026-09-16T12:30:00Z",
+            "updated_at": "2026-09-16T12:31:00Z",
+        }
+        with self.assertRaisesRegex(
+            report.ReportError, "ledger head disagrees with GitHub identity"
+        ):
+            collect(mismatched_push)
 
     def test_live_collection_does_not_reassign_a_reused_branch(self) -> None:
         old_run = {
