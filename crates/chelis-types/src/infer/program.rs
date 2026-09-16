@@ -394,12 +394,16 @@ fn bind_library_products(
 }
 
 fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
-    if crate::cancel::cancellation_requested() {
-        errors.push(crate::cancel::cancellation_check_error());
-        true
-    } else {
-        false
+    if !crate::cancel::cancellation_requested() {
+        return false;
     }
+    if !errors
+        .iter()
+        .any(|error| crate::cancel::is_cancellation(&error.message))
+    {
+        errors.push(crate::cancel::cancellation_check_error());
+    }
+    true
 }
 
 /// Run type inference on a list of top-level Deep expressions.
@@ -667,8 +671,7 @@ pub(super) fn infer_program_with_product_in_session(
     crate::opacity::set_current_item(None, None);
     env.set_current_declaration_ordinal(None);
 
-    if cancelled() {
-        errors.push(crate::cancel::cancellation_check_error());
+    if cancellation_gate(errors) {
         return product;
     }
     product.resolve_owner_types(&subst);
@@ -679,6 +682,11 @@ pub(super) fn infer_program_with_product_in_session(
     // handle that carrier directly.
     let semantic_type_env = build_ir_type_env(exprs);
     validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
+    if cancellation_gate(errors) {
+        stack_scope.drain_into(errors);
+        product.top_level_references = top_level_references;
+        return product;
+    }
 
     // Final shared checks: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
@@ -1402,6 +1410,10 @@ pub(crate) fn infer_ir_program_in_session(
         return stats;
     }
     validate_semantic_program(exprs, &type_env, &product.top_level_references, errors);
+    if cancellation_gate(errors) {
+        stack_scope.drain_into(errors);
+        return stats;
+    }
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     // Surface any walker stack bail as a hard located error.

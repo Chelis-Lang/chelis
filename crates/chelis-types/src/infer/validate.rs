@@ -6,6 +6,44 @@
 use super::shape_honesty::*;
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static CANCEL_BEFORE_DECLARATION_VALIDATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct DeclarationValidationCancellationHook;
+
+#[cfg(test)]
+impl Drop for DeclarationValidationCancellationHook {
+    fn drop(&mut self) {
+        CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| armed.set(false));
+    }
+}
+
+#[cfg(test)]
+fn cancel_before_declaration_validation_for_test() -> DeclarationValidationCancellationHook {
+    CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
+        assert!(
+            !armed.replace(true),
+            "the declaration-validation cancellation hook is already armed"
+        );
+    });
+    DeclarationValidationCancellationHook
+}
+
+#[cfg(test)]
+fn trip_declaration_validation_cancellation_for_test() {
+    CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
+        if armed.replace(false) {
+            crate::cancel::current_cancel_token()
+                .expect("the declaration-validation hook requires an installed token")
+                .cancel();
+        }
+    });
+}
+
 /// The ordered semantic pass protocol shared by every public checker entry.
 ///
 /// PP9 / [04-TOT-5] keeps language-required checks here and leaves backend
@@ -29,6 +67,8 @@ pub(super) fn validate_semantic_program(
     // cost grows with the program, and interrupt latency is bounded by the
     // longest such step. The caller's `cancellation_gate` rejects the
     // truncated walk.
+    #[cfg(test)]
+    trip_declaration_validation_cancellation_for_test();
     let cancel = crate::cancel::current_cancel_token();
     for expr in top_level_decl_items(exprs) {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
@@ -1777,4 +1817,96 @@ pub(super) fn totality_violation_error(traces: &[String]) -> CheckError {
         ),
         vec![],
     )
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Observation {
+        reported_success: bool,
+        messages: Vec<String>,
+    }
+
+    type Entry = fn(&[deep::Expr]) -> Observation;
+
+    fn validation_only_failure_fixture() -> Vec<deep::Expr> {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
+             conv(x, k, [0i64], [(0i64, 0i64)])\n",
+        )
+        .expect("the zero-stride Surf fixture must parse");
+        chelis_surf::desugar::desugar_program(&declarations)
+    }
+
+    fn observe_check(result: Result<CheckedProgram, InferResult>) -> Observation {
+        match result {
+            Ok(_) => Observation {
+                reported_success: true,
+                messages: Vec::new(),
+            },
+            Err(result) => Observation {
+                reported_success: false,
+                messages: result
+                    .errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect(),
+            },
+        }
+    }
+
+    fn observe_infer(result: InferResult) -> Observation {
+        Observation {
+            reported_success: result.errors.is_empty(),
+            messages: result
+                .errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect(),
+        }
+    }
+
+    fn run_with_validator_cancellation(
+        exprs: &[deep::Expr],
+        run: impl FnOnce(&[deep::Expr]) -> Observation,
+    ) -> Observation {
+        let token = crate::cancel::CancelToken::new();
+        let _cancel_guard = crate::cancel::install_cancel_token(token);
+        let _hook_guard = cancel_before_declaration_validation_for_test();
+        run(exprs)
+    }
+
+    #[test]
+    fn cancellation_inside_shared_semantic_validation_is_hard_at_every_public_entry() {
+        let exprs = validation_only_failure_fixture();
+        let entries: [(&str, Entry); 4] = [
+            ("check_ir_program", |exprs| {
+                observe_check(crate::check_ir_program(exprs))
+            }),
+            ("check_typed_program", |exprs| {
+                observe_check(crate::check_typed_program(exprs))
+            }),
+            ("infer_ir_program", |exprs| {
+                observe_infer(crate::infer_ir_program(exprs))
+            }),
+            ("infer_program", |exprs| {
+                observe_infer(crate::infer_program(exprs))
+            }),
+        ];
+
+        for (entry, run) in entries {
+            let observation = run_with_validator_cancellation(&exprs, run);
+            assert!(
+                !observation.reported_success,
+                "{entry} returned without a cancellation diagnostic: {observation:?}"
+            );
+            assert_eq!(
+                observation.messages,
+                [crate::cancel::EVAL_CANCELLED_MSG.to_string()],
+                "{entry} must report exactly one cancellation diagnostic in order"
+            );
+        }
+    }
 }
