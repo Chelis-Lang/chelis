@@ -256,11 +256,10 @@ pub(crate) fn verify_mapped_gradient_closure(
         }
     }
 
-    crate::axis_sources::check_rendered_dim_origins(
-        mapped,
-        chelis_types::unsupported::Stage::Lowering,
-    )
-    .map_err(|error| format!("mapped rendered dimension origin is unresolved: {error}"))?;
+    // The vectorized callee is an intermediate graph: its mapped batch extent
+    // may be supplied only by the caller actual introduced by splice. Validate
+    // rendered identifiers at the post-splice artifact boundary, where that
+    // correspondence must be complete.
     crate::axis_sources::check_rendered_dim_origins(
         spliced,
         chelis_types::unsupported::Stage::Lowering,
