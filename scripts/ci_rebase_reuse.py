@@ -174,13 +174,13 @@ def _changed_paths(
     return paths
 
 
-def _unsafe_delta_paths(
+def _interaction_frontier(
     repository_path: Path,
     *,
     prior_candidate: str,
     current_candidate: str,
     delta_paths: Sequence[str],
-) -> list[str]:
+) -> dict[str, object]:
     config = ci_change_owned.read_config(
         TRUSTED_ROOT / ".config/ci-test-targets.toml"
     )
@@ -190,18 +190,39 @@ def _unsafe_delta_paths(
     candidate_metadata = ci_change_owned.metadata_at(
         repository_path, current_candidate
     )
-    covered = {"integration_target", "package", "docs", "rule"}
-    return [
-        path
-        for path in delta_paths
-        if ci_change_owned.targeted_rebase_preflight_path_classification(
-            path,
-            base_metadata=base_metadata,
-            candidate_metadata=candidate_metadata,
-            config=config,
-        )
-        not in covered
-    ]
+    return ci_change_owned.targeted_rebase_frontier(
+        delta_paths,
+        base_metadata=base_metadata,
+        candidate_metadata=candidate_metadata,
+        config=config,
+    )
+
+
+def _frontier_flags(
+    packages: Sequence[str], owner_jobs: Sequence[Mapping[str, str]]
+) -> dict[str, bool]:
+    package_set = set(packages)
+    owners = {
+        (owner.get("workflow"), owner.get("job"))
+        for owner in owner_jobs
+    }
+    return {
+        "run_rust": bool(package_set) or ("ci.yml", "lint-rust") in owners,
+        "run_script_unit": (
+            ("ci.yml", "script-unit") in owners
+            or "chelis-python" in package_set
+        ),
+        "run_integration": bool(package_set),
+        "run_smt": "chelis-prove" in package_set,
+        "run_backend": "chelis-backend-c" in package_set,
+        "run_diagnostic": bool(
+            {"chelis-types", "chelis-compiler-api"} & package_set
+        ),
+        "run_hull": (
+            ("conformance.yml", "conformance") in owners
+            or bool({"chelis-cli", "chelis-conformance"} & package_set)
+        ),
+    }
 
 
 def _candidate_parents(repository_path: Path, candidate_sha: str) -> list[str]:
@@ -500,7 +521,7 @@ def evaluate_rebase(
             prior_receipt_run_id=prior_run_id,
         )
     try:
-        unsafe_paths = _unsafe_delta_paths(
+        frontier = _interaction_frontier(
             repository_path,
             prior_candidate=prior_candidate,
             current_candidate=candidate_sha,
@@ -511,9 +532,10 @@ def evaluate_rebase(
             "trusted test mapping could not classify the rebase delta",
             prior_receipt_run_id=prior_run_id,
         )
+    unsafe_paths = frontier["unsafe_paths"]
     if unsafe_paths:
         return fallback(
-            "rebase delta is not safely classifiable by the trusted planner",
+            "rebase delta has unmapped, ambiguous, or unsupported owner paths",
             prior_receipt_run_id=prior_run_id,
         )
     base_delta_paths = _changed_paths(repository_path, prior_base, base_sha)
@@ -532,18 +554,15 @@ def evaluate_rebase(
     )
     prior_patch_docs_only = is_docs_only(prior_paths)
     current_patch_docs_only = is_docs_only(current["changed_paths"])
-    lane = (
-        "docs"
-        if is_docs_only(delta_paths)
-        and prior_patch_docs_only
-        and current_patch_docs_only
-        else "targeted"
-    )
+    lane = "docs" if is_docs_only(delta_paths) else "targeted"
     reason = (
-        "trusted docs-only rebase of a docs-only patch"
+        "trusted docs-only synthetic-candidate delta"
         if lane == "docs"
-        else "trusted rebase of a code-bearing patch or delta"
+        else "trusted interaction-frontier rebase"
     )
+    frontier_packages = frontier["packages"] if lane == "targeted" else []
+    frontier_owner_jobs = frontier["owner_jobs"] if lane == "targeted" else []
+    flags = _frontier_flags(frontier_packages, frontier_owner_jobs)
     return {
         "schema": SCHEMA,
         "lane": lane,
@@ -558,12 +577,15 @@ def evaluate_rebase(
         "overlap_paths": overlap_paths,
         "prior_patch_docs_only": prior_patch_docs_only,
         "current_patch_docs_only": current_patch_docs_only,
+        "frontier_packages": frontier_packages,
+        "frontier_owner_jobs": frontier_owner_jobs,
         "patch_identity_unchanged": patch_identity_unchanged,
         "standing_review_required": bool(
             overlap_paths or not patch_identity_unchanged
         ),
         "prior_receipt_run_id": prior_run_id,
         "ci_contract_changed": False,
+        **flags,
     }
 
 
@@ -717,6 +739,31 @@ def write_decision(
             raise ReuseError("decision ci_contract_changed must be a boolean")
         if any(character in reason for character in "\r\n"):
             raise ReuseError("decision reason cannot contain a newline")
+        flags = {
+            key: decision.get(key, False)
+            for key in (
+                "run_rust",
+                "run_script_unit",
+                "run_integration",
+                "run_smt",
+                "run_backend",
+                "run_diagnostic",
+                "run_hull",
+            )
+        }
+        if any(type(value) is not bool for value in flags.values()):
+            raise ReuseError("decision frontier flags must be booleans")
+        packages = decision.get("frontier_packages", [])
+        if (
+            not isinstance(packages, list)
+            or any(
+                not isinstance(package, str)
+                or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", package) is None
+                for package in packages
+            )
+            or len(packages) != len(set(packages))
+        ):
+            raise ReuseError("decision frontier packages are malformed")
         Path(github_output).write_text(
             "\n".join(
                 [
@@ -730,6 +777,11 @@ def write_decision(
                     ),
                     "rebase_contract_changed="
                     + ("true" if contract_changed else "false"),
+                    "rebase_packages=" + ",".join(packages),
+                    *[
+                        f"rebase_{key}={'true' if value else 'false'}"
+                        for key, value in flags.items()
+                    ],
                 ]
             )
             + "\n"

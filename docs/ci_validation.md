@@ -8,13 +8,13 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | Owner | Cadence | Coverage |
 |---|---|---|
 | `ci.yml` / `conformance.yml` candidate preflight | Every PR implementation event; CI-contract tests only when their path classifier fires | Rejects undeclared base merges, base-changing rebases and other history rewrites; runs bootstrap-light workflow/routing tests before expensive build fan-out |
-| `ci.yml` `ci-fast` | PR and main push, with the existing docs-only skip | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
-| `ci.yml` change-owned shards and report | PR and trusted exact-candidate workflow dispatch, with the existing docs-only skip | Every default-enabled integration target added or directly modified by the candidate, or its exact reviewed alternative owner; four deterministic shards with a 20-minute limit each |
+| `ci.yml` `ci-fast` | Ordinary PR and main push, with the existing docs-only skip; accepted targeted rebases use the interaction frontier instead | Every default-feature library/binary unit target and the reviewed `standing_target` identities in `.config/ci-test-targets.toml`; 20-minute limit |
+| `ci.yml` change-owned shards and report | Ordinary PR and trusted exact-candidate workflow dispatch, with the existing docs-only skip; accepted targeted rebases run only when their package frontier selects integration coverage | Every default-enabled integration target added or directly modified by the candidate, or its exact reviewed alternative owner; targeted rebases require every eligible target in affected packages and their reverse workspace dependents; four deterministic shards with a 20-minute limit each |
 | `pr-package-expansion.yml` | Manual dispatch after review repairs, parallel with final required checks, using an open PR number and exact expected head SHA | Other default-enabled integration targets in directly selected packages, excluding exact reviewed target/test rows; four informational shards with a 20-minute hard limit and a separate summary |
 | `pr-contract-acknowledgements.yml` | PR open, synchronize, reopen, title/body edit or base retarget | Dedicated required validation of persistent candidate-lifecycle, protected-test and frozen-contract acknowledgement lines; no compiler build |
 | `pr-base-retarget.yml` | PR open/synchronize/reopen plus base-retarget coordination | Required head receipt. Ordinary candidates defer to the normal required implementation contexts. A base retarget holds the head pending while trusted-base coordination dispatches exact-head/exact-base CI and Hull runs against the new synthetic merge |
 | `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; eligible receipts can authorize the guarded targeted-rebase lane |
-| `ci.yml` retained workers | PR and main push | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
+| `ci.yml` retained workers | Ordinary PR and main push; accepted targeted rebases run only the owners selected by their interaction frontier | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
 | `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
 | `macos-nightly.yml` | Daily 04:17 UTC and manual dispatch | Both Mac workspace partitions, both Clippy configurations, architecture/ABI/Metal smokes, and Darwin SMT |
@@ -96,18 +96,19 @@ docs-only skip. A linear content update remains on ordinary docs-aware routing
 rather than attempting receipt reuse. No pull-request workflow can issue its
 own trusted receipt.
 
-The cheap docs lane requires both the prior/current PR patch and the complete
-rebase delta to be documentation-only. It runs the contract preflight, PR
-acknowledgements, changelog policy, Docs, and inexpensive metadata paths. A
-code-bearing patch or delta reruns combined-candidate Rust policy/compile,
-every default-feature Rust library/binary unit, and Python unit evidence plus
-base-sensitive Hull, SMT, backend, documentation and metadata checks, and makes
-the change-owned planner execute all change-owned and package-targeted coverage
-selected between the prior and current synthetic candidates. This includes
-same-file and same-line conflict resolutions and target movement after the
-rebase. Required contexts still report on the rewritten head; reuse
-short-circuits only the standing integration and final-expansion work whose
-trusted evidence remains applicable.
+The prior receipt already covers the earlier PR patch, so the cheap docs lane
+requires only the complete prior-to-current synthetic-candidate delta to be
+documentation-only; the PR itself may contain code. It runs the contract
+preflight, PR acknowledgements, changelog policy, Docs, and inexpensive metadata
+paths. A code-bearing delta is classified into exact packages and reviewed owner
+jobs. Package seeds expand through reverse workspace dependencies. The targeted
+lane runs Rust policy and default-feature library/binary units for that package
+frontier, every eligible integration target in it, and only the additional
+Python/script, SMT, backend, diagnostic or Hull owners selected by the frontier.
+This includes same-file and same-line conflict resolutions and target movement
+after the rebase. Required contexts still report on the rewritten head; reuse
+short-circuits only work outside the interaction frontier and final-expansion
+work whose trusted evidence remains applicable.
 The collector issues receipts only for ordinary `pull_request` candidates. A
 base-retarget candidate is validated by trusted dispatch and coordinator paths
 that the receipt schema does not model, so its absent receipt remains a
@@ -150,12 +151,13 @@ only (chelis#1781).
 On a pull request or trusted exact-candidate dispatch, `Integration Tests (Linux)` fails closed on both the standing fast worker and the required change-owned report. The four required shards are assigned by `sha256(package + "::" + target) mod 4`; their report rejects missing shards, digest disagreement, duplicate execution, uncovered selected targets, executed exclusions, and test failure. A change-owned target already in the standing set is removed from shard execution only when the report verifies the ci-fast record against the same candidate SHA, normalized configuration digest, exact execution mode, complete standing target set, and matching selected/executed per-test results. Missing, stale, partial, failed, or tampered standing evidence does not satisfy the obligation. The `integration-change-plan`, per-shard receipts, standing coverage, required report, JUnit, commands, selected/executed lists, and timings are retained for 14 days.
 
 For an accepted targeted rebase, the planner compares the prior receipt's
-synthetic candidate with the current synthetic candidate. Every direct
-change-owned and package-expansion target selected by that exact candidate
-delta becomes required change-owned coverage. The plan deliberately reuses no
-standing coverage receipt: its selected shards execute and report the affected
-targets on the current synthetic candidate before the required integration
-context passes.
+synthetic candidate with the current synthetic candidate. It maps every code
+path in that exact delta to an exact package or reviewed owner, expands package
+seeds through reverse workspace dependencies, and makes every eligible
+integration target in that package frontier required change-owned coverage.
+The plan deliberately reuses no standing coverage receipt: its selected shards
+execute and report the affected targets on the current synthetic candidate
+before the required integration context passes.
 
 On a push to `main`, `Integration Tests (Linux)` instead requires only the fixed `ci-fast` standing receipt. The planner, change-owned workers, and their report are skipped. This makes every default-branch commit answer the same standing acceptance question: a merge cannot make `main` red merely because its file diff happens to select known nightly residuals, and a later unrelated merge cannot make `main` green by selecting a different target set. Full workspace and hardware-sensitive residual work remains owned by the scheduled suites and its tracking issues.
 

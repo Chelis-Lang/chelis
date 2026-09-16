@@ -30,6 +30,7 @@ def package(
     *,
     root: str | None = None,
     features: dict[str, list[str]] | None = None,
+    dependencies: tuple[str, ...] = (),
 ) -> dict:
     root = root or f"crates/{name}"
     return {
@@ -37,6 +38,22 @@ def package(
         "name": name,
         "manifest_path": f"/repo/{root}/Cargo.toml",
         "features": features or {"default": []},
+        "dependencies": [
+            {
+                "name": dependency,
+                "rename": None,
+                "kind": None,
+                "optional": False,
+                "uses_default_features": True,
+                "features": [],
+                "target": None,
+                "registry": None,
+                "path": f"/repo/crates/{dependency}",
+                "req": "*",
+                "source": None,
+            }
+            for dependency in dependencies
+        ],
         "targets": [
             {
                 "name": target,
@@ -581,6 +598,32 @@ class PlanningTests(unittest.TestCase):
                     owned.Identity("p", "smoke"),
                 ]
             ),
+        )
+        owned.verify_plan_digest(plan)
+
+    def test_targeted_rebase_includes_reverse_workspace_dependents(self) -> None:
+        sources = fixture_sources()
+        metadata_with_dependency = fixture_metadata()
+        metadata_with_dependency["packages"][1]["dependencies"] = package(
+            "q", [], dependencies=("p",)
+        )["dependencies"]
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            base_metadata=metadata_with_dependency,
+            candidate_metadata=metadata_with_dependency,
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertEqual(plan["selected_packages"], ["p", "q"])
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::smoke", "q::smoke"],
         )
         owned.verify_plan_digest(plan)
 

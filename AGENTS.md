@@ -191,18 +191,20 @@ obligations.
   current synthetic candidate. The validation delta is the prior receipt's synthetic
   candidate through the current synthetic candidate, so it includes the conflict
   resolution and every target advance included in that frozen candidate;
-  `event.before..event.after` remains the head-rewrite record for review. The cheap
-  docs lane requires both the PR patch and the complete delta to be documentation-only.
-  A code-bearing patch or delta runs the base-sensitive required checks,
-  combined-candidate lint, every default-feature Rust library/binary unit, Python
-  units, and all change-owned and package-targeted tests selected for the affected
-  paths. Before fan-out, the trusted verifier applies the planner's exact Cargo target
-  identities and package/path rules to every delta path. An ambiguous target,
-  path owned by standing evidence that the targeted lane would reuse instead of
-  rerunning, CI-policy delta, missing or ineligible receipt, retarget, non-forward
-  update, candidate mismatch, unmapped path, or uncertain history runs full CI,
-  overriding the ordinary docs-only skip. Every required context still reports on the
-  new head.
+  `event.before..event.after` remains the head-rewrite record for review. The prior
+  receipt already covers the earlier PR patch, so the cheap docs lane requires only
+  that complete synthetic-candidate delta to be documentation-only; the PR itself may
+  contain code. A code-bearing delta is mapped to exact Cargo packages and reviewed
+  owner jobs. Package seeds expand through reverse workspace dependencies, and the
+  targeted lane runs their Rust policy and default-feature library/binary units, all
+  eligible integration targets in that package frontier, and only the additional
+  Python/script, SMT, backend, diagnostic or Hull owners selected by the frontier.
+  Before fan-out, the trusted verifier applies the planner's exact Cargo target
+  identities and package/path rules to every delta path. An ambiguous target, path
+  owned only by standing or nightly evidence, CI-policy delta, missing or ineligible
+  receipt, retarget, non-forward update, candidate mismatch, unmapped path, or
+  uncertain history runs full CI, overriding the ordinary docs-only skip. Every
+  required context still reports on the new head.
   Path overlap and patch-identity changes are recorded for review, not treated as proof
   that all prior evidence is unusable. The standing reviewer inspects any hand-resolved
   intersection; use a fresh round only under the review rules above.

@@ -316,7 +316,7 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "docs")
         self.assertEqual(
             decision["reason"],
-            "trusted docs-only rebase of a docs-only patch",
+            "trusted docs-only synthetic-candidate delta",
         )
         self.assertEqual(decision["before_sha"], repository.old_head_sha)
         self.assertEqual(decision["head_sha"], repository.new_head_sha)
@@ -331,16 +331,20 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["prior_receipt_run_id"], 202)
         self.assertFalse(decision["ci_contract_changed"])
 
-    def test_docs_delta_with_candidate_added_consumer_requires_code_lane(self) -> None:
+    def test_docs_only_synthetic_delta_reuses_code_patch_evidence(self) -> None:
         repository = RebaseRepository()
         self.addCleanup(repository.close)
 
         decision = repository.evaluate()
 
-        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(decision["lane"], "docs")
         self.assertEqual(decision["delta_paths"], ["docs/rebase.md"])
         self.assertFalse(decision["prior_patch_docs_only"])
         self.assertFalse(decision["current_patch_docs_only"])
+        self.assertEqual(decision["frontier_packages"], [])
+        self.assertFalse(decision["run_rust"])
+        self.assertFalse(decision["run_script_unit"])
+        self.assertFalse(decision["run_hull"])
 
     def test_disjoint_code_delta_uses_targeted_lane(self) -> None:
         repository = RebaseRepository(
@@ -353,13 +357,57 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "targeted")
         self.assertEqual(
             decision["reason"],
-            "trusted rebase of a code-bearing patch or delta",
+            "trusted interaction-frontier rebase",
         )
         self.assertEqual(
             decision["delta_paths"],
             ["crates/fixture/src/rebase_delta.rs"],
         )
+        self.assertEqual(decision["frontier_packages"], ["fixture"])
+        self.assertTrue(decision["run_rust"])
+        self.assertTrue(decision["run_integration"])
+        self.assertFalse(decision["run_script_unit"])
+        self.assertFalse(decision["run_hull"])
         self.assertFalse(decision["ci_contract_changed"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            github_output = Path(temporary) / "github-output"
+            reuse.write_decision(
+                decision,
+                output=Path(temporary) / "decision.json",
+                github_output=github_output,
+            )
+            outputs = github_output.read_text()
+            self.assertIn("rebase_packages=fixture", outputs)
+            self.assertIn("rebase_run_rust=true", outputs)
+            self.assertIn("rebase_run_integration=true", outputs)
+            self.assertIn("rebase_run_script_unit=false", outputs)
+
+    def test_script_unit_owner_runs_only_its_frontier(self) -> None:
+        repository = RebaseRepository(
+            delta_path="scripts/test_runtime_extent_oracle.py"
+        )
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "targeted")
+        self.assertEqual(decision["frontier_packages"], [])
+        self.assertTrue(decision["run_script_unit"])
+        self.assertFalse(decision["run_rust"])
+        self.assertFalse(decision["run_integration"])
+        self.assertFalse(decision["run_hull"])
+
+    def test_nightly_owned_delta_falls_back_to_full(self) -> None:
+        repository = RebaseRepository(
+            delta_path="scripts/runtime_extent_oracle.py"
+        )
+        self.addCleanup(repository.close)
+
+        decision = repository.evaluate()
+
+        self.assertEqual(decision["lane"], "full")
+        self.assertIn("unsupported owner paths", decision["reason"])
 
     def test_target_may_advance_again_after_the_rebase(self) -> None:
         repository = RebaseRepository(feature_path="docs/feature.md")
@@ -392,6 +440,8 @@ class RebaseReuseTests(unittest.TestCase):
                 f"rebase_before={repository.old_candidate_sha}",
                 github_output.read_text(),
             )
+            self.assertIn("rebase_run_rust=false", github_output.read_text())
+            self.assertIn("rebase_run_hull=false", github_output.read_text())
 
     def test_live_base_movement_does_not_rebind_the_frozen_candidate(self) -> None:
         repository = RebaseRepository(feature_path="docs/feature.md")
@@ -537,7 +587,7 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "full")
         self.assertEqual(
             decision["reason"],
-            "rebase delta is not safely classifiable by the trusted planner",
+            "rebase delta has unmapped, ambiguous, or unsupported owner paths",
         )
 
     def test_ambiguous_integration_target_path_falls_back_before_fanout(self) -> None:
@@ -552,7 +602,7 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "full")
         self.assertEqual(
             decision["reason"],
-            "rebase delta is not safely classifiable by the trusted planner",
+            "rebase delta has unmapped, ambiguous, or unsupported owner paths",
         )
 
     def test_reused_ci_fast_owner_falls_back_to_full_before_fanout(self) -> None:
@@ -566,7 +616,7 @@ class RebaseReuseTests(unittest.TestCase):
         self.assertEqual(decision["lane"], "full")
         self.assertEqual(
             decision["reason"],
-            "rebase delta is not safely classifiable by the trusted planner",
+            "rebase delta has unmapped, ambiguous, or unsupported owner paths",
         )
 
     def test_literal_docs_conflict_uses_docs_delta_and_standing_review(self) -> None:

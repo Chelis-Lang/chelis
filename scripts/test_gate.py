@@ -859,6 +859,32 @@ class StageUnionTests(unittest.TestCase):
         self.assertIn("--bins", gate.NEXTEST_TARGETED_UNITS)
         self.assertNotIn("--tests", gate.NEXTEST_TARGETED_UNITS)
 
+    def test_targeted_rebase_units_use_only_the_package_frontier(self):
+        commands = gate.selected_stage_commands(
+            "targeted-units",
+            tests_only=False,
+            support_only=False,
+            partition=None,
+            environ={gate.TARGETED_PACKAGES_ENV: "chelis-types,chelis-cli"},
+        )
+        self.assertEqual(commands[0], gate.FMT_CHECK)
+        for command in commands[1:]:
+            self.assertNotIn("--workspace", command)
+            self.assertIn("chelis-types", command)
+            self.assertIn("chelis-cli", command)
+        self.assertIn("--tests", commands[1])
+        self.assertNotIn("--tests", commands[2])
+
+    def test_targeted_rebase_package_frontier_rejects_shell_payloads(self):
+        with self.assertRaisesRegex(ValueError, gate.TARGETED_PACKAGES_ENV):
+            gate.selected_stage_commands(
+                "targeted-units",
+                tests_only=False,
+                support_only=False,
+                partition=None,
+                environ={gate.TARGETED_PACKAGES_ENV: "chelis-types;echo bad"},
+            )
+
     def test_integration_partition_selects_only_the_nextest_command(self):
         commands = gate.selected_stage_commands(
             "integration",
@@ -4176,9 +4202,10 @@ class DocsOnlySkipTests(unittest.TestCase):
                 "needs.changes.outputs.candidate_preflight == 'success' && "
                 "(needs.changes.result != 'success' || "
                 "needs.changes.outputs.rebase_lane == 'full' || "
-                "(needs.changes.outputs.rebase_lane != 'docs' && "
-                "(needs.changes.outputs.rebase_lane == 'targeted' || "
-                "needs.changes.outputs.docs_only != 'true'))) }}"
+                "(needs.changes.outputs.rebase_lane == 'targeted' && "
+                "needs.changes.outputs.rebase_run_integration == 'true') || "
+                "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+                "needs.changes.outputs.docs_only != 'true')) }}"
             ),
             "change-owned-shard": (
                 "${{ !cancelled() && github.event_name != 'push' && "
@@ -4188,9 +4215,10 @@ class DocsOnlySkipTests(unittest.TestCase):
                 "${{ always() && github.event_name != 'push' && "
                 "(needs.changes.result != 'success' || "
                 "needs.changes.outputs.rebase_lane == 'full' || "
-                "(needs.changes.outputs.rebase_lane != 'docs' && "
-                "(needs.changes.outputs.rebase_lane == 'targeted' || "
-                "needs.changes.outputs.docs_only != 'true'))) }}"
+                "(needs.changes.outputs.rebase_lane == 'targeted' && "
+                "needs.changes.outputs.rebase_run_integration == 'true') || "
+                "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+                "needs.changes.outputs.docs_only != 'true')) }}"
             ),
         }
         for job, predicate in expected.items():
