@@ -1404,19 +1404,69 @@ fn resolve_eval_pairs(
         .collect()
 }
 
+/// The stride operation's runtime domain failure, in the compiled lane's
+/// exact words. The signed step is checked against this domain before any
+/// unsigned conversion, extent division, allocation, or element access.
+const STRIDE_DOMAIN_TRAP: &str = "Domain: stride step must be positive\n\
+                                  numeric trap: domain in stride at int64";
+
+fn resolve_eval_stride_step(
+    step: &RtDim,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    input_extent: usize,
+) -> Result<std::num::NonZeroUsize, String> {
+    let resolved = match step {
+        RtDim::Lit(value) => *value,
+        RtDim::Node(i) => {
+            let src = values.get(&node.inputs[*i]).ok_or_else(|| {
+                format!(
+                    "stride step at node {}: missing value for step-source input slot {i}",
+                    node.id.0
+                )
+            })?;
+            if src.is_empty() {
+                return Err(format!(
+                    "stride step at node {}: step-source input slot {i} is empty",
+                    node.id.0
+                ));
+            }
+            let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
+                format!(
+                    "stride step at node {}: step-source input slot {i} must be int64",
+                    node.id.0
+                )
+            })?;
+            if raw <= 0 {
+                return Err(STRIDE_DOMAIN_TRAP.to_string());
+            }
+            usize::try_from(raw).map_err(|_| {
+                format!(
+                    "stride step at node {}: step-source input slot {i} exceeds host extent capacity: {raw}",
+                    node.id.0
+                )
+            })?
+        }
+        RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => {
+            resolve_eval_bound(step, node, values, input_extent)?
+        }
+    };
+    std::num::NonZeroUsize::new(resolved).ok_or_else(|| STRIDE_DOMAIN_TRAP.to_string())
+}
+
 /// chelis#616: resolve a `Stride` step list against the input shape.
 fn resolve_eval_strides(
     strides: &[RtDim],
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
     input_shape: &[usize],
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<std::num::NonZeroUsize>, String> {
     strides
         .iter()
         .enumerate()
         .map(|(axis, b)| {
             let extent = input_shape.get(axis).copied().unwrap_or(0);
-            resolve_eval_bound(b, node, values, extent)
+            resolve_eval_stride_step(b, node, values, extent)
         })
         .collect()
 }
@@ -1543,19 +1593,13 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> Result<TensorValue,
     ))
 }
 
-fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
+fn stride(input: &TensorValue, strides: &[std::num::NonZeroUsize]) -> TensorValue {
     assert_eq!(strides.len(), input.shape.len());
     let out_shape: Vec<usize> = input
         .shape
         .iter()
         .zip(strides.iter())
-        .map(|(dim, step)| {
-            if *step == 0 {
-                *dim
-            } else {
-                (*dim).div_ceil(*step)
-            }
-        })
+        .map(|(dim, step)| (*dim).div_ceil(step.get()))
         .collect();
     let out_len = numel(&out_shape);
     let mut picks = Vec::with_capacity(out_len);
@@ -1564,7 +1608,7 @@ fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
         let in_index: Vec<usize> = out_index
             .iter()
             .zip(strides.iter())
-            .map(|(idx, step)| idx * step.max(&1))
+            .map(|(idx, step)| idx * step.get())
             .collect();
         picks.push(index_to_linear(&in_index, &input.shape));
     }
@@ -1698,12 +1742,9 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
             }
         }
         RiscOp::Stride { strides } => {
-            for (axis, step) in strides.iter().enumerate() {
+            for step in strides {
                 if step.as_lit() == Some(0) {
-                    return Err(format!(
-                        "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
-                        node.id.0
-                    ));
+                    return Err(STRIDE_DOMAIN_TRAP.to_string());
                 }
             }
         }
@@ -3610,6 +3651,22 @@ fn computed_axis_extent_value(
             Ok(extent
                 .checked_add(before)
                 .and_then(|widened| widened.checked_add(after)))
+        }
+        crate::axis_sources::ComputedAxisExtent::StrideSpan { step, operand_axis } => {
+            // Preserve the operand-axis identity and the signed step carrier
+            // through the shared observation. The step-domain check happens
+            // in `resolve_eval_stride_step`, before this ceil division and
+            // before the stride operation allocates or reads any element.
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            let step = resolve_eval_stride_step(step, node, values, extent)?;
+            Ok(Some(extent.div_ceil(step.get())))
         }
     }
 }

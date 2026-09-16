@@ -1633,8 +1633,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     );
     assert_eq!(static_op_computed_axis_extent(&dag, shrunk, 0), Some(2));
 
-    // Negative parity: an unadmitted owner has no computed extent to report,
-    // constant carriers or not.
+    // A positive non-unit stride is an admitted computed extent. The
+    // observation retains both the operand axis and the exact step carrier so
+    // Eval and C can perform the same overflow-free ceil division before the
+    // stride allocates.
     let mut dag = Dag::new();
     let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
     let strided = dag.add_node(
@@ -1644,6 +1646,69 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
         vec![concrete],
         ty(vec![DimInfo::Lit(3)], Prim::F32),
         None,
+    );
+    assert_eq!(
+        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
+        Some(chelis_ir::axis_sources::ComputedAxisExtent::StrideSpan {
+            step: RtDim::Lit(2),
+            operand_axis: 0,
+        })
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), Some(3));
+
+    // The ceil division does not form `extent + step - 1`, so the largest
+    // representable host extent remains foldable instead of overflowing.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(usize::MAX)]);
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![concrete],
+        ty(vec![DimInfo::Lit(usize::MAX.div_ceil(2))], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        static_op_computed_axis_extent(&dag, strided, 0),
+        Some(usize::MAX.div_ceil(2))
+    );
+
+    // A runtime positive step is admitted but cannot be folded statically.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
+    let step = load(&mut dag, "step", vec![]);
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Node(1)],
+        },
+        vec![concrete, step],
+        ty(vec![named("*")], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
+        Some(chelis_ir::axis_sources::ComputedAxisExtent::StrideSpan {
+            step: RtDim::Node(1),
+            operand_axis: 0,
+        })
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), None);
+
+    // Step one remains identity-only: no computed site is introduced for an
+    // axis whose source is the operand axis itself.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(1)],
+        },
+        vec![concrete],
+        ty(vec![DimInfo::Lit(6)], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        chelis_ir::axis_sources::op_computed_axis_extent(&dag.get(strided).expect("stride").op, 0),
+        None
     );
     assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), None);
 }
