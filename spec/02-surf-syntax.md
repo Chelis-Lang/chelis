@@ -11,8 +11,9 @@ Deep desugaring shown as **⟹** with the target Deep s-expression.
 Canonical Surf is the one repository and output spelling for each grammatical
 construct. The normal parser also accepts the explicitly value-preserving
 input families in P10-P12: numeric radix/digit-separator/exponent spellings,
-equivalent valid string escapes, whitespace before a parenthesized call argument
-list, and trailing separators in delimited forms.
+float bodies carrying decimal digits beyond the shortest round-trippable
+spelling, equivalent valid string escapes, whitespace before a parenthesized
+call argument list, and trailing separators in delimited forms.
 `chelis fmt` prints those inputs in canonical form and is idempotent on its own
 output; `chelis fmt --check` enforces that output form in a repository. The
 versioned `chelis migrate surf --from 0.18` path remains for genuinely legacy,
@@ -62,9 +63,10 @@ The canonical forms are:
   `vmap(f, axis=n)`. Axis zero is written `vmap(f)`;
 - literal output is the canonical literal printer's decimal spelling for the
   decoded value and suffix: no digit separators or redundant leading/trailing
-  zeroes, and the shortest round-trippable float form with a decimal point or
-  canonical exponent when required. P10-P11 define the equivalent spellings
-  accepted as input and the semantic forms that remain rejected.
+  zeroes; a float body uses the shortest round-trippable form with a decimal
+  point or canonical exponent when required, and an integer body under a float
+  suffix keeps its integer spelling (P10a). P10-P11 define the equivalent
+  spellings accepted as input and the semantic forms that remain rejected.
 
 Canonical Deep and canonical Surf are two representations of the same public
 language. The required executable laws are:
@@ -813,15 +815,24 @@ Integers are decimal with no separators or redundant leading zeroes. Floats
 are finite and use the shortest round-trippable decimal spelling for their
 decoded value, with `.0` added when the shortest spelling would otherwise look
 like an integer; a lowercase `e` form is used only when the shortest printer
-emits it.
+emits it. A float-suffixed literal whose body is an integer (§P10a) is a
+distinct source form rather than a spelling of the decimal-bodied literal, and
+its canonical output keeps the integer body.
 
 The normal parser additionally accepts value-preserving hexadecimal and binary
-integers, underscores placed strictly between digits, and equivalent finite
-exponent spellings such as `1e3` and `1.0E+3`. The formatter decodes these
-forms and emits the canonical decimal token. This allowance does not admit
-malformed separators, padded non-exponent decimals such as `1.00`, a suffix
-with different type/adoption meaning, or a token whose decoded value is
-non-finite. Surf has no infinity or NaN literal.
+integers, underscores placed strictly between digits, and, for a float-bodied
+literal, any finite decimal body that decodes to the literal's value. That
+family covers equivalent exponent spellings such as `1e3` and `1.0E+3`, padded
+decimals such as `1.00` and `1.10f64`, and bodies carrying digits beyond the
+shortest round-trippable spelling such as `0.319381530` and
+`0.99999999999980993f64`. The formatter decodes these forms and emits the
+canonical token, so a transcribed reference constant is repaired by
+`chelis fmt` rather than refused by the parser.
+
+This allowance does not admit malformed separators, a non-canonical decimal
+body on an integer-bodied literal, a suffix with different type/adoption
+meaning, or a token whose decoded value is non-finite. Surf has no infinity or
+NaN literal.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
 at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
@@ -855,7 +866,7 @@ narrowing. The closed suffix set is:
 
 | Suffix | Bound type | Example | Notes |
 |---|---|---|---|
-| `f32` | `f32` | `1.0f32`, `42.0f32` | Float-typed |
+| `f32` | `f32` | `1.0f32`, `42.0f32`, `42f32` | Float-typed |
 | `f64` | `f64` | `1.0f64` | Float-typed |
 | `bf16` | `bf16` | `1.0bf16` | Float-typed |
 | `f16` | `f16` | `1.0f16` | Float-typed |
@@ -867,10 +878,32 @@ narrowing. The closed suffix set is:
 Default-type suffixes are semantic commitments, not syntax-safe aliases. In
 particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
 `cast(1.1, f64)` contextually binds the literal at `f64` under P10b. Both are
-therefore canonical. A float suffix requires the canonical printed float body:
-`42.0f32`, not `42f32`. Integer-typed suffixes attach to
-integer literal tokens only;
-`1.0i8` is a parse error.
+therefore canonical.
+
+A float suffix accepts either a float body or an integer body, and the two are
+semantically distinct rather than spellings of one another. `42.0f32` decodes
+its decimal body and binds the decoded float. `42f32` binds the exact integer
+directly at the suffix width: it is
+`spec/04-type-system.md` [04-LIT-1]'s suffix-bound cross-family form, an exact
+Int atom marked `literal_source: integer`, finalized once at the declared width
+rather than through `f64`. Both are canonical, and `chelis fmt` preserves
+whichever body the author wrote rather than converting between them. Deep-to-Surf
+output is governed separately: `spec/03-deep-syntax.md` §6.3.2 normalizes an
+integer atom at a float primitive to the equivalent float atom, so a resugared
+program prints the decimal body. §0.1's retraction law does not require
+`resugar(desugar(surf))` to reproduce authored bytes.
+
+An integer body binds at the suffix width, so its admissible range is that
+width's, not the body's: a body whose exact value rounds to infinity at the
+declared width is rejected as non-finite, exactly as `1e400` is. `65504f16`
+binds; `65520f16` does not.
+
+No radix body carries a float suffix (`spec/04-type-system.md` §5.5). That
+holds for a hexadecimal body even though every float suffix is spelled in hex
+digits: such a token is rejected, not read as a longer hexadecimal integer.
+
+Integer-typed suffixes attach to integer literal tokens only; `1.0i8` is a
+parse error.
 
 **Adjacency rule.** A suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -1385,9 +1418,11 @@ InfixOp       <- '|>' / '||' / '&&' / CmpOp
 Literal       <- FloatLit / IntLit / BoolLit / StringLit
 
 FloatLit      <- (DecimalFloat / ExponentFloat) FloatSuffix?
+               / IntFloatBody FloatSuffix
 BareFloatLit  <- DecimalFloat / ExponentFloat
-DecimalFloat  <- DecimalInt '.' DecDigitSeq
+DecimalFloat  <- DecDigitSeq '.' DecDigitSeq
 ExponentFloat <- DecDigitSeq ('.' DecDigitSeq)? [eE] [+-]? DecDigitSeq
+IntFloatBody  <- DecimalInt
 IntLit        <- IntBody IntSuffix?
 BareIntLit    <- IntBody
 IntBody       <- HexInt / BinInt / DecimalInt
@@ -1397,11 +1432,17 @@ HexInt        <- '0' [xX] [0-9a-fA-F] ('_'? [0-9a-fA-F])*
 BinInt        <- '0' [bB] [01] ('_'? [01])*
 FloatSuffix   <- 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix     <- 'i8' / 'i16' / 'i32' / 'i64'
-# After lexical recognition, a non-exponent decimal MUST equal the canonical
-# literal spelling after digit separators are removed. Radices and exponent
-# forms MUST decode to the same finite typed value the canonical printer emits.
-# Radix forms accept only IntSuffix; integer-looking decimals with FloatSuffix
-# remain invalid (`42f32` must be written canonically as `42.0f32`).
+# After lexical recognition, a DECIMAL integer body MUST equal the canonical
+# literal spelling after digit separators are removed; that is what rejects a
+# redundant leading zero such as `007` or `007f64`. HexInt and BinInt are exempt
+# and MUST instead decode to the same finite typed value the canonical printer
+# emits. A float body carries neither constraint: every finite decimal body
+# decodes to the value its canonical spelling round-trips to, so exponent forms,
+# padded decimals, and bodies with digits past the shortest spelling are all
+# accepted and normalized by the printer. FloatLit admits no radix body:
+# IntFloatBody is decimal only, because an integer radix form carries no float
+# suffix (spec/04-type-system.md §5.5). An IntFloatBody whose exact value rounds
+# to infinity at its FloatSuffix width is rejected as non-finite (P10a).
 # Suffix must immediately follow the digit sequence (no whitespace, no comment).
 # Closed sets: any other identifier sequence directly adjacent to a numeric
 # literal (e.g. `1.0xyz`, `42u8`, `1.0f8e4m3`) is a parse error per P10a.

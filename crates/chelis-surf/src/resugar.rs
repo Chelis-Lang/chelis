@@ -2484,7 +2484,12 @@ fn invalid_literal_pair() -> ResugarError {
 /// the intermediate can manufacture a midpoint and make f32/f16/bf16 choose
 /// the wrong adjacent value. The rounded significand is at most 53 bits, so
 /// widening the final target value to f64 for Surf's decimal printer is exact.
-fn round_integer_at_float_width(value: i64, suffix: LiteralSuffix) -> f64 {
+///
+/// The parser shares this function so that the integer bodies it admits under a
+/// float suffix are exactly the ones that are representable here: an authored
+/// body whose rounded value overflows the declared width would otherwise be
+/// canonical Surf whose own Deep resugars to nothing (chelis#2119).
+pub(crate) fn round_integer_at_float_width(value: i64, suffix: LiteralSuffix) -> f64 {
     let (significand_bits, maximum_exponent) = match suffix {
         LiteralSuffix::F16 => (11, 15),
         LiteralSuffix::Bf16 => (8, 127),

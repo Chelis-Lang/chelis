@@ -195,11 +195,10 @@ fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), Pars
         let expected = match &token.kind {
             TokenKind::Int(value) => Some(value.to_string()),
             TokenKind::Float(value) => Some(crate::format::canonical_float(*value)),
-            TokenKind::TypedInt(value, suffix) if suffix.is_float() => Some(format!(
-                "{}{}",
-                crate::format::canonical_float(*value as f64),
-                suffix.as_str()
-            )),
+            // An integer body under a float suffix keeps its integer spelling:
+            // spec/02-surf-syntax.md §P10a binds it as [04-LIT-1]'s exact
+            // `literal_source: integer` form, which is not the decimal-bodied
+            // literal in another spelling (chelis#2119).
             TokenKind::TypedInt(value, suffix) => Some(format!("{value}{}", suffix.as_str())),
             TokenKind::TypedFloat(value, suffix) => Some(format!(
                 "{}{}",
@@ -229,10 +228,19 @@ fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), Pars
 
 fn validate_finite_literals(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
     for token in tokens {
-        if matches!(
-            &token.kind,
-            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) if !value.is_finite()
-        ) {
+        let non_finite = match &token.kind {
+            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) => !value.is_finite(),
+            // An integer body under a float suffix binds the exact integer at
+            // the suffix width (§P10a), so its representability is decided by
+            // that width, not by the i64 body. `65520f16` rounds to infinity
+            // and has no Surf literal, exactly as `1e400` has none
+            // (chelis#2119).
+            TokenKind::TypedInt(value, suffix) if suffix.is_float() => {
+                !crate::resugar::round_integer_at_float_width(*value, *suffix).is_finite()
+            }
+            _ => false,
+        };
+        if non_finite {
             let found = source
                 .get(token.span.offset..token.span.end())
                 .unwrap_or_default();
@@ -248,20 +256,28 @@ fn validate_finite_literals(source: &str, tokens: &[Token]) -> Result<(), ParseE
 fn accepted_literal_alias(found: &str, expected: &str, kind: &TokenKind) -> bool {
     match kind {
         TokenKind::Str(_) => true,
-        TokenKind::TypedInt(_, suffix) if suffix.is_float() => found == expected,
+        // An integer-bodied literal must already be the canonical decimal
+        // spelling, or a value-preserving radix form: a redundant leading zero
+        // reads as C octal to a human and is refused rather than normalized.
+        // A float suffix does not relax this, so `007f64` stays an error.
         TokenKind::Int(_) | TokenKind::TypedInt(_, _) | TokenKind::IntMinMagnitude(_) => {
             let lower = found.to_ascii_lowercase();
-            lower.starts_with("0x") || lower.starts_with("0b") || found.replace('_', "") == expected
+            let radix = lower.starts_with("0x") || lower.starts_with("0b");
+            if radix && matches!(kind, TokenKind::TypedInt(_, suffix) if suffix.is_float()) {
+                // spec/04-type-system.md §5.5: an integer radix form carries no
+                // float suffix. Hex is already a lex error under maximal munch;
+                // this refuses the binary spelling for the same reason.
+                return false;
+            }
+            radix || found.replace('_', "") == expected
         }
-        TokenKind::Float(_) | TokenKind::TypedFloat(_, _) => {
-            let core = found
-                .strip_suffix("bf16")
-                .or_else(|| found.strip_suffix("f16"))
-                .or_else(|| found.strip_suffix("f32"))
-                .or_else(|| found.strip_suffix("f64"))
-                .unwrap_or(found);
-            core.contains(['e', 'E']) || found.replace('_', "") == expected
-        }
+        // Every finite decimal float body decodes to the value its canonical
+        // spelling round-trips to, so redundant precision, padded zeroes, and
+        // exponent forms are all value-preserving input aliases the printer
+        // normalizes rather than parse errors (spec/02-surf-syntax.md §P10,
+        // chelis#2119). Malformed separators are already a lex error and a
+        // non-finite decode is rejected by `validate_finite_literals`.
+        TokenKind::Float(_) | TokenKind::TypedFloat(_, _) => true,
         _ => true,
     }
 }

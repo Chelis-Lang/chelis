@@ -120,10 +120,16 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 
 - Integers: canonical decimal such as `42` and `1000000`. Default type `int32`.
 - Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
-  `31400000000.0`. Default type `f32`.
+  `31400000000.0`. Default type `f32`. You may write a longer body that decodes
+  to the same value — a constant transcribed from a reference at published
+  precision, say `0.319381530f64` — and `chelis fmt` prints the shortest
+  spelling for it.
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
   bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.
+  A float suffix on an integer body (`42f32`) is a different literal from the
+  decimal-bodied one: it binds the exact integer directly at that width instead
+  of decoding a decimal, and the formatter keeps whichever you wrote.
   Literal patterns are unsuffixed because Deep patterns preserve only the raw value.
 - Strings: `"hello"` with escapes `\" \\ \n \t \r \0`.
 - Booleans: `true`, `false`.
@@ -138,11 +144,11 @@ Delimited nonempty lists may carry one trailing comma (or a trailing semicolon i
 `par`/`do`). The parser discards it and the formatter omits it; the comma in `(a,)`
 remains because it distinguishes a one-element tuple from grouping.
 
-The parser accepts value-preserving digit separators, hexadecimal/binary integers,
-equivalent finite exponent spellings, and equivalent valid Unicode escapes. `chelis fmt`
-prints their canonical decimal/string spelling; `fmt --check` rejects the resulting source
-diff. Padded non-exponent decimals, malformed separators, invalid escapes, and semantic
-suffix/adoption changes remain errors.
+The parser accepts value-preserving digit separators, hexadecimal/binary integers, every
+finite decimal float body that decodes to the literal's value, and equivalent valid
+Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `fmt --check`
+rejects the resulting source diff. Malformed separators, a redundant leading zero on an
+integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or
 the first argument of `cast`), bracket-literal elements adopt that element type. So
