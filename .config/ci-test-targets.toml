@@ -672,6 +672,116 @@ prefix = "bindings/python/tests/"
 disposition = "packages"
 packages = ["chelis-python"]
 
+# Exact executable-corpus sources exercised by
+# chelis-e2e::spec_all_executable_examples_parse_and_check. Keep these exact:
+# unrelated future example files must acquire their own evidence-backed owner.
+[[path_rule]]
+prefix = "examples/checked_reshape.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/checked_sparse_axes.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/count_bool_axes.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/count_bool_device_entry.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/dict_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/hello_tensor.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/induction_bond.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/integer_functions.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/iter_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/list_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/recursive_cast_targets.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/recursive_generic.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/scalar_string_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/tensor_structural_ops.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+# Exact illustrative and package-fixture sources exercised by recursive
+# chelis-cli integration targets.
+[[path_rule]]
+prefix = "examples/illustrative/moe_gather_duplicate_indices.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/phase3g_text_pipeline/src/main.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/process_run_chelis_version.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/runtime_shape_semantics.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/scatter_replace_last_write_wins.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/sparse_summary_def_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
 [[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"

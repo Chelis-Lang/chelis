@@ -372,6 +372,39 @@ class SchemaTests(unittest.TestCase):
         python_bindings = by_path["bindings/python/tests/"]
         self.assertEqual(python_bindings.disposition, "packages")
         self.assertEqual(python_bindings.packages, ("chelis-python",))
+        for path in (
+            "examples/checked_reshape.ch",
+            "examples/checked_sparse_axes.ch",
+            "examples/count_bool_axes.ch",
+            "examples/count_bool_device_entry.ch",
+            "examples/dict_foundation.ch",
+            "examples/hello_tensor.ch",
+            "examples/induction_bond.ch",
+            "examples/integer_functions.ch",
+            "examples/iter_foundation.ch",
+            "examples/list_foundation.ch",
+            "examples/recursive_cast_targets.ch",
+            "examples/recursive_generic.ch",
+            "examples/scalar_string_foundation.ch",
+            "examples/tensor_structural_ops.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-e2e",))
+        for path in (
+            "examples/illustrative/moe_gather_duplicate_indices.ch",
+            "examples/illustrative/phase3g_text_pipeline/src/main.ch",
+            "examples/illustrative/process_run_chelis_version.ch",
+            "examples/illustrative/runtime_shape_semantics.ch",
+            "examples/illustrative/scatter_replace_last_write_wins.ch",
+            "examples/illustrative/sparse_summary_def_wrapper.ch",
+            "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-cli",))
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(
