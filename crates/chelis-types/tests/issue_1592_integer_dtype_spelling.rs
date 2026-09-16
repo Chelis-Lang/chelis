@@ -1,15 +1,9 @@
 //! chelis#1592 checker ingress parity for canonical and retired signed integer
 //! primitive spellings.
 
-use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
 use chelis_types::types::{Prim, Type};
-
-fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
-    let declarations = parse_str(source).expect("Surf parses");
-    desugar_program(&declarations)
-}
 
 fn error_messages(program: &[chelis_deep::Expr]) -> Vec<String> {
     match check_ir_program(program) {
@@ -40,21 +34,30 @@ fn prim_identity_uses_the_literal_suffix_spelling_only() {
             None,
             "retired spellings are migration input, not aliases"
         );
+        assert!(
+            Prim::parse_interchange_name(retired).is_some(),
+            "interchange keeps the ecosystem spelling"
+        );
+    }
+    for language_name in ["i8", "i16", "i32", "i64"] {
+        assert_eq!(
+            Prim::parse_interchange_name(language_name),
+            None,
+            "versioned interchange must not admit the language spelling"
+        );
     }
 }
 
 #[test]
-fn retired_surf_names_reject_with_the_versioned_migration_command() {
+fn retired_surf_names_reject_at_parser_ingress_with_the_versioned_migration_command() {
     for retired in ["int8", "int16", "int32", "int64"] {
-        let program = surf_to_deep(&format!(
-            "module P.M\nexport (f)\ndef f(x: {retired}) -> {retired} = x\n"
-        ));
-        let messages = error_messages(&program);
+        let source = format!("module P.M\nexport (f)\ndef f(x: {retired}) -> {retired} = x\n");
+        let message = parse_str(&source)
+            .expect_err("canonical Surf parser rejects retired dtype")
+            .to_string();
         assert!(
-            messages.iter().any(|message| {
-                message.contains(retired) && message.contains("chelis migrate surf --from 0.18")
-            }),
-            "`{retired}` must reject with actionable migration advice: {messages:?}"
+            message.contains(retired) && message.contains("chelis migrate surf --from 0.18"),
+            "`{retired}` must reject with actionable migration advice: {message}"
         );
     }
 }
@@ -71,13 +74,12 @@ fn retired_deep_primitive_and_type_variable_names_both_reject() {
              (def {{}} f (fn {{}} (params {{}} (x {{type: ({tag} {{}} int64)}})) \
              (var {{}} x))))\n"
         );
-        let program = chelis_deep::parser::parse_and_stamp_file(&source).expect("Deep parses");
-        let messages = error_messages(&program);
+        let error =
+            chelis_deep::parser::parse_and_stamp_file(&source).expect_err("Deep ingress rejects");
+        let message = error.to_string();
         assert!(
-            messages
-                .iter()
-                .any(|message| { message.contains("int64") && message.contains(command) }),
-            "retired `{tag}` spelling must reject with Deep migration advice: {messages:?}"
+            message.contains("int64") && message.contains(command),
+            "retired `{tag}` spelling must reject with Deep migration advice: {message}"
         );
     }
 }

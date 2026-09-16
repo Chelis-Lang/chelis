@@ -3614,7 +3614,7 @@ mod inferred_wire_extent_tests {
                     result.expect("zero extent survives every container");
                 } else {
                     let error = result.expect_err("negative metadata extent");
-                    assert!(error.contains("nonnegative i64"), "{error}");
+                    assert!(error.contains("nonnegative int64"), "{error}");
                 }
             }
         }

@@ -40,6 +40,23 @@ fn canonical_formatter_preserves_the_single_integer_spelling() {
 }
 
 #[test]
+fn canonical_parser_rejects_retired_integer_names_in_every_type_edge() {
+    for source in [
+        "value: int64 = 1i64\n",
+        "value: tensor[n, int32] = [1]\n",
+        "value = cast(1, int16)\n",
+        "value = 1 |> cast(int8)\n",
+    ] {
+        let error = parse_str(source).expect_err("retired dtype spelling must not parse");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("chelis migrate surf --from 0.18"),
+            "{source:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn v018_migration_rewrites_retired_integer_names_without_touching_identifiers() {
     let source = "module P.M\nexport (int64_value, f)\n\
                   int64_value: int64 = 1i64\n\

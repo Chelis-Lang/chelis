@@ -2124,7 +2124,7 @@ same wider-accumulator default for bf16/f16 matmul.
 Rationale for the i8/i16 → i32 default: overflow safety. Summing 200
 non-trivial `i8` values overflows `i8` but fits comfortably in `i32`.
 The same instinct exists ecosystem-wide, but the details differ: PyTorch's
-`torch.sum` promotes ALL integral inputs to `i64`, and NumPy accumulates at
+`torch.sum` promotes ALL integral inputs to `int64`, and NumPy accumulates at
 the platform default integer. Chelis deliberately widens one step instead of
 jumping to `i64`; the §5.7 accumulator parameter is the authored route to a
 wider accumulator when a reduction genuinely needs one.

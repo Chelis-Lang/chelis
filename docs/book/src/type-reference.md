@@ -16,10 +16,10 @@ The numeric primitives are:
 | `f64` | 64-bit float |
 | `bf16` | bfloat16 |
 | `f16` | IEEE 754 binary16 |
-| `int8` | 8-bit signed integer |
-| `int16` | 16-bit signed integer |
-| `int32` | 32-bit signed integer |
-| `int64` | 64-bit signed integer |
+| `i8` | 8-bit signed integer |
+| `i16` | 16-bit signed integer |
+| `i32` | 32-bit signed integer |
+| `i64` | 64-bit signed integer |
 | `bool` | boolean |
 
 There are no unsigned integer types. `string` exists as a type for parsing and host work,
@@ -87,10 +87,10 @@ family.
 
 ```chelis-surf-fragment
 sig arange[p: Int]: p -> p -> tensor[n, p]
-sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]
 ```
 
-Calling `arange` at `f32`, or `linspace` at `int32`, is a `PrecisionMismatch` naming the
+Calling `arange` at `f32`, or `linspace` at `i32`, is a `PrecisionMismatch` naming the
 required family. The bound is part of the function's type, not a check on the callee name,
 so it survives aliases, wrappers, higher-order values, and imports. Two bounded variables
 that unify keep the intersection of their families; `Float` and `Int` share nothing, so
@@ -149,14 +149,14 @@ sum = add(x, cast(y, f32))
 ```
 
 `cast(e, p)` is the explicit precision change; it preserves dimensions and changes only the
-element type. Integer literals default to `int32` and float literals default to `f32`.
+element type. Integer literals default to `i32` and float literals default to `f32`.
 Three things override a default: a literal suffix, a surrounding known element type, or an
 explicit `cast`.
 
 ```chelis-surf-fragment
 a = cast(x, bf16)        -- precision change
 b = 1.0f64               -- suffix binds f64
-c = cast(3000000000, int64)  -- escape hatch for out-of-int32-range literals
+c = cast(3000000000, i64)  -- escape hatch for out-of-i32-range literals
 ```
 
 The compatibility rules: arithmetic (`add`, `mul`, `sub`, `div`) needs equal numeric
@@ -166,7 +166,7 @@ logical operations (`and`, `or`, `not`) take `bool`; transcendental operations (
 
 `matmul` and `sum` accept an optional accumulator precision, the one place mixed precision
 appears. The default accumulator widens `bf16` and `f16` inputs to `f32` for numerical
-stability and widens `int8` and `int16` to `int32` for overflow safety; a requested
+stability and widens `i8` and `i16` to `i32` for overflow safety; a requested
 accumulator must be at least as wide as the operands and the default.
 
 ## Function types

@@ -33,8 +33,8 @@ In Deep the effect set is `eff` metadata on the function type:
 
 ## Handlers
 
-A handler is a `with` block. `with seed(...)` takes an int64-suffixed integer literal
-(`42i64`; the seed is semantically int64, so an unsuffixed literal is a type error) and makes
+A handler is a `with` block. `with seed(...)` takes an i64-suffixed integer literal
+(`42i64`; the seed is semantically i64, so an unsuffixed literal is a type error) and makes
 the randomness inside it deterministic; an unhandled `Random` effect at the top level is a
 check error with repair guidance. `with device(...)` takes a string literal naming the device.
 

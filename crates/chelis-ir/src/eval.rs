@@ -1447,7 +1447,7 @@ fn resolve_eval_pairs(
 /// exact words. The signed step is checked against this domain before any
 /// unsigned conversion, extent division, allocation, or element access.
 const STRIDE_DOMAIN_TRAP: &str = "Domain: stride step must be positive\n\
-                                  numeric trap: domain in stride at int64";
+                                  numeric trap: domain in stride at i64";
 
 fn resolve_eval_stride_step(
     step: &RtDim,

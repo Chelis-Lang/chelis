@@ -599,6 +599,7 @@ impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
 pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
     Ok(typed)
 }
@@ -609,6 +610,7 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw_syntax(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
         // [03-PROG-3] puts the zero-form rejection at the position where a
         // top-level form was required, the end of the input.
@@ -635,6 +637,7 @@ pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError
 pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
     Ok(typed)
 }
@@ -647,6 +650,7 @@ pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrP
 pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let mut raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     if raw_exprs.len() != 1 {
         return Err(ParseError::Expected {
             expected: "exactly one type expression".to_string(),
@@ -671,6 +675,7 @@ pub fn parse_and_stamp_tagged(
 ) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
     Ok(typed)
 }

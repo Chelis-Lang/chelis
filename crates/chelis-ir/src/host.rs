@@ -19126,7 +19126,7 @@ def bad[b](box: Box[b]) -> bool =
                     error.message,
                     "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
                 );
-                assert_eq!(error.span_id.as_deref(), Some("surf:467..507"));
+                assert_eq!(error.span_id.as_deref(), Some("surf:465..503"));
             } else {
                 assert_eq!(
                     result,

@@ -477,11 +477,11 @@ representation of the same obligation, not distinct trapping operations.
 
 ##### Stride preconditions and result extents (#1907 and #1931)
 
-A stride step is read as its signed `int64` carrier and validated before any
+A stride step is read as its signed `i64` value and validated before any
 conversion to an index type, ceil-division, allocation or element access. A
 runtime step less than or equal to zero executes one stride
 operation-precondition guard and raises `Domain` with the exact
-`numeric trap: domain in stride at int64` line and its stride-step context.
+`numeric trap: domain in stride at i64` line and its stride-step context.
 Eval and C consume the same observation and neither substitutes step one,
 returns the input extent, or reaches a result-claim or generic movement-target
 check first.

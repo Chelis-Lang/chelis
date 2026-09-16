@@ -2013,8 +2013,9 @@ impl Parser {
             TokenKind::Cast => Some(CastMode::Checked),
             TokenKind::CastTrunc => Some(CastMode::Trunc),
             _ => None,
-        } && let Some(precision) = self.peek_one_arg_cast_precision()
+        } && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
         {
+            self.reject_retired_integer_dtype_name(&precision, precision_span)?;
             let cast_tok = self.advance(); // consume Cast / CastTrunc
             let span = cast_tok.span;
             self.advance(); // consume LParen
@@ -2061,7 +2062,7 @@ impl Parser {
     /// the precision identifier (the type name). Otherwise `None`.
     /// Used by `parse_pipe_stage` to recognize the H3 one-arg
     /// `cast(type)` pipe-stage form without consuming tokens on miss.
-    fn peek_one_arg_cast_precision(&self) -> Option<String> {
+    fn peek_one_arg_cast_precision(&self) -> Option<(String, Span)> {
         // Caller has already verified `self.peek() == Cast`. We need to
         // look at the token after Cast (skipping newlines), then the
         // token after that, etc. Using `peek_after_current` would only
@@ -2103,8 +2104,11 @@ impl Parser {
             pos += 1;
         }
         // Expect Ident (the precision name).
-        let precision = match self.tokens.get(pos).map(|t| &t.kind) {
-            Some(TokenKind::Ident(name)) => name.clone(),
+        let (precision, precision_span) = match self.tokens.get(pos) {
+            Some(token) => match &token.kind {
+                TokenKind::Ident(name) => (name.clone(), token.span),
+                _ => return None,
+            },
             _ => return None,
         };
         pos += 1;
@@ -2121,7 +2125,7 @@ impl Parser {
         ) {
             return None;
         }
-        Some(precision)
+        Some((precision, precision_span))
     }
 
     /// Pick a fresh `__chelis_pipe[N]` parameter name. Mirrors the desugar
@@ -2549,7 +2553,8 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
-        let (precision, _) = self.expect_ident()?;
+        let (precision, precision_span) = self.expect_ident()?;
+        self.reject_retired_integer_dtype_name(&precision, precision_span)?;
         self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Cast(
@@ -3105,6 +3110,7 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
+                self.reject_retired_integer_dtype_name(&name, tok.span)?;
                 Ok(TypeExpr::Named(name, tok.span))
             }
             TokenKind::TypeIdent(name) => {
@@ -3707,6 +3713,22 @@ impl Parser {
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(Some(effects))
+    }
+
+    fn reject_retired_integer_dtype_name(&self, name: &str, span: Span) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical
+            && let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name)
+        {
+            return Err(ParseError::Expected {
+                expected: format!(
+                    "canonical integer dtype `{canonical}`; run \
+                     `chelis migrate surf --from 0.18` to rewrite v0.18 source"
+                ),
+                found: format!("retired v0.18 integer dtype `{name}`"),
+                offset: span.offset,
+            });
+        }
+        Ok(())
     }
 
     fn parse_effect_expr(&mut self) -> Result<EffectExpr, ParseError> {

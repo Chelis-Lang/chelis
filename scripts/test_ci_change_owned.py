@@ -369,6 +369,9 @@ class SchemaTests(unittest.TestCase):
             deep_spec.packages,
             ("chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"),
         )
+        python_bindings = by_path["bindings/python/tests/"]
+        self.assertEqual(python_bindings.disposition, "packages")
+        self.assertEqual(python_bindings.packages, ("chelis-python",))
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(

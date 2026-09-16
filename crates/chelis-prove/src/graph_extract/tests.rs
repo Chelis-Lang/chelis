@@ -80,7 +80,7 @@ fn result_claim_dependencies_remain_outside_the_scalar_proof_envelope() {
     witness.inputs = vec![0];
     witness.output_type = WireTensorType {
         dims: vec![],
-        precision: "i64".into(),
+        precision: "int64".into(),
     };
     dag.nodes.push(witness.clone());
     witness.id = 2;

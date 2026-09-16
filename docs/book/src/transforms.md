@@ -100,7 +100,7 @@ def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f
 ```
 
 ```chelis-deep-fragment
-(vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0))
+(vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0))
 ```
 
 Each tensor argument of the wrapped function gains the batch dimension; non-tensor arguments

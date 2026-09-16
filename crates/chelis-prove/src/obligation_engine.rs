@@ -2285,29 +2285,38 @@ mod finding_tests {
 
     #[test]
     fn scalar_flattening_moves_exact_bits_and_rejects_dtype_substitution() {
-        for wire in [
-            serde_json::json!({"dtype":"f16","bits":"7c01"}),
-            serde_json::json!({"dtype":"bf16","bits":"ff81"}),
-            serde_json::json!({"dtype":"f32","bits":"80000000"}),
-            serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
-            serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
-            serde_json::json!({"dtype":"int32","value":i32::MIN}),
-            serde_json::json!({"dtype":"int16","value":i16::MIN}),
-            serde_json::json!({"dtype":"int8","value":i8::MIN}),
+        for (wire, language_dtype) in [
+            (serde_json::json!({"dtype":"f16","bits":"7c01"}), "f16"),
+            (serde_json::json!({"dtype":"bf16","bits":"ff81"}), "bf16"),
+            (serde_json::json!({"dtype":"f32","bits":"80000000"}), "f32"),
+            (
+                serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
+                "f64",
+            ),
+            (
+                serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
+                "i64",
+            ),
+            (serde_json::json!({"dtype":"int32","value":i32::MIN}), "i32"),
+            (serde_json::json!({"dtype":"int16","value":i16::MIN}), "i16"),
+            (serde_json::json!({"dtype":"int8","value":i8::MIN}), "i8"),
         ] {
             let input: ExecutionValue =
                 serde_json::from_value(serde_json::json!({"type":"scalar","value":wire})).unwrap();
-            let dtype = wire["dtype"].as_str().unwrap();
             let mut env = BTreeMap::new();
             flatten_field_value(
                 &input,
-                &FieldType::Scalar(dtype.into()),
+                &FieldType::Scalar(language_dtype.into()),
                 "p.value",
                 &mut env,
             )
             .unwrap();
             assert_eq!(serde_json::to_value(env["p.value"]).unwrap(), wire);
-            let other = if dtype == "f32" { "f64" } else { "f32" };
+            let other = if language_dtype == "f32" {
+                "f64"
+            } else {
+                "f32"
+            };
             assert!(
                 flatten_field_value(
                     &input,

@@ -236,6 +236,7 @@ impl Prim {
             "int16" => Some(Prim::Int16),
             "int32" => Some(Prim::Int32),
             "int64" => Some(Prim::Int64),
+            "i8" | "i16" | "i32" | "i64" => None,
             _ => Self::parse_name(s),
         }
     }

@@ -82,10 +82,10 @@ fn previous_worker_handoff_is_rejected_before_positional_payload_decode() {
 #[test]
 fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
     let evidence = manifest();
-    let std_decls =
-        chelis_surf::parser::parse_str(evidence["stdlib_source"].as_str().unwrap()).unwrap();
-    let dep_decls =
-        chelis_surf::parser::parse_str(evidence["dependency_source"].as_str().unwrap()).unwrap();
+    let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
+    let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
+    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
+    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
     let std_key = stdlib_cache_key(&std_decls, [0x5a; 32]);
     let lib_key = library_cache_key(&dep_decls, std_key);
     for (input_file, cache_file, prefix, expected_version, current_input, current_key) in [

@@ -235,8 +235,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "c",
         // [04-FIT-26] (chelis#1853): one projected line per diagnostic.
         "error: Check errors: Type errors:\n  PrecisionMismatch: type variable bounded by dtype \
-         family `Float` (the active float dtypes) cannot be instantiated at `i32` at byte 51 \
-         [surf:51..57] (suggestion: Insert explicit cast)\n",
+         family `Float` (the active float dtypes) cannot be instantiated at `i32` at byte 47 \
+         [surf:47..53] (suggestion: Insert explicit cast)\n",
     ),
     (
         "c_nonliteral_window",
@@ -248,7 +248,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
          chelis#1058: window and stride lists must be integer literals for the compiled lane \
          today; a runtime-parameterized window previously lowered to a silent no-op; \
-         chelis#1058 owns compiled runtime-list support at source span `surf:86..89`\n",
+         chelis#1058 owns compiled runtime-list support at source span `surf:82..85`\n",
     ),
     (
         "hip_int64_neg",

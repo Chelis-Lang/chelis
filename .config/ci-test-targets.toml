@@ -668,6 +668,11 @@ disposition = "packages"
 packages = ["chelis-types", "chelis-compiler-api"]
 
 [[path_rule]]
+prefix = "bindings/python/tests/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"
 workflow = "ci.yml"
