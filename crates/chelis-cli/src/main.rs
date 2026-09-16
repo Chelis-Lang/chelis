@@ -1099,11 +1099,15 @@ fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::
             Ok(checked) => checked.annotated_exprs().to_vec(),
             Err(result) => {
                 // [04-FIT-26]: the shared projected rendering, never `{:?}`.
-                let lines = chelis_compiler_api::check_report::render_check_errors(&result.errors)?;
-                return Err(format!(
-                    "`chelis deep --annotate` requires a well-typed program; type errors:\n{lines}"
-                )
-                .into());
+                const PREFIX: &str =
+                    "`chelis deep --annotate` requires a well-typed program; type errors:";
+                return Err(
+                    match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
+                        Ok(lines) => format!("{PREFIX}\n{lines}"),
+                        Err(reason) => format!("{PREFIX} {reason}"),
+                    }
+                    .into(),
+                );
             }
         }
     } else {

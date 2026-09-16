@@ -2630,11 +2630,12 @@ owns that gap.)
 
 ### 6.6 Textual Rendering Of Check Diagnostics
 
-A command that stops on a checker rejection and reports it as text rather
+A command that stops on a check rejection and reports it as text rather
 than as the §6.4 document -- `chelis build`, for example -- still reports
 the same diagnostics.
 
-> **[04-FIT-26]** A textual rendering of a checker rejection SHALL render
+> **[04-FIT-26]** A textual rendering of a check rejection -- type, effect,
+> or linearity diagnostics alike, the stages [04-FIT-15] names -- SHALL render
 > each diagnostic from the projection §6.4's `errors` elements carry: its
 > `kind` vocabulary member, its `message`, and its location as
 > [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
