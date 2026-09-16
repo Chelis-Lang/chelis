@@ -837,6 +837,15 @@ reason = "script-unit validates trusted prior-receipt discovery, exact patch rep
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/ci_pr_lifecycle_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates complete PR Actions collection, lifecycle attribution, billing estimates and trace-backed wait accounting"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/test_ci_change_owned.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -897,6 +906,15 @@ workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
 reason = "rebase evidence reuse and negative fallback controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_pr_lifecycle_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the lifecycle report attribution, chronology, job-accounting and Markdown contracts execute in script-unit"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
