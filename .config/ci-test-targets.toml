@@ -723,6 +723,15 @@ reason = "the strict v2 ownership manifest is parsed and mutation-tested by scri
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = ".config/ci-change-owned-durations.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the reviewed target-duration baseline is authenticated and mutation-tested by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = ".github/workflows/ci.yml"
 disposition = "owner"
 workflow = "ci.yml"

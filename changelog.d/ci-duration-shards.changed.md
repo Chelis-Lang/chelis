@@ -1,0 +1,1 @@
+Change-owned pull-request tests are now assigned to four shards using reviewed target-duration evidence, preventing a hash collision of slow targets from overloading one runner without increasing the job count or changing test coverage.

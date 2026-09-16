@@ -152,6 +152,38 @@ def load_config(content: str | None = None) -> owned.Config:
         return owned.read_config(path)
 
 
+def duration_baseline(
+    weights: dict[owned.Identity, int] | None = None,
+) -> owned.DurationBaseline:
+    return owned.DurationBaseline(
+        default_milliseconds=owned.DEFAULT_DURATION_MILLISECONDS,
+        targets=weights or {},
+        digest="d" * 64,
+    )
+
+
+def shard_fields(
+    change_owned: list[owned.Identity],
+    package_expansion: list[owned.Identity],
+) -> dict:
+    change_owned_shards, planning = owned.change_owned_shard_plan(
+        change_owned,
+        duration_baseline(),
+    )
+    return {
+        "shard_planning": {
+            "change_owned": planning,
+            "package_expansion": {
+                "algorithm": owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+            },
+        },
+        "shards": {
+            "change_owned": change_owned_shards,
+            "package_expansion": owned.shard_map(package_expansion),
+        },
+    }
+
+
 class SchemaTests(unittest.TestCase):
     def test_strict_schema_reads_all_five_row_kinds(self) -> None:
         config = load_config(config_text(manual_only_target=("q", "smoke")))
@@ -376,6 +408,7 @@ class SchemaTests(unittest.TestCase):
             ("ci.yml", "docs"),
         )
         for path in (
+            ".config/ci-change-owned-durations.json",
             ".github/workflows/conformance.yml",
             ".github/workflows/pr-base-retarget.yml",
             ".github/workflows/pr-candidate-receipt.yml",
@@ -544,6 +577,195 @@ class SchemaTests(unittest.TestCase):
                 load_config(text)
 
 
+class DurationBaselineTests(unittest.TestCase):
+    def _write_sample(
+        self,
+        root: Path,
+        *,
+        candidate_sha: str,
+        list_seconds: float,
+        run_seconds: float,
+        receipt_success: bool,
+    ) -> tuple[Path, Path]:
+        identity = owned.Identity("p", "smoke")
+        plan = {
+            "version": owned.PLAN_VERSION,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": candidate_sha,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p"],
+            "eligible_targets": [identity.canonical],
+            "change_owned": [identity.canonical],
+            "package_expansion": [],
+            "standing_targets": [],
+            "standing_coverage_reuse": [],
+            "manual_only_targets": [],
+            "target_exclusions": [],
+            "test_exclusions": [],
+            **shard_fields([identity], []),
+        }
+        owned.attach_plan_digest(plan)
+        plan_path = root / "plan.json"
+        plan_path.write_bytes(owned.canonical_json(plan))
+        receipts_root = root / "receipts"
+
+        for shard in owned.SHARDS:
+            selected = plan["shards"]["change_owned"][str(shard)]
+            output = receipts_root / f"shard-{shard}"
+            output.mkdir(parents=True)
+            tests = [f"{canonical}::fast_case" for canonical in selected]
+            timings = {
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:01Z",
+                "elapsed_seconds": list_seconds + run_seconds,
+                "workspace_products": None,
+                "targets": {
+                    canonical: {
+                        "command_group": [canonical],
+                        "list_started_at": "2026-09-16T00:00:00Z",
+                        "list_finished_at": "2026-09-16T00:00:00Z",
+                        "list_seconds": list_seconds,
+                        "run_started_at": "2026-09-16T00:00:00Z",
+                        "run_finished_at": "2026-09-16T00:00:01Z",
+                        "run_seconds": run_seconds,
+                    }
+                    for canonical in selected
+                },
+            }
+            sidecars = {
+                "commands.json": owned.canonical_json([]),
+                "timings.json": owned.canonical_json(timings),
+                "test-list.json": owned.canonical_json(
+                    {
+                        "selected_targets": selected,
+                        "selected_tests": tests,
+                        "executed_targets": selected,
+                        "executed_tests": tests,
+                    }
+                ),
+                "junit.xml": b"<testsuite/>\n",
+            }
+            for name, payload in sidecars.items():
+                (output / name).write_bytes(payload)
+            failed = bool(selected) and not receipt_success
+            receipt = {
+                "version": owned.RECEIPT_VERSION,
+                "lane": "change-owned",
+                "shard": shard,
+                "plan_digest": plan["plan_digest"],
+                "selected_targets": selected,
+                "executed_targets": selected,
+                "selected_tests": tests,
+                "executed_tests": tests,
+                "commands_file": "commands.json",
+                "timings_file": "timings.json",
+                "test_list_file": "test-list.json",
+                "junit_file": "junit.xml",
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:01Z",
+                "elapsed_seconds": list_seconds + run_seconds,
+                "soft_budget_seconds": None,
+                "soft_budget_exceeded": False,
+                "sidecars": {
+                    name: owned.sha256_bytes(payload)
+                    for name, payload in sidecars.items()
+                },
+                "success": not failed,
+                "failures": ["test verdict failed"] if failed else [],
+            }
+            owned.attach_receipt_digest(receipt)
+            (output / "receipt.json").write_bytes(owned.canonical_json(receipt))
+        return plan_path, receipts_root
+
+    def test_builder_uses_max_completed_observation_independent_of_verdict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            first_sample = self._write_sample(
+                first,
+                candidate_sha="b" * 40,
+                list_seconds=1.0,
+                run_seconds=4.0,
+                receipt_success=False,
+            )
+            second_sample = self._write_sample(
+                second,
+                candidate_sha="c" * 40,
+                list_seconds=1.0,
+                run_seconds=6.0,
+                receipt_success=True,
+            )
+            result = owned.build_duration_baseline(
+                [first_sample, second_sample]
+            )
+            self.assertEqual(
+                result["targets"]["p::smoke"],
+                {"milliseconds": 7000, "samples": 2},
+            )
+            output = root / "baseline.json"
+            output.write_bytes(owned.canonical_json(result))
+            baseline = owned.load_duration_baseline(output)
+            self.assertEqual(
+                baseline.targets[owned.Identity("p", "smoke")],
+                7000,
+            )
+
+    def test_baseline_rejects_duplicate_keys_and_invalid_durations(self) -> None:
+        duplicate = (
+            '{"version":1,"version":1,"default_milliseconds":30000,'
+            '"sources":[],"targets":{}}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baseline.json"
+            path.write_text(duplicate)
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                owned.load_duration_baseline(path)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_milliseconds": 30000,
+                        "sources": [
+                            {
+                                "candidate_sha": "b" * 40,
+                                "plan_digest": "c" * 64,
+                            }
+                        ],
+                        "targets": {
+                            "p::smoke": {
+                                "milliseconds": 0,
+                                "samples": 1,
+                            }
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                owned.load_duration_baseline(path)
+
+    def test_builder_rejects_nonfinite_authenticated_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = self._write_sample(
+                Path(tmp),
+                candidate_sha="b" * 40,
+                list_seconds=1.0,
+                run_seconds=float("nan"),
+                receipt_success=True,
+            )
+            with self.assertRaisesRegex(ValueError, "finite"):
+                owned.build_duration_baseline([sample])
+
+
 class MetadataAndDiffTests(unittest.TestCase):
     def test_default_feature_eligibility_and_duplicate_names_are_package_qualified(self) -> None:
         targets = owned.integration_targets(fixture_metadata())
@@ -662,12 +884,13 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["standing_coverage_reuse"], [])
         self.assertEqual(
             plan["shards"]["change_owned"],
-            owned.shard_map(
+            owned.change_owned_shard_plan(
                 [
                     owned.Identity("p", "default_gated"),
                     owned.Identity("p", "smoke"),
-                ]
-            ),
+                ],
+                duration_baseline(),
+            )[0],
         )
         owned.verify_plan_digest(plan)
 
@@ -1219,6 +1442,71 @@ class ShardingAndExecutionTests(unittest.TestCase):
             owned.shard_for(owned.Identity("other-package", "smoke")),
         )
 
+    def test_duration_balancing_spreads_slow_hash_collisions(self) -> None:
+        slow: list[owned.Identity] = []
+        index = 0
+        while len(slow) < len(owned.SHARDS):
+            identity = owned.Identity("p", f"slow_{index}")
+            if owned.shard_for(identity) == 0:
+                slow.append(identity)
+            index += 1
+        ordinary = [owned.Identity("p", f"ordinary_{n}") for n in range(40)]
+        weights = {
+            identity: 100_000 if identity in slow else 5_000
+            for identity in slow + ordinary
+        }
+        balanced, estimates = owned.duration_shard_map(weights)
+        repeated, repeated_estimates = owned.duration_shard_map(
+            dict(reversed(list(weights.items())))
+        )
+        self.assertEqual((balanced, estimates), (repeated, repeated_estimates))
+        self.assertEqual(
+            sorted(row for rows in balanced.values() for row in rows),
+            sorted(identity.canonical for identity in weights),
+        )
+        self.assertEqual(
+            {
+                next(
+                    shard
+                    for shard, rows in balanced.items()
+                    if identity.canonical in rows
+                )
+                for identity in slow
+            },
+            {str(shard) for shard in owned.SHARDS},
+        )
+        hash_loads = {str(shard): 0 for shard in owned.SHARDS}
+        for identity, milliseconds in weights.items():
+            hash_loads[str(owned.shard_for(identity))] += milliseconds
+        self.assertLess(max(estimates.values()), max(hash_loads.values()))
+
+    def test_unknown_targets_use_the_conservative_default_and_stay_even(self) -> None:
+        identities = [owned.Identity("p", f"unknown_{index}") for index in range(9)]
+        shards, planning = owned.change_owned_shard_plan(
+            identities,
+            duration_baseline(),
+        )
+        self.assertEqual(
+            set(planning["weights_milliseconds"].values()),
+            {owned.DEFAULT_DURATION_MILLISECONDS},
+        )
+        counts = [len(shards[str(shard)]) for shard in owned.SHARDS]
+        self.assertLessEqual(max(counts) - min(counts), 1)
+
+    def test_plan_rejects_duration_assignment_tampering(self) -> None:
+        plan = self._plan()
+        source = next(
+            shard
+            for shard in owned.SHARDS
+            if plan["shards"]["change_owned"][str(shard)]
+        )
+        target = (source + 1) % len(owned.SHARDS)
+        canonical = plan["shards"]["change_owned"][str(source)].pop()
+        plan["shards"]["change_owned"][str(target)].append(canonical)
+        owned.attach_plan_digest(plan)
+        with self.assertRaisesRegex(ValueError, "duration planning"):
+            owned.verify_plan_digest(plan)
+
     def test_commands_are_package_scoped_and_apply_only_exact_test_exclusions(self) -> None:
         config = load_config()
         p = owned.Identity("p", "smoke")
@@ -1446,14 +1734,10 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
             ],
-            "shards": {
-                "change_owned": owned.shard_map(
-                    [identity] if lane_key == "change_owned" else []
-                ),
-                "package_expansion": owned.shard_map(
-                    [identity] if lane_key == "package_expansion" else []
-                ),
-            },
+            **shard_fields(
+                [identity] if lane_key == "change_owned" else [],
+                [identity] if lane_key == "package_expansion" else [],
+            ),
         }
         owned.attach_plan_digest(plan)
         return plan
@@ -1979,12 +2263,10 @@ class ReportTests(unittest.TestCase):
             "test_exclusions": [
                 {"identity": "p::smoke::slow_case", "owner": OWNER}
             ],
-            "shards": {
-                "change_owned": owned.shard_map(
-                    [owned.Identity("q", "smoke")]
-                ),
-                "package_expansion": owned.shard_map([]),
-            },
+            **shard_fields(
+                [owned.Identity("q", "smoke")],
+                [],
+            ),
         }
         owned.attach_plan_digest(self.plan)
 
@@ -2057,6 +2339,11 @@ class ReportTests(unittest.TestCase):
         )
         self.assertTrue(report["success"])
         self.assertEqual(report["covered_targets"], sorted(self.plan["change_owned"]))
+        self.assertEqual(len(report["shard_durations"]), len(owned.SHARDS))
+        self.assertEqual(
+            {row["actual_milliseconds"] for row in report["shard_durations"]},
+            {1000},
+        )
 
     def test_required_report_rejects_missing_digest_duplicate_uncovered_excluded_and_failure(self) -> None:
         mutations = [

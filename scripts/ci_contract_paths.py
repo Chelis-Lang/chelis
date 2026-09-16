@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 CI_CONTRACT_EXACT_PATHS: frozenset[str] = frozenset(
     {
+        ".config/ci-change-owned-durations.json",
         ".config/ci-test-targets.toml",
         "AGENTS.md",
         "agent-skills/redteam-exec/SKILL.md",
