@@ -427,6 +427,10 @@ class SchemaTests(unittest.TestCase):
                     ("ci.yml", "script-unit"),
                 )
         exact_job_owners = {
+            "editors/vscode/syntaxes/chelis.tmLanguage.json": (
+                "ci.yml",
+                "script-unit",
+            ),
             "scripts/compiled_value_ownership_oracle.py": (
                 "heavy-e2e.yml",
                 "compiled-value-ownership-phase0-oracle",
@@ -434,6 +438,14 @@ class SchemaTests(unittest.TestCase):
             "scripts/faithful_observation_phase2_oracle.py": (
                 "heavy-e2e.yml",
                 "faithful-observation-phase2-oracle",
+            ),
+            "tests/conformance/hull/build_corpus.py": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "tests/conformance/hull/known_conservative.json": (
+                "conformance.yml",
+                "conformance",
             ),
             "tests/conformance/hull/programs/": (
                 "conformance.yml",

@@ -672,6 +672,15 @@ prefix = "bindings/python/tests/"
 disposition = "packages"
 packages = ["chelis-python"]
 
+[[path_rule]]
+prefix = "editors/vscode/syntaxes/chelis.tmLanguage.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the issue 1592 script-unit boundary test checks canonical integer spelling in the maintained VS Code grammar"
+tracking_issue = "chelis#1592"
+
 # Exact executable-corpus sources exercised by
 # chelis-e2e::spec_all_executable_examples_parse_and_check. Keep these exact:
 # unrelated future example files must acquire their own evidence-backed owner.
@@ -923,6 +932,24 @@ workflow = "conformance.yml"
 job = "conformance"
 cadence = "pull_request and push"
 reason = "the required Hull gate executes every frozen program against the candidate compiler"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/build_corpus.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the issue 1592 script-unit boundary test checks canonical integer spelling in the maintained Hull corpus builder"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/known_conservative.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull integrity and conformance gates load the committed conservative-reference fixture"
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
