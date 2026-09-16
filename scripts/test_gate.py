@@ -845,16 +845,14 @@ class StageUnionTests(unittest.TestCase):
         self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
         self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
 
-    def test_targeted_rebase_units_exclude_integration_targets(self):
-        self.assertEqual(
+    def test_targeted_rebase_units_require_an_exact_package_frontier(self):
+        with self.assertRaisesRegex(ValueError, gate.TARGETED_PACKAGES_ENV):
             gate.selected_stage_commands(
                 "targeted-units",
                 tests_only=False,
                 support_only=False,
                 partition=None,
-            ),
-            [gate.NEXTEST_TARGETED_UNITS],
-        )
+            )
         self.assertIn("--lib", gate.NEXTEST_TARGETED_UNITS)
         self.assertIn("--bins", gate.NEXTEST_TARGETED_UNITS)
         self.assertNotIn("--tests", gate.NEXTEST_TARGETED_UNITS)
@@ -868,12 +866,16 @@ class StageUnionTests(unittest.TestCase):
             environ={gate.TARGETED_PACKAGES_ENV: "chelis-types,chelis-cli"},
         )
         self.assertEqual(commands[0], gate.FMT_CHECK)
-        for command in commands[1:]:
+        for command in commands[1:3]:
             self.assertNotIn("--workspace", command)
             self.assertIn("chelis-types", command)
             self.assertIn("chelis-cli", command)
         self.assertIn("--tests", commands[1])
         self.assertNotIn("--tests", commands[2])
+        self.assertIn(gate.DOCTEST_TYPES, commands)
+        self.assertNotIn(gate.DOCTEST_IR, commands)
+        self.assertNotIn(gate.DOCTEST_COMPILER_API, commands)
+        self.assertNotIn(gate.DOCTEST_PIPELINE_CORE, commands)
 
     def test_targeted_rebase_package_frontier_rejects_shell_payloads(self):
         with self.assertRaisesRegex(ValueError, gate.TARGETED_PACKAGES_ENV):

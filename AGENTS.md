@@ -196,9 +196,11 @@ obligations.
   that complete synthetic-candidate delta to be documentation-only; the PR itself may
   contain code. A code-bearing delta is mapped to exact Cargo packages and reviewed
   owner jobs. Package seeds expand through reverse workspace dependencies, and the
-  targeted lane runs their Rust policy and default-feature library/binary units, all
-  eligible integration targets in that package frontier, and only the additional
-  Python/script, SMT, backend, diagnostic or Hull owners selected by the frontier.
+  targeted lane runs package-scoped Clippy, formatting, default-feature
+  library/binary units and existing doctest owners, all eligible integration targets
+  in that package frontier, and only the additional Python/script, SMT, backend,
+  diagnostic or Hull owners selected by the frontier. A Rust-policy owner with no
+  package frontier runs the complete `lint-and-unit` stage.
   Before fan-out, the trusted verifier applies the planner's exact Cargo target
   identities and package/path rules to every delta path. An ambiguous target, path
   owned only by standing or nightly evidence, CI-policy delta, missing or ineligible

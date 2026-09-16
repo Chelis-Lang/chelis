@@ -396,6 +396,12 @@ DOCTEST_PIPELINE_CORE: list[str] = [
     "chelis-pipeline-core",
     "--doc",
 ]
+TARGETED_DOCTESTS: dict[str, list[str]] = {
+    "chelis-types": DOCTEST_TYPES,
+    "chelis-ir": DOCTEST_IR,
+    "chelis-compiler-api": DOCTEST_COMPILER_API,
+    "chelis-pipeline-core": DOCTEST_PIPELINE_CORE,
+}
 # This script verifies the exact compiler diagnostic from the standalone
 # raw-offset fixture. The marker is replaced with the same validated managed
 # interpreter exported to child commands as PYO3_PYTHON.
@@ -2780,7 +2786,11 @@ def selected_stage_commands(
     commands = STAGES[stage]
     if stage == "targeted-units":
         raw = (environ or {}).get(TARGETED_PACKAGES_ENV, "")
-        packages = raw.split(",") if raw else []
+        if not raw:
+            raise ValueError(
+                f"{TARGETED_PACKAGES_ENV} must name the exact package frontier"
+            )
+        packages = raw.split(",")
         if any(
             not package
             or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", package) is None
@@ -2815,6 +2825,11 @@ def selected_stage_commands(
             ]
             targeted_units[3:3] = package_args
             commands = [FMT_CHECK, targeted_clippy, targeted_units]
+            commands.extend(
+                TARGETED_DOCTESTS[package]
+                for package in packages
+                if package in TARGETED_DOCTESTS
+            )
     if tests_only:
         selected = [list(commands[0])]
     elif support_only:

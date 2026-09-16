@@ -547,6 +547,9 @@ def targeted_rebase_frontier(
             unsafe_paths.add(path)
             continue
         if targets:
+            if any(identity in config.target_exclusions for identity in targets):
+                unsafe_paths.add(path)
+                continue
             package = next(iter(targets)).package
             if package not in candidate_names:
                 unsafe_paths.add(path)
@@ -879,6 +882,7 @@ def make_plan(
     source_reader: Callable[[str], str],
     event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
+    targeted_packages: Sequence[str] = (),
 ) -> dict[str, Any]:
     if mode not in {"pull_request", "push", "targeted_rebase"}:
         raise ValueError(f"unsupported planning mode: {mode}")
@@ -896,7 +900,25 @@ def make_plan(
     candidate_packages = package_infos(candidate_metadata)
     candidate_package_names = {package.name for package in candidate_packages}
 
-    selected_packages: set[str] = set()
+    trusted_targeted_packages = set(targeted_packages)
+    if len(trusted_targeted_packages) != len(targeted_packages):
+        raise ValueError("targeted package frontier contains duplicates")
+    if any(not IDENTIFIER.fullmatch(package) for package in targeted_packages):
+        raise ValueError("targeted package frontier contains an invalid package")
+    if mode != "targeted_rebase" and trusted_targeted_packages:
+        raise ValueError(
+            "only targeted_rebase planning accepts a targeted package frontier"
+        )
+    unknown_targeted_packages = sorted(
+        trusted_targeted_packages - candidate_package_names
+    )
+    if unknown_targeted_packages:
+        raise ValueError(
+            "targeted package frontier contains unknown workspace packages: "
+            f"{unknown_targeted_packages}"
+        )
+
+    selected_packages: set[str] = set(trusted_targeted_packages)
     change_owned: set[Identity] = set()
     dispositions: list[dict[str, Any]] = []
     target_dispositions: list[dict[str, Any]] = []
@@ -1728,6 +1750,7 @@ def generate_plan(
     before: str,
     after: str,
     config_path: Path,
+    targeted_packages: Sequence[str] = (),
 ) -> dict[str, Any]:
     head = _commit(repo, "HEAD")
     if event_name == "pull_request":
@@ -1738,9 +1761,10 @@ def generate_plan(
         mode = "pull_request"
         event_pr_head: str | None = pr_head
     elif event_name == "targeted_rebase":
-        if not pr_head or not before:
+        if not pr_head or not before or not targeted_packages:
             raise ValueError(
-                "targeted_rebase planning requires --pr-head and --before"
+                "targeted_rebase planning requires --pr-head, --before, "
+                "and --targeted-packages"
             )
         pr_head = _commit(repo, pr_head)
         _, candidate = resolve_pr_commits(repo, head, pr_head)
@@ -1759,6 +1783,10 @@ def generate_plan(
         event_pr_head = None
     else:
         raise ValueError(f"unsupported --event-name: {event_name!r}")
+    if mode != "targeted_rebase" and targeted_packages:
+        raise ValueError(
+            "--targeted-packages is valid only for targeted_rebase planning"
+        )
 
     config = read_config(config_path)
     base_metadata = metadata_at(repo, base)
@@ -1778,6 +1806,7 @@ def generate_plan(
         tracked_paths=tracked,
         base_tracked_paths=base_tracked,
         source_reader=lambda path: source_at(repo, candidate, path),
+        targeted_packages=targeted_packages,
     )
 
 
@@ -2746,6 +2775,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--pr-head", default="")
     plan.add_argument("--before", default="")
     plan.add_argument("--after", default="")
+    plan.add_argument(
+        "--targeted-packages",
+        default="",
+        help="trusted comma-separated package frontier for targeted_rebase",
+    )
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument(
         "--config",
@@ -2789,6 +2823,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "plan":
+        targeted_packages = (
+            tuple(args.targeted_packages.split(","))
+            if args.targeted_packages
+            else ()
+        )
         result = generate_plan(
             ROOT,
             event_name=args.event_name,
@@ -2796,6 +2835,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             before=args.before,
             after=args.after,
             config_path=args.config,
+            targeted_packages=targeted_packages,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(canonical_json(result))

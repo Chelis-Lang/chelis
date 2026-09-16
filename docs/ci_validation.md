@@ -102,11 +102,13 @@ documentation-only; the PR itself may contain code. It runs the contract
 preflight, PR acknowledgements, changelog policy, Docs, and inexpensive metadata
 paths. A code-bearing delta is classified into exact packages and reviewed owner
 jobs. Package seeds expand through reverse workspace dependencies. The targeted
-lane runs Rust policy and default-feature library/binary units for that package
-frontier, every eligible integration target in it, and only the additional
-Python/script, SMT, backend, diagnostic or Hull owners selected by the frontier.
-This includes same-file and same-line conflict resolutions and target movement
-after the rebase. Required contexts still report on the rewritten head; reuse
+lane runs package-scoped Clippy, formatting, default-feature library/binary
+units and existing doctest owners for that package frontier, every eligible
+integration target in it, and only the additional Python/script, SMT, backend,
+diagnostic or Hull owners selected by the frontier. A Rust-policy owner with no
+package frontier runs the complete `lint-and-unit` stage. This includes
+same-file and same-line conflict resolutions and target movement after the
+rebase. Required contexts still report on the rewritten head; reuse
 short-circuits only work outside the interaction frontier and final-expansion
 work whose trusted evidence remains applicable.
 The collector issues receipts only for ordinary `pull_request` candidates. A

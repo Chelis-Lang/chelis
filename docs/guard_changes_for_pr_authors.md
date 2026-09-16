@@ -67,15 +67,17 @@ head-rewrite record for review. The prior receipt already covers the earlier PR
 patch, so the cheap docs lane requires only that complete synthetic-candidate
 delta to be documentation-only; the PR itself may contain code. A code-bearing
 delta is mapped to exact packages and reviewed owner jobs. Package seeds expand
-through reverse workspace dependencies, and the targeted lane runs their Rust
-policy and default-feature library/binary units, all eligible integration
-targets in that package frontier, and only the additional Python/script, SMT,
-backend, diagnostic or Hull owners selected by the frontier. The trusted
-verifier applies the planner's exact Cargo target identities and package/path
-rules before fan-out; ambiguous targets, paths owned only by standing or nightly
-evidence, CI-policy changes, retargets, missing receipts, non-forward updates,
-unmapped paths, and uncertain history run full CI. That includes a changed
-`ci-fast` input because targeted rebases otherwise skip that standing job. The
+through reverse workspace dependencies, and the targeted lane runs
+package-scoped Clippy, formatting, default-feature library/binary units and
+existing doctest owners, all eligible integration targets in that package
+frontier, and only the additional Python/script, SMT, backend, diagnostic or
+Hull owners selected by the frontier. A Rust-policy owner with no package
+frontier runs the complete `lint-and-unit` stage. The trusted verifier applies
+the planner's exact Cargo target identities and package/path rules before
+fan-out; ambiguous targets, paths owned only by standing or nightly evidence,
+CI-policy changes, retargets, missing receipts, non-forward updates, unmapped
+paths, and uncertain history run full CI. That includes a changed `ci-fast`
+input because targeted rebases otherwise skip that standing job. The
 fail-closed full lane overrides the ordinary docs-only skip. Every required
 context still reports on the new head.
 Patch changes and path overlap are reported so the standing reviewer can

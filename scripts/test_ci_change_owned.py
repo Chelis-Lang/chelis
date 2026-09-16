@@ -627,6 +627,31 @@ class PlanningTests(unittest.TestCase):
         )
         owned.verify_plan_digest(plan)
 
+    def test_targeted_rebase_preserves_the_trusted_package_frontier(self) -> None:
+        sources = fixture_sources()
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[
+                owned.ChangeRecord("D", "crates/p/tests/default_gated.rs")
+            ],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+            targeted_packages=("p",),
+        )
+
+        self.assertEqual(plan["selected_packages"], ["p"])
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::smoke"],
+        )
+        owned.verify_plan_digest(plan)
+
     def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
         plan = self.plan(
             [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")],
@@ -864,6 +889,19 @@ class PlanningTests(unittest.TestCase):
             "rule",
         )
 
+    def test_targeted_frontier_rejects_a_nightly_excluded_target(self) -> None:
+        frontier = owned.targeted_rebase_frontier(
+            ["crates/p/tests/heavy.rs"],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+        )
+
+        self.assertEqual(frontier["packages"], [])
+        self.assertEqual(
+            frontier["unsafe_paths"], ["crates/p/tests/heavy.rs"]
+        )
+
     def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:
         plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/heavy.rs")])
         self.assertEqual(plan["change_owned"], [])
@@ -940,6 +978,7 @@ class PlanningTests(unittest.TestCase):
                 before="prior",
                 after="",
                 config_path=Path("config.toml"),
+                targeted_packages=("p",),
             )
 
         self.assertEqual(result, {"plan": "ok"})
@@ -949,6 +988,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(make.call_args.kwargs["base_sha"], prior_candidate)
         self.assertEqual(make.call_args.kwargs["candidate_sha"], current_candidate)
         self.assertEqual(make.call_args.kwargs["event_pr_head"], pr_head)
+        self.assertEqual(make.call_args.kwargs["targeted_packages"], ("p",))
 
 
 class ShardingAndExecutionTests(unittest.TestCase):

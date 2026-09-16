@@ -467,7 +467,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install cargo-nextest for targeted Rust units
-        if: needs.changes.outputs.rebase_lane == 'targeted'
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
         uses: taiki-e/install-action@nextest
 
       # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` so the
@@ -507,11 +507,11 @@ jobs:
       # and fails if any gate step is not produced by gate.py. See
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
-        if: needs.changes.outputs.rebase_lane != 'targeted'
+        if: needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''
         run: python3 scripts/gate.py lint-and-unit
 
       - name: Run affected Rust policy and units for targeted rebase
-        if: needs.changes.outputs.rebase_lane == 'targeted'
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
         env:
           CHELIS_TARGETED_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
         run: python3 scripts/gate.py targeted-units
@@ -978,6 +978,7 @@ jobs:
           AFTER: ${{ needs.changes.outputs.candidate_sha }}
           REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
           REBASE_BEFORE: ${{ needs.changes.outputs.rebase_before }}
+          REBASE_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
         run: |
           event_name="$EVENT_NAME"
           before="$BEFORE"
@@ -990,6 +991,7 @@ jobs:
             --pr-head "$PR_HEAD" \
             --before "$before" \
             --after "$AFTER" \
+            --targeted-packages "$REBASE_PACKAGES" \
             --output target/integration-change/plan.json
 
       - name: Upload integration change plan

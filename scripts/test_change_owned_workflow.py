@@ -136,6 +136,8 @@ def assert_change_owned_topology(
     test.assertIn("targeted_rebase", _run_steps(planner))
     test.assertIn("REBASE_LANE", _run_steps(planner))
     test.assertIn("REBASE_BEFORE", _run_steps(planner))
+    test.assertIn("REBASE_PACKAGES", _run_steps(planner))
+    test.assertIn("--targeted-packages", _run_steps(planner))
     test.assertIn("integration-change-plan", str(planner))
     test.assertIn("target/integration-change/plan.json", str(planner))
 
