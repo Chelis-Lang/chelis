@@ -275,7 +275,7 @@ fn malformed_affine_metadata_traps_before_returning() {
             "stride"
         };
         assert!(
-            stderr.ends_with(&format!("numeric trap: {class} in {op} at int64\n")),
+            stderr.ends_with(&format!("numeric trap: {class} in {op} at i64\n")),
             "{case}: {stderr}"
         );
     }

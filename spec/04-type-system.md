@@ -33,10 +33,10 @@ The active primitive set is exactly ten names:
 (t-prim {} f64)       ;; 64-bit float
 (t-prim {} bf16)      ;; bfloat16
 (t-prim {} f16)       ;; 16-bit float (IEEE 754 binary16)
-(t-prim {} int8)      ;; 8-bit signed integer
-(t-prim {} int16)     ;; 16-bit signed integer
-(t-prim {} int32)     ;; 32-bit signed integer
-(t-prim {} int64)     ;; 64-bit signed integer
+(t-prim {} i8)        ;; 8-bit signed integer
+(t-prim {} i16)       ;; 16-bit signed integer
+(t-prim {} i32)       ;; 32-bit signed integer
+(t-prim {} i64)       ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
 (t-prim {} string)    ;; UTF-8 string
 ```
@@ -44,7 +44,7 @@ The active primitive set is exactly ten names:
 These closed subsets are used throughout the specs:
 
 - the **eight active numeric dtypes** are the four floats (`f16`, `bf16`,
-  `f32`, `f64`) and four signed integers (`int8`, `int16`, `int32`, `int64`);
+  `f32`, `f64`) and four signed integers (`i8`, `i16`, `i32`, `i64`);
 - the **nine active tensor element dtypes** are those eight numeric dtypes plus
   `bool`; and
 - `string` is an active host primitive, but is neither a numeric dtype nor a
@@ -53,6 +53,15 @@ These closed subsets are used throughout the specs:
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
 spellings in §1.1.1 are rejected.
+
+The retired v0.18 spellings `int8`, `int16`, `int32`, and `int64` are not
+primitive names. Normal Surf and Deep ingress reject them and direct the
+author to the corresponding versioned migration command. They remain the
+stable ecosystem spellings of existing JSON, WireDag, cache, and ABI-facing
+interchange contracts; that external vocabulary does not make them source or
+Deep type names. Retired spellings are not available to implicit or explicit
+type-variable binding. This exclusion does not depend on classifying them as
+future-reserved primitive names.
 
 #### 1.1.1 Reserved And Rejected Numeric Names
 
@@ -159,10 +168,10 @@ the spec or in user-facing docs must resolve to a cell in this table.
 | f64    | admitted                                                                                                          | admitted                                                                                                                                                                                                 | **rejected (hardware)**                      | admitted  |
 | bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to that operation's own restrictions | admitted on Apple7+ (M3 or later)            | admitted  |
 | f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to that operation's own restrictions | admitted                                     | admitted  |
-| int8   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
-| int16  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
-| int32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
-| int64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i8   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i16  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
@@ -953,7 +962,7 @@ A generic length function accepting `List[a]` can leave `a` unconstrained:
 the `List` constructor supplies the admission information that `len` needs.
 In contrast, `def size(x) = len(x)` cannot become an implicitly constrained
 generic function; a later top-level call with a list does not repair the
-declaration. Neither does a signature promising `a -> int64` for arbitrary
+declaration. Neither does a signature promising `a -> i64` for arbitrary
 `a`. An unannotated local lambda applying `len` may still bind monomorphically
 to a list at its first application within the enclosing declaration under
 [04-INF-1]. The identity function needs no operation-admission restriction
@@ -1138,11 +1147,11 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | `neg`, `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil`, `round` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved; each operation's dtype domain remains as specified in spec/05 |
 | `is_nan`, `is_finite`, `is_infinite` | `tensor[D, p_float]` | `tensor[D, bool]` | Dimensions preserved |
 | `sum(x, axis=k, accumulator=a)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, sum_result(p,a)]` | Remove dimension at axis k; `sum_result` is §5.7.1's result-precision rule |
-| `count(x, axis=k)` | `tensor[d₁,...,dₙ, bool]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k; the named multi-axis form removes every selected axis |
+| `count(x, axis=k)` | `tensor[d₁,...,dₙ, bool]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, i64]` | Remove dimension at axis k; the named multi-axis form removes every selected axis |
 | `mean`, `max_reduce`, `min_reduce`, `prod_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k; `mean` additionally requires float `p` |
-| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k |
+| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, i64]` | Remove dimension at axis k |
 | `cumsum(x, axis=k)` | `tensor[D, p]` | `tensor[D, sum_result(p,default(p))]` | Dimensions preserved; every prefix uses §5.7.1's default sum accumulator |
-| `sort(x, axis=k)` | `tensor[D, p]` | `(tensor[D, p], tensor[D, int64])` | Values and stable source indices preserve the input dimensions |
+| `sort(x, axis=k)` | `tensor[D, p]` | `(tensor[D, p], tensor[D, i64])` | Values and stable source indices preserve the input dimensions |
 | `where(cond, yes, no)` | `tensor[D, bool]`, `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | All three dimension lists match exactly |
 | `clamp(x, lower, upper)` | `tensor[D, p]` plus rank-zero or `tensor[D, p]` bounds | `tensor[D, p]` | Bounds are explicitly rank-zero or shape-equal; no broadcasting rule is inferred |
 | `diagonal(x, axis1, axis2)` | `tensor[D, p]` | `tensor[D_diagonal, p]` | Remove axis2 and replace axis1 by the smaller selected extent as [05-OP-33] specifies |
@@ -1333,7 +1342,7 @@ rank-uniform-list guarantee above is unaffected.
 ;;   b_flat = reshape(
 ;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
 ;;                [cast(3.0, f32), cast(4.0, f32)]]),
-;;     [cast(4, int64)])
+;;     [cast(4, i64)])
 ;;   [a, b_flat]
 ;; }
 ```
@@ -1435,7 +1444,7 @@ symbolically.
 
 Multiple axes may be reduced in one call. A rank-polymorphic operand uses
 unique named axes — `sum(x, seq, head)` or `count(mask, seq, head)`. A
-concrete-rank operand may instead use one or more compile-time int32 positional
+concrete-rank operand may instead use one or more compile-time i32 positional
 axes — `sum(x, 1i32, 3i32)` or `count(mask, -1i32, 0i32)`. Each positional
 axis applies §4.7's one-step negative normalization against the original rank;
 every normalized axis must be in range and unique. Named and positional axes
@@ -1452,7 +1461,7 @@ vector rather than the source order. The variadic form is defined for the value
 reductions `sum`, `mean`, `max_reduce`, `min_reduce`, and `prod_reduce`.
 `count` instead resolves the complete unique axis set and executes the
 single dedicated multi-axis reduction of [05-OP-29]; it cannot compose
-single-axis `count` operations because the first result has dtype `int64`.
+single-axis `count` operations because the first result has dtype `i64`.
 The variadic form is **not** defined for the
 index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
 axis is not composable with a second reduction, so a variadic call on those is
@@ -1526,10 +1535,10 @@ Hard errors (`DimensionMismatch`, never a guessed placement):
 The inserted axis is a *named* dim: declared result types refer to it by name
 (`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
 dimension name only when it is **not bound in the value environment**: a bound
-`int32` variable is a runtime value and keeps the static-axis rule:
-`insert(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
+`i32` variable is a runtime value and keeps the static-axis rule:
+`insert(x, ax, 4i64)` with `ax: i32` is an error, never a trailing insert
 of an axis named `ax`. The `size` argument is any expression of exactly type
-`int64`. A static negative value is a type error; a runtime negative value
+`i64`. A static negative value is a type error; a runtime negative value
 traps `Domain`. The inserted named dimension carries the executed extent. A
 literal or named extent claimed by a surrounding result type is either proven
 equal statically or protected by an execution-time equality guard under
@@ -1614,20 +1623,20 @@ returned by a function, or derived by integer arithmetic. The relevant
 built-ins are:
 
 - `shape(x, axis)`: returns the size of `x`'s `axis`-th dimension as an
-  `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
-  expression of exactly type `int32`. The result is a runtime scalar, not a
+  `i64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
+  expression of exactly type `i32`. The result is a runtime scalar, not a
   symbolic dim reference.
 - `expand(x, axis, size)`: set the size-1 dimension at position `axis` to
-  width `size`, where `size` is any expression of exactly type `int64`. The
+  width `size`, where `size` is any expression of exactly type `i64`. The
   rank is unchanged.
 - `insert(x, axis, size)`: add a new dimension of width `size` at position
-  `axis`, where `size` is any expression of exactly type `int64`. When `axis`
+  `axis`, where `size` is any expression of exactly type `i64`. When `axis`
   is a dimension *name* instead of an integer, the call is the named-axis
   insert form (§4.5.3): it adds a new named axis at the trailing end, or —
   with a fourth `anchor` argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
-  `shape_list`, a `List<int64>`; every element may be computed at runtime.
-- `reduce_window_*`: consume runtime `List[int64]` window and stride values
+  `shape_list`, a `List<i64>`; every element may be computed at runtime.
+- `reduce_window_*`: consume runtime `List[i64]` window and stride values
   under [05-RWIN-1..2]. Their values and list lengths are validated at
   execution when not statically known.
 
@@ -1675,10 +1684,10 @@ guarded extent: for a guard whose operands are all interface values, the
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
 movement operation; for a declared-result guard, the primitive that produced
 the returned value, whether the return expression names it directly or reaches
-it through a block tail, a binding, or a callee. Its `<prim>` slot is `int64`, because the result this
+it through a block tail, a binding, or a callee. Its `<prim>` slot is `i64`, because the result this
 guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
 complete user-facing line is therefore
-`numeric trap: domain in <op> at int64`, and [04-NUM-9] permits it no prefix
+`numeric trap: domain in <op> at i64`, and [04-NUM-9] permits it no prefix
 and no suffix. Every lane SHALL also convey, on separate lines accompanying
 that trap, the names of the disagreeing sources, the axis, and the value
 observed for each; that requirement binds the information conveyed and not
@@ -1699,13 +1708,13 @@ extents.
 
 #### 4.7.1 `shape` axis form
 
-Every form below produces an `int64` value ([05-DIM-2]):
+Every form below produces an `i64` value ([05-DIM-2]):
 
 ```text
 shape(x, 0)
-shape(x, cast(0, int32))
+shape(x, cast(0, i32))
 shape(x, -1)
-shape(x, cast(-1, int32))
+shape(x, cast(-1, i32))
 shape(x, axis_parameter)
 shape(x, computed_int32_axis)
 ```
@@ -1715,13 +1724,13 @@ axis first adds the input rank exactly once when negative, so `-1` names the
 last axis. A statically known normalized value outside `0..rank` is a type
 error (`DimensionMismatch`). A computed normalized value outside that range
 traps `Domain` as operation `shape` before reading metadata. An axis whose
-type is not exactly `int32` is a type error; no width is inferred or coerced.
+type is not exactly `i32` is a type error; no width is inferred or coerced.
 The zero-cotangent and target-independent execution rules are [05-OP-7] and
 [05-SHAPE-1].
 
 #### 4.7.2 `expand` and `insert` with a runtime size
 
-`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `int64`
+`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `i64`
 `size`. A literal produces a literal result extent; an in-scope symbolic
 dimension may preserve its name; and every other expression produces a fresh
 runtime extent. A static negative size is a type error. A runtime negative
@@ -1748,9 +1757,9 @@ extent because of its provenance or default it to one.
 
 #### 4.7.3 `reshape` with runtime sizes
 
-`reshape` accepts a `List[int64]` whose arity is statically known, because
+`reshape` accepts a `List[i64]` whose arity is statically known, because
 tensor rank is part of the static type. Every element may be an arbitrary
-runtime int64 expression. A literal extent becomes a literal result dim. A
+runtime i64 expression. A literal extent becomes a literal result dim. A
 direct shape read may preserve an input dimension identity only when ordinary
 type reasoning proves that identity; an arithmetic expression, a cross-tensor
 read without a proof of equality, or any other computed value produces a
@@ -1777,7 +1786,7 @@ one, infer provenance to narrow the language, or substitute a guessed extent.
 > typed extent expressions. An implementation MAY conservatively decline to
 > prove two capacities equal, but it SHALL NOT wrap, saturate, truncate, or
 > substitute an overflow sentinel that can make unequal mathematical counts
-> equal. Projection from the exact count into `int64`, `usize`, or a target
+> equal. Projection from the exact count into `i64`, `usize`, or a target
 > allocation-size domain SHALL be checked and SHALL fail before planning,
 > allocation, or element access when the value is outside that domain. This
 > rule applies to compiler analyses as well as runtime allocation paths; a
@@ -1785,28 +1794,28 @@ one, infer provenance to narrow the language, or substitute a guessed extent.
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
-`reshape`'s shape list is `List<int64>`: its elements are extent-domain
+`reshape`'s shape list is `List<i64>`: its elements are extent-domain
 quantities under `spec/05-risc-primitives.md` [05-DIM-1]. The list must be
-homogeneous, and its element precision must be `int64`. Those are two
+homogeneous, and its element precision must be `i64`. Those are two
 separate requirements and either can fail alone.
 
 No §5.6 position reaches a list literal, so a literal element states
-`int64` itself, with a suffix or an explicit `cast`; the §5.3 `int32`
+`i64` itself, with a suffix or an explicit `cast`; the §5.3 `i32`
 default never satisfies this slot. A non-literal element needs no
-annotation when its producer is already `int64`, which [05-DIM-2] makes
+annotation when its producer is already `i64`, which [05-DIM-2] makes
 true of `shape()`:
 
 ```text
 reshape(x, [2i64, 2i64])                               ;; OK - explicit suffix
-reshape(x, [shape(x, 0), 4i64])                        ;; OK - shape() is int64; the literal states it
-reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK - explicit cast
-reshape(x, [2, 2])                                     ;; TYPE ERROR: int32 literals in a List<int64> slot
+reshape(x, [shape(x, 0), 4i64])                        ;; OK - shape() is i64; the literal states it
+reshape(x, [cast(shape(x, 0), i64), cast(4, i64)]) ;; OK - explicit cast
+reshape(x, [2, 2])                                     ;; TYPE ERROR: i32 literals in a List<i64> slot
 reshape(x, [2i64, 2i32])                               ;; TYPE ERROR: mixed element precision
 ```
 
 The suffix requirement is deliberate, not a §5.6 gap; §5.6 records why
 list literals do not adopt. The two error lines want different
-diagnostics. The all-`int32` list is a slot mismatch, and its message
+diagnostics. The all-`i32` list is a slot mismatch, and its message
 should name the fix (write `2i64`) rather than only the mismatch. The
 mixed list is an intra-list disagreement that no defaulting rule can
 resolve, and its message should name the disagreeing element rather than
@@ -1844,7 +1853,7 @@ add(tensor[D, f32], tensor[D, bf16])  →  TYPE ERROR
 
 ```
 cast(x: tensor[D, f32], bf16) : tensor[D, bf16]
-cast(x: tensor[D, int32], f32) : tensor[D, f32]
+cast(x: tensor[D, i32], f32) : tensor[D, f32]
 ```
 
 Cast is always explicit. The compiler never inserts implicit casts.
@@ -1860,8 +1869,8 @@ on scalar and tensor surfaces. Per direction:
 - float source -> integer target: the value must be finite, integral, and
   in range. A fractional value or NaN/±inf traps `domain`; an integral
   value outside the target width traps `overflow`. The default cast never
-  chooses a rounding rule; write `cast(floor(x), int32)` or
-  `cast(round(x), int32)` to state one explicitly.
+  chooses a rounding rule; write `cast(floor(x), i32)` or
+  `cast(round(x), i32)` to state one explicitly.
 - any source -> bool target: strict {0, 1} membership; exactly 0/1
   encodes false/true, anything else traps `domain` ([04-NUM-4]).
 
@@ -1880,7 +1889,7 @@ write `cast(round(x), target)` when that composition is intended.
 
 ### 5.3 Literal Types
 
-Integer literals default to `int32`. Float literals default to `f32`. These
+Integer literals default to `i32`. Float literals default to `f32`. These
 defaults can be overridden in three ways:
 
 1. an explicit literal suffix (§5.5) attached to the literal token
@@ -1888,15 +1897,15 @@ defaults can be overridden in three ways:
 3. an explicit `cast` around the literal expression
 
 There is **no implicit precision promotion** from these defaults to any other
-type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, int32]`, not
-`tensor[3, int64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
+type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, i32]`, not
+`tensor[3, i64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
 `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
 type must say so via suffix, declared element type, or `cast`.
 
 The default is the **user-facing contract**. The lexer parses an unsuffixed
 integer or float literal token at i64/f64 precision so that out-of-range
 literals can be diagnosed before defaulting; the desugarer/type-check
-narrows the literal to `int32` (for integer tokens) or `f32` (for float
+narrows the literal to `i32` (for integer tokens) or `f32` (for float
 tokens) before Deep is materialized. The narrowing is mechanical and
 non-overridable except by the three mechanisms above.
 
@@ -1918,10 +1927,10 @@ Operations accept same-precision operands only. The table of valid combinations:
 
 | Operation type | Valid precisions |
 |---|---|
-| Arithmetic (add, mul, sub) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
+| Arithmetic (add, mul, sub) | f32, f64, bf16, f16, i8, i16, i32, i64 (all same) |
 | Float division (div) | f32, f64, bf16, f16 only (not integer; integer operands cite `spec/05-risc-primitives.md` §2.1 and point at `floor_div` / `trunc_div`) |
-| Floor division (floor_div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
-| Truncating division (trunc_div) | int8, int16, int32, int64 only (integer-only; float operands are a type error) |
+| Floor division (floor_div) | f32, f64, bf16, f16, i8, i16, i32, i64 (all same) |
+| Truncating division (trunc_div) | i8, i16, i32, i64 only (integer-only; float operands are a type error) |
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
@@ -1951,10 +1960,10 @@ narrowing. The closed suffix set is:
 | `f64` | `(t-prim {} f64)` | `1.0f64` |
 | `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
 | `f16` | `(t-prim {} f16)` | `1.0f16` |
-| `i8` | `(t-prim {} int8)` | `42i8` |
-| `i16` | `(t-prim {} int16)` | `42i16` |
-| `i32` | `(t-prim {} int32)` | `42i32` |
-| `i64` | `(t-prim {} int64)` | `42i64` |
+| `i8` | `(t-prim {} i8)` | `42i8` |
+| `i16` | `(t-prim {} i16)` | `42i16` |
+| `i32` | `(t-prim {} i32)` | `42i32` |
+| `i64` | `(t-prim {} i64)` | `42i64` |
 
 Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) accept a float body or a
 decimal integer body, and the two bind differently. `42.0f32` binds the decoded
@@ -2020,10 +2029,10 @@ Position 4 applies to a **bare scalar numeric literal** as well as to a
 tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
 at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
 `f32` default and then widen (which would yield the f32-truncation value
-`1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal
-at `int64`, which is what makes the §5.3 out-of-int32-range escape hatch
+`1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
+at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
 work. The adoption re-binds the literal at `p` and the §5.6 range checks
-apply at `p`: `cast(2147483648, int32)` is still a range error. Adoption
+apply at `p`: `cast(2147483648, i32)` is still a range error. Adoption
 is limited to unsuffixed numeric literals with a numeric `p` of matching
 kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
 widens the f32 value), and a float literal under an integer `p` keeps the
@@ -2037,7 +2046,7 @@ stated once in its type, and the body is bulk data — a per-element suffix
 on a thousand-element weights literal is noise that buries the one
 element that differs. Position 4 adopts a **bare scalar**, but its target
 dtype is spelled at the site and the position exists for
-**expressibility**, not convenience: without it `cast(3000000000, int64)`
+**expressibility**, not convenience: without it `cast(3000000000, i64)`
 cannot be written at all, and `cast(1.1, f64)` would round through the
 `f32` default. What no position does is adopt a **list literal, or a
 scalar against a remote callee signature** — position 2 reaches through a
@@ -2045,17 +2054,17 @@ signature, but only into a tensor body — and none should be added for
 ergonomics alone. A structural argument — a shape list, a bounds pair, a
 stride step — is program rather than payload, and under
 `spec/05-risc-primitives.md` [05-DIM-1] its dtype states which KIND of
-quantity it is: an extent is `int64` and an axis is `int32`, so a
+quantity it is: an extent is `i64` and an axis is `i32`, so a
 context-inferred `[2, 2]` would hide exactly the distinction the dtype
 exists to carry. Chelis programs are written and, more often, audited by
 agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
 context-dependent literals is paid on every audit. This is the trade
-`with seed(...)` already records (§7.1): its seed demands `int64` and the
+`with seed(...)` already records (§7.1): its seed demands `i64` and the
 literal states it (`with seed(42i64)`), with no adoption carve-out.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
-§5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
+§5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
 
 A tensor literal with mixed-suffix entries is well-formed only if every
 suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
@@ -2063,7 +2072,7 @@ suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
 explicit dtype that disagrees with the surrounding `f32` element type.
 
 A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
-`tensor[3, int32]`, not `tensor[3, int64]`. The fallback to the §5.3
+`tensor[3, i32]`, not `tensor[3, i64]`. The fallback to the §5.3
 default is the spec contract; no stage may silently widen it.
 
 ### 5.7 Mixed-Precision Accumulator Parameter
@@ -2103,21 +2112,21 @@ For operands of precision `p`, the default accumulator precision is:
 | `f16` | `f32` | `f32` | operand precision (`f16`) |
 | `f32` | `f32` | `f32` | operand precision (`f32`) |
 | `f64` | `f64` | `f64` | operand precision (`f64`) |
-| `int8` | (matmul not defined for int8 — see §5.7.2) | `int32` | `int32` |
-| `int16` | (matmul not defined for int16 — see §5.7.2) | `int32` | `int32` |
-| `int32` | (matmul not defined for int32 — see §5.7.2) | `int32` | `int32` |
-| `int64` | (matmul not defined for int64 — see §5.7.2) | `int64` | `int64` |
+| `i8` | (matmul not defined for i8 — see §5.7.2) | `i32` | `i32` |
+| `i16` | (matmul not defined for i16 — see §5.7.2) | `i32` | `i32` |
+| `i32` | (matmul not defined for i32 — see §5.7.2) | `i32` | `i32` |
+| `i64` | (matmul not defined for i64 — see §5.7.2) | `i64` | `i64` |
 
 Rationale for the bf16/f16 → f32 default: numerical stability of long
 inner-product reductions in low-precision arithmetic. PyTorch and JAX use the
 same wider-accumulator default for bf16/f16 matmul.
 
 Rationale for the i8/i16 → i32 default: overflow safety. Summing 200
-non-trivial `int8` values overflows `int8` but fits comfortably in `int32`.
+non-trivial `i8` values overflows `i8` but fits comfortably in `i32`.
 The same instinct exists ecosystem-wide, but the details differ: PyTorch's
-`torch.sum` promotes ALL integral inputs to `int64`, and NumPy accumulates at
+`torch.sum` promotes ALL integral inputs to `i64`, and NumPy accumulates at
 the platform default integer. Chelis deliberately widens one step instead of
-jumping to `int64`; the §5.7 accumulator parameter is the authored route to a
+jumping to `i64`; the §5.7 accumulator parameter is the authored route to a
 wider accumulator when a reduction genuinely needs one.
 
 An accumulator has the same numeric kind as its operands: a signed-integer
@@ -2126,7 +2135,7 @@ float accumulator. Cross-kind accumulation is a type error. Within that kind,
 the accumulator parameter is permitted only when it is at least as wide as
 the operand precision and is not narrower than the documented default. A
 program that explicitly requests a narrower accumulator (e.g.
-`reduce_sum(x: tensor[N, int8], accumulator=int8)`) is a type error with a
+`reduce_sum(x: tensor[N, i8], accumulator=i8)`) is a type error with a
 diagnostic suggesting either omitting the parameter (which yields the i32
 default) or accepting the wider default explicitly.
 
@@ -2138,10 +2147,10 @@ The permitted accumulator and result pairs are total and exact:
 | `f16` | `f32`, `f64` | `f16` |
 | `f32` | `f32`, `f64` | accumulator dtype `a` |
 | `f64` | `f64` | `f64` |
-| `int8` | `int32`, `int64` | accumulator dtype `a` |
-| `int16` | `int32`, `int64` | accumulator dtype `a` |
-| `int32` | `int32`, `int64` | accumulator dtype `a` |
-| `int64` | `int64` | `int64` |
+| `i8` | `i32`, `i64` | accumulator dtype `a` |
+| `i16` | `i32`, `i64` | accumulator dtype `a` |
+| `i32` | `i32`, `i64` | accumulator dtype `a` |
+| `i64` | `i64` | `i64` |
 
 Equivalently, `sum_result(p, a) = p` exactly when `p` is `bf16` or `f16`;
 otherwise `sum_result(p, a) = a`. A pair absent from this table is a type
@@ -2161,8 +2170,8 @@ the explicit accumulator or `default(p)` when the argument is omitted.
 
 #### 5.7.2 Integer matmul
 
-The matmul signature rejects integer operand precisions (`int8`, `int16`,
-`int32`, `int64`). Integer `sum` is admitted per §5.7.1.
+The matmul signature rejects integer operand precisions (`i8`, `i16`,
+`i32`, `i64`). Integer `sum` is admitted per §5.7.1.
 
 ### 5.8 Stdlib Generalization Shape
 
@@ -2208,11 +2217,10 @@ contextually:
 > precision slot of a `tensor[...]` type that match the sig's quantifier
 > list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
 > matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
-> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. The four short
-> integer names stay as `t-prim` BY MAPPING to their §1.1 primitives
-> (`i8` to `int8`, and likewise for `i16`, `i32` and `i64`), so
-> canonical Deep carries one spelling per primitive; they are accepted
-> Surf input spellings, not Deep ones. Outside a sig
+> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`, so canonical
+> Surf and Deep carry one spelling per primitive. The retired spellings
+> `int8`, `int16`, `int32`, and `int64` are rejected and offered only to
+> the explicit v0.18 migrations; they never become `t-var`. Outside a sig
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
@@ -2403,7 +2411,7 @@ shape is a change to a published interface.
 > `severity` orders the producer's assessment from least to most severe;
 > it neither changes diagnostic presence nor replaces the error-list exit rule.
 > Score components and the weighted total retain §6.1's measurements and
-> weights. Checked-node counters SHALL be exact nonnegative `int64`, with
+> weights. Checked-node counters SHALL be exact nonnegative `i64`, with
 > `typed_nodes <= total_nodes` and
 > `untyped_nodes = total_nodes - typed_nodes`. Their provenance remains
 > [04-FIT-1]. Counter overflow or an inconsistent report is an error, never
@@ -2703,7 +2711,7 @@ Inference and checking obey these rules:
 - `with seed(seed) { ... }` handles `Random` across direct operations and calls made
   inside the handled region; the C host backend preserves this with generated
   handler-scoped RNG state for nested stdlib/user functions. The seed is
-  semantically int64, and a seed written as an integer literal SHALL carry the
+  semantically i64, and a seed written as an integer literal SHALL carry the
   `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
   unsuffixed literal is a type error naming the required suffix. The body is
   checked in the enclosing context and its type is returned, so the enclosing
@@ -3092,8 +3100,8 @@ Scope:
 > RNGs, checksums); the wrap prohibited by [04-NUM-3] is the *implicit*
 > overflow behavior of the ordinary arithmetic ops, not these named
 > ops, whose result is in-range by construction. Named modular
-> operations are defined ONLY on the integer dtypes (`int8`, `int16`,
-> `int32`, `int64`); they SHALL NOT be defined on `bool` or any float
+> operations are defined ONLY on the integer dtypes (`i8`, `i16`,
+> `i32`, `i64`); they SHALL NOT be defined on `bool` or any float
 > dtype (floats overflow to infinity per [04-NUM-2] and have no modular
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
@@ -3110,15 +3118,15 @@ Scope:
 > | `f32` | IEEE-754 binary32 | 32 | f32 |
 > | `f16` | IEEE-754 binary16 | 16 | f32 |
 > | `bf16` | bfloat16 | 16 | f32 |
-> | `int64` | signed two's-complement 64-bit integer | 64 | exact int64 |
-> | `int32` | signed two's-complement 32-bit integer | 32 | exact int32 |
-> | `int16` | signed two's-complement 16-bit integer | 16 | exact int16 |
-> | `int8` | signed two's-complement 8-bit integer | 8 | exact int8 |
+> | `i64` | signed two's-complement 64-bit integer | 64 | exact i64 |
+> | `i32` | signed two's-complement 32-bit integer | 32 | exact i32 |
+> | `i16` | signed two's-complement 16-bit integer | 16 | exact i16 |
+> | `i8` | signed two's-complement 8-bit integer | 8 | exact i8 |
 > | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
 >
 > Stored representation, storage width, and arithmetic width are separate
 > facts. Equal storage widths do not make two representations interchangeable:
-> for example, `f32` and `int32` are both 32 bits, and `bool` and `int8` are
+> for example, `f32` and `i32` are both 32 bits, and `bool` and `i8` are
 > both 8 bits, but neither pair may share a typed load, store, carrier, or
 > kernel element spelling. Every boundary and lane SHALL match the exact
 > representation identity, not only its byte width. No implementation may
@@ -3175,7 +3183,7 @@ conversions per op, no tensor-core path); for transcendentals and for
 multi-step reductions it also changes the answer, which is what would
 otherwise force a cross-lane tolerance table between two lanes that
 should agree exactly. The same argument applies to routing exact integer
-arithmetic through f64, which additionally destroys int64 exactness above
+arithmetic through f64, which additionally destroys i64 exactness above
 2^53.
 
 **Why reduced precision is opt-in only.** The prohibition on narrowing is
@@ -3230,7 +3238,7 @@ refuses the default.
 
 **The availability trade, stated.** Trapping converts silent data
 corruption into loud termination, by design: a long-running job that
-overflows an `int64` counter DIES where wrapping arithmetic would have
+overflows an `i64` counter DIES where wrapping arithmetic would have
 carried a silently wrong value to completion. That operational cost is
 deliberate, and this record carries it alongside the benefit: the
 alternative outcome is not a successful run but a plausible wrong result,
@@ -3240,14 +3248,14 @@ which is the strictly worse failure mode. Code that WANTS mod-2^width semantics 
 named operations if introduced. Behaviors are named operations, never modes.
 
 > **[04-NUM-11]** A value SHALL survive storage, transport, and every
-> boundary crossing at its declared dtype without collapse. An `int64`
+> boundary crossing at its declared dtype without collapse. An `i64`
 > value above 2^53 that is exact when produced SHALL still be exact after
 > being stored in a tensor, serialized onto the execution wire, returned
 > through a language binding, and read back. A representation that cannot
 > carry a dtype's full value set is not a conforming representation for
 > that dtype, and no stage SHALL substitute a wider or narrower one to
-> compensate. A language binding or device descriptor SHALL preserve rank as int32
-> and each extent, stride, element count, and byte capacity as int64, matching
+> compensate. A language binding or device descriptor SHALL preserve rank as i32
+> and each extent, stride, element count, and byte capacity as i64, matching
 > the domains of [05-DIM-1], [05-DIM-2], and [05-OP-31]. It SHALL carry the
 > exact dtype tag and dynamic rank; a fixed-rank carrier, a narrower metadata
 > field, or an element pointer not coupled to the exact tag in the same
@@ -3352,8 +3360,8 @@ i64.
 | `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | arithmetic/conversion NaN -> `0x7fc00000`; ±inf and -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | arithmetic/conversion NaN -> `0x7e00`; ±inf and -0.0 preserved |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | arithmetic/conversion NaN -> `0x7fc0`; ±inf and -0.0 preserved |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
-| `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
+| `i64` | integers in [-2^63, 2^63-1] | exact i64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
+| `i32` / `i16` / `i8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
 | `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
 | reserved names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
 
@@ -3367,7 +3375,7 @@ Reading notes:
   accumulation order).
 - The **f64 row's identity finalize** is why [04-NUM-6] holds:
   `f64 add(2^53, 1) == 2^53` is the correctly rounded answer and stays. The
-  same two numbers at `int64` are exact or trap, never silently collapsed -
+  same two numbers at `i64` are exact or trap, never silently collapsed -
   same inputs, opposite verdicts, by design.
 - The **bool row has no arithmetic width** because arithmetic on `bool` is
   rejected rather than performed ([04-NUM-4]). `and` / `or` / `not` are the

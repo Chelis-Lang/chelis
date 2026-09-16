@@ -133,7 +133,7 @@ fn every_unsigned_name_in_a_typealias_body_reaches_the_rejection() {
 fn every_unsigned_name_in_a_lambda_annotation_reaches_the_rejection() {
     for name in UNSIGNED {
         let deep = deep_of(&format!(
-            "module P.M\nexport (f)\ndef f() -> int32 = (fn (x: {name}) -> 1i32)(1i32)\n"
+            "module P.M\nexport (f)\ndef f() -> i32 = (fn (x: {name}) -> 1i32)(1i32)\n"
         ));
         assert_reaches_rejection(&deep, name, "a lambda parameter annotation");
     }
@@ -159,7 +159,7 @@ fn the_tensor_precision_slot_still_emits_t_prim() {
 fn a_cast_target_still_emits_t_prim() {
     for name in UNSIGNED {
         let deep = deep_of(&format!(
-            "module P.M\nexport (f)\ndef f() -> int32 = cast(1i32, {name})\n"
+            "module P.M\nexport (f)\ndef f() -> i32 = cast(1i32, {name})\n"
         ));
         assert_reaches_rejection(&deep, name, "a cast target");
     }

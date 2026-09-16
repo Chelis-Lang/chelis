@@ -1217,10 +1217,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         )
 
     recursive_function_sources = {
-        "option": ("reject_option_function.ch", "Option[int8 -> int8]"),
-        "list": ("reject_list_function.ch", "List[int8 -> int8]"),
-        "tuple": ("reject_tuple_function.ch", "(int8 -> int8, int64)"),
-        "dict": ("reject_dict_function.ch", "Dict[string, int8 -> int8]"),
+        "option": ("reject_option_function.ch", "Option[i8 -> i8]"),
+        "list": ("reject_list_function.ch", "List[i8 -> i8]"),
+        "tuple": ("reject_tuple_function.ch", "(i8 -> i8, i64)"),
+        "dict": ("reject_dict_function.ch", "Dict[string, i8 -> i8]"),
         "adt": ("reject_adt_function.ch", "CallbackBox"),
     }
     for backend in (Backend.C, Backend.HIP, Backend.METAL):

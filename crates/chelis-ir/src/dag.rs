@@ -610,7 +610,7 @@ pub enum RiscOp {
     },
     /// Count true elements across one or more axes. `axes` stores the
     /// normalized positions in the original input rank exactly once and in
-    /// strictly descending order. The result precision is always int64.
+    /// strictly descending order. The result precision is always i64.
     Count {
         axes: Vec<usize>,
     },
@@ -675,7 +675,7 @@ pub enum RiscOp {
     /// Index of maximum element along `axis`.
     ///
     /// argmax / argmin logically return integer indices, and per chelis#230
-    /// the type-system result is canonically `tensor[..., int64]`
+    /// the type-system result is canonically `tensor[..., i64]`
     /// regardless of input precision. Per chelis#233 the host-runtime
     /// adapter (`chelis_compiler_api::runtime::tensor_reduce_host`) tags
     /// the produced `RuntimeTensorValue` with `Prim::Int64` storage, so
@@ -737,8 +737,8 @@ pub enum RiscOp {
     /// Runtime extent of the input tensor along `axis`, produced as a
     /// rank-0 integer scalar (the precision is carried on the node's
     /// `output_type`; the Surf `shape(tensor, axis)` builtin types it as
-    /// `int32`, while the hydronnx ONNX translator constructs it as
-    /// `int64` per chelis#558).
+    /// `i32`, while the hydronnx ONNX translator constructs it as
+    /// `i64` per chelis#558).
     ///
     /// This is the DAG-level realization of a `shape(tensor, axis)` read
     /// used as a *value*. It is distinct from a shape read consumed as an
@@ -759,7 +759,7 @@ pub enum RiscOp {
     Shape {
         axis: usize,
     },
-    /// A call's shape-only witness. Requirements are tagged int64 literals,
+    /// A call's shape-only witness. Requirements are tagged i64 literals,
     /// distinct from the actual input axis read by this scalar operation.
     /// The node is created at call entry, before the callee body, and
     /// its enclosing invocation retains required checks through `shape_deps`.
@@ -780,7 +780,7 @@ pub enum RiscOp {
     },
     /// Checks an independently computed reshape target (input 0) against
     /// its declaring witnesses or literal requirements (inputs 1..). Every
-    /// input and the result is scalar int64. The nonempty `claims` labels
+    /// input and the result is scalar i64. The nonempty `claims` labels
     /// correspond one-to-one to requirement edges, checked in order. Labels
     /// are diagnostic only; edges identify each activation's requirement.
     CheckedReshapeExtent {
@@ -853,7 +853,7 @@ pub enum RiscOp {
     /// `spec/04-type-system.md` §5.7 / §5.7.1. Result precision matches
     /// the operand precision (the wider accumulator is consumed inside
     /// the op and downcast on output, per §5.7.1). Integer matmul
-    /// (operand precision in {int8, int16, int32, int64}) is NOT
+    /// (operand precision in {i8, i16, i32, i64}) is NOT
     /// admitted; use [`RiscOp::matmul_with_accumulator`] /
     /// [`RiscOp::matmul_default`] for the rejection path.
     BlasMatmul {
@@ -1601,7 +1601,7 @@ fn prim_lane(p: Prim) -> u8 {
 
 /// Width ordering for the active dtype set. Larger is wider. Within the
 /// float lane: f16 = bf16 < f32 < f64. Within the integer lane:
-/// int8 < int16 < int32 < int64. Bool is 0; non-numeric returns 0.
+/// i8 < i16 < i32 < i64. Bool is 0; non-numeric returns 0.
 ///
 /// E2 (WS-A0 RT-1 fixup, sibling sweep): `f8e4m3` is deferred per
 /// `spec/04-type-system.md` §1.1.1 and is rejected upstream by

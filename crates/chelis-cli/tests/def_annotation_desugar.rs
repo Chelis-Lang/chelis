@@ -99,7 +99,7 @@ fn def_two_independent_precision_tvars_accepted() {
     write_file(
         &path,
         "def two_args[p, q](x: &tensor[3, p], y: &tensor[3, q]) -> &tensor[3, p] = x\n\
-         def caller(a: &tensor[3, f32], b: &tensor[3, int32]) -> &tensor[3, f32] = two_args(a, b)\n",
+         def caller(a: &tensor[3, f32], b: &tensor[3, i32]) -> &tensor[3, f32] = two_args(a, b)\n",
     );
 
     let json = run_json_check(&path);
@@ -216,9 +216,7 @@ fn def_mixed_dim_and_precision_quantifiers_accepted() {
 /// the invariant's owning file.
 #[test]
 fn def_quantifier_precision_tvar_typechecks_at_every_arithmetic_dtype() {
-    const ARITHMETIC_DTYPES: &[&str] = &[
-        "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
-    ];
+    const ARITHMETIC_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64"];
     for dtype in ARITHMETIC_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("wsa6_dtype_matrix.ch");

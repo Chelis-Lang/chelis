@@ -4,12 +4,12 @@
 //! Reproducers (Surf), verbatim from the issue:
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(shrink(x, [[cast(0, int32), cast(2, int32)]]), cast(0, int32)))
+//!   tensor_to_scalar(sum(shrink(x, [[cast(0, i32), cast(2, i32)]]), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(stride(x, cast(2, int32)), cast(0, int32)))
+//!   tensor_to_scalar(sum(stride(x, cast(2, i32)), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //!
@@ -18,7 +18,7 @@
 //!
 //!   * `shrink`: the Pad-based adjoint in `compute_adjoints` was already
 //!     correct, but the FRONT-END lowering of the issue's bound literal
-//!     `[[cast(0, int32), cast(2, int32)]]` dropped the `cast`-wrapped
+//!     `[[cast(0, i32), cast(2, i32)]]` dropped the `cast`-wrapped
 //!     pair elements (the bound walker accepted only `Atom::Int` /
 //!     `(lit ...)`), producing an empty `RiscOp::Shrink { bounds: [] }`
 //!     that failed backward-DAG verification (`bounds len 0 != input

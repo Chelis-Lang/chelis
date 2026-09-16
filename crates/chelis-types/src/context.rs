@@ -497,7 +497,7 @@ mod tests {
             &Type::Prim(Prim::Int32),
             &mut integer_trial,
         )
-        .expect_err("round-tripped restriction must reject int32");
+        .expect_err("round-tripped restriction must reject i32");
         assert!(matches!(
             error.kind,
             crate::unify::TypeErrorKind::DtypeFamilyMismatch

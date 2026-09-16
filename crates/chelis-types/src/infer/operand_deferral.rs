@@ -244,8 +244,8 @@ pub(super) fn defer_or_check_shape_route(
 ) -> Type {
     // chelis#1512: ANY unresolved operand, not just the tensor. These routes
     // check their axis, stride, bounds and window arguments too, and an arm
-    // that admitted a variable there let a non-int32 `permute` axis and a
-    // non-int64 `stride` step through while the tensor operand was settled.
+    // that admitted a variable there let a non-i32 `permute` axis and a
+    // non-i64 `stride` step through while the tensor operand was settled.
     if arg_tys
         .iter()
         .any(|ty| matches!(type_for_readonly_check(ty, subst), Type::Var(_)))

@@ -26,8 +26,8 @@
 //!     where the two literals have distinct concrete dims — per-axis
 //!     join in Cons element unification produces the expected
 //!     wildcard along the differing axis instead of rejecting.
-//!   * R3 MEDIUM-RESHAPE-ICE: `reshape(matmul(x, w), [cast(2, int64),
-//!     cast(1, int64)])` in a grad body — relies on #220 fix at
+//!   * R3 MEDIUM-RESHAPE-ICE: `reshape(matmul(x, w), [cast(2, i64),
+//!     cast(1, i64)])` in a grad body — relies on #220 fix at
 //!     `lower.rs::extract_dim_list` (PR #224) plus the routing
 //!     exemption in this PR.
 //!   * R4 HIGH (= issue #219): named-dim sigs with concrete callers
@@ -403,13 +403,13 @@ fn issue_218_r3_cons_rank_mismatch_still_rejects() {
 }
 
 // =================================================================
-// R3 MEDIUM-RESHAPE-ICE: reshape with cast(N, int64) shape in a grad
+// R3 MEDIUM-RESHAPE-ICE: reshape with cast(N, i64) shape in a grad
 // body. Depends on PR #224 (#220 fix) at extract_dim_list.
 // =================================================================
 
 #[test]
 fn issue_218_r3_reshape_after_matmul_in_grad_body_builds() {
-    // Surf `reshape(matmul(x, w), [cast(2, int64), cast(1, int64)])`
+    // Surf `reshape(matmul(x, w), [cast(2, i64), cast(1, i64)])`
     // is grad'd by composing the reshape with a sum reduction so
     // the function returns a scalar. The named `summed_g` helper
     // wraps the reshape-into-reduction so `grad(summed_g, wrt=x)`
@@ -420,7 +420,7 @@ fn issue_218_r3_reshape_after_matmul_in_grad_body_builds() {
         &path,
         "def summed_g(x: tensor[2, 3, f32]) -> tensor[f32] = {\n\
            w = to_tensor([[1.0], [2.0], [3.0]])\n\
-           y = reshape(matmul(copy(x), w), [cast(2, int64), cast(1, int64)])\n\
+           y = reshape(matmul(copy(x), w), [cast(2, i64), cast(1, i64)])\n\
            sum(sum(y, 0), 0)\n\
          }\n\
          def compute_grad(x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =\n\

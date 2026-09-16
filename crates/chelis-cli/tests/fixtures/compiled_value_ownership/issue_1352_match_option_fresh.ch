@@ -1,4 +1,4 @@
-def choose(original: List[int64]) -> List[int64] = {
+def choose(original: List[i64]) -> List[i64] = {
   choice: Option[bool] = Some(false)
   match choice with {
     | None => original

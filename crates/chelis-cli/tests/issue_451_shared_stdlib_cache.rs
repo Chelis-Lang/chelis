@@ -404,7 +404,7 @@ fn public_std_test_non_float_rejections_are_structural_cold_and_reused() {
         ("returned_alias", "returned_alias", false),
         ("stored_alias", "stored_alias", false),
     ];
-    let dtypes = ["int8", "int16", "int32", "int64", "bool"];
+    let dtypes = ["i8", "i16", "i32", "i64", "bool"];
 
     for dtype in dtypes {
         for (route, callee, higher_order) in routes {

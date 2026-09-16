@@ -12,7 +12,7 @@
 //! ## The escalations (fixed by chelis#731 Phase 1)
 //!
 //! * The masked error used to reach a RUNNABLE binary: `with seed(42i64) {
-//!   cast(5, int64) }` from an `-> f32` fn passed check (score 1), built, ran,
+//!   cast(5, i64) }` from an `-> f32` fn passed check (score 1), built, ran,
 //!   and printed `5` in BOTH lanes. The handle-effect checker case now returns
 //!   the body's type, so the declared return type is enforced and the build
 //!   rejects it with a type diagnostic (`masked_return_type_violation...`).
@@ -46,7 +46,7 @@ mod common;
 
 use common::write_file;
 
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 fn c_toolchain_available() -> bool {
     std::process::Command::new("cc")
@@ -307,22 +307,22 @@ fn unsuffixed_seed_literal_is_rejected() {
     );
 }
 
-/// [05-RNG-1] admits signed int64 seed bits in both source representations.
+/// [05-RNG-1] admits signed i64 seed bits in both source representations.
 #[test]
 fn negative_int64_seed_literal_is_accepted() {
     let score = check_score(
         "(module {} m.main (def {} out (handle-effect {effect: random} \
-         (lit {type: (t-prim {} int64)} -1) (lit {type: (t-prim {} f32)} 2.5))))\n",
+         (lit {type: (t-prim {} i64)} -1) (lit {type: (t-prim {} f32)} 2.5))))\n",
         ".dp",
     );
     assert!(
         score == 1.0,
-        "a negative int64 seed literal must be accepted, got score {score}"
+        "a negative i64 seed literal must be accepted, got score {score}"
     );
 }
 
-/// chelis#731 Phase 1: `with seed(42i64) { cast(5, int64) }` from an `-> f32`
-/// fn used to pass check (score 1), build, and run, printing an int64 `5` from
+/// chelis#731 Phase 1: `with seed(42i64) { cast(5, i64) }` from an `-> f32`
+/// fn used to pass check (score 1), build, and run, printing an i64 `5` from
 /// a function declared `-> f32`. The handle-effect case returns the body's type,
 /// so the declared return type is now enforced and the build rejects it with a
 /// type diagnostic before any backend sees it. Was `#[ignore]`d red.
@@ -331,7 +331,7 @@ fn masked_return_type_violation_does_not_reach_a_binary() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let program = "def f() -> f32 = with seed(42i64) { cast(5, int64) }\nout = print(f())\n";
+    let program = "def f() -> f32 = with seed(42i64) { cast(5, i64) }\nout = print(f())\n";
     match c_lane_outcome(program, ".ch", "seed_masked") {
         CLane::Rejected(stderr) => assert!(
             stderr.contains("Type errors") || stderr.contains("type"),
@@ -420,14 +420,14 @@ fn nullary_fn_applied_twice_through_eval() {
 }
 
 /// A nullary def whose body is NOT a bare literal but still DAG-folds into
-/// `tensor_bindings` (`cast(5, int64)` -> a shaped scalar root, verified via
+/// `tensor_bindings` (`cast(5, i64)` -> a shaped scalar root, verified via
 /// the `f = tensor(...)` labeled root). It exercises the SAME tensor-root
 /// shadow as the bare-lit lock through a compound body. (A scalar `add` of
 /// two literals is host-gated to a Closure instead and never took this path,
 /// so it is not the interesting case here.)
 #[test]
 fn nullary_nonliteral_fn_deep_roundtrips_through_eval() {
-    let dp = deep_of("def f() -> int64 = cast(5, int64)\nout = print(f())\n");
+    let dp = deep_of("def f() -> i64 = cast(5, i64)\nout = print(f())\n");
     let stdout =
         eval_with_ext(&dp, ".dp").expect("nullary cast-bodied def must evaluate through eval");
     assert_eq!(first_line(&stdout), "5", "full stdout: {stdout}");

@@ -115,7 +115,7 @@ fn ill_typed_discarded_block_child_scores_below_one() {
     let score = check_score(
         "(def {} out (block {} \
          (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) \
-         (lit {type: (t-prim {} int64)} 2)) \
+         (lit {type: (t-prim {} i64)} 2)) \
          (lit {type: (t-prim {} f32)} 2.5)))\n",
     );
     assert!(

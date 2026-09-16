@@ -6,8 +6,8 @@
 //! ```chelis
 //! module Repro.GradExpandConst
 //! def f(x: tensor[2, f32]) -> f32 = {
-//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))
-//!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
+//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))
+//!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
 //! ```
@@ -36,8 +36,8 @@ use tempfile::tempdir;
 
 const REPRO: &str = "module Repro.GradExpandConst\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n\
-  tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
+  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))\n\
+  tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
 out = df(to_tensor([3.0, 4.0]))\n";

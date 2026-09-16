@@ -91,8 +91,8 @@ fn neg_fail_with_substring_is_ok() {
         &pkg,
         "case",
         "Case",
-        r#"def test_neg_rejects() -> unit = test_assert(false, "expected int32, got f32")"#,
-        Some("expected int32\n"),
+        r#"def test_neg_rejects() -> unit = test_assert(false, "expected i32, got f32")"#,
+        Some("expected i32\n"),
     );
     run_expect(&pkg, "neg").success().stdout(verdict_is("ok"));
 }
@@ -105,7 +105,7 @@ fn neg_pass_is_should_have_failed() {
         "case",
         "Case",
         r#"def test_neg_rejects() -> unit = test_assert(true, "unexpectedly accepted")"#,
-        Some("expected int32\n"),
+        Some("expected i32\n"),
     );
     run_expect(&pkg, "neg")
         .failure()
@@ -121,7 +121,7 @@ fn neg_fail_wrong_diagnostic() {
         "case",
         "Case",
         r#"def test_neg_rejects() -> unit = test_assert(false, "some unrelated failure")"#,
-        Some("expected int32\n"),
+        Some("expected i32\n"),
     );
     run_expect(&pkg, "neg")
         .failure()
@@ -135,7 +135,7 @@ fn neg_bare_file_check_failure_matches_sidecar() {
     write_file_probe(
         &pkg,
         "case",
-        r#"def helper() -> int64 = true"#,
+        r#"def helper() -> i64 = true"#,
         "body doesn't match declared signature\n",
     );
     run_expect(&pkg, "neg").success().stdout(predicate::eq(
@@ -150,7 +150,7 @@ fn ordinary_testless_compile_mismatch_keeps_legacy_zero_record_behavior() {
     write_file_probe(
         &pkg,
         "case",
-        r#"def helper() -> int64 = true"#,
+        r#"def helper() -> i64 = true"#,
         "body doesn't match declared signature\n",
     );
     Command::cargo_bin("chelis")
@@ -177,7 +177,7 @@ fn neg_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     write_file_probe(
         &pkg,
         "case",
-        r#"def helper() -> int64 = true"#,
+        r#"def helper() -> i64 = true"#,
         "diagnostic that must not match\n",
     );
     let output = Command::cargo_bin("chelis")
@@ -195,7 +195,7 @@ fn neg_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     assert_eq!(
         record["got"],
         serde_json::json!([
-            "compile: def 'helper' body doesn't match declared signature: body has type `() -> bool`, declared type is `() -> int64`"
+            "compile: def 'helper' body doesn't match declared signature: body has type `() -> bool`, declared type is `() -> i64`"
         ])
     );
 }

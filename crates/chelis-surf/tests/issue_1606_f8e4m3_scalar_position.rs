@@ -80,28 +80,28 @@ fn f8e4m3_explicit_binder_does_not_rebind_in_scalar_or_tensor_position() {
 /// REGRESSION test. A `&f8e4m3` reference type.
 #[test]
 fn f8e4m3_behind_a_reference_reaches_the_rejection() {
-    let deep = deep_of("module P.M\nexport (f)\ndef f(x: &f8e4m3) -> int32 = 0i32\n");
+    let deep = deep_of("module P.M\nexport (f)\ndef f(x: &f8e4m3) -> i32 = 0i32\n");
     assert_reaches_rejection(&deep, "a reference type");
 }
 
 /// REGRESSION test. A tuple element.
 #[test]
 fn f8e4m3_in_a_tuple_element_reaches_the_rejection() {
-    let deep = deep_of("module P.M\nexport (f)\ndef f(x: (f8e4m3, int32)) -> int32 = 0i32\n");
+    let deep = deep_of("module P.M\nexport (f)\ndef f(x: (f8e4m3, i32)) -> i32 = 0i32\n");
     assert_reaches_rejection(&deep, "a tuple element");
 }
 
 /// REGRESSION test. An arrow (function-value) parameter.
 #[test]
 fn f8e4m3_in_an_arrow_parameter_reaches_the_rejection() {
-    let deep = deep_of("module P.M\nexport (f)\ndef f(g: (f8e4m3) -> int32) -> int32 = 0i32\n");
+    let deep = deep_of("module P.M\nexport (f)\ndef f(g: (f8e4m3) -> i32) -> i32 = 0i32\n");
     assert_reaches_rejection(&deep, "an arrow parameter");
 }
 
 /// REGRESSION test. A `List[f8e4m3]` element type.
 #[test]
 fn f8e4m3_in_a_list_element_reaches_the_rejection() {
-    let deep = deep_of("module P.M\nexport (f)\ndef f(x: List[f8e4m3]) -> int32 = 0i32\n");
+    let deep = deep_of("module P.M\nexport (f)\ndef f(x: List[f8e4m3]) -> i32 = 0i32\n");
     assert_reaches_rejection(&deep, "a List element");
 }
 
@@ -122,7 +122,7 @@ fn the_tensor_precision_slot_still_emits_t_prim_for_f8e4m3() {
 /// `t-prim`.
 #[test]
 fn a_cast_target_still_emits_t_prim_for_f8e4m3() {
-    let deep = deep_of("module P.M\nexport (f)\ndef f() -> int32 = cast(1i32, f8e4m3)\n");
+    let deep = deep_of("module P.M\nexport (f)\ndef f() -> i32 = cast(1i32, f8e4m3)\n");
     assert_reaches_rejection(&deep, "a cast target");
 }
 

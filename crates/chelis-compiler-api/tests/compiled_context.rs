@@ -57,7 +57,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     // test stands in for the user-supplied entry decls.
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
 
@@ -65,10 +65,10 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(
         root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add, double, square, host_len)\n\n\
-         def add(x: int32, y: int32) -> int32 = x + y\n\
-         def double(x: int32) -> int32 = x + x\n\
-         def square(x: int32) -> int32 = x * x\n\
-         def host_len[n](xs: tensor[n, f32]) -> int64 = len(to_list(xs))\n",
+         def add(x: i32, y: i32) -> i32 = x + y\n\
+         def double(x: i32) -> i32 = x + x\n\
+         def square(x: i32) -> i32 = x * x\n\
+         def host_len[n](xs: tensor[n, f32]) -> i64 = len(to_list(xs))\n",
     )
     .expect("write math.ch");
 
@@ -81,7 +81,7 @@ fn issue1493_cached_context_keeps_aliases_callable_and_observes_results() {
     let (_dir, root) = library_fixture();
     let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
     let restored = CompiledContext::decode(&context.encode().unwrap()).unwrap();
-    let snippet = "module App.Eval\nimport Mylib.Math (square)\nalias: (int32) -> int32 = square\nsecond = alias\ndef user() -> int32 = second(3)\n";
+    let snippet = "module App.Eval\nimport Mylib.Math (square)\nalias: (i32) -> i32 = square\nsecond = alias\ndef user() -> i32 = second(3)\n";
     for ctx in [&context, &restored] {
         let results = eval_many_in_context(ctx, snippet, &["user".into(), "alias".into()]);
         let value = results[0].1.as_ref().unwrap();
@@ -161,19 +161,19 @@ fn eval_in_context_matches_prepare_eval_for_int_snippets() {
         (
             "int_add",
             "module App.Eval\nimport Mylib.Math (add)\n\n\
-             def main_value() -> int32 = add(3, 4)\n",
+             def main_value() -> i32 = add(3, 4)\n",
             "main_value",
         ),
         (
             "int_double",
             "module App.Eval\nimport Mylib.Math (double)\n\n\
-             def doubled() -> int32 = double(21)\n",
+             def doubled() -> i32 = double(21)\n",
             "doubled",
         ),
         (
             "int_square_compose",
             "module App.Eval\nimport Mylib.Math (square)\nimport Mylib.Math (add)\n\n\
-             def composed() -> int32 = add(square(5), square(3))\n",
+             def composed() -> i32 = add(square(5), square(3))\n",
             "composed",
         ),
     ];
@@ -214,7 +214,7 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (host_len)\n\n\
-                   def length_from_host() -> int64 = host_len(to_tensor([1.0, 2.0]))\n";
+                   def length_from_host() -> i64 = host_len(to_tensor([1.0, 2.0]))\n";
 
     let formatted = format_library_plus_snippet(&root, snippet);
     let baseline = eval(EvalRequest {
@@ -253,7 +253,7 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -375,7 +375,7 @@ fn checked_result_name_transport_keeps_authored_named_mismatch_rejection() {
         "authored named diagnostic remains informative: {messages}"
     );
     assert!(
-        messages.ends_with("numeric trap: domain in load at int64"),
+        messages.ends_with("numeric trap: domain in load at i64"),
         "the real named mismatch must still trap: {messages}"
     );
 }
@@ -390,7 +390,7 @@ fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -408,17 +408,17 @@ fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
 #[test]
 fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
     // Use let-bindings (no `def`, no params) so the values are tensor
-    // roots that the host evaluator carries through. `def name() -> int32`
+    // roots that the host evaluator carries through. `def name() -> i32`
     // becomes a 0-arg fn under desugar and is NOT eagerly evaluated by
-    // the runtime; bare `name: int32 = ...` is a value binding that is.
+    // the runtime; bare `name: i32 = ...` is a value binding that is.
     //
     // The bare-form parser path requires the names live inside a module
     // wrapper or at the file root; we wrap them in `App.Eval` for parity
     // with `chelis test`'s actual entry-file shape.
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (square)\n\n\
-                   def isolated_a() -> int32 = square(3)\n\
-                   def isolated_b() -> int32 = square(4)\n";
+                   def isolated_a() -> i32 = square(3)\n\
+                   def isolated_b() -> i32 = square(4)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -483,7 +483,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -549,20 +549,20 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/text.ch"),
         "module Mylib.Text\nexport (label)\n\n\
-         def label(prefix: string, n: int64) -> string = string_concat(prefix, to_string(n))\n",
+         def label(prefix: string, n: i64) -> string = string_concat(prefix, to_string(n))\n",
     )
     .expect("write text.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
     let snippet = "module App.Eval\nimport Mylib.Text (label)\n\n\
-                   caption = label(\"n=\", cast(7, int64))\n";
+                   caption = label(\"n=\", cast(7, i64))\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     // Round-trip through bincode (mirrors the worker tempfile bridge).
@@ -591,7 +591,7 @@ fn check_in_context_accepts_well_typed_snippet() {
     let (_dir, root) = library_fixture();
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def ok() -> int32 = add(1, 2)\n";
+                   def ok() -> i32 = add(1, 2)\n";
     let result = check_in_context(&ctx, snippet).expect("check ok");
     assert!(
         result.errors.is_empty(),
@@ -606,7 +606,7 @@ fn check_in_context_rejects_unbound_library_reference() {
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     // Reference to a name that exists in NEITHER the library nor the new code.
     let snippet = "module App.Eval\n\n\
-                   def bad() -> int32 = nonexistent_function(1, 2)\n";
+                   def bad() -> i32 = nonexistent_function(1, 2)\n";
     let outcome = check_in_context(&ctx, snippet);
     assert!(
         outcome.is_err(),
@@ -618,7 +618,7 @@ fn check_in_context_rejects_unbound_library_reference() {
 fn compiled_context_round_trips_through_bincode() {
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def eight() -> int32 = add(3, 5)\n";
+                   def eight() -> i32 = add(3, 5)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let pre = eval_in_context(&ctx, snippet).expect("pre-encode eval");
@@ -651,7 +651,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
 
@@ -665,12 +665,12 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
         math.push_str(&format!(", helper_{i}"));
     }
     math.push_str(")\n\n");
-    math.push_str("def add(x: int32, y: int32) -> int32 = x + y\n");
-    math.push_str("def double(x: int32) -> int32 = x + x\n");
-    math.push_str("def square(x: int32) -> int32 = x * x\n");
+    math.push_str("def add(x: i32, y: i32) -> i32 = x + y\n");
+    math.push_str("def double(x: i32) -> i32 = x + x\n");
+    math.push_str("def square(x: i32) -> i32 = x * x\n");
     for i in 0..80 {
         math.push_str(&format!(
-            "def helper_{i}(x: int32, y: int32) -> int32 = (x + {}) * (y + {})\n",
+            "def helper_{i}(x: i32, y: i32) -> i32 = (x + {}) * (y + {})\n",
             i + 1,
             i * 2 + 3
         ));
@@ -702,7 +702,7 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
     let snippets: Vec<String> = (0..50)
         .map(|i| {
             format!(
-                "module App.Eval\nimport Mylib.Math (add)\n\ndef result_{i} -> int32 = add({}, {})\n",
+                "module App.Eval\nimport Mylib.Math (add)\n\ndef result_{i} -> i32 = add({}, {})\n",
                 i,
                 i * 2 + 1
             )
@@ -760,7 +760,7 @@ fn compile_in_context_hip_rejects_as_branded_unsupported_feature() {
     let err = chelis_compiler_api::compiler::compile_for_execution_in_context(
         &ctx,
         "module App.Main\nimport Mylib.Math (add)\n\n\
-         def main_value() -> int32 = add(3, 4)\n",
+         def main_value() -> i32 = add(3, 4)\n",
         CompileTarget::Hip,
         None,
     )

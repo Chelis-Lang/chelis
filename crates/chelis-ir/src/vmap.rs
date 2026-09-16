@@ -114,14 +114,12 @@ pub fn vectorize_axis0_with_node_map(
                         axis: RtAxis::Lit(axis),
                     } => crate::dag::ExtentWitnessSite::ResultClaim {
                         claim: claim.clone(),
-                        axis: RtAxis::Lit(
-                            axis.checked_add(1).expect("vmap result axis fits int32"),
-                        ),
+                        axis: RtAxis::Lit(axis.checked_add(1).expect("vmap result axis fits i32")),
                     },
                     other => other.clone(),
                 },
                 parameter: parameter.clone(),
-                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
+                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
                 requirements: requirements.clone(),
                 // A named claim relates two witnesses, and both shift by the
                 // same prepended batch axis, so the obligation is unchanged.
@@ -137,7 +135,7 @@ pub fn vectorize_axis0_with_node_map(
             RiscOp::CheckedUnitAxis {
                 axis: RtAxis::Lit(axis),
             } => RiscOp::CheckedUnitAxis {
-                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
+                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
             },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
             other => other.clone(),
@@ -364,7 +362,7 @@ fn shift_input_axis(dim: &RtDim) -> RtDim {
             axis: RtAxis::Lit(axis),
         } => RtDim::InputAxis {
             tensor: *tensor,
-            axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
+            axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits i32")),
         },
         other => other.clone(),
     }

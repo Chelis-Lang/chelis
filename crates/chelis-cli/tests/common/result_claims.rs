@@ -54,7 +54,7 @@ pub fn assert_claim(output: &str, op: &str, actual: usize) {
     assert!(
         output
             .lines()
-            .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+            .any(|line| line == format!("numeric trap: domain in {op} at i64")),
         "{output}"
     );
     assert!(!output.contains("out ="), "{output}");

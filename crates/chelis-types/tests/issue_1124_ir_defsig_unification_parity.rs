@@ -52,12 +52,12 @@ fn typed_diagnostics(source: &str) -> Vec<String> {
 /// checker API bypasses that gate, but the fixtures mirror the shipped `.dp`
 /// surface, so they keep the blank line.
 const MISMATCH: &str = "(defsig {} k (t-prim {} f32))\n\n\
-                        (def {} k (lit {type: (t-prim {} int32)} 1))\n";
+                        (def {} k (lit {type: (t-prim {} i32)} 1))\n";
 
 const MATCHING: &str = "(defsig {} k (t-prim {} f32))\n\n\
                         (def {} k (lit {type: (t-prim {} f32)} 1.0))\n";
 
-const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} int32)} 1))\n";
+const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} i32)} 1))\n";
 
 /// A `defsig`-less def (`use_base`) that forward-references another
 /// `defsig`-less def (`base`) declared later. chelis#1134 / [04-INF-4]
@@ -65,7 +65,7 @@ const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} int32)} 1))\n";
 /// metadata manufacture value scope. The authoritative parity coverage lives
 /// in `issue_1134_forward_reference_parity`.
 const DEFSIG_LESS_CROSS_REF: &str = "(def {} use_base (var {} base))\n\n\
-                                     (def {} base (lit {type: (t-prim {} int32)} 7))\n";
+                                     (def {} base (lit {type: (t-prim {} i32)} 7))\n";
 
 /// Positive rejection: a `defsig`/body type mismatch is rejected by the IR
 /// ingress with EXACTLY the diagnostic the typed ingress reports. This is the
@@ -84,7 +84,7 @@ fn ir_ingress_rejects_defsig_body_mismatch_like_typed_ingress() {
         ir,
         vec![
             "TypeMismatch: def 'k' body doesn't match declared signature: \
-             body has type `int32`, declared type is `f32`"
+             body has type `i32`, declared type is `f32`"
                 .to_string()
         ],
         "the mismatch must be the exact declared-signature diagnostic"
@@ -143,8 +143,8 @@ fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
 /// ingresses and can no longer observe the prebind. PP9 / [04-TOT-5] makes
 /// this function-metadata capability common to both checker entries.
 const DEFSIG_LESS_FORWARD_FN: &str = "(def {} caller (fn {} (params {}) (app {} (var {} helper))))\n\n\
-     (def {} helper (fn {type: (t-fn {} (t-prim {} int32))} (params {}) \
-     (lit {type: (t-prim {} int32)} 1)))\n";
+     (def {} helper (fn {type: (t-fn {} (t-prim {} i32))} (params {}) \
+     (lit {type: (t-prim {} i32)} 1)))\n";
 
 /// Over-rejection sentinel for the prebind's core job (chelis#1124 review
 /// condition 3): a `defsig`-less def that forward-references another

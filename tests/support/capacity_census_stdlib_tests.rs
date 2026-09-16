@@ -170,7 +170,7 @@ fn aliases_substitute_generic_arguments_and_preserve_nonnumeric_companions() {
 fn forward_and_recursive_aliases_reach_a_finite_numeric_fixed_point() {
     let rows = sources(&[(
         "recursive",
-        "module Std.Recursive\nexport (forward, growing, booleans)\ntype First = Second\ntype Second = (f64, bool)\ntype Tree[a] = | Leaf(a) | Branch(List[Tree[List[a]]])\ntype Recursive[a] = (a, Recursive[a])\ndef forward(x: First) -> First = x\ndef growing(x: Tree[int64]) -> Tree[int64] = x\ndef booleans(x: Recursive[bool]) -> Recursive[bool] = x",
+        "module Std.Recursive\nexport (forward, growing, booleans)\ntype First = Second\ntype Second = (f64, bool)\ntype Tree[a] = | Leaf(a) | Branch(List[Tree[List[a]]])\ntype Recursive[a] = (a, Recursive[a])\ndef forward(x: First) -> First = x\ndef growing(x: Tree[i64]) -> Tree[i64] = x\ndef booleans(x: Recursive[bool]) -> Recursive[bool] = x",
     )]);
     assert!(numeric(&rows, "recursive::forward"));
     assert!(numeric(&rows, "recursive::growing"));
@@ -211,7 +211,7 @@ fn unresolved_nominals_and_wrong_nominal_arguments_fail_closed() {
 fn nested_alias_fields_and_precision_variables_are_capacity() {
     let rows = sources(&[(
         "nested",
-        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Result[List[int64], bool]])\ndef read(x: Hidden) -> Hidden = x\nsig generic: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
+        "module Std.Nested\nexport (read, generic, ordinary, bounded)\ntype Hidden = (&tensor[3, f64], Dict[string, Result[List[i64], bool]])\ndef read(x: Hidden) -> Hidden = x\nsig generic: tensor[n, p] -> p\ndef generic(x) = x\nsig ordinary: p -> p\ndef ordinary(x) = x\nsig bounded[p: Float]: p -> p\ndef bounded(x) = x",
     )]);
     for name in ["read", "generic", "bounded"] {
         assert!(
@@ -301,7 +301,7 @@ fn symbolic_tensor_precision_requires_an_adt_operation_row() {
 fn imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances() {
     for field in ["Imported[p]", "Option[Imported[p]]", "Nested[p]"] {
         let source = format!(
-            "module Std.Use\nimport Std.Data (Imported, Nested)\nexport (Vector, numbers, booleans)\ntype Vector[p] = | Vector({field})\nsig numbers: Vector[int32] -> Vector[int32]\ndef numbers(x) = x\nsig booleans: Vector[bool] -> Vector[bool]\ndef booleans(x) = x"
+            "module Std.Use\nimport Std.Data (Imported, Nested)\nexport (Vector, numbers, booleans)\ntype Vector[p] = | Vector({field})\nsig numbers: Vector[i32] -> Vector[i32]\ndef numbers(x) = x\nsig booleans: Vector[bool] -> Vector[bool]\ndef booleans(x) = x"
         );
         let rows = sources(&[
             (
@@ -400,7 +400,7 @@ fn every_structural_payload_edge_has_numeric_and_boolean_parity() {
         "Result[DTYPE, bool]",
         "Result[bool, DTYPE]",
     ] {
-        for (dtype, expected) in [("int32", true), ("bool", false)] {
+        for (dtype, expected) in [("i32", true), ("bool", false)] {
             let ty = shape.replace("DTYPE", dtype);
             let source = format!(
                 "module Std.Edge\nexport (read)\ntype Payload = {ty}\ndef read(x: Payload) -> Payload = x"
@@ -418,7 +418,7 @@ fn every_structural_payload_edge_has_numeric_and_boolean_parity() {
 fn mutually_recursive_aliases_substitute_their_payload_parameter() {
     let rows = sources(&[(
         "mutual_alias",
-        "module Std.MutualAlias\nexport (numbers, booleans)\ntype Left[a] = Option[Right[a]]\ntype Right[a] = (a, Left[a])\ndef numbers(x: Left[int64]) -> Left[int64] = x\ndef booleans(x: Left[bool]) -> Left[bool] = x",
+        "module Std.MutualAlias\nexport (numbers, booleans)\ntype Left[a] = Option[Right[a]]\ntype Right[a] = (a, Left[a])\ndef numbers(x: Left[i64]) -> Left[i64] = x\ndef booleans(x: Left[bool]) -> Left[bool] = x",
     )]);
     assert!(numeric(&rows, "mutual_alias::numbers"));
     assert!(!numeric(&rows, "mutual_alias::booleans"));
@@ -428,7 +428,7 @@ fn mutually_recursive_aliases_substitute_their_payload_parameter() {
 fn tensor_alias_precision_is_substituted_before_numeric_classification() {
     for (argument, expected) in [
         ("bool", false),
-        ("int32", true),
+        ("i32", true),
         ("p", true),
         ("Identity[p]", true),
     ] {

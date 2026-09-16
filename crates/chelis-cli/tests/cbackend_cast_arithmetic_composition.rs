@@ -393,13 +393,13 @@ int main(void) {{
     );
 }
 
-/// `add(cast(t, f64), cast(t, f64))` for int32 source.  The int32
+/// `add(cast(t, f64), cast(t, f64))` for i32 source.  The i32
 /// values widen to f64 first, then the f64 add runs.  Validates
-/// the int32 -> f64 cast plus the f64 add dispatch chain.
+/// the i32 -> f64 cast plus the f64 add dispatch chain.
 #[test]
 fn cbackend_add_of_two_casts_f64_from_int32() {
     let build = chelis_build_c(
-        "def composed(x: tensor[3, int32]) -> tensor[3, f64] = {\n  \
+        "def composed(x: tensor[3, i32]) -> tensor[3, f64] = {\n  \
          a = cast(x, f64)\n  \
          b = cast(x, f64)\n  \
          add(a, b)\n\
@@ -435,6 +435,6 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "14 22 26",
-        "expected 2*int32 widened to f64; got stdout={trimmed:?}"
+        "expected 2*i32 widened to f64; got stdout={trimmed:?}"
     );
 }

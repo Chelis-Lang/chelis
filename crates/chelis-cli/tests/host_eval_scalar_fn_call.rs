@@ -66,7 +66,7 @@ fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
     // i64 path. Integers print as integers ([05-OBS-2]).
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("scalar_i64_zero_arg.ch");
-    write_file(&fixture, "def go() -> int64 = 7i64\nresult = go()\n");
+    write_file(&fixture, "def go() -> i64 = 7i64\nresult = go()\n");
 
     eval_file(&fixture).success().stdout("go = 7\nresult = 7\n");
 }

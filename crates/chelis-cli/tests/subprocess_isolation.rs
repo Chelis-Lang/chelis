@@ -266,9 +266,9 @@ fn worker_stack_overflow_in_one_file_does_not_kill_sibling_file() {
         &pkg.join("tests/crash.ch"),
         r#"module Iso.Tests.Overflow
 
-def deep(n: int64) -> int64 = if eq(n, cast(0, int64)) then cast(0, int64) else add(cast(1, int64), deep(sub(n, cast(1, int64))))
+def deep(n: i64) -> i64 = if eq(n, cast(0, i64)) then cast(0, i64) else add(cast(1, i64), deep(sub(n, cast(1, i64))))
 
-def test_overflow() -> unit = test_assert(eq(deep(cast(10000000, int64)), cast(10000000, int64)), "would survive")
+def test_overflow() -> unit = test_assert(eq(deep(cast(10000000, i64)), cast(10000000, i64)), "would survive")
 "#,
     );
     write_file(
@@ -356,7 +356,7 @@ def test_foo() -> unit = test_assert(true, "ok")
     // Genuinely invalid Chelis: the parser bails out before ever reaching
     // module enumeration or compilation, exercising the worker's
     // read/parse-failure `<file>` row path. (A type-only error like
-    // `def trigger() -> int64 = "string"` does NOT exercise this path
+    // `def trigger() -> i64 = "string"` does NOT exercise this path
     // because, with `--filter test_foo`, the worker enumerates zero
     // matching tests and returns early before compile, leaving the file
     // entirely silent. A real parse error fires regardless of filter.)

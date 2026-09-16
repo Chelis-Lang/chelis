@@ -34,7 +34,7 @@
 //!     convert to integers. memcpy reinterprets f32 bit patterns as int32s;
 //!     fractional checked-cast behavior is separately red/ignored for Phase 3.
 //!   * `cbackend_cast_tensor_int32_to_f32` -- integer widening to float.
-//!     memcpy reinterprets int32 bit patterns as f32s.
+//!     memcpy reinterprets i32 bit patterns as f32s.
 //!
 //! Originally gated `#[ignore]` in the failing-test commit; flipped to
 //! running in the fix commit on this branch.
@@ -280,13 +280,13 @@ int main(void) {{
     );
 }
 
-/// f32 -> int32 exact integral conversion. Input `[1.0, 2.0, 3.0]`
-/// converts to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
+/// f32 -> i32 exact integral conversion. Input `[1.0, 2.0, 3.0]`
+/// converts to `[1, 2, 3]`. With the memcpy bug, the i32 buffer
 /// contains the raw f32 bit patterns (1.0f -> 0x3F800000 -> 1065353216).
 #[test]
 fn cbackend_cast_tensor_f32_to_int32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = cast(x, int32)\n",
+        "def cast_demo(x: tensor[3, f32]) -> tensor[3, i32] = cast(x, i32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -321,17 +321,17 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "1 2 3",
-        "expected exact integral f32->int32 conversion; got stdout={trimmed:?}"
+        "expected exact integral f32->i32 conversion; got stdout={trimmed:?}"
     );
 }
 
-/// int32 -> f32 conversion. Input `[1, 2, 3]` converts to `[1.0, 2.0,
-/// 3.0]`. With the memcpy bug, the f32 buffer contains the raw int32
+/// i32 -> f32 conversion. Input `[1, 2, 3]` converts to `[1.0, 2.0,
+/// 3.0]`. With the memcpy bug, the f32 buffer contains the raw i32
 /// bit patterns (1 -> 0x00000001 -> ~1.4e-45 denormal).
 #[test]
 fn cbackend_cast_tensor_int32_to_f32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = cast(x, f32)\n",
+        "def cast_demo(x: tensor[3, i32]) -> tensor[3, f32] = cast(x, f32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -366,6 +366,6 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "1 2 3",
-        "expected int32->f32 element-wise conversion; got stdout={trimmed:?}"
+        "expected i32->f32 element-wise conversion; got stdout={trimmed:?}"
     );
 }

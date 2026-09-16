@@ -29,9 +29,9 @@ fn bounded_tensor_targets_preserve_shape_and_instantiate_independently() {
     for (family, first, second) in [
         ("Float", "f32", "f64"),
         ("Float", "f16", "bf16"),
-        ("Int", "int16", "int64"),
-        ("Int", "int8", "int32"),
-        ("Numeric", "f32", "int64"),
+        ("Int", "i16", "i64"),
+        ("Int", "i8", "i32"),
+        ("Numeric", "f32", "i64"),
     ] {
         check(
             &format!(
@@ -41,7 +41,7 @@ fn bounded_tensor_targets_preserve_shape_and_instantiate_independently() {
         );
         check(
             &format!(
-                "def convert[p: {family}](x: tensor[2, int32], witness: p) -> tensor[2, p] = cast(x, p)\na = convert(to_tensor([1, 2]), cast(0, {first}))\nb = convert(to_tensor([3, 4]), cast(0, {second}))\n"
+                "def convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\na = convert(to_tensor([1, 2]), cast(0, {first}))\nb = convert(to_tensor([3, 4]), cast(0, {second}))\n"
             ),
             None,
         );
@@ -98,7 +98,7 @@ fn truncating_bounded_tensor_cast_requires_float_to_integer() {
 
 #[test]
 fn result_constraints_obey_bounded_target_family() {
-    let declaration = "def convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\n";
+    let declaration = "def convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\n";
     check(
         &format!(
             "{declaration}a: tensor[2, f32] = convert(to_tensor([1, 2]))\nb: tensor[2, f64] = convert(to_tensor([1, 2]))\n"
@@ -106,7 +106,7 @@ fn result_constraints_obey_bounded_target_family() {
         None,
     );
     check(
-        &format!("{declaration}a: tensor[2, int64] = convert(to_tensor([1, 2]))\n"),
+        &format!("{declaration}a: tensor[2, i64] = convert(to_tensor([1, 2]))\n"),
         Some("PrecisionMismatch"),
     );
 }

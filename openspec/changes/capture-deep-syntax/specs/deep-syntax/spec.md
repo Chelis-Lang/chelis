@@ -287,7 +287,7 @@ the left-to-right evaluation order.
 Canonical Deep SHALL normalize literals: integers to decimal without leading zeros and finite
 floats to the shortest round-trippable spelling, adding `.0` when otherwise integer-like and
 using lowercase `e` only when selected by that printer. An unsuffixed integer literal SHALL
-bind at `int32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
+bind at `i32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
 tensor-literal inference, or an explicit `cast`. The closed suffix set SHALL match Surf's.
 
 #### Scenario: Float canonicalization
@@ -299,6 +299,23 @@ tensor-literal inference, or an explicit `cast`. The closed suffix set SHALL mat
 
 - **WHEN** a producer constructs a NaN or infinity float literal
 - **THEN** validation/resugaring rejects it because canonical Surf has no representation
+
+### Requirement: Canonical Deep integer dtype spelling
+
+Canonical Deep SHALL spell signed integer primitives `i8`, `i16`, `i32`, and
+`i64`. Normal Deep ingress SHALL reject the retired v0.18 `int*` spellings.
+The explicit v0.18 Deep migration SHALL rewrite only the primitive symbol of a
+`t-prim` node and SHALL preserve arbitrary identifiers, metadata, and strings.
+
+#### Scenario: Canonical t-prim uses i64
+
+- **WHEN** Deep represents the 64-bit signed-integer primitive
+- **THEN** canonical printing emits `(t-prim {} i64)`
+
+#### Scenario: Migration is AST-scoped
+
+- **WHEN** v0.18 Deep contains both `(t-prim {} int64)` and the string `"int64"`
+- **THEN** migration rewrites only the primitive symbol
 
 ### Requirement: Total canonical Surf resugaring
 
@@ -312,10 +329,10 @@ constructor `var`, zero-argument `app`, and zero-field `record` forms SHALL rema
 without erasing semantic type data. Multi-pair `bind` nodes SHALL resugar in
 their written sequential order; empty `pat-tuple` SHALL resugar directly as `()`.
 Negative Deep literals SHALL normalize to Surf's unary-minus application shape. The full
-`int64` minimum SHALL use Surf's direct signed-minimum literal, while a narrower signed
+`i64` minimum SHALL use Surf's direct signed-minimum literal, while a narrower signed
 minimum SHALL use a non-overflowing decomposition; float-typed integer atoms SHALL normalize
 to the equivalent float atom. Negative `pat-lit` values SHALL instead resugar directly as an
-unsuffixed negative pattern, including negative zero and the full `int64` minimum. Nested
+unsuffixed negative pattern, including negative zero and the full `i64` minimum. Nested
 application SHALL preserve its association through an explicitly grouped Surf callee. Every
 Deep string SHALL use Surf's named or minimal lowercase control escape and remain
 representable. Any public Deep name that cannot occupy its corresponding Surf identifier

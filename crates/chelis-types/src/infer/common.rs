@@ -459,8 +459,8 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///   (chelis#405 / WS-3 build ICE).
 ///
 ///   A *return-only* dim var (one that appears in the declared return but
-///   in NO parameter tensor position — e.g. `arange[n](start: int32,
-///   stop: int32) -> tensor[n, int32]`, where the length comes from a
+///   in NO parameter tensor position — e.g. `arange[n](start: i32,
+///   stop: i32) -> tensor[n, i32]`, where the length comes from a
 ///   value parameter) is NOT in `param_dims` and is deliberately left as
 ///   `Wildcard`. Baking such an unbound var into the generalized scheme is
 ///   the red-team RT-39+44 soundness regression (commit 8067c9ce): it
@@ -2831,10 +2831,10 @@ pub(super) fn infer_top_level(
             };
             // WS-A5 RT-3a F1: the permissive `(Error, _)` unify rule lets
             // a body whose return position collapses to `Type::Error`
-            // (e.g. `def use_mix(x: tensor[3, int32]) -> tensor[3, f32]
+            // (e.g. `def use_mix(x: tensor[3, i32]) -> tensor[3, f32]
             // = poly_id(nonexistent_function(x))`, where the outer call
             // early-exits at `Type::Error` so the body's `fn` type is
-            // `Fn([tensor[3, int32]], Type::Error)`) silently satisfy a
+            // `Fn([tensor[3, i32]], Type::Error)`) silently satisfy a
             // concrete declared signature, masking the precision/shape
             // mismatch the user would otherwise see. Surface the masked
             // mismatch here when the body collapses to `Type::Error` at
@@ -2890,7 +2890,7 @@ pub(super) fn infer_top_level(
                             format!(
                                 " (precision `{}` vs declared `{}`; if the body is a \
                              `reduce_sum`, see spec/04-type-system.md §5.7.1: \
-                             narrow integer operands widen to int32 to prevent \
+                             narrow integer operands widen to i32 to prevent \
                              silent overflow; use `tensor[{}]` or omit the result \
                              type)",
                                 body_prec.name(),
@@ -2952,7 +2952,7 @@ pub(super) fn infer_top_level(
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
         // chelis#397/#469: record the size provenance of a top-level value
-        // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
+        // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
         // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
         // whether it is a materializable extent (static / shape-sourced) or a
         // sourceless runtime scalar. Classified against the pre-binding scope.

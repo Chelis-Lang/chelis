@@ -42,7 +42,7 @@ fn programs(dtype: &str, values: &str) -> Vec<String> {
 #[test]
 fn invalid_function_value_chain_lambda_and_field_calls_stop_before_execution() {
     let dir = TempDir::new().unwrap();
-    let sources: Vec<_> = programs("int32", "[1i32, 2i32, 4i32]")
+    let sources: Vec<_> = programs("i32", "[1i32, 2i32, 4i32]")
         .into_iter()
         .flat_map(|source| [source.replace("[p: Float]", "[p]"), source])
         .collect();
@@ -58,7 +58,7 @@ fn invalid_function_value_chain_lambda_and_field_calls_stop_before_execution() {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(
-                rendered.contains("Float") && rendered.contains("int32"),
+                rendered.contains("Float") && rendered.contains("i32"),
                 "{command}: {rendered}"
             );
             if command == "check" {
@@ -223,16 +223,10 @@ fn window_reduction_contracts_reject_invalid_public_calls() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("window-contract.ch");
     for (operation, bad_binder, good_binder, bad_dtype, good_dtype) in [
-        (
-            "reduce_window_mean",
-            "p: Numeric",
-            "p: Float",
-            "int32",
-            "f32",
-        ),
-        ("reduce_window_sum", "p", "p: Numeric", "bool", "int32"),
-        ("reduce_window_max", "p", "p: Numeric", "bool", "int32"),
-        ("reduce_window_min", "p", "p: Numeric", "bool", "int32"),
+        ("reduce_window_mean", "p: Numeric", "p: Float", "i32", "f32"),
+        ("reduce_window_sum", "p", "p: Numeric", "bool", "i32"),
+        ("reduce_window_max", "p", "p: Numeric", "bool", "i32"),
+        ("reduce_window_min", "p", "p: Numeric", "bool", "i32"),
     ] {
         for alias in [false, true] {
             let prefix = if alias {
@@ -314,7 +308,7 @@ fn deferred_window_shape_errors_precede_late_family_rejection() {
         )
     };
 
-    for dtype in ["bool", "int32"] {
+    for dtype in ["bool", "i32"] {
         let invalid_rank = source(dtype, "[1i64, 1i64]");
         fs::write(&path, &invalid_rank).unwrap();
         let checked = cli("check", &path, &dir.path().join("deferred-window-out"));

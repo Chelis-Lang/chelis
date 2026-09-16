@@ -36,16 +36,16 @@ use common::{link_generated, write_file};
 
 /// PR #1215 review P1 reproducer, verbatim shape: the callee takes a
 /// callable AND returns a generic ADT, so the inline path must carry the
-/// checked `Box[int64]` result type into the body for `Full { item: .. }`
+/// checked `Box[i64]` result type into the body for `Full { item: .. }`
 /// to resolve. Prints `1`.
 const CALLABLE_PARAM_GENERIC_RESULT: &str = "\
 type Box[a] =
   | Empty
   | Full { item: a }
 def apply[a](f: (a) -> a, x: a) -> Box[a] = Full { item: f(x) }
-def bump(n: int64) -> int64 = n
-def read() -> int64 = match apply(bump, cast(1, int64)) with {
-  | Empty => cast(0, int64)
+def bump(n: i64) -> i64 = n
+def read() -> i64 = match apply(bump, cast(1, i64)) with {
+  | Empty => cast(0, i64)
   | Full { item: i } => i
 }
 out = print(read())
@@ -61,7 +61,7 @@ type Box[a] =
   | Empty
   | Full { value: a }
 def pick[a, b](x: a, y: Box[b]) -> a = x
-def main() -> int32 = pick(cast(1, int32), Empty)
+def main() -> i32 = pick(cast(1, i32), Empty)
 out = print(main())
 ";
 

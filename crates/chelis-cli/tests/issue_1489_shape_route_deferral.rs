@@ -240,7 +240,7 @@ fn an_operand_that_never_resolves_is_still_rejected() {
     for (call, _) in ROUTES {
         let report = check_json(&format!(
             "module Issue1489ShapeNever\n\
-             def go[t](x: t) -> int32 = {{\n\
+             def go[t](x: t) -> i32 = {{\n\
             \x20 g = {call2}\n\
             \x20 1i32\n\
              }}\n",
@@ -499,7 +499,7 @@ fn a_let_bound_route_result_is_checked_against_the_declaration() {
     let report = check_json(
         "module Issue1489RouteLetLie\n\
          def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
-         def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> tensor[100, 2, f32] =\n\
+         def probe(t: tensor[4, 3, f32], i: tensor[2, i32]) -> tensor[100, 2, f32] =\n\
         \x20 apply_n(fn (v) -> { g = gather(v, i, -1i32)\n\
         \x20   g }, t)\n",
     );
@@ -524,7 +524,7 @@ fn a_let_bound_route_result_with_the_true_type_is_accepted() {
     let report = check_json(
         "module Issue1489RouteLetTruth\n\
          def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
-         def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> tensor[4, 2, f32] =\n\
+         def probe(t: tensor[4, 3, f32], i: tensor[2, i32]) -> tensor[4, 2, f32] =\n\
         \x20 apply_n(fn (v) -> { g = gather(v, i, -1i32)\n\
         \x20   g }, t)\n",
     );

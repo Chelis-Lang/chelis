@@ -12,8 +12,8 @@
 //! false-positive the #711 audit recorded).
 //!
 //! Bounding controls: conditions with an effectful branch (`fail`) route
-//! host-lane, do not fold, and the compiled int64 comparison there is exact
-//! (locked below). The Phase 3 int8 row also proves that folding cannot hide
+//! host-lane, do not fold, and the compiled i64 comparison there is exact
+//! (locked below). The Phase 3 i8 row also proves that folding cannot hide
 //! the required checked-overflow trap.
 
 #![allow(clippy::uninlined_format_args)]
@@ -154,11 +154,11 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
 }
 
 // ===========================================================================
-// chelis#718 - int8 conditions do NOT fold, but the runtime branch diverges
+// chelis#718 - i8 conditions do NOT fold, but the runtime branch diverges
 // through the int64_t widening (#714). Contract: the overflow must trap.
 // ===========================================================================
 
-/// `add(100i8, 100i8)` overflows int8. Today eval wraps (-56 < 0, prints
+/// `add(100i8, 100i8)` overflows i8. Today eval wraps (-56 < 0, prints
 /// 111) and compiled C widens (200 < 0, prints 222) - opposite branches at
 /// runtime, no deletion (both bit patterns present in the emitted C,
 /// verified when this row was probed). The decided contract (#680/#695)
@@ -168,7 +168,7 @@ fn int8_overflow_condition_traps_in_both_lanes() {
     let program = "def pick() -> f32 = if lt(add(100i8, 100i8), 0i8) \
                    then 111.0 else 222.0\nout = print(pick())\n";
     match eval_first_line(program) {
-        Ok(line) => panic!("eval must trap on the int8 overflow, got: {line}"),
+        Ok(line) => panic!("eval must trap on the i8 overflow, got: {line}"),
         Err(stderr) => assert!(stderr.contains("overflow"), "got: {stderr}"),
     }
     if !c_toolchain_available() {
@@ -177,7 +177,7 @@ fn int8_overflow_condition_traps_in_both_lanes() {
     let (_, stdout, stderr, ok) = build_and_run_c(program, "fold_i8").expect("C lane");
     assert!(
         !ok && stderr.contains("overflow"),
-        "compiled C must trap on the int8 overflow; got ok={ok}, stdout `{stdout}`"
+        "compiled C must trap on the i8 overflow; got ok={ok}, stdout `{stdout}`"
     );
 }
 
@@ -186,7 +186,7 @@ fn int8_overflow_condition_traps_in_both_lanes() {
 // ===========================================================================
 
 /// An effectful branch (`fail`) keeps the def in the host lane: no fold,
-/// both branches present in the emitted C, and the compiled int64 comparison
+/// both branches present in the emitted C, and the compiled i64 comparison
 /// is EXACT - `lt(2^53, 2^53 + 1)` is true, so the binary must trap with the
 /// fail message. It does. (eval takes the wrong branch on the same program -
 /// that is chelis#680's known f64 comparison bug, asserted nowhere here.)
@@ -197,14 +197,14 @@ fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
         return;
     }
     let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
-                   then fail(\"int64 invariant violated\") else 222.0\nout = print(pick())\n";
+                   then fail(\"i64 invariant violated\") else 222.0\nout = print(pick())\n";
     let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
     assert!(
-        emitted.contains("int64 invariant violated"),
+        emitted.contains("i64 invariant violated"),
         "the fail branch must survive lowering (host lane, no fold)"
     );
     assert!(
-        !ok && stderr.contains("int64 invariant violated"),
+        !ok && stderr.contains("i64 invariant violated"),
         "2^53 < 2^53 + 1 is true in exact integers; the compiled host lane \
          must take the fail branch. got ok={ok}, stderr: {stderr}"
     );

@@ -5,7 +5,7 @@
 //! `spec/04-type-system.md` [04-PAT-1] states the rule. Before the fix
 //! `chelis check` scored the issue program a clean 1.0 with an empty error
 //! list and `chelis eval --file` ran it and printed `r = 2.5`: the `1.5` arm
-//! can never match an `int32` scrutinee, so the program carried a silently
+//! can never match an `i32` scrutinee, so the program carried a silently
 //! dead arm and the score said nothing was wrong.
 //!
 //! The fixtures are canonical Surf, so the style gate runs on them rather than
@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 /// The issue program, parameterised by the literal pattern on its first arm.
-/// `1.5` is the float-versus-`int32` violation; `1` is the well-formed control.
+/// `1.5` is the float-versus-`i32` violation; `1` is the well-formed control.
 fn program(pattern: &str) -> String {
     // Canonical Surf: `chelis fmt` removes the blank lines between top-level
     // declarations, and these fixtures run WITH the style gate enabled so the
     // corpus stays formatter-clean.
     format!(
         "module ScrutineeSigned\n\
-         def g(n: int32) -> int32 = add(1, n)\n\
+         def g(n: i32) -> i32 = add(1, n)\n\
          r: f32 = match g(2) with {{\n\
          \x20 | {pattern} => 1.5\n\
          \x20 | _ => 2.5\n\
@@ -73,7 +73,7 @@ fn dead_literal_pattern_arm_does_not_score_one() {
     let score = json["score"].as_f64().expect("numeric score");
     assert!(
         score < 1.0,
-        "an f32 literal pattern against an int32 scrutinee must not score 1.0, got {score}"
+        "an f32 literal pattern against an i32 scrutinee must not score 1.0, got {score}"
     );
 
     let errors = json["errors"].as_array().expect("errors array");
@@ -85,7 +85,7 @@ fn dead_literal_pattern_arm_does_not_score_one() {
     assert!(
         message.contains("[04-PAT-1]")
             && message.contains("floating-point literal pattern `1.5`")
-            && message.contains("`int32`"),
+            && message.contains("`i32`"),
         "the diagnostic must cite the atom and name both sides, got {message}"
     );
 }

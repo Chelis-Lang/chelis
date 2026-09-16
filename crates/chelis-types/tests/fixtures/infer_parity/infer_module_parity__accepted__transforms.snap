@@ -72,7 +72,7 @@
                           (t-prim {} f32)))
               }
           (var {span: "surf:195..202"} process)
-          (lit {type: (t-prim {} int32)} 0))
+          (lit {type: (t-prim {} i32)} 0))
         (var {span: "surf:184..186"} xs)))))
 
 == type env ==

@@ -112,9 +112,7 @@ fn bare_arg_add_with_borrow_sig_concrete_precision_type_checks() {
 /// invariant's owning file.
 #[test]
 fn bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype() {
-    const ARITHMETIC_DTYPES: &[&str] = &[
-        "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
-    ];
+    const ARITHMETIC_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64"];
     for dtype in ARITHMETIC_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("wsa7_dtype_matrix.ch");

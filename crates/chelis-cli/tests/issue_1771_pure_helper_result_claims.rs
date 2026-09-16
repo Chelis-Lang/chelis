@@ -105,10 +105,9 @@ fn helper_owned_claims(native: bool) {
                 if let Some((required, axis, observed)) = expected {
                     assert!(output.contains(&format!("extent `{required}`: claimed = {required}, {producer} axis {axis} = {observed}")), "{output}");
                     assert!(
-                        output
-                            .lines()
-                            .any(|line| line
-                                == format!("numeric trap: domain in {producer} at int64")),
+                        output.lines().any(
+                            |line| line == format!("numeric trap: domain in {producer} at i64")
+                        ),
                         "{output}"
                     );
                 } else {
@@ -138,9 +137,9 @@ fn producer_precondition_order(native: bool) {
             ("[0i64, 127i64, 127i64, 127i64]", "element"),
         ] {
             let source = format!(
-                "def double(x: tensor[n, int8]) -> tensor[{callee_claim}, int8] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
-                 def caller(x: tensor[n, int8]) -> tensor[{caller_claim}, int8] ! {{ IO }} = {{\n _ = print(\"add-before\")\n value = double(x)\n _ = print(\"add-after\")\n value\n}}\n\
-                 out = caller(cast(to_tensor({values}), int8))\n"
+                "def double(x: tensor[n, i8]) -> tensor[{callee_claim}, i8] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
+                 def caller(x: tensor[n, i8]) -> tensor[{caller_claim}, i8] ! {{ IO }} = {{\n _ = print(\"add-before\")\n value = double(x)\n _ = print(\"add-after\")\n value\n}}\n\
+                 out = caller(cast(to_tensor({values}), i8))\n"
             );
             let (ok, output) = run(&source, native);
             assert_eq!(ok, expected == "success", "{source}\n{output}");
@@ -159,7 +158,7 @@ fn producer_precondition_order(native: bool) {
                     assert!(
                         output
                             .lines()
-                            .any(|line| line == "numeric trap: domain in add at int64"),
+                            .any(|line| line == "numeric trap: domain in add at i64"),
                         "{source}\n{output}"
                     );
                 }
@@ -167,7 +166,7 @@ fn producer_precondition_order(native: bool) {
                     output
                         .lines()
                         .any(|line| line.strip_prefix("error: ").unwrap_or(line)
-                            == "numeric trap: overflow in add at int8"),
+                            == "numeric trap: overflow in add at i8"),
                     "{source}\n{output}"
                 ),
                 _ => unreachable!(),
@@ -216,7 +215,7 @@ fn gradient_claims(native: bool) {
                 assert!(
                     output
                         .lines()
-                        .any(|line| line == "numeric trap: domain in add at int64"),
+                        .any(|line| line == "numeric trap: domain in add at i64"),
                     "{source}\n{output}"
                 );
             }
@@ -231,8 +230,8 @@ fn cast_element_and_extent_order(native: bool) {
         ("[1.0f32, 2.5f32, 3.5f32, 4.5f32]", "element"),
     ] {
         let source = format!(
-            "def convert(x: tensor[n, f32]) -> tensor[*, int64] = cast(shrink(x, [[1i64, shape(x, 0i32)]]), int64)\n\
-             def claimed(x: tensor[n, f32]) -> tensor[3, int64] ! {{ IO }} = {{\n _ = print(\"cast-before\")\n value = convert(x)\n _ = print(\"cast-after\")\n value\n}}\n\
+            "def convert(x: tensor[n, f32]) -> tensor[*, i64] = cast(shrink(x, [[1i64, shape(x, 0i32)]]), i64)\n\
+             def claimed(x: tensor[n, f32]) -> tensor[3, i64] ! {{ IO }} = {{\n _ = print(\"cast-before\")\n value = convert(x)\n _ = print(\"cast-after\")\n value\n}}\n\
              out = claimed(to_tensor({values}))\n"
         );
         let (ok, output) = run(&source, native);
@@ -250,7 +249,7 @@ fn cast_element_and_extent_order(native: bool) {
             }
             _ => {
                 assert!(
-                    output.contains("numeric trap: domain in cast at int64"),
+                    output.contains("numeric trap: domain in cast at i64"),
                     "{output}"
                 );
                 assert!(!output.contains("extent `"), "{output}");

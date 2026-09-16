@@ -615,7 +615,7 @@ mod tests {
     fn flags_em_dash_in_raw_string_inside_test_fn() {
         let dash = '\u{2014}';
         let src = format!(
-            "#[test]\nfn t() {{\n    let s = r#\"expected NO int64 {dash} silent widening\"#;\n    assert!(!s.is_empty());\n}}\n"
+            "#[test]\nfn t() {{\n    let s = r#\"expected NO i64 {dash} silent widening\"#;\n    assert!(!s.is_empty());\n}}\n"
         );
         let violations = NoEmDashInPublicStrings.check(&ctx(&src));
         assert_eq!(
@@ -645,7 +645,7 @@ mod tests {
         // panic-message string literals; reproduce that exact shape.
         let dash = '\u{2014}';
         let src = format!(
-            "#[test]\nfn t() {{\n    panic!(\n        \"bare unannotated list must not silently default \\\n         to int64 {dash} got something\"\n    );\n}}\n"
+            "#[test]\nfn t() {{\n    panic!(\n        \"bare unannotated list must not silently default \\\n         to i64 {dash} got something\"\n    );\n}}\n"
         );
         let violations = NoEmDashInPublicStrings.check(&ctx(&src));
         assert_eq!(

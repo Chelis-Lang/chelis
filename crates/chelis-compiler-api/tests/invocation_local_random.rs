@@ -152,16 +152,16 @@ fn recursive_random_calls_inherit_the_same_ordinal() {
     let source = format!(
         r#"
 {SOURCE}
-def recur(x: tensor[2, f32], n: int64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
+def recur(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
     ignored = draw(x)
     recur(x, sub(n, 1i64))
 }}
 def recursive_entry(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) {{ recur(x, 3i64) }}
-def ping(x: tensor[2, f32], n: int64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
+def ping(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
     ignored = draw(x)
     pong(x, sub(n, 1i64))
 }}
-def pong(x: tensor[2, f32], n: int64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
+def pong(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
     ignored = draw(x)
     ping(x, sub(n, 1i64))
 }}

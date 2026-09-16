@@ -2231,7 +2231,7 @@ impl WireDag {
             match &node.op {
                 WireRiscOp::Mod => {
                     if node.inputs.len() != 2
-                        || !Prim::parse_name(&node.output_type.precision)
+                        || !Prim::parse_interchange_name(&node.output_type.precision)
                             .is_some_and(|prim| prim.is_integer())
                         || node.inputs.iter().any(|id| {
                             self.nodes[..index]
@@ -2476,8 +2476,8 @@ impl WireDag {
             }
 
             if let WireRiscOp::Pad { fill, .. } = &node.op {
-                let output_prim =
-                    Prim::parse_name(&node.output_type.precision).ok_or_else(|| {
+                let output_prim = Prim::parse_interchange_name(&node.output_type.precision)
+                    .ok_or_else(|| {
                         WireDagContractError::new(format!(
                             "WireDag Pad node {} has unknown output dtype {}",
                             node.id, node.output_type.precision
@@ -2486,9 +2486,9 @@ impl WireDag {
                 if fill.prim() != output_prim {
                     return Err(WireDagContractError::new(format!(
                         "WireDag Pad fill dtype {} does not match node {} output dtype {}",
-                        fill.prim().name(),
+                        fill.prim().interchange_name(),
                         node.id,
-                        output_prim.name()
+                        output_prim.interchange_name()
                     )));
                 }
             }
@@ -2521,7 +2521,8 @@ impl WireDag {
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let Some(output_prim) = Prim::parse_name(&node.output_type.precision) else {
+                let Some(output_prim) = Prim::parse_interchange_name(&node.output_type.precision)
+                else {
                     return Err(WireDagContractError::new(format!(
                         "WireDag ReLU node {} has unknown output dtype {}",
                         node.id, node.output_type.precision
@@ -2599,7 +2600,7 @@ impl WireDag {
                     node.id, input.output_type.precision
                 )));
             }
-            if node.output_type.precision != Prim::Int64.name() {
+            if node.output_type.precision != Prim::Int64.interchange_name() {
                 return Err(WireDagContractError::new(format!(
                     "WireDag Count node {} output dtype must be int64, found {}",
                     node.id, node.output_type.precision

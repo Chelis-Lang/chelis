@@ -1,4 +1,4 @@
-//! Probes for chelis#206: `reshape(x, [cast(shape(x, axis), int64), ...])`
+//! Probes for chelis#206: `reshape(x, [cast(shape(x, axis), i64), ...])`
 //! is syntactically accepted but the type checker does not propagate the
 //! corresponding symbolic dim of `x` into the reshape result type.
 //!
@@ -8,22 +8,22 @@
 //!
 //! ```text
 //! sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-//! def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+//! def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 //! ```
 //!
 //! reports a `TypeMismatch` because the body is inferred as
 //! `tensor[Wildcard, f32]`. The neighbor pattern
-//! `expand(b, 0, shape(x, cast(0, int32)))` type-checks cleanly because
+//! `expand(b, 0, shape(x, cast(0, i32)))` type-checks cleanly because
 //! `expand`'s output dim is forced by the declared signature -- but the
 //! issue is that `reshape` collapses the entire output rank to a
 //! `vec![Wildcard]` (the input precision case in `infer_reshape_app`
 //! recovers only the precision, not the dims).
 //!
 //! Expected fix: when an element of `reshape`'s shape list is the
-//! syntactic form `cast(shape(x, lit_axis), int64)` and `x` is the same
+//! syntactic form `cast(shape(x, lit_axis), i64)` and `x` is the same
 //! input tensor being reshaped AND `lit_axis` resolves to a known axis
 //! of `x`, the typer must propagate `x`'s dim at that axis into the
-//! corresponding output dim. Plain literal dims like `cast(4, int64)`
+//! corresponding output dim. Plain literal dims like `cast(4, i64)`
 //! must continue to produce `Dim::Lit(4)`. Any other shape-list element
 //! shape (arbitrary expression that the recognizer doesn't know how to
 //! interpret) must fall back to `Dim::Wildcard` -- no regression in
@@ -80,7 +80,7 @@ module Probe.Runtime
 export (flatten_batch)
 
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     assert!(
@@ -100,7 +100,7 @@ module Probe.Runtime
 export (bias_broadcast)
 
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, int32)))
+def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, i32)))
 "#,
     );
     assert!(
@@ -120,10 +120,10 @@ module Probe.Runtime
 export (bias_broadcast, flatten_batch)
 
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, int32)))
+def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, i32)))
 
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     assert!(
@@ -140,7 +140,7 @@ fn issue_206_two_symbolic_dims_propagate() {
     let errors = typecheck_surf(
         r#"
 sig flatten_two: &tensor[n, m, f32] -> tensor[n, m, f32]
-def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(shape(x, cast(1, int32)), int64)])
+def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(shape(x, cast(1, i32)), i64)])
 "#,
     );
     assert!(
@@ -158,7 +158,7 @@ fn issue_206_mixed_symbolic_and_literal_dim() {
     let errors = typecheck_surf(
         r#"
 sig with_literal: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def with_literal(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def with_literal(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     assert!(
@@ -176,7 +176,7 @@ fn issue_206_all_literal_dims_still_work() {
     let errors = typecheck_surf(
         r#"
 sig fixed: &tensor[n, 4, f32] -> tensor[4, 4, f32]
-def fixed(x) = reshape(x, [cast(4, int64), cast(4, int64)])
+def fixed(x) = reshape(x, [cast(4, i64), cast(4, i64)])
 "#,
     );
     assert!(
@@ -186,7 +186,7 @@ def fixed(x) = reshape(x, [cast(4, int64), cast(4, int64)])
     );
 }
 
-/// Negative: `cast(shape(y, ...), int64)` where `y` is a DIFFERENT
+/// Negative: `cast(shape(y, ...), i64)` where `y` is a DIFFERENT
 /// tensor (not the input being reshaped). The recognizer requires the
 /// shape source to match the reshape input expression's bound name, so
 /// the cross-tensor pattern must fall back to `Dim::Wildcard` for that
@@ -206,7 +206,7 @@ fn issue_206_shape_of_other_tensor_does_not_propagate() {
     let errors = typecheck_surf(
         r#"
 sig cross_dim: &tensor[n, 4, f32] -> &tensor[m, 4, f32] -> tensor[n, 4, f32]
-def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, int32)), int64), cast(4, int64)])
+def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     let has_dim_mismatch = errors.iter().any(|e| {
@@ -226,7 +226,7 @@ def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, int32)), int64), cast(4,
 }
 
 /// Negative: arbitrary expression in the dim list (e.g. `cast(add(...),
-/// int64)`) is not a recognized symbolic-dim source -- the inner shape
+/// i64)`) is not a recognized symbolic-dim source -- the inner shape
 /// call is wrapped in `add`, so the outer cast peel does not find a
 /// direct `shape(input, lit_axis)`. The recognizer falls back to
 /// `Dim::Wildcard`.
@@ -241,7 +241,7 @@ fn issue_206_unrecognized_dim_expression_falls_back_to_wildcard() {
     let errors = typecheck_surf(
         r#"
 sig add_one_dim: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, int32)), 1), int64), cast(4, int64)])
+def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, i32)), 1), i64), cast(4, i64)])
 "#,
     );
     // The arithmetic-wrapped shape source is NOT a recognized symbolic
@@ -272,7 +272,7 @@ fn issue_206_non_var_reshape_input_falls_back_safely() {
     let errors = typecheck_surf(
         r#"
 sig roundtrip: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)]), [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)]), [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     // Inner reshape's input is a `var x` -- recognizer fires, body type
@@ -302,7 +302,7 @@ fn issue_206_var_name_match_is_load_path_for_propagation() {
     let errors = typecheck_surf(
         r#"
 sig same_var: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
-def same_var(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def same_var(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
     assert!(
@@ -322,7 +322,7 @@ fn issue_206_propagated_def_appears_in_type_env() {
     let checked = typecheck_surf_program(
         r#"
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     )
     .expect("flatten_batch must type-check");

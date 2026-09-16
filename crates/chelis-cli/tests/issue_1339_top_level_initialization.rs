@@ -36,7 +36,7 @@ const REJECT_CASES: &[RejectCase] = &[
         source: "module Issue1339.Scalar\n\
                  root = read_later(1i32)\n\
                  later = 5i32\n\
-                 def read_later(n: int32) -> int32 = add(n, later)\n",
+                 def read_later(n: i32) -> i32 = add(n, later)\n",
         root: "root",
         later: "later",
     },
@@ -45,7 +45,7 @@ const REJECT_CASES: &[RejectCase] = &[
         source: "module Issue1339.List\n\
                  root = read_later()\n\
                  later = [1i64, 2i64]\n\
-                 def read_later() -> List[int64] = later\n",
+                 def read_later() -> List[i64] = later\n",
         root: "root",
         later: "later",
     },
@@ -63,8 +63,8 @@ const REJECT_CASES: &[RejectCase] = &[
         source: "module Issue1339.Multihop\n\
                  root = outer()\n\
                  later = 7i32\n\
-                 def outer() -> int32 = middle()\n\
-                 def middle() -> int32 = add(later, 1i32)\n",
+                 def outer() -> i32 = middle()\n\
+                 def middle() -> i32 = add(later, 1i32)\n",
         root: "root",
         later: "later",
     },
@@ -72,8 +72,8 @@ const REJECT_CASES: &[RejectCase] = &[
         name: "later_external_input",
         source: "module Issue1339.External\n\
                  root = read_input()\n\
-                 input: int32 = input\n\
-                 def read_input() -> int32 = input\n",
+                 input: i32 = input\n\
+                 def read_input() -> i32 = input\n",
         root: "root",
         later: "input",
     },
@@ -84,8 +84,8 @@ const REJECT_CASES: &[RejectCase] = &[
         source: "module Issue1339.Nested\n\
                  root = make_ignored()\n\
                  later = 5i32\n\
-                 def make_ignored() -> int32 = discard(fn (n: int32) -> add(n, later))\n\
-                 def discard(callback: int32 -> int32) -> int32 = 0i32\n",
+                 def make_ignored() -> i32 = discard(fn (n: i32) -> add(n, later))\n\
+                 def discard(callback: i32 -> i32) -> i32 = 0i32\n",
         root: "root",
         later: "later",
     },
@@ -100,26 +100,26 @@ const DIRECT_FORWARD_CONTROL: RejectCase = RejectCase {
     later: "later",
 };
 
-const DEEP_INDIRECT_SOURCE: &str = "(defsig {} read_later (t-fn {} (t-prim {} int32) (t-prim {} int32)))\n\n\
-     (def {} root (app {} (var {} read_later) (lit {type: (t-prim {} int32)} 1)))\n\n\
-     (def {} later (lit {type: (t-prim {} int32)} 5))\n\n\
+const DEEP_INDIRECT_SOURCE: &str = "(defsig {} read_later (t-fn {} (t-prim {} i32) (t-prim {} i32)))\n\n\
+     (def {} root (app {} (var {} read_later) (lit {type: (t-prim {} i32)} 1)))\n\n\
+     (def {} later (lit {type: (t-prim {} i32)} 5))\n\n\
      (def {} read_later\n\
-       (fn {} (params {} (n {type: (t-prim {} int32)}))\n\
+       (fn {} (params {} (n {type: (t-prim {} i32)}))\n\
          (app {} (var {} add) (var {} n) (var {} later))))\n";
 
 const CYCLE_SOURCE: &str = "module Issue1339.Cycle\n\
                             root = read_cycle()\n\
-                            later: int32 = root\n\
-                            def read_cycle() -> int32 = later\n";
+                            later: i32 = root\n\
+                            def read_cycle() -> i32 = later\n";
 
 const CYCLIC_ROOT_WITH_LATER_SOURCE: &str = "module Issue1339.CycleWithLater\n\
                                             root = add(read_root(), later)\n\
                                             later = 5i32\n\
-                                            def read_root() -> int32 = root\n";
+                                            def read_root() -> i32 = root\n";
 
 const CYCLIC_ROOT_WITH_UNKNOWN_SOURCE: &str = "module Issue1339.CycleWithUnknown\n\
                                               root = add(read_root(), missing)\n\
-                                              def read_root() -> int32 = root\n";
+                                              def read_root() -> i32 = root\n";
 
 const POSITIVE_SOURCE: &str = "module Issue1339.Positive\n\
                                base = 5i32\n\
@@ -132,12 +132,12 @@ const POSITIVE_SOURCE: &str = "module Issue1339.Positive\n\
                                unrelated_later = 11i32\n\
                                recursive = countdown(3i32)\n\
                                forward_function = plus_one(4i32)\n\
-                               def read_base(n: int32) -> int32 = add(n, base)\n\
-                               def read_list(_unused: int32) -> List[int64] = list_base\n\
-                               def read_tensor(_unused: int32) -> tensor[2, f32] = tensor_base\n\
-                               def double(n: int32) -> int32 = mul(n, 2i32)\n\
-                               def countdown(n: int32) -> int32 = if n <= 0i32 then base else countdown(n - 1i32) + 1i32\n\
-                               def plus_one(n: int32) -> int32 = add(n, 1i32)\n";
+                               def read_base(n: i32) -> i32 = add(n, base)\n\
+                               def read_list(_unused: i32) -> List[i64] = list_base\n\
+                               def read_tensor(_unused: i32) -> tensor[2, f32] = tensor_base\n\
+                               def double(n: i32) -> i32 = mul(n, 2i32)\n\
+                               def countdown(n: i32) -> i32 = if n <= 0i32 then base else countdown(n - 1i32) + 1i32\n\
+                               def plus_one(n: i32) -> i32 = add(n, 1i32)\n";
 
 const POSITIVE_OUTPUT: &str = "base = 5\n\
                                backward = 6\n\
@@ -685,7 +685,7 @@ module_prefix = "Initlib"
         "module Initlib.Values\n\
          export (read_base)\n\n\
          base = 40i32\n\
-         def read_base(n: int32) -> int32 = add(base, n)\n",
+         def read_base(n: i32) -> i32 = add(base, n)\n",
     );
     let entry = app_pkg.join("src/main.ch");
     write_file(

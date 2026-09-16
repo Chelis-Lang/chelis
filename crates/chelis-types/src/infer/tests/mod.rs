@@ -506,7 +506,7 @@ fn moderate_chain_does_not_trip_sibling_guard() {
 
 #[test]
 fn lit_int32() {
-    check_ok("(def {} x (lit {type: (t-prim {} int32)} 42))");
+    check_ok("(def {} x (lit {type: (t-prim {} i32)} 42))");
 }
 
 #[test]
@@ -529,8 +529,8 @@ fn scalar_add_is_allowed() {
     check_ok(
         "(def {} x
             (app {} (var {} add)
-                (lit {type: (t-prim {} int64)} 2)
-                (lit {type: (t-prim {} int64)} 3)))",
+                (lit {type: (t-prim {} i64)} 2)
+                (lit {type: (t-prim {} i64)} 3)))",
     );
 }
 
@@ -540,19 +540,19 @@ fn integer_mod_and_bitwise_builtins_are_allowed() {
         "(def {} bits
             (app {} (var {} bitxor)
                 (app {} (var {} bitand)
-                    (lit {type: (t-prim {} int64)} 7)
-                    (lit {type: (t-prim {} int64)} 3))
+                    (lit {type: (t-prim {} i64)} 7)
+                    (lit {type: (t-prim {} i64)} 3))
                 (app {} (var {} shl)
-                    (lit {type: (t-prim {} int64)} 1)
-                    (lit {type: (t-prim {} int64)} 2))))
+                    (lit {type: (t-prim {} i64)} 1)
+                    (lit {type: (t-prim {} i64)} 2))))
          (def {} rem
             (app {} (var {} mod)
-                (lit {type: (t-prim {} int64)} 17)
-                (lit {type: (t-prim {} int64)} 5)))
+                (lit {type: (t-prim {} i64)} 17)
+                (lit {type: (t-prim {} i64)} 5)))
          (def {} shrunk
             (app {} (var {} shr)
-                (lit {type: (t-prim {} int64)} 8)
-                (lit {type: (t-prim {} int64)} 1)))",
+                (lit {type: (t-prim {} i64)} 8)
+                (lit {type: (t-prim {} i64)} 1)))",
     );
 }
 
@@ -578,8 +578,8 @@ fn string_predicates_and_transforms_are_allowed() {
                         (app {} (var {} string_slice)
                             (app {} (var {} string_trim)
                                 (lit {type: (t-prim {} string)} "  ckpt-7.safetensors  "))
-                            (lit {type: (t-prim {} int64)} 7)
-                            (lit {type: (t-prim {} int64)} 12))
+                            (lit {type: (t-prim {} i64)} 7)
+                            (lit {type: (t-prim {} i64)} 12))
                         (lit {type: (t-prim {} string)} ".safetensors")))
                 (lit {type: (t-prim {} bool)} true)
                 (lit {type: (t-prim {} bool)} false)))"#,
@@ -594,7 +594,7 @@ fn to_int_builtin_uses_prelude_option_without_local_deftype() {
                 (app {} (var {} to_int)
                     (lit {type: (t-prim {} string)} "42"))
                 (arm {} (pat-ctor {} Some (pat-var {} n)) () (var {} n))
-                (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int64)} 0))))"#,
+                (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} i64)} 0))))"#,
     );
 }
 
@@ -615,7 +615,7 @@ fn to_int_builtin_rejects_non_string_input() {
     check_err(
         r#"(def {} parsed
             (app {} (var {} to_int)
-                (lit {type: (t-prim {} int32)} 7)))"#,
+                (lit {type: (t-prim {} i32)} 7)))"#,
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -636,8 +636,8 @@ fn bitand_rejects_mismatched_integer_widths() {
     check_err(
         r#"(def {} bad
             (app {} (var {} bitand)
-                (lit {type: (t-prim {} int32)} 7)
-                (lit {type: (t-prim {} int64)} 3)))"#,
+                (lit {type: (t-prim {} i32)} 7)
+                (lit {type: (t-prim {} i64)} 3)))"#,
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -647,7 +647,7 @@ fn shl_rejects_non_integer_shift_amount() {
     check_err(
         r#"(def {} bad
             (app {} (var {} shl)
-                (lit {type: (t-prim {} int64)} 1)
+                (lit {type: (t-prim {} i64)} 1)
                 (lit {type: (t-prim {} f64)} 2.0)))"#,
         CheckErrorKind::TypeMismatch,
     );
@@ -658,9 +658,9 @@ fn string_slice_rejects_non_string_input() {
     check_err(
         r#"(def {} bad
             (app {} (var {} string_slice)
-                (lit {type: (t-prim {} int32)} 7)
-                (lit {type: (t-prim {} int64)} 0)
-                (lit {type: (t-prim {} int64)} 1)))"#,
+                (lit {type: (t-prim {} i32)} 7)
+                (lit {type: (t-prim {} i64)} 0)
+                (lit {type: (t-prim {} i64)} 1)))"#,
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -670,7 +670,7 @@ fn rank_builtin_requires_tensor_input() {
     check_err(
         "(def {} x
             (app {} (var {} rank)
-                (lit {type: (t-prim {} int64)} 2)))",
+                (lit {type: (t-prim {} i64)} 2)))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -683,7 +683,7 @@ fn shape_builtin_accepts_tensor_input() {
            (def {} dim
             (app {} (var {} shape)
                 (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
-                (lit {type: (t-prim {} int32)} 1)))"#,
+                (lit {type: (t-prim {} i32)} 1)))"#,
     );
 }
 
@@ -695,7 +695,7 @@ fn shape_builtin_rejects_negative_axis_when_rank_is_known() {
            (def {} dim
             (app {} (var {} shape)
                 (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
-                (lit {type: (t-prim {} int32)} -1)))"#,
+                (lit {type: (t-prim {} i32)} -1)))"#,
         CheckErrorKind::DimensionMismatch,
     );
 }
@@ -723,7 +723,7 @@ fn unbound_variable() {
 #[test]
 fn var_lookup_defined() {
     check_ok(
-        "(def {} x (lit {type: (t-prim {} int32)} 42))
+        "(def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (var {} x))",
     );
 }
@@ -752,8 +752,8 @@ fn app_precision_mismatch() {
 #[test]
 fn app_not_a_function() {
     check_err(
-        "(def {} x (lit {type: (t-prim {} int32)} 42))
-         (def {} y (app {} (var {} x) (lit {type: (t-prim {} int32)} 1)))",
+        "(def {} x (lit {type: (t-prim {} i32)} 42))
+         (def {} y (app {} (var {} x) (lit {type: (t-prim {} i32)} 1)))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -783,7 +783,7 @@ fn fn_two_params() {
 #[test]
 fn fn_with_body_app() {
     check_ok(
-        "(def {} f (fn {} (params {} (x {type: (t-prim {} int32)}) (y {type: (t-prim {} int32)})) (app {} (var {} add) (var {} x) (var {} y))))",
+        "(def {} f (fn {} (params {} (x {type: (t-prim {} i32)}) (y {type: (t-prim {} i32)})) (app {} (var {} add) (var {} x) (var {} y))))",
     );
     check_err(
         "(def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))",
@@ -797,7 +797,7 @@ fn fn_with_body_app() {
 fn let_simple() {
     check_ok(
         "(def {} result
-           (let {} (bind {} x (lit {type: (t-prim {} int32)} 42))
+           (let {} (bind {} x (lit {type: (t-prim {} i32)} 42))
              (var {} x)))",
     );
 }
@@ -806,7 +806,7 @@ fn let_simple() {
 fn let_multiple_bindings() {
     check_ok(
         "(def {} result
-           (let {} (bind {} x (lit {type: (t-prim {} int32)} 1) y (lit {type: (t-prim {} f32)} 2.0))
+           (let {} (bind {} x (lit {type: (t-prim {} i32)} 1) y (lit {type: (t-prim {} f32)} 2.0))
              (var {} x)))",
     );
 }
@@ -816,7 +816,7 @@ fn let_scoping() {
     // Variable defined in let should be usable in body
     check_ok(
         "(def {} result
-           (let {} (bind {} x (lit {type: (t-prim {} int32)} 42))
+           (let {} (bind {} x (lit {type: (t-prim {} i32)} 42))
              (var {} x)))",
     );
 }
@@ -827,8 +827,8 @@ fn let_scoping() {
 fn if_correct() {
     check_ok(
         "(def {} x (lit {type: (t-prim {} bool)} true))
-         (def {} a (lit {type: (t-prim {} int32)} 1))
-         (def {} b (lit {type: (t-prim {} int32)} 2))
+         (def {} a (lit {type: (t-prim {} i32)} 1))
+         (def {} b (lit {type: (t-prim {} i32)} 2))
          (def {} c (if {} (var {} x) (var {} a) (var {} b)))",
     );
 }
@@ -837,7 +837,7 @@ fn if_correct() {
 fn if_branch_mismatch() {
     check_err(
         "(def {} x (lit {type: (t-prim {} bool)} true))
-         (def {} a (lit {type: (t-prim {} int32)} 1))
+         (def {} a (lit {type: (t-prim {} i32)} 1))
          (def {} b (lit {type: (t-prim {} f32)} 2.0))
          (def {} c (if {} (var {} x) (var {} a) (var {} b)))",
         CheckErrorKind::PrecisionMismatch,
@@ -869,14 +869,14 @@ fn pipe_chain() {
 #[test]
 fn tuple_creation() {
     check_ok(
-        "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))",
+        "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} f32)} 2.0)))",
     );
 }
 
 #[test]
 fn tuple_get_valid() {
     check_ok(
-        "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
+        "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
          (def {} x (tuple-get {} (var {} t) 0))",
     );
 }
@@ -884,7 +884,7 @@ fn tuple_get_valid() {
 #[test]
 fn tuple_get_out_of_bounds() {
     check_err(
-        "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1)))
+        "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1)))
          (def {} x (tuple-get {} (var {} t) 5))",
         CheckErrorKind::TupleIndexOutOfBounds,
     );
@@ -893,12 +893,12 @@ fn tuple_get_out_of_bounds() {
 #[test]
 fn tuple_get_lit_node_index_valid() {
     // chelis#707: the Surf `.N` desugar emits the index as a `lit`
-    // node `(lit {int32} N)`, not a bare `Int` atom. The bare-atom
+    // node `(lit {i32} N)`, not a bare `Int` atom. The bare-atom
     // form above always worked; this is the untested seam that made
     // every Surf-level projection type as `Type::Error`.
     check_ok(
-        "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
-         (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} int32)} 0)))",
+        "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
+         (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} i32)} 0)))",
     );
 }
 
@@ -909,8 +909,8 @@ fn tuple_get_lit_node_index_out_of_bounds() {
     // returned `Type::Error` with NO diagnostic (a swallowed reject);
     // now it fires `TupleIndexOutOfBounds`.
     check_err(
-        "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1)))
-         (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} int32)} 5)))",
+        "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1)))
+         (def {} x (tuple-get {} (var {} t) (lit {type: (t-prim {} i32)} 5)))",
         CheckErrorKind::TupleIndexOutOfBounds,
     );
 }
@@ -946,14 +946,14 @@ fn cast_tensor() {
     // `cast_tensor_rejects_unsupported_precision` below.
     check_ok(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-         (def {} y (cast {} (var {} x) (t-prim {} int32)))",
+         (def {} y (cast {} (var {} x) (t-prim {} i32)))",
     );
 }
 
 #[test]
 fn cast_prim() {
     check_ok(
-        "(def {} x (lit {type: (t-prim {} int32)} 42))
+        "(def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (cast {} (var {} x) (t-prim {} f32)))",
     );
 }
@@ -962,7 +962,7 @@ fn cast_prim() {
 fn cast_accepts_alias_precision() {
     check_ok(
         "(typealias {} Floaty () (t-prim {} f32))
-         (def {} x (lit {type: (t-prim {} int32)} 42))
+         (def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (cast {} (var {} x) (t-adt {} Floaty)))",
     );
 }
@@ -1007,7 +1007,7 @@ fn tensor_ascription_rejects_f8e4m3() {
 #[test]
 fn tensor_ascription_accepts_int64() {
     // Integer tensor precisions remain valid.
-    check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} int64))} 0))");
+    check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} i64))} 0))");
 }
 
 #[test]
@@ -1051,7 +1051,7 @@ fn cast_tensor_rejects_f8e4m3() {
 fn cast_prim_to_f64_is_allowed() {
     // Host scalar f64 is still valid — only tensor-precision f64 is banned.
     check_ok(
-        "(def {} x (lit {type: (t-prim {} int32)} 42))
+        "(def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (cast {} (var {} x) (t-prim {} f64)))",
     );
 }
@@ -1103,7 +1103,7 @@ fn copy_accepts_tensor() {
 #[test]
 fn copy_rejects_scalar() {
     check_err(
-        "(def {} x (lit {type: (t-prim {} int32)} 42))
+        "(def {} x (lit {type: (t-prim {} i32)} 42))
          (def {} y (copy {} (var {} x)))",
         CheckErrorKind::TypeMismatch,
     );
@@ -1179,7 +1179,7 @@ fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
         "(deftype {} Mixed ()
             (variant {} Mixed
                 (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
-                (field {} n (t-prim {} int32))))
+                (field {} n (t-prim {} i32))))
          (defsig {} f (t-fn {} (t-adt {} Mixed) (t-prim {} f32)))
          (def {} f (fn {} (params {} p) (lit {type: (t-prim {} f32)} 1.0)))
          (def {} g (grad {} (var {} f)))",
@@ -1238,7 +1238,7 @@ fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
             (t-tensor {} (d-lit {} 2) (t-prim {} f32))
             (t-prim {} f32)))
          (def {} f (fn {} (params {} p y) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+         (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1329,7 +1329,7 @@ fn grad_with_explicit_wrt_returns_selected_gradient_only() {
             (fn {} (params {} x w)
                 (lit {type: (t-prim {} f32)} 1.0)))
          (def {} dw
-            (grad {} (var {} loss) (lit {type: (t-prim {} int32)} 1)))",
+            (grad {} (var {} loss) (lit {type: (t-prim {} i32)} 1)))",
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1356,8 +1356,8 @@ fn grad_with_multiple_wrt_returns_flat_tuple() {
          (def {} grads
             (grad {} (var {} loss)
                 (tuple {}
-                    (lit {type: (t-prim {} int32)} 0)
-                    (lit {type: (t-prim {} int32)} 1))))",
+                    (lit {type: (t-prim {} i32)} 0)
+                    (lit {type: (t-prim {} i32)} 1))))",
     )
     .unwrap();
     let checked = check_ir_program(&exprs).expect("IR check");
@@ -1375,7 +1375,7 @@ fn grad_rejects_nondifferentiable_explicit_wrt_target() {
     check_err(
         "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
          (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
-         (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+         (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -1395,7 +1395,7 @@ fn vmap_function_inserts_axis_zero_batch_dim() {
                 (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
                 (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
          (def {} batch_process
-            (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0)))",
+            (vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0)))",
     );
 }
 
@@ -1403,7 +1403,7 @@ fn vmap_function_inserts_axis_zero_batch_dim() {
 fn vmap_non_function_is_rejected() {
     check_err(
         "(def {} x (lit {type: (t-prim {} f32)} 1.0))
-         (def {} y (vmap {} (var {} x) (lit {type: (t-prim {} int32)} 0)))",
+         (def {} y (vmap {} (var {} x) (lit {type: (t-prim {} i32)} 0)))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -1419,7 +1419,7 @@ fn vmap_axis_out_of_bounds_is_rejected() {
             (fn {} (params {} x)
                 (var {} x)))
          (def {} batch_process
-            (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 2)))",
+            (vmap {} (var {} process) (lit {type: (t-prim {} i32)} 2)))",
         CheckErrorKind::DimensionMismatch,
     );
 }
@@ -1447,14 +1447,14 @@ fn vmap_grad_single_tensor_param_type_checks() {
                 (app {type: (t-prim {} f32)} (var {} tensor_to_scalar)
                     (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum)
                         (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x)
-                        (lit {type: (t-prim {} int32)} 0))))
+                        (lit {type: (t-prim {} i32)} 0))))
          )
          (defsig {} per_example_grad
             (t-fn {}
                 (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
                 (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
          (def {} per_example_grad
-            (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))",
+            (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0)))",
     );
 }
 
@@ -1476,10 +1476,10 @@ fn vmap_grad_multiple_params_type_checks_with_tuple_result() {
                         (app {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} (var {} add)
                             (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x)
                             (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} y))
-                        (lit {type: (t-prim {} int32)} 0))))
+                        (lit {type: (t-prim {} i32)} 0))))
          )
          (def {} per_example_grad
-            (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))",
+            (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0)))",
     );
 }
 
@@ -1494,7 +1494,7 @@ fn grad_of_vmap_is_rejected_for_non_scalar_output() {
             (fn {} (params {} x)
                 (lit {type: (t-prim {} f32)} 1.0)))
          (def {} g
-            (grad {} (vmap {} (var {} loss) (lit {type: (t-prim {} int32)} 0))))",
+            (grad {} (vmap {} (var {} loss) (lit {type: (t-prim {} i32)} 0))))",
         CheckErrorKind::Other,
     );
 }
@@ -1505,7 +1505,7 @@ fn grad_of_vmap_is_rejected_for_non_scalar_output() {
 fn adt_deftype_and_construct() {
     check_ok(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
-         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))",
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42)))",
     );
 }
 
@@ -1573,7 +1573,7 @@ fn deftype_then_typealias_with_same_name_is_rejected() {
     // would silently overwrite an earlier `deftype Holder`.
     check_err(
         "(deftype {} Holder () (variant {} V))
-         (typealias {} Holder () (t-prim {} int32))",
+         (typealias {} Holder () (t-prim {} i32))",
         CheckErrorKind::DuplicateDefinition,
     );
 }
@@ -1581,7 +1581,7 @@ fn deftype_then_typealias_with_same_name_is_rejected() {
 #[test]
 fn typealias_then_deftype_with_same_name_is_rejected() {
     check_err(
-        "(typealias {} Holder () (t-prim {} int32))
+        "(typealias {} Holder () (t-prim {} i32))
          (deftype {} Holder () (variant {} V))",
         CheckErrorKind::DuplicateDefinition,
     );
@@ -1590,7 +1590,7 @@ fn typealias_then_deftype_with_same_name_is_rejected() {
 #[test]
 fn duplicate_typealias_is_rejected() {
     check_err(
-        "(typealias {} Alias () (t-prim {} int32))
+        "(typealias {} Alias () (t-prim {} i32))
          (typealias {} Alias () (t-prim {} f32))",
         CheckErrorKind::DuplicateDefinition,
     );
@@ -1617,8 +1617,8 @@ fn duplicate_def_in_same_program_is_rejected() {
 fn duplicate_value_def_in_same_program_is_rejected() {
     // The rule keys on the `def` tag, so duplicate value defs collide too.
     check_err(
-        "(def {} x (lit {type: (t-prim {} int32)} 1))
-         (def {} x (lit {type: (t-prim {} int32)} 2))",
+        "(def {} x (lit {type: (t-prim {} i32)} 1))
+         (def {} x (lit {type: (t-prim {} i32)} 2))",
         CheckErrorKind::DuplicateDefinition,
     );
 }
@@ -1679,11 +1679,11 @@ fn duplicate_defsig_identical_signature_is_rejected() {
 fn match_simple_adt() {
     check_ok(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
-         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42)))
          (def {} result
            (match {} (var {} x)
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))
-             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
+             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} i32)} 0))))",
     );
 }
 
@@ -1691,7 +1691,7 @@ fn match_simple_adt() {
 fn match_non_exhaustive() {
     check_err(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
-         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42)))
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42)))
          (def {} result
            (match {} (var {} x)
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))))",
@@ -1927,7 +1927,7 @@ fn partial_inference_continues_after_error() {
     // First def has an error, second should still be processed
     let result = check(
         "(def {} x (var {} nonexistent))
-         (def {} y (lit {type: (t-prim {} int32)} 42))",
+         (def {} y (lit {type: (t-prim {} i32)} 42))",
     );
     assert!(!result.errors.is_empty(), "expected at least one error");
     // y should still have been typed
@@ -2033,7 +2033,7 @@ fn builtin_conv_accepts_int_stride_padding() {
     check_ok(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (var {} Nil)))))",
     );
 }
 
@@ -2042,7 +2042,7 @@ fn builtin_conv_rejects_channel_mismatch() {
     check_err(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_a) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_b) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (var {} Nil)))))",
         CheckErrorKind::DimensionMismatch,
     );
 }
@@ -2052,7 +2052,7 @@ fn builtin_conv_rejects_kernel_precision_mismatch() {
     check_err(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} bf16))} 0))
-         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 1) (lit {type: (t-prim {} i64)} 1)) (var {} Nil)))))",
         CheckErrorKind::PrecisionMismatch,
     );
 }

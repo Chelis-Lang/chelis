@@ -88,7 +88,7 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
 fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", 4);
-    // A runtime bound: `end` comes from a rank-0 int64 scalar input, as
+    // A runtime bound: `end` comes from a rank-0 i64 scalar input, as
     // `k = n - 4` lowers.
     let k = dag.add_node(
         RiscOp::Load { name: "k".into() },

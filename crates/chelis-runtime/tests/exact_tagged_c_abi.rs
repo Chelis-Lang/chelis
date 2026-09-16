@@ -221,7 +221,7 @@ fn borrowed_view_copies_shape_and_honors_declared_capacity() {
 /// empty view, and a view based at an offset into a larger buffer.
 ///
 /// Both assertions are profile-independent. The runtime sizes with checked
-/// int64 arithmetic rather than with debug overflow checks, so a release build
+/// i64 arithmetic rather than with debug overflow checks, so a release build
 /// must produce these same exact answers.
 #[test]
 fn zero_size_and_offset_views_are_accepted_at_their_exact_capacity() {
@@ -321,7 +321,7 @@ fn run_invalid_case(case: &str) -> ! {
                 );
             }
             "byte-overflow" => {
-                // The element count fits int64, but the exact I16 byte count
+                // The element count fits i64, but the exact I16 byte count
                 // does not. This is distinct from the product overflow above
                 // and must fail before inspecting the placeholder data.
                 let shape = [(i64::MAX / 2) + 1];
@@ -334,7 +334,7 @@ fn run_invalid_case(case: &str) -> ! {
                 );
             }
             // chelis#889 owned-allocation leg of the byte-overflow control.
-            // The extent product 2^62 is a legal int64 element count; the f32
+            // The extent product 2^62 is a legal i64 element count; the f32
             // byte size it names, 2^64, is not. `chelis_alloc` sizes its own
             // storage, so this is the path the `byte-overflow` view case
             // above cannot reach.
@@ -441,16 +441,16 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     // product overflow
     (
         "shape-overflow",
-        "Overflow: chelis_tensor_entry_borrow extent product exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow extent product exceeds i64",
     ),
     // byte overflow
     (
         "byte-overflow",
-        "Overflow: chelis_tensor_entry_borrow byte size exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow byte size exceeds i64",
     ),
     (
         "alloc-byte-overflow",
-        "Overflow: chelis_alloc byte size exceeds int64",
+        "Overflow: chelis_alloc byte size exceeds i64",
     ),
     // declared capacity and base pointer
     (
@@ -463,7 +463,7 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     ),
     (
         "view-alignment",
-        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for int64",
+        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for i64",
     ),
 ];
 

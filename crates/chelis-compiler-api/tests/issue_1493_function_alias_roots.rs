@@ -4,10 +4,10 @@ use chelis_compiler_api::schema::{CheckRequest, EvalRequest, SourceKind};
 
 fn source(module: bool, annotated: bool, chain: bool) -> String {
     format!(
-        "{}\ndef anchor(x: int32) -> int32 = x\n{} = anchor\n{}\ndef user() -> int32 = {}(1)\n",
+        "{}\ndef anchor(x: i32) -> i32 = x\n{} = anchor\n{}\ndef user() -> i32 = {}(1)\n",
         if module { "module AliasUser" } else { "" },
         if annotated {
-            "alias: (int32) -> int32"
+            "alias: (i32) -> i32"
         } else {
             "alias"
         },
@@ -64,7 +64,7 @@ fn function_aliases_remain_callable_entries_without_display_roots() {
 
 #[test]
 fn ordinary_aliases_and_callable_declarations_remain_observable() {
-    let result = eval(request("def anchor(x: int32) -> int32 = x\nvalue = 1\nother = value\ndef user() -> int32 = anchor(other)".into())).unwrap();
+    let result = eval(request("def anchor(x: i32) -> i32 = x\nvalue = 1\nother = value\ndef user() -> i32 = anchor(other)".into())).unwrap();
     let names = result
         .roots
         .iter()
@@ -99,7 +99,7 @@ fn deep_function_alias_preserves_only_concrete_observations() {
 
 #[test]
 fn nullary_alias_is_a_value_not_an_implicitly_applied_declaration() {
-    let source = "def anchor() -> int32 = 7\nalias = anchor\ndef user() -> int32 = alias()";
+    let source = "def anchor() -> i32 = 7\nalias = anchor\ndef user() -> i32 = alias()";
     let result = eval_selected(request(source.into()), &["user".into()]).unwrap();
     assert_eq!(result.roots[0].display.as_deref(), Some("7"));
     let selected = eval_selected(request(source.into()), &["alias".into()]).unwrap();
@@ -108,7 +108,7 @@ fn nullary_alias_is_a_value_not_an_implicitly_applied_declaration() {
 
 #[test]
 fn tensor_function_alias_preserves_concrete_call_result() {
-    let source = "def anchor(x: tensor[2, int32]) -> tensor[2, int32] = x\nalias = anchor\ndef user() -> tensor[2, int32] = alias(to_tensor([1, 2]))";
+    let source = "def anchor(x: tensor[2, i32]) -> tensor[2, i32] = x\nalias = anchor\ndef user() -> tensor[2, i32] = alias(to_tensor([1, 2]))";
     let result = eval_selected(request(source.into()), &["user".into()]).unwrap();
     assert_eq!(
         result.roots[0].display.as_deref(),
@@ -122,7 +122,7 @@ fn tensor_function_alias_preserves_concrete_call_result() {
 fn nullary_alias_remains_callable_as_an_argument_or_local_value() {
     for body in ["invoke(alias)", "{\nlocal = alias\nlocal()\n}"] {
         let source = format!(
-            "def anchor() -> int32 = 7\nalias = anchor\ndef invoke(f) -> int32 = f()\ndef user() -> int32 = {body}"
+            "def anchor() -> i32 = 7\nalias = anchor\ndef invoke(f) -> i32 = f()\ndef user() -> i32 = {body}"
         );
         let checked = check(CheckRequest {
             source_kind: SourceKind::Surf,

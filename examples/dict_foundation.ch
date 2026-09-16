@@ -1,10 +1,10 @@
 keys: List[string] = ["alpha", "beta", "gamma"]
-ids: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+ids: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
 pairs = zip(keys, ids)
 enumerated = enumerate(keys)
-vocab: Dict[string, int64] = dict_of(pairs)
-extended = dict_insert(vocab, "delta", cast(4, int64))
-overlay: Dict[string, int64] = dict_of([("beta", cast(20, int64)), ("epsilon", cast(5, int64))])
+vocab: Dict[string, i64] = dict_of(pairs)
+extended = dict_insert(vocab, "delta", cast(4, i64))
+overlay: Dict[string, i64] = dict_of([("beta", cast(20, i64)), ("epsilon", cast(5, i64))])
 merged = dict_merge(extended, overlay)
 trimmed = dict_remove(merged, "gamma")
 key_count = len(vocab)
@@ -16,11 +16,11 @@ trimmed_count = len(trimmed)
 has_beta = dict_contains(vocab, "beta")
 beta_id = match dict_get(vocab, "beta") with {
   | Some(value) => value
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 merged_beta_id = match dict_get(merged, "beta") with {
   | Some(value) => value
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 pairs_view = print(pairs)
 enumerated_view = print(enumerated)

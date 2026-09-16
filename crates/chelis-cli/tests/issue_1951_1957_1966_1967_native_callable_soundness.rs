@@ -162,7 +162,7 @@ fn source_def_read_uses_private_c_namespace_and_runs() {
 /// even if the parameter is unused in the selected body branch.
 #[test]
 fn lambda_application_evaluates_argument_before_unused_body_parameter() {
-    let program = "def f(z: int64) -> int64 = (fn (x) -> if false then x else 7i64)(trunc_div(1i64, z))\n\
+    let program = "def f(z: i64) -> i64 = (fn (x) -> if false then x else 7i64)(trunc_div(1i64, z))\n\
                    out = f(0i64)\n";
     let eval_output = eval(program, "lambda_argument_eval");
     assert!(
@@ -171,7 +171,7 @@ fn lambda_application_evaluates_argument_before_unused_body_parameter() {
     );
     assert!(
         String::from_utf8_lossy(&eval_output.stderr)
-            .contains("numeric trap: division by zero in trunc_div at int64"),
+            .contains("numeric trap: division by zero in trunc_div at i64"),
         "eval must report the argument trap: {}",
         String::from_utf8_lossy(&eval_output.stderr)
     );
@@ -182,7 +182,7 @@ fn lambda_application_evaluates_argument_before_unused_body_parameter() {
         assert!(!run.status.success(), "C must not skip the argument trap");
         assert!(
             String::from_utf8_lossy(&run.stderr)
-                .contains("numeric trap: division by zero in trunc_div at int64"),
+                .contains("numeric trap: division by zero in trunc_div at i64"),
             "C must report the same first trap as eval: {}",
             String::from_utf8_lossy(&run.stderr)
         );
@@ -193,7 +193,7 @@ fn lambda_application_evaluates_argument_before_unused_body_parameter() {
 /// argument's trap is observably first.
 #[test]
 fn lambda_application_argument_trap_precedes_body_trap() {
-    let program = "def f(z: int64) -> int64 = (fn (x) -> add(trunc_div(-9223372036854775808i64, -1i64), x))(trunc_div(1i64, z))\n\
+    let program = "def f(z: i64) -> i64 = (fn (x) -> add(trunc_div(-9223372036854775808i64, -1i64), x))(trunc_div(1i64, z))\n\
                    out = f(0i64)\n";
     let artifacts = build_c(program, "lambda_order_c").expect("C build must succeed");
     if common::gcc_available() {
@@ -211,7 +211,7 @@ fn lambda_application_argument_trap_precedes_body_trap() {
 /// its own `y`; no C name capture may rewrite the argument.
 #[test]
 fn lambda_body_binding_cannot_capture_caller_argument_expression() {
-    let program = "def f(y: int64) -> int64 = (fn (x) -> {\n\
+    let program = "def f(y: i64) -> i64 = (fn (x) -> {\n\
                      y = 9i64\n\
                      x\n\
                    })(y)\n\
@@ -241,7 +241,7 @@ fn lambda_body_binding_cannot_capture_caller_argument_expression() {
 #[test]
 fn lambda_body_can_bind_its_own_parameter() {
     let artifacts = build_c(
-        "def f(y: int64) -> int64 = (fn (x) -> {\n\
+        "def f(y: i64) -> i64 = (fn (x) -> {\n\
            x = 9i64\n\
            x\n\
          })(y)\n\

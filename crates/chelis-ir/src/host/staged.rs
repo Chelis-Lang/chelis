@@ -129,7 +129,7 @@ pub(crate) fn partition(
                         node.output_type != scalar_type() || !matches!(node.op, RiscOp::Load { .. })
                     })
                 {
-                    return Err("a staged reshape target must have one exact int64 producer".into());
+                    return Err("a staged reshape target must have one exact i64 producer".into());
                 }
             }
             StageValue::Host(id) => {
@@ -706,7 +706,7 @@ mod tests {
             occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
                 .unwrap()
                 .remove(0),
             captures: vec![(
@@ -973,7 +973,7 @@ mod tests {
             occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
                 .unwrap()
                 .remove(0),
             captures: vec![(

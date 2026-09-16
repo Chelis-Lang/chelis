@@ -165,14 +165,14 @@ fn incompatible_literal_type_metadata_is_rejected() {
 
 #[test]
 fn int64_minimum_resugars_to_parseable_typed_surf() {
-    let deep = parse_one_deep("(lit {type: (t-prim {} int64)} -9223372036854775808)");
+    let deep = parse_one_deep("(lit {type: (t-prim {} i64)} -9223372036854775808)");
 
     let surf = format_expression(&resugar_expression(&deep).expect("i64 minimum resugars"));
 
     assert_eq!(surf, "-9223372036854775808i64");
     let redesugared = redesugar_expression(&surf);
     assert!(
-        redesugared.contains("type: (t-prim {} int64)"),
+        redesugared.contains("type: (t-prim {} i64)"),
         "the typed minimum must survive the round trip:\n{redesugared}"
     );
 }

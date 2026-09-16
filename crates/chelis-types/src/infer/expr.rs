@@ -702,7 +702,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 ///
 /// Handler-form rules (open question 1, decided 2026-07-17; explicit over
 /// implicit, since this code is agent-written):
-/// * `random` (`with seed`): the seed is semantically int64. A seed written as
+/// * `random` (`with seed`): the seed is semantically i64. A seed written as
 ///   an integer LITERAL must carry the `i64` suffix; an unsuffixed literal is a
 ///   `TypeMismatch` naming the suffix (this is the reject-diagnostic half left
 ///   to chelis#731 Phase 1 by chelis#771, unblocking the parked cross-lane RNG
@@ -766,7 +766,7 @@ pub(super) fn infer_handle_effect(
             {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    "`with seed(...)` requires a signed int64 literal seed; \
+                    "`with seed(...)` requires a signed i64 literal seed; \
                      a shadowed `neg` is a runtime callable"
                         .to_string(),
                     vec![],
@@ -776,8 +776,8 @@ pub(super) fn infer_handle_effect(
                 SeedLiteralForm::Unsuffixed => {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        "`with seed(...)` requires an int64-suffixed integer literal seed; \
-                         an unsuffixed literal defaults to int32 (spec/02-surf-syntax.md \
+                        "`with seed(...)` requires an i64-suffixed integer literal seed; \
+                         an unsuffixed literal defaults to i32 (spec/02-surf-syntax.md \
                          §P10a; spec/design/checker_totality.md §C1.5)"
                             .to_string(),
                         vec![
@@ -814,7 +814,7 @@ pub(super) fn infer_handle_effect(
 
     // T-Handle: return the BODY's type in the enclosing context. This is the
     // chelis#709 fix -- the enclosing `def` signature is now enforced against
-    // the body, so an int64 body in an `-> f32` def, or a tensor body from a
+    // the body, so an i64 body in an `-> f32` def, or a tensor body from a
     // scalar-typed fn, is a type error caught before any backend sees it.
     infer_expr(body, env, vg, subst, adt_reg, errors, product)
 }
@@ -828,9 +828,9 @@ pub(super) enum SeedLiteralForm {
     /// diagnostic.
     NotIntLiteral,
     /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
-    /// int32} N)`). The seed is semantically int64, so this is a type error.
+    /// i32} N)`). The seed is semantically i64, so this is a type error.
     Unsuffixed,
-    /// A signed int64-suffixed literal. [05-RNG-1] admits negative values.
+    /// A signed i64-suffixed literal. [05-RNG-1] admits negative values.
     ValidInt64,
 }
 
@@ -845,14 +845,14 @@ pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
     // `Expr::List`-only read of the `t-prim` under its `type:` metadata -- so
     // on the stamped ingress the handler `Expr::Node` fell straight to the
     // default arm, the seed classified as `NotIntLiteral`, and the §P10a
-    // int64-suffix rejection never fired at all.
+    // i64-suffix rejection never fired at all.
     let int_lit = match expr {
         // A bare integer atom has no suffix metadata: unsuffixed by construction.
         deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
         _ => match stamped_parts(expr) {
             Some((DeepTag::Lit, meta, lit_kids)) => match lit_kids.first() {
                 Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
-                    let is_int64 = meta.ty().is_some_and(|ty| matches!(stamped_parts(ty.expression()), Some((DeepTag::TPrim, _, prim_kids)) if prim_kids.first().and_then(symbol_name) == Some("int64")));
+                    let is_int64 = meta.ty().is_some_and(|ty| matches!(stamped_parts(ty.expression()), Some((DeepTag::TPrim, _, prim_kids)) if prim_kids.first().and_then(symbol_name) == Some("i64")));
                     Some((is_int64, *value))
                 }
                 // A `(lit ...)` wrapping a non-int value is not an int seed.
@@ -895,9 +895,9 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
     match atom {
         // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 the
         // lexer parses unsuffixed integer tokens at i64 so that
-        // out-of-range literals can be diagnosed before the int32
+        // out-of-range literals can be diagnosed before the i32
         // narrowing. The bare-atom path is the value-only fallback for
-        // Deep code that bypasses the desugarer's `(lit {type: int32}
+        // Deep code that bypasses the desugarer's `(lit {type: i32}
         // N)` wrapping; the same range check is enforced more visibly
         // at `infer_lit` where the type metadata is in scope.
         // Out-of-range here would silently wrap to a negative i32 if
@@ -1063,19 +1063,19 @@ pub(super) fn infer_lit(
     // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 last
     // paragraph, the lexer parses unsuffixed integer literals at i64
     // so that out-of-range literals can be diagnosed before the
-    // int32 narrowing. The desugarer attaches `type: int32` ahead of
-    // type-check (because §5.3 declares int32 as the default), so
+    // i32 narrowing. The desugarer attaches `type: i32` ahead of
+    // type-check (because §5.3 declares i32 as the default), so
     // here we check whether the underlying i64 value actually fits in
     // i32. If it doesn't, emit the §5.3 diagnostic before defaulting
     // — silently wrapping to a negative i32 is the bug §5.3 was
     // written to prevent.
     //
-    // RT-2 fixup B2/B3: extend the same range check to int8 and
-    // int16 contextual positions (spec §5.6 / §P10b). When the
+    // RT-2 fixup B2/B3: extend the same range check to i8 and
+    // i16 contextual positions (spec §5.6 / §P10b). When the
     // contextual tensor-literal rule (chelis-surf desugar) emits a
-    // `(lit {type: (t-prim {} int8)} N)` for an `xs: tensor[N, int8]
+    // `(lit {type: (t-prim {} i8)} N)` for an `xs: tensor[N, i8]
     // = [..., 200]` source, the underlying i64 value (200) overflows
-    // int8 (range [-128, 127]) and silently wraps to -56 if not
+    // i8 (range [-128, 127]) and silently wraps to -56 if not
     // diagnosed here. Mirror the i32 check for the i8 and i16 rows.
     let value_atom = kids.first();
     // chelis#1125 PP7 / [04-TOT-5]: read the `type:` metadata VALUE through
@@ -1083,7 +1083,7 @@ pub(super) fn infer_lit(
     // metadata map verbatim, so on the stamped ingress this value is still an
     // `Expr::Node` even though the enclosing `lit` arrived here as a rebuilt
     // `List`. The old `Expr::List`-only destructure therefore selected no
-    // range-check row at all, and `(lit {type: (t-prim {} int8)} 200)` was
+    // range-check row at all, and `(lit {type: (t-prim {} i8)} 200)` was
     // accepted by `check_typed_program` while `check_ir_program` rejected it.
     let meta_prim_name =
         meta.and_then(|m| m.ty())
@@ -1100,37 +1100,37 @@ pub(super) fn infer_lit(
         // produces a Float atom; an Int atom in a float context is
         // either an error caught elsewhere or a Cons-mismatch).
         let range_check = match prim_name {
-            "int8" => Some(("int8", i8::MIN as i64, i8::MAX as i64)),
-            "int16" => Some(("int16", i16::MIN as i64, i16::MAX as i64)),
-            "int32" => Some(("int32", i32::MIN as i64, i32::MAX as i64)),
-            // int64 cannot overflow an i64 atom; bool/string don't
+            "i8" => Some(("i8", i8::MIN as i64, i8::MAX as i64)),
+            "i16" => Some(("i16", i16::MIN as i64, i16::MAX as i64)),
+            "i32" => Some(("i32", i32::MIN as i64, i32::MAX as i64)),
+            // i64 cannot overflow an i64 atom; bool/string don't
             // accept Int atoms.
             _ => None,
         };
         if let Some((dtype, lo, hi)) = range_check
             && (*n < lo || *n > hi)
         {
-            // The int32 default path keeps the WS-A0 D1 message
-            // shape (i64 suffix + cast(_, int64) hint) so existing
-            // diagnostics-pinning tests stay green; the int8/int16
+            // The i32 default path keeps the WS-A0 D1 message
+            // shape (i64 suffix + cast(_, i64) hint) so existing
+            // diagnostics-pinning tests stay green; the i8/i16
             // contextual paths cite §5.6 + §5.3 because the
             // narrowing came from contextual inference, not the
             // default. The cast hint spells the prec type name
-            // `int64` (§1.1) — `i64` is only the literal-suffix
+            // `i64` (§1.1) — `i64` is only the literal-suffix
             // spelling (§5.5) and is not a valid `cast` target, so
             // recommending `cast({n}, i64)` would send the user to a
             // form that re-fires this same diagnostic (issue #308
             // review fix).
-            if dtype == "int32" {
+            if dtype == "i32" {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
-                        "literal {n} out of range for default int32; use the `i64` \
-                         suffix (`{n}i64`) or an explicit cast({n}, int64) \
+                        "literal {n} out of range for default i32; use the `i64` \
+                         suffix (`{n}i64`) or an explicit cast({n}, i64) \
                          (spec/04-type-system.md §5.3, §5.5)"
                     ),
                     vec![
-                        "spec/04-type-system.md §5.3: integer literals default to int32; \
+                        "spec/04-type-system.md §5.3: integer literals default to i32; \
                          the lexer parses at i64 so out-of-range tokens can be diagnosed \
                          before the narrowing rather than wrapping silently"
                             .to_string(),
@@ -1291,22 +1291,22 @@ pub(super) fn infer_lit(
             deep::Expr::Atom(deep::Atom::Int(n), _) => {
                 // D1 (WS-A0 RT-1 fixup): same check as the metadata
                 // path above but for Deep producers that omit the
-                // explicit `type: int32` ascription on a `(lit {} N)`
+                // explicit `type: i32` ascription on a `(lit {} N)`
                 // form. Without this guard the bare-form path would
-                // silently default to int32 and wrap.
+                // silently default to i32 and wrap.
                 if i32::try_from(*n).is_err() {
                     report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
                             format!(
-                                "literal {n} out of range for default int32; use the \
-                             `{n}i64` literal suffix or an explicit cast({n}, int64) \
+                                "literal {n} out of range for default i32; use the \
+                             `{n}i64` literal suffix or an explicit cast({n}, i64) \
                              (spec/04-type-system.md §5.3, §5.5)"
                             ),
                             vec![
                                 "spec/04-type-system.md §5.3: integer literals default \
-                             to int32; the lexer parses at i64 so out-of-range \
+                             to i32; the lexer parses at i64 so out-of-range \
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
                                     .to_string(),

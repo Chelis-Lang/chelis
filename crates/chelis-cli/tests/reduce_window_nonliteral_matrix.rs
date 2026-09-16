@@ -104,8 +104,8 @@ const POOLED: &str = "tensor(shape=[5], data=[5.0, 5.0, 8.0, 8.0, 9.0])";
 /// clearance is CI-checked rather than asserted.
 #[test]
 fn partition_agrees_across_lanes() {
-    let program = "xs: List[int64] = [cast(1, int64), cast(3, int64), cast(2, int64), cast(4, int64)]\n\
-         buckets = partition(fn (x: int64) -> gt(x, cast(2, int64)), xs)\n\
+    let program = "xs: List[i64] = [cast(1, i64), cast(3, i64), cast(2, i64), cast(4, i64)]\n\
+         buckets = partition(fn (x: i64) -> gt(x, cast(2, i64)), xs)\n\
          out = print(buckets)\n";
     assert_eq!(
         eval_first_line(program).expect("eval"),
@@ -139,7 +139,7 @@ fn literal_window_pools_correctly_in_both_lanes() {
 #[test]
 fn eval_pools_correctly_with_nonliteral_window_and_strides() {
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+         def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
          out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
     assert_eq!(eval_first_line(program).expect("eval"), POOLED);
@@ -159,7 +159,7 @@ fn c_nonliteral_window_and_strides_pool_or_reject() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+         def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
          out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
     let (ok, stderr, stdout) = c_outcome(program, "rw_both_var");
@@ -194,7 +194,7 @@ fn c_nonliteral_window_does_not_panic_the_compiler() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int64) -> tensor[5, f32] = \
+         def f(x: tensor[6, f32], w: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [1i64])\n\
          out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64))\n";
     let (_, stderr, _) = c_outcome(program, "rw_one_var");

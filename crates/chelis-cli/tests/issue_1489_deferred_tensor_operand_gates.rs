@@ -36,7 +36,7 @@
 //!
 //! The decision is deferred, never dropped. The issue's suggested tolerant arm
 //! would remove the rejection, and that is unsafe here: measured, a tolerant
-//! `cast` lets `def go[t](x: t) -> int32 = cast(x, int32)` check at score 1.0
+//! `cast` lets `def go[t](x: t) -> i32 = cast(x, i32)` check at score 1.0
 //! AND build, with the backend selecting a dtype for the never-resolved `t`.
 //! A variable that is never bound is still rejected by the per-def pass.
 
@@ -104,7 +104,7 @@ fn an_operand_resolved_after_the_gate_is_accepted() {
 fn an_operand_resolved_to_a_non_tensor_is_still_rejected() {
     let report = check_json(
         "module Issue1489Concrete\n\
-         def probe() -> int32 = {\n\
+         def probe() -> i32 = {\n\
         \x20 g = copy(())\n\
         \x20 1i32\n\
          }\n",
@@ -123,7 +123,7 @@ fn an_operand_resolved_to_a_non_tensor_is_still_rejected() {
 fn an_operand_that_never_resolves_is_still_rejected() {
     let report = check_json(
         "module Issue1489Never\n\
-         def go[t](x: t) -> int32 = {\n\
+         def go[t](x: t) -> i32 = {\n\
         \x20 g = copy(x)\n\
         \x20 1i32\n\
          }\n",
@@ -143,11 +143,11 @@ fn an_operand_that_never_resolves_is_still_rejected() {
 fn a_never_resolved_declared_parameter_is_named_not_numbered() {
     let report = check_json(
         "module Issue1489Named\n\
-         def alpha[t](x: t) -> int32 = {\n\
+         def alpha[t](x: t) -> i32 = {\n\
         \x20 g = copy(x)\n\
         \x20 1i32\n\
          }\n\
-         def beta[q](y: q) -> int32 = 1i32\n",
+         def beta[q](y: q) -> i32 = 1i32\n",
     );
     let found = messages(&report);
     assert!(
@@ -200,19 +200,15 @@ fn eager_and_deferred_gates_agree_on_the_same_operand() {
         ("&tensor[3, f32]", "copy(v)", "&tensor[3, f32]"),
         ("unit", "copy(v)", "unit"),
         ("f32", "copy(v)", "f32"),
-        ("(int32, int32)", "copy(v)", "(int32, int32)"),
+        ("(i32, i32)", "copy(v)", "(i32, i32)"),
         ("tensor[3, f32]", "cast(v, f64)", "tensor[3, f64]"),
         ("&tensor[3, f32]", "cast(v, f64)", "tensor[3, f64]"),
         ("f32", "cast(v, f64)", "f64"),
         ("unit", "cast(v, f64)", "f64"),
-        ("(int32, int32)", "cast(v, f64)", "f64"),
-        ("tensor[3, f32]", "cast_trunc(v, int32)", "tensor[3, int32]"),
-        (
-            "&tensor[3, f32]",
-            "cast_trunc(v, int32)",
-            "tensor[3, int32]",
-        ),
-        ("f64", "cast_trunc(v, int32)", "int32"),
+        ("(i32, i32)", "cast(v, f64)", "f64"),
+        ("tensor[3, f32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
+        ("&tensor[3, f32]", "cast_trunc(v, i32)", "tensor[3, i32]"),
+        ("f64", "cast_trunc(v, i32)", "i32"),
     ];
     let mut divergences = Vec::new();
     for (ty, call, ret) in grid {
@@ -263,16 +259,16 @@ fn a_chain_of_deferred_gates_agrees_with_the_eager_form() {
     let chains = [
         ("copy(copy(t))", "copy(v)", "copy(w)", "tensor[3, f32]"),
         (
-            "copy(cast_trunc(t, int32))",
+            "copy(cast_trunc(t, i32))",
             "copy(v)",
-            "cast_trunc(w, int32)",
-            "tensor[3, int32]",
+            "cast_trunc(w, i32)",
+            "tensor[3, i32]",
         ),
         (
-            "cast_trunc(copy(t), int32)",
-            "cast_trunc(v, int32)",
+            "cast_trunc(copy(t), i32)",
+            "cast_trunc(v, i32)",
             "copy(w)",
-            "tensor[3, int32]",
+            "tensor[3, i32]",
         ),
     ];
     let mut divergences = Vec::new();
@@ -316,12 +312,12 @@ fn a_chain_of_deferred_gates_agrees_with_the_eager_form() {
 fn a_deferred_cast_decides_as_the_eager_one_does() {
     let eager = check_json(
         "module Issue1489CastEager\n\
-         def probe(t: &tensor[3, f32]) -> tensor[3, int32] = cast_trunc(t, int32)\n",
+         def probe(t: &tensor[3, f32]) -> tensor[3, i32] = cast_trunc(t, i32)\n",
     );
     let deferred = check_json(
         "module Issue1489CastDeferred\n\
-         def apply_it(f: (&tensor[3, f32]) -> tensor[3, int32], t: &tensor[3, f32]) -> tensor[3, int32] = f(t)\n\
-         def probe(t: tensor[3, f32]) -> tensor[3, int32] = apply_it(fn (v) -> cast_trunc(v, int32), &t)\n",
+         def apply_it(f: (&tensor[3, f32]) -> tensor[3, i32], t: &tensor[3, f32]) -> tensor[3, i32] = f(t)\n\
+         def probe(t: tensor[3, f32]) -> tensor[3, i32] = apply_it(fn (v) -> cast_trunc(v, i32), &t)\n",
     );
     assert!(
         !messages(&eager).is_empty(),
@@ -401,7 +397,7 @@ fn a_deferred_cast_constrains_its_result() {
 fn a_deferred_cast_does_not_resolve_its_own_operand() {
     let report = check_json(
         "module Issue1489CastSelf\n\
-         def go[t](x: t) -> int32 = cast(x, int32)\n",
+         def go[t](x: t) -> i32 = cast(x, i32)\n",
     );
     let found = messages(&report);
     assert!(
@@ -479,7 +475,7 @@ fn a_host_slot_rejection_names_the_resolved_type_not_an_identity() {
         ),
         (
             "csv_nrows(v)",
-            "int64",
+            "i64",
             "csv_nrows expects List[Dict[string,string]] as the first argument",
         ),
     ] {
@@ -572,7 +568,7 @@ fn an_accepted_host_slot_operand_draws_no_slot_rejection_when_deferred() {
     for (ty, call, ret) in [
         ("f64", "round_to(v, 2i32)", "f64"),
         ("f32", "round_to(v, 2i32)", "f32"),
-        ("List[Dict[string,string]]", "csv_nrows(v)", "int64"),
+        ("List[Dict[string,string]]", "csv_nrows(v)", "i64"),
         ("List[Dict[string,string]]", "to_csv(v)", "string"),
     ] {
         let deferred = check_json(&format!(

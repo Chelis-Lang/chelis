@@ -46,7 +46,7 @@ fn compile_c(source: &str, entry: &str) -> String {
 
 const MULTI_WRT_SOURCE: &str = r#"module Repro.GradTupleProj
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
+  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
 "#;
 
@@ -128,7 +128,7 @@ fn issue309_single_wrt_grad_call_stays_single_tensor() {
     // the function returns it directly (no projection).
     let source = r#"module Repro.GradSingle
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
+  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = grad(loss, wrt=x)(x, w)
 "#;
     let c = compile_c(source, "single");

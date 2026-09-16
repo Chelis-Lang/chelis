@@ -409,7 +409,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn sample(marker: u32) -> StdLibContext {
-        let source = format!("module CacheProof\ndef value_{marker}() -> int32 = {marker}\n");
+        let source = format!("module CacheProof\ndef value_{marker}() -> i32 = {marker}\n");
         let decls = chelis_surf::parser::parse_str(&source).unwrap();
         build_stdlib_context(&decls).unwrap()
     }

@@ -33,7 +33,7 @@ module_prefix = "Demo"
         &app_pkg.join("src/special.ch"),
         r#"module Demo.Special
 
-def answer() -> int32 = 7
+def answer() -> i32 = 7
 "#,
     );
     write_file(

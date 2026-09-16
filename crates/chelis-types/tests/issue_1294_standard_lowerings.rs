@@ -46,7 +46,7 @@ fn layer_norm_rejects_missing_or_mistyped_epsilon_and_invalid_operands() {
         );
         assert!(check(&source).is_err(), "accepted {source}");
     }
-    for dtype in ["int8", "int16", "int32", "int64", "bool"] {
+    for dtype in ["i8", "i16", "i32", "i64", "bool"] {
         let source = format!(
             "def f(x: tensor[2,2,{dtype}], g: tensor[2,{dtype}], b: tensor[2,{dtype}], e: {dtype}) = layer_norm(x,g,b,e)\n"
         );
@@ -130,7 +130,7 @@ fn hosted_matmul_rejects_rank_dtype_and_batch_mismatches() {
     for source in [
         "def f(a: tensor[2,f32], b: tensor[2,1,f32]) = matmul(a,b)\n",
         "def f(a: tensor[1,2,f32], b: tensor[2,1,f64]) = matmul(a,b)\n",
-        "def f(a: tensor[1,2,int32], b: tensor[2,1,int32]) = matmul(a,b)\n",
+        "def f(a: tensor[1,2,i32], b: tensor[2,1,i32]) = matmul(a,b)\n",
         "def f(a: tensor[2,1,2,f32], b: tensor[3,2,1,f32]) = matmul(a,b)\n",
         "def f(a: tensor[1,2,f32], b: tensor[3,1,f32]) = matmul(a,b)\n",
     ] {

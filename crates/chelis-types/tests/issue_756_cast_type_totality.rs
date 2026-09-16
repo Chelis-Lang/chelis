@@ -31,7 +31,7 @@ use chelis_types::errors::CheckErrorKind;
 use chelis_types::{FitnessReport, InferResult, check_ir_fitness, check_ir_program};
 
 const ACTIVE_CAST_TARGETS: [&str; 9] = [
-    "f32", "f64", "bf16", "f16", "bool", "int8", "int16", "int32", "int64",
+    "f32", "f64", "bf16", "f16", "bool", "i8", "i16", "i32", "i64",
 ];
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {

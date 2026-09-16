@@ -36,17 +36,17 @@ fn issue_527_len_index_then_reuse_list_builds_and_runs() {
         return;
     }
     let source = "\
-def walk(params: List[tensor[2, f32]], i: int64, total: int64) -> tensor[2, f32] =\n\
+def walk(params: List[tensor[2, f32]], i: i64, total: i64) -> tensor[2, f32] =\n\
   if gte(i, total) then to_tensor([0.0, 0.0]) else\n\
     {\n\
       p = index(params, i)\n\
-      rest = walk(params, add(i, cast(1, int64)), total)\n\
+      rest = walk(params, add(i, cast(1, i64)), total)\n\
       add(p, rest)\n\
     }\n\
 def reduce_list(params: List[tensor[2, f32]]) -> tensor[2, f32] =\n\
   {\n\
-    total = cast(len(params), int64)\n\
-    walk(params, cast(0, int64), total)\n\
+    total = cast(len(params), i64)\n\
+    walk(params, cast(0, i64), total)\n\
   }\n\
 def run() -> tensor[2, f32] =\n\
   {\n\

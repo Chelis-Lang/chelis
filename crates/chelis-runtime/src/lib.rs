@@ -156,7 +156,7 @@ pub trait TensorElement: element::ElementStorage + Sized + Copy {
 /// `Bool8` and `i8` share a width and are not interchangeable, exactly as
 /// [`chelis_vocab::Repr::Bool8`] and `Repr::TwosComplement8` are distinct
 /// despite both being one byte. Keeping them distinct at the element type is
-/// what stops bool storage and int8 storage being cross-wired; a bare `u8`
+/// what stops bool storage and i8 storage being cross-wired; a bare `u8`
 /// would silently permit it.
 ///
 #[repr(transparent)]
@@ -353,10 +353,10 @@ fn finalize_f64(value: f64) -> f64 {
 
 impl_runtime_float_arithmetic!(f32, finalize_f32);
 impl_runtime_float_arithmetic!(f64, finalize_f64);
-impl_runtime_integer_arithmetic!(i8, "int8");
-impl_runtime_integer_arithmetic!(i16, "int16");
-impl_runtime_integer_arithmetic!(i32, "int32");
-impl_runtime_integer_arithmetic!(i64, "int64");
+impl_runtime_integer_arithmetic!(i8, "i8");
+impl_runtime_integer_arithmetic!(i16, "i16");
+impl_runtime_integer_arithmetic!(i32, "i32");
+impl_runtime_integer_arithmetic!(i64, "i64");
 
 #[inline]
 fn finalize_f16(value: f32) -> half::f16 {
@@ -967,7 +967,7 @@ pub union chelis_value_payload {
 /// Read a signed-integer-valued slot from a tensor at logical offset
 /// `linear`, dispatching on the tensor's declared dtype. RT-4 F1
 /// sibling: gather/scatter previously read indices via `*data.add(i)`
-/// which assumes f32 storage; with int64 indices now sized at 8
+/// which assumes f32 storage; with i64 indices now sized at 8
 /// bytes/elem this needs to dispatch on dtype.
 unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: RuntimeDType) -> i64 {
     match dtype {
@@ -1027,7 +1027,7 @@ fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
 
 fn exact_i64_scalar(value: chelis_scalar, context: &str) -> i64 {
     if value.dtype != CHELIS_DTYPE_I64 {
-        runtime_fail!("Domain: {context} requires int64 tagged metadata");
+        runtime_fail!("Domain: {context} requires i64 tagged metadata");
     }
     validate_scalar(value, context);
     i64::from_ne_bytes(value.bits.to_ne_bytes())
@@ -1739,7 +1739,7 @@ unsafe fn tensor_scalar_or_same_shape_validated(
 
 unsafe fn int_list_value(list: *const chelis_list, index: i64, op: &str) -> i64 {
     if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
-        runtime_fail!("{op} expects a list of int64 values");
+        runtime_fail!("{op} expects a list of i64 values");
     }
     internal_value_as_i64((*list).items[index as usize])
 }
@@ -1994,7 +1994,7 @@ pub unsafe extern "C" fn chelis_tensor_repurpose(
 ) {
     let rank_i64 = exact_i64_scalar(rank, "chelis_tensor_repurpose rank");
     let rank = c_int::try_from(rank_i64).unwrap_or_else(|_| {
-        runtime_fail!("Overflow: chelis_tensor_repurpose rank {rank_i64} exceeds int32")
+        runtime_fail!("Overflow: chelis_tensor_repurpose rank {rank_i64} exceeds i32")
     });
     if rank > 0 && shape.is_null() {
         runtime_fail!("Domain: chelis_tensor_repurpose has null shape for rank {rank}");
@@ -2307,7 +2307,7 @@ pub unsafe extern "C" fn chelis_tensor_elementwise_index_step_for_shape(
         runtime_fail!("Domain: {context} negative rank {rank_i64}");
     }
     let rank = i32::try_from(rank_i64)
-        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds i32"));
     let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
     if rank > 0 && shape.is_null() {
         runtime_fail!("Domain: {context} positive rank has null shape");
@@ -2370,8 +2370,7 @@ pub unsafe extern "C" fn chelis_tensor_flat_index(
             .flat_index_by(|axis| exact_i64_scalar(coordinates.add(axis).read(), context)),
         context,
     );
-    i64::try_from(index)
-        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} index exceeds int64"))
+    i64::try_from(index).unwrap_or_else(|_| runtime_fail!("Overflow: {context} index exceeds i64"))
 }
 
 unsafe fn checked_movement_target(
@@ -2386,7 +2385,7 @@ unsafe fn checked_movement_target(
         runtime_fail!("Domain: {context} negative rank {rank}");
     }
     let rank = i32::try_from(rank)
-        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank exceeds int32"));
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank exceeds i32"));
     if rank > 0 && shape.is_null() {
         runtime_fail!("Domain: {context} positive rank has null shape");
     }
@@ -2454,7 +2453,7 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
             MetadataError::Overflow(_) => "overflow",
         };
         eprintln!("{error}");
-        runtime_fail!("numeric trap: {class} in {op} at int64")
+        runtime_fail!("numeric trap: {class} in {op} at i64")
     })
 }
 
@@ -2477,7 +2476,7 @@ impl chelis_metadata_plan {
             MetadataPlanLayout::Strided(metadata) => metadata.byte_offset(linear),
         }?;
         i64::try_from(offset.get())
-            .map_err(|_| MetadataError::Overflow("metadata byte offset exceeds int64"))
+            .map_err(|_| MetadataError::Overflow("metadata byte offset exceeds i64"))
     }
     fn shape(&self) -> &[i64] {
         match &self.layout {
@@ -2539,7 +2538,7 @@ fn metadata_plan_input_rank(rank: chelis_scalar) -> usize {
         );
     }
     let rank = affine_result(
-        i32::try_from(rank).map_err(|_| MetadataError::Overflow("metadata rank exceeds int32")),
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("metadata rank exceeds i32")),
         "metadata_plan",
     ) as usize;
     let entries = affine_result(ElementCount::scratch_entries(rank, 0), "metadata_plan");
@@ -2814,7 +2813,7 @@ unsafe fn movement_plan_rank(input: *const chelis_tensor, rank: chelis_scalar, o
         );
     }
     let rank = affine_result(
-        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds i32")),
         op,
     );
     if rank != (*input).rank() {
@@ -3405,8 +3404,7 @@ unsafe fn reduction_array(rank: chelis_scalar, values: *const chelis_scalar, op:
         );
     }
     let rank = affine_result(
-        i32::try_from(rank)
-            .map_err(|_| MetadataError::Overflow("metadata array rank exceeds int32")),
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("metadata array rank exceeds i32")),
         op,
     );
     affine_array(values, rank as usize, op)
@@ -3573,7 +3571,7 @@ fn affine_scalar(value: chelis_scalar, op: &str) -> i64 {
             Ok(i64::from_ne_bytes(value.bits.to_ne_bytes()))
         } else {
             Err(MetadataError::Domain(
-                "requires canonical tagged int64 metadata".into(),
+                "requires canonical tagged i64 metadata".into(),
             ))
         },
         op,
@@ -3625,7 +3623,7 @@ unsafe fn affine_shape(
         );
     }
     let rank = affine_result(
-        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds i32")),
         op,
     );
     if rank != (*tensor).rank() {
@@ -3735,7 +3733,7 @@ pub unsafe extern "C" fn chelis_tensor_affine_index(
         op,
     );
     affine_result(
-        i64::try_from(index).map_err(|_| MetadataError::Overflow("affine index exceeds int64")),
+        i64::try_from(index).map_err(|_| MetadataError::Overflow("affine index exceeds i64")),
         op,
     )
 }
@@ -3750,7 +3748,7 @@ pub unsafe extern "C" fn chelis_tensor_check_reshape(
     let dtype = tensor_metadata_dtype(tensor, context);
     let rank_i64 = exact_i64_scalar(rank, context);
     let rank = i32::try_from(rank_i64)
-        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds i32"));
     let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
     if rank > 0 && shape.is_null() {
         runtime_fail!("Domain: {context} positive rank has null shape");
@@ -4508,8 +4506,8 @@ pub unsafe extern "C" fn chelis_value_release(value: chelis_value) {
 
 unsafe fn internal_value_as_i64(value: chelis_value) -> i64 {
     let scalar = internal_value_as_scalar(value);
-    if validate_scalar(scalar, "internal int64 extraction") != RuntimeDType::I64 {
-        runtime_fail!("Domain: expected int64 value");
+    if validate_scalar(scalar, "internal i64 extraction") != RuntimeDType::I64 {
+        runtime_fail!("Domain: expected i64 value");
     }
     i64::from_ne_bytes(scalar.bits.to_ne_bytes())
 }
@@ -4971,7 +4969,7 @@ unsafe fn nested_list_shape(list: *const chelis_list) -> Vec<i64> {
     }
     let items = &(*list).items;
     let mut shape = vec![i64::try_from(items.len()).unwrap_or_else(|_| {
-        runtime_fail!("Overflow: chelis_tensor_from_values list length exceeds int64")
+        runtime_fail!("Overflow: chelis_tensor_from_values list length exceeds i64")
     })];
     if items.is_empty() {
         return shape;
@@ -5050,9 +5048,8 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
 ) -> *mut chelis_tensor {
     let dtype = require_runtime_dtype(dtype, "chelis_tensor_from_values dtype");
     let shape = nested_list_shape(list);
-    let rank = i32::try_from(shape.len()).unwrap_or_else(|_| {
-        runtime_fail!("Overflow: chelis_tensor_from_values rank exceeds int32")
-    });
+    let rank = i32::try_from(shape.len())
+        .unwrap_or_else(|_| runtime_fail!("Overflow: chelis_tensor_from_values rank exceeds i32"));
     let out = chelis_alloc(rank, shape.as_ptr(), dtype.id() as chelis_dtype);
     if (*out).size() != 0 {
         let mut index = 0;
@@ -5260,7 +5257,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         // from the allocator, where the atom mandates `Overflow`.
         out_shape[axis_i] = out_shape[axis_i]
             .checked_add((*tensor).shape()[axis_i])
-            .unwrap_or_else(|| runtime_fail!("Overflow: concat output extent exceeds int64"));
+            .unwrap_or_else(|| runtime_fail!("Overflow: concat output extent exceeds i64"));
     }
     let out = chelis_alloc(
         (*first).rank(),
@@ -5277,7 +5274,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
             );
             indices[axis_i] = indices[axis_i]
                 .checked_add(axis_offset)
-                .unwrap_or_else(|| runtime_fail!("Overflow: concat coordinate exceeds int64"));
+                .unwrap_or_else(|| runtime_fail!("Overflow: concat coordinate exceeds i64"));
             let out_linear = metadata_or_fail((*out).metadata.flat_index(&indices), "tensor index");
             // Byte-stride copy of a single element; preserves the
             // full bit pattern for every supported dtype (f32, f64,
@@ -5287,7 +5284,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         }
         axis_offset = axis_offset
             .checked_add((*tensor).shape()[axis_i])
-            .unwrap_or_else(|| runtime_fail!("Overflow: concat axis offset exceeds int64"));
+            .unwrap_or_else(|| runtime_fail!("Overflow: concat axis offset exceeds i64"));
     }
     out
 }
@@ -5300,7 +5297,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
 ) -> *mut chelis_list {
     let dtype = tensor_dtype(tensor, "split input");
     let axis_i = tensor_normalize_axis(tensor, axis, "split");
-    // [05-OP-33]: split takes "nonnegative int64 sizes whose checked sum
+    // [05-OP-33]: split takes "nonnegative i64 sizes whose checked sum
     // equals the selected extent". Both halves matter. An unchecked `+=`
     // wraps on an i64.MAX-shaped size list, and without the nonnegativity
     // guard a negative size lets the sum equality hold while an individual
@@ -5310,11 +5307,11 @@ pub unsafe extern "C" fn chelis_tensor_split(
     for i in 0..chelis_list_len(sizes) {
         let size = int_list_value(sizes, i, "split");
         if size < 0 {
-            runtime_fail!("Domain: split expects nonnegative int64 sizes, got {size}");
+            runtime_fail!("Domain: split expects nonnegative i64 sizes, got {size}");
         }
         total = total
             .checked_add(size)
-            .unwrap_or_else(|| runtime_fail!("Overflow: split size sum exceeds int64"));
+            .unwrap_or_else(|| runtime_fail!("Overflow: split size sum exceeds i64"));
     }
     if total != (*tensor).shape()[axis_i] {
         runtime_fail!("split sizes must sum to the selected axis extent");
@@ -5336,7 +5333,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
             );
             indices[axis_i] = indices[axis_i]
                 .checked_add(axis_offset)
-                .unwrap_or_else(|| runtime_fail!("Overflow: split coordinate exceeds int64"));
+                .unwrap_or_else(|| runtime_fail!("Overflow: split coordinate exceeds i64"));
             let src = metadata_or_fail((*tensor).metadata.flat_index(&indices), "tensor index");
             // Byte-stride copy of a single element; correct for every
             // supported dtype (4-byte f32/i32/bool and 8-byte
@@ -5345,7 +5342,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
         }
         axis_offset = axis_offset
             .checked_add(part_size)
-            .unwrap_or_else(|| runtime_fail!("Overflow: split axis offset exceeds int64"));
+            .unwrap_or_else(|| runtime_fail!("Overflow: split axis offset exceeds i64"));
         items.push(chelis_value_take_tensor(part));
     }
     new_list(items, "chelis_tensor_split")
@@ -6604,11 +6601,11 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
 // `#[no_mangle]` tensor print with ZERO emitters anywhere in
 // `chelis-backend-c` or `chelis-ir`, so no compiled program could reach
 // it. It was neither dead-and-removable nor a supported extern surface
-// owed exit coverage, which is exactly how the int32 misdecode above
+// owed exit coverage, which is exactly how the i32 misdecode above
 // stayed invisible - an exit the census never had to account for because
 // nothing called it. Removing it shrinks the observation surface to the
 // exits that are actually reachable. C ABI note: the declaration leaves
-// `chelis_runtime.h` at the 0.18 cut, alongside chelis#730 §C6.2's int32
+// `chelis_runtime.h` at the 0.18 cut, alongside chelis#730 §C6.2's i32
 // decode completion. It does NOT ride with chelis#894's
 // `chelis_fill_bool_bits` -> `chelis_fill_bool` rename, which is a bool
 // STORAGE change and belongs to 0.19 under the roadmap's anti-churn

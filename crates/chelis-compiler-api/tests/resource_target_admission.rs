@@ -61,7 +61,7 @@ fn ordinary_and_callable_apis_enforce_the_selected_target() {
 #[test]
 fn legacy_value_root_compilation_checks_resource_regions() {
     for (device, allowed) in [("cpu", true), ("gpu:0", false)] {
-        let source = format!("x: int32 = with device(\"{device}\") {{ 1 }}");
+        let source = format!("x: i32 = with device(\"{device}\") {{ 1 }}");
         let result = compile(request(&source, CompileTarget::C));
         if allowed {
             result.unwrap();

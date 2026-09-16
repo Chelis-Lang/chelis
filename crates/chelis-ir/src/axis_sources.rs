@@ -84,7 +84,7 @@ pub fn expansion_kind(dag: &Dag, id: NodeId) -> Option<ExpansionKind> {
 ///
 /// The variant set is C4's, and it is deliberately closed: an extent is a
 /// compile-time literal, an axis of an external `Load`, an axis of one of
-/// this node's own tensor inputs, a rank-0 `int64` scalar input, or a value
+/// this node's own tensor inputs, a rank-0 `i64` scalar input, or a value
 /// the operation computes by its own output-shape rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxisSource {
@@ -94,7 +94,7 @@ pub enum AxisSource {
     ExternalAxis { load: NodeId, axis: usize },
     /// An axis of the tensor in this node's absolute input slot `input`.
     InputAxis { input: usize, axis: RtAxis },
-    /// A rank-0 exact-`int64` extent value in absolute input slot `input`.
+    /// A rank-0 exact-`i64` extent value in absolute input slot `input`.
     ScalarInput { input: usize },
     /// The operation computes this extent by its own output-shape rule, so
     /// it is a fresh extent rather than any input's runtime dimension.
@@ -684,8 +684,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
 ///
 /// C4.1: the derivation must yield exactly the output rank with no omitted
 /// or duplicated axis; `ExternalAxis` must name a real `Load`; `InputAxis`
-/// must validate the tensor slot and its normalized `int32` axis;
-/// `ScalarInput` must validate C2.1's rank-0 exact-`int64` contract. A
+/// must validate the tensor slot and its normalized `i32` axis;
+/// `ScalarInput` must validate C2.1's rank-0 exact-`i64` contract. A
 /// well-typed mapping this resolver cannot yet supply is the registered
 /// chelis#730 typed receipt (C4.3), never the occurrence pass's panic and
 /// never an input extent substituted for the missing one.
@@ -920,7 +920,7 @@ pub(crate) fn check_node_axis_sources(
                 if source_node.output_type.precision != Prim::Int64 {
                     return Err(receipt(
                         format!(
-                            "output axis {axis} reads a `{}` extent value in input slot {input}, which must be int64",
+                            "output axis {axis} reads a `{}` extent value in input slot {input}, which must be i64",
                             source_node.output_type.precision.name()
                         ),
                         node,
@@ -981,7 +981,7 @@ pub enum ExtentOrigin {
     /// C and HIP prologues can declare this one from input shape metadata
     /// before any operation runs.
     ExternalAxis { load: NodeId, axis: usize },
-    /// A rank-0 exact-`int64` extent value produced by `value`, read by the
+    /// A rank-0 exact-`i64` extent value produced by `value`, read by the
     /// operation at output axis `axis` of `at`. The operation is where a lane
     /// renders the read, so it is also where a declaration goes; `value`
     /// names the node the extent comes out of.
@@ -1263,7 +1263,7 @@ pub struct RuntimeDimClass {
 ///
 /// "A `cast` takes the placement of the value it casts" (section 4.7, same
 /// paragraph), so the walk looks through `Cast`/`CastTrunc` to the value cast:
-/// an `int32` parameter reaching an extent through `cast(m, int64)` lands its
+/// an `i32` parameter reaching an extent through `cast(m, i64)` lands its
 /// carrier at the Cast, not at the `Load`, and classifying by the immediate
 /// producer would place one claim two ways depending on a width conversion.
 /// The walk is bounded by the node count, so a malformed graph cannot spin.
@@ -1341,8 +1341,8 @@ impl RuntimeDimClass {
         // the function".
         // "A `cast` takes the placement of the value it casts" (section 4.7,
         // the same paragraph as the interface list). A cast is how a scalar
-        // parameter of the wrong width reaches an extent - an `int32`
-        // parameter `m` in `reshape(x, [cast(m, int64)])` lands its
+        // parameter of the wrong width reaches an extent - an `i32`
+        // parameter `m` in `reshape(x, [cast(m, i64)])` lands its
         // `RtDim::Node` at the Cast, not at the `Load` - so classifying by
         // the slot's IMMEDIATE producer would place the same claim two
         // different ways depending on a width conversion. Look through the
@@ -2470,7 +2470,7 @@ pub enum CanonicalExtent {
     /// extent and the value actually observed, and the entry path already
     /// emits exactly that for a `Literal` claim (chelis#1377).
     Resolved(usize),
-    /// The exact declaring activation's rank-0 int64 observation.
+    /// The exact declaring activation's rank-0 i64 observation.
     Witness(NodeId),
 }
 
@@ -2936,9 +2936,9 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
                 }
             };
             ResultExtentSite {
-                output_axis: RtAxis::Lit(i32::try_from(output_axis).expect("rank fits int32")),
+                output_axis: RtAxis::Lit(i32::try_from(output_axis).expect("rank fits i32")),
                 producer,
-                producer_axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                producer_axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                 observation,
                 operation: expansion_kind(dag, attributed).map_or_else(
                     || crate::grad::risc_op_name(&attributed_node.op),

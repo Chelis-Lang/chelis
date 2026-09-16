@@ -2134,7 +2134,7 @@ mod tests {
     fn scalar_grad_named_non_float_result_fails_closed() {
         assert_eq!(
             parsed_grad_error(
-                "def integer_value(x: f32) -> int32 = 1\n",
+                "def integer_value(x: f32) -> i32 = 1\n",
                 "integer_value",
                 &["x"],
             ),

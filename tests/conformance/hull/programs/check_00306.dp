@@ -1,1 +1,9 @@
-(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-name {} rdim) (t-prim {} f32))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} int32)} 0) (var {} batch))))
+(def {}
+  answer
+  (fn {}
+    (params {} (ta {type: (t-tensor {} (d-name {} rdim) (t-prim {} f32))}))
+    (app {}
+      (var {} expand)
+      (var {} ta)
+      (lit {type: (t-prim {} i32)} 0)
+      (var {} batch))))

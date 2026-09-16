@@ -84,13 +84,13 @@ fn fused_named_batch_zero_retains_caller_shape() {
 fn fused_constant_primal_range_trap_is_not_erased_by_zero() {
     let source = |literal| {
         format!(
-            "def loss(x: tensor[f32]) -> f32 = cast(cast({literal}f64, int32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n"
+            "def loss(x: tensor[f32]) -> f32 = cast(cast({literal}f64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n"
         )
     };
     // Check the negative first: no-roots is not an overflow diagnostic.
     let error = eval(request(&source("2147483648.0"))).unwrap_err();
     assert!(
-        format!("{error:?}").contains("numeric trap: overflow in cast at int32"),
+        format!("{error:?}").contains("numeric trap: overflow in cast at i32"),
         "{error:?}"
     );
     roots(&source("7.0"), "f32", &[2], &[vec![0.0; 2]]);
@@ -101,7 +101,7 @@ fn fused_empty_batch_does_not_execute_constant_primal_cast() {
     for transform in ["loss", "grad(loss)"] {
         roots(
             &format!(
-                "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, int32), f32)\nout = {{ empty: tensor[0, f32] = to_tensor([])\n vmap({transform})(empty) }}\n"
+                "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, i32), f32)\nout = {{ empty: tensor[0, f32] = to_tensor([])\n vmap({transform})(empty) }}\n"
             ),
             "f32",
             &[0],
@@ -164,7 +164,7 @@ fn fused_zero_keeps_nested_named_extent_claim() {
             assert!(rendered.contains("claimed = 2"), "{error:?}");
             assert!(rendered.contains("shrink axis 1 = 3"), "{error:?}");
             assert!(
-                rendered.contains("numeric trap: domain in shrink at int64"),
+                rendered.contains("numeric trap: domain in shrink at i64"),
                 "{error:?}"
             );
             assert!(!rendered.contains("extent source(s)"), "{error:?}");

@@ -62,21 +62,21 @@ const GROWTH_ILL_TYPED_BODY: &str = "(cast {} (var {} d) (t-prim {} f64))";
 const PINGPONG_DEEP: &str = r#"(module {}
   frag.pingpong
   (export {} ping pong)
-  (defsig {} ping (t-fn {} (t-prim {} int32) (t-prim {} int32)))
-  (defsig {} pong (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+  (defsig {} ping (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (defsig {} pong (t-fn {} (t-prim {} i32) (t-prim {} i32)))
   (def {}
     ping
     (fn {}
-      (params {} (n {type: (t-prim {} int32)}))
+      (params {} (n {type: (t-prim {} i32)}))
       (if {}
-        (app {} (var {} eq) (var {} n) (lit {type: (t-prim {} int32)} 0))
-        (lit {type: (t-prim {} int32)} 0)
-        (app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1))))))
+        (app {} (var {} eq) (var {} n) (lit {type: (t-prim {} i32)} 0))
+        (lit {type: (t-prim {} i32)} 0)
+        (app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} i32)} 1))))))
   (def {}
     pong
     (fn {}
-      (params {} (n {type: (t-prim {} int32)}))
-      (app {} (var {} ping) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1))))))
+      (params {} (n {type: (t-prim {} i32)}))
+      (app {} (var {} ping) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} i32)} 1))))))
 "#;
 
 /// A replacement body for `ping` that drops the base case: it calls `pong`
@@ -84,7 +84,7 @@ const PINGPONG_DEEP: &str = r#"(module {}
 /// [04-INF-2]/[04-INF-3] make that checker-legal; any unsupported lowering is a
 /// separate chelis#730 capability boundary.
 const PINGPONG_NO_BASE_BODY: &str =
-    "(app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))";
+    "(app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} i32)} 1)))";
 
 fn call_replace(arguments: serde_json::Value) -> serde_json::Value {
     handle_message(&json!({
@@ -1043,7 +1043,7 @@ fn u4_unsupported_property_is_not_ok_through_tide() {
     // A `string`-band tensor element type is outside the L2 v1 samplable
     // set, so the property is unsupported.
     let source = "module M
-@property tensor_prop forall(t: tensor[3, int32]):
+@property tensor_prop forall(t: tensor[3, i32]):
   (t == t)
 ";
     let response = handle_message(&json!({

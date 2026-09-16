@@ -564,7 +564,7 @@ fn nested_equal_seed_scope_does_not_advance_its_parent() {
         counter: 5,
     });
     let plan = lower(
-        "(let {} (bind {} dead (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)) nested (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))) (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+        "(let {} (bind {} dead (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)) nested (handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))) (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))",
         0,
         UnordMap::new(),
         &context,
@@ -699,7 +699,7 @@ fn source_ad_replays_a_mask_with_no_extra_draw_and_preserves_dead_forward_calls(
             "(app {} (var {} dropout) (var {} t) (lit {type: (t-prim {} f32)} 0.5))"
         };
         let function = format!(
-            "(fn {{}} (params {{}} (t {{type: (t-tensor {{}} (d-lit {{}} 32) (t-prim {{}} f32))}})) (app {{type: (t-tensor {{}} (t-prim {{}} f32))}} (var {{}} sum) {body} (lit {{type: (t-prim {{}} int32)}} 0)))"
+            "(fn {{}} (params {{}} (t {{type: (t-tensor {{}} (d-lit {{}} 32) (t-prim {{}} f32))}})) (app {{type: (t-tensor {{}} (t-prim {{}} f32))}} (var {{}} sum) {body} (lit {{type: (t-prim {{}} i32)}} 0)))"
         );
         let mut defs = UnordMap::new();
         defs.insert(

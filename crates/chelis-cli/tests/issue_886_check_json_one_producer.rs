@@ -116,8 +116,8 @@ fn every_emitted_kind_is_a_known_spelling() {
     // than reaching a consumer that keys on it.
     for source in [
         "def f(x: f32) -> f32 = add(x, nope)\n",
-        "def g(x: f32) -> f32 = add(x, cast(1, int32))\n",
-        "def k(x: int64) -> int64 = copy(x)\n",
+        "def g(x: f32) -> f32 = add(x, cast(1, i32))\n",
+        "def k(x: i64) -> i64 = copy(x)\n",
     ] {
         let report = check_json(source);
         for error in report["errors"].as_array().expect("errors array") {

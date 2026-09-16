@@ -111,7 +111,7 @@ fn native_empty_and_zero_rate_calls_consume_one_ordinal_before_the_next_draw() {
         for count in [0, 32] {
             for rate in ["0.0", "0.5"] {
                 let source = format!(
-                    "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} {seed}) \
+                    "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} {seed}) \
                      (let {{}} (bind {{}} discarded (app {{}} (var {{}} dropout) \
                      (var {{}} prefix) (lit {{type: (t-prim {{}} f32)}} {rate}))) \
                      (app {{}} (var {{}} dropout) (var {{}} x) \
@@ -182,7 +182,7 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
     ] {
         for count in [0, 1, 32] {
             let source = format!(
-                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.1)))"
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.1)))"
             );
             let plan = plan(&source, prim, count);
             let input = chelis_types::finalize_tensor(
@@ -648,7 +648,7 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
         for rate in ["0.0", "0.5"] {
             let dtype = words.prim.name();
             let source = format!(
-                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
             );
             let plan = plan(&source, words.prim, 4);
             let node = plan.dag_for_inspection().roots()[0];
@@ -845,7 +845,7 @@ fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
         for (case, (seed, narrow_mask, wide_mask)) in cases.into_iter().enumerate() {
             let dtype = words.prim.name();
             let source = format!(
-                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} {seed}) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.5)))"
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} {seed}) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.5)))"
             );
             let plan = plan(&source, words.prim, 4);
             let node = plan.dag_for_inspection().roots()[0];
@@ -921,7 +921,7 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
         .collect();
     for rate in ["0.0", "0.5"] {
         let source = format!(
-            "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate})))"
+            "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate})))"
         );
         let plan = plan(&source, Prim::F32, input.len());
         let mut context = RandomExecutionContext::new(RandomLoweringState {
@@ -1031,7 +1031,7 @@ fn native_entry_rejects_invalid_stored_rates_even_for_empty_inputs() {
     ] {
         for rate in ["-0.5", "1.0"] {
             let source = format!(
-                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) \
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) \
                  (app {{}} (var {{}} dropout) (var {{}} x) \
                  (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
             );

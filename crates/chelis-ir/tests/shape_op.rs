@@ -118,7 +118,7 @@ fn shape_node_verify_rejects_non_scalar_output() {
 fn shape_node_verify_rejects_non_integer_output() {
     let errs = verify_shape(vec![DimInfo::Lit(4)], 0, scalar_int_ty(Prim::F32));
     assert!(
-        errs.iter().any(|e| e.contains("exact int64 scalar")),
+        errs.iter().any(|e| e.contains("exact i64 scalar")),
         "non-integer output must be rejected; errs = {errs:?}"
     );
 }

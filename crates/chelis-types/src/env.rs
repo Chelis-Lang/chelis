@@ -52,7 +52,7 @@ pub(crate) fn generalize_sweep_env_visits() -> usize {
 /// A runtime `expand` size has a backend representation only when its
 /// extent is recoverable: either it folds to a compile-time constant, or
 /// it provably derives from an in-scope tensor's `shape(t, axis)` read.
-/// A *truly sourceless* runtime scalar (a bare `int32`/`int64` parameter)
+/// A *truly sourceless* runtime scalar (a bare `i32`/`i64` parameter)
 /// has neither, so it must be rejected at check time to keep
 /// check↔build↔eval in sync. The discriminator is PROVENANCE, not the
 /// surface spelling: `let-bound`, `cast`-wrapped, and arithmetic spellings

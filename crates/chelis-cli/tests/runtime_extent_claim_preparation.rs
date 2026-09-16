@@ -201,7 +201,7 @@ fn cases() -> Vec<Case> {
     add(
         "vmap.element_bound",
         1378,
-        "def g(x: tensor[n, f32]) -> tensor[m, f32] = { end = cast(tensor_to_scalar(sum(x, 0i32)), int64)\n shrink(x, [[0i64, end]]) }\nout = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n",
+        "def g(x: tensor[n, f32]) -> tensor[m, f32] = { end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n shrink(x, [[0i64, end]]) }\nout = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n",
         None,
         Expected::Reject("batch_varying_extent"),
     );
@@ -436,7 +436,7 @@ fn observe_host_lane(case: &Case, library: Option<&str>, target: &str, api: bool
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(
             dir.path().join("src/placeholder.ch"),
-            "module App.Placeholder\ndef placeholder() -> int32 = 0i32\n",
+            "module App.Placeholder\ndef placeholder() -> i32 = 0i32\n",
         )
         .unwrap();
         fs::write(dir.path().join("reef.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\nmodule_prefix = \"App\"\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n")).unwrap();
@@ -737,7 +737,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     && run["success"] == false
                     && stderr
                         .lines()
-                        .any(|line| line == format!("numeric trap: domain in {op} at int64"))
+                        .any(|line| line == format!("numeric trap: domain in {op} at i64"))
                     && context
                         .iter()
                         .all(|record| context_has_record(stderr, record))
@@ -771,7 +771,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     && stderr.lines().any(|line| {
                         line.strip_prefix("error: ").unwrap_or(line)
                             == if lane == "eval" {
-                                "numeric trap: division by zero in floor_div at int64"
+                                "numeric trap: division by zero in floor_div at i64"
                             } else {
                                 "integer division or remainder by zero"
                             }
@@ -782,7 +782,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     && run["success"] == false
                     && stderr.lines().any(|line| {
                         line.strip_prefix("error: ").unwrap_or(line)
-                            == "numeric trap: division by zero in floor_div at int64"
+                            == "numeric trap: division by zero in floor_div at i64"
                     })
             }
             Expected::EntryShapeMismatch(context) => {
@@ -1098,11 +1098,11 @@ fn claims_and_traps_require_their_own_evidence() {
     case.expected = Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]);
     for lane in ["eval", "c"] {
         observed[lane] = json!({"stage":"execute", "success":false,"stdout":"",
-            "stderr":"extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64"});
+            "stderr":"extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at i64"});
     }
     assert!(contract_failures(&case, &observed).is_empty());
     observed["eval"]["stderr"] =
-        "extent `4`: claimed = 4, x axis 0 = 50\nnumeric trap: domain in load at int64".into();
+        "extent `4`: claimed = 4, x axis 0 = 50\nnumeric trap: domain in load at i64".into();
     assert_eq!(
         contract_failures(&case, &observed).len(),
         1,
@@ -1115,7 +1115,7 @@ fn claims_and_traps_require_their_own_evidence() {
         1,
         "build refusal is not the runtime guard"
     );
-    observed["eval"]["stderr"] = "numeric trap: domain in load at int64".into();
+    observed["eval"]["stderr"] = "numeric trap: domain in load at i64".into();
     assert_eq!(
         contract_failures(&case, &observed).len(),
         2,
@@ -1141,16 +1141,14 @@ fn trap_context_keeps_source_axis_and_signed_value_together() {
         "claimed = 4, y axis 0 = 5",
         "claimed = 4, x axis 0 = 50",
     ] {
-        observed["c"]["stderr"] =
-            format!("{context}\nnumeric trap: domain in load at int64").into();
+        observed["c"]["stderr"] = format!("{context}\nnumeric trap: domain in load at i64").into();
         assert_eq!(
             contract_failures(&case, &observed).len(),
             1,
             "wrong context accepted: {context}"
         );
     }
-    observed["c"]["stderr"] =
-        "x axis 0: 5\nclaimed: 4\nnumeric trap: domain in load at int64".into();
+    observed["c"]["stderr"] = "x axis 0: 5\nclaimed: 4\nnumeric trap: domain in load at i64".into();
     assert!(
         contract_failures(&case, &observed).is_empty(),
         "context punctuation and record order are not normative"
@@ -1457,7 +1455,7 @@ fn remainder_reshape_claims_preserve_dynamic_target() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Spec/04 §4.7.3 admits any correctly typed int64 target producer. A host
+/// Spec/04 §4.7.3 admits any correctly typed i64 target producer. A host
 /// boundary must retain the claim just as the tensor-DAG boundary does.
 #[test]
 fn host_produced_reshape_targets_preserve_declared_claims() {
@@ -1469,7 +1467,7 @@ fn host_produced_reshape_targets_preserve_declared_claims() {
         ("list", "", "len(to_list(source))"),
         (
             "helper",
-            "def size(y: tensor[m, f32]) -> int64 = numel(y)\n",
+            "def size(y: tensor[m, f32]) -> i64 = numel(y)\n",
             "size(source)",
         ),
         (
@@ -1534,22 +1532,22 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             ),
             (
                 "scalar_capture_shadow",
-                "def g(source: int64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
+                "def g(source: i64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
                 "g(shape(source, 0i32), x)",
             ),
             (
                 "scalar_helper_alias",
-                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  reshape(x, [target(source), 2i64])\n}",
             ),
             (
                 "scalar_helper_alias_nested",
-                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  reshape(x, [bitand(target(source), 3i64), 2i64])\n}",
             ),
             (
                 "scalar_helper_alias_shadow",
-                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  extent = to_list(source)\n  reshape(x, [bitand(target(source), len(extent)), 2i64])\n}",
             ),
             (
@@ -1696,11 +1694,11 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
         for (kind, body) in [
             (
                 "scalar_view",
-                "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, int64), 3i64)\n  reshape(x, [size, 2i64])\n}",
+                "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, i64), 3i64)\n  reshape(x, [size, 2i64])\n}",
             ),
             (
                 "retained_views",
-                "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, int64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}",
+                "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, i64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}",
             ),
         ] {
             call_matrix(

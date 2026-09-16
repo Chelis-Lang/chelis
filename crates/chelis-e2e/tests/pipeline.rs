@@ -209,7 +209,7 @@ def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
 fn pipeline_preserves_rejection_stage_messages() {
     let fixtures = [
         ("def broken(\n", "Surf parse error:"),
-        ("def broken() -> int32 = missing\n", "Type errors:"),
+        ("def broken() -> i32 = missing\n", "Type errors:"),
         (
             "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
             "Random",

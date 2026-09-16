@@ -13,7 +13,7 @@
 //! `Std.Io.Json.canonical_bigint_text`'s `digits = if negative then
 //! string_slice(text, ..) else text`, which freed the caller's string on
 //! every non-negative bigint token and made compiled `parse_json` of any
-//! out-of-int64 integer corrupt the heap (PR #1302 red-team finding P0-1).
+//! out-of-i64 integer corrupt the heap (PR #1302 red-team finding P0-1).
 //!
 //! The fix drops the source-provenance half of both guards for binding
 //! VALUE TEMPS: their release (through the binding name at the block
@@ -165,7 +165,7 @@ fn shared_line<'a>(stdout: &'a str, name: &str) -> &'a str {
 // ---------------------------------------------------------------------------
 
 const CAPTURED_COPY: &str = "g = [1i64, 2i64]\n\
-def my_take() -> int64 = {\n\
+def my_take() -> i64 = {\n\
   y = g\n\
   len(y)\n\
 }\n\
@@ -203,7 +203,7 @@ fn captured_top_level_copy_in_function_body_frees_once() {
 //    correct on both paths.
 // ---------------------------------------------------------------------------
 
-const PARAM_ALIAS_ARM: &str = "def gate(text: string, negative: bool) -> int64 = {\n\
+const PARAM_ALIAS_ARM: &str = "def gate(text: string, negative: bool) -> i64 = {\n\
   digits = if negative then string_slice(text, 1i64, sub(string_len(text), 1i64)) else text\n\
   string_len(digits)\n\
 }\n\
@@ -270,11 +270,11 @@ fn parameter_alias_arm_retains_before_block_release() {
 // ---------------------------------------------------------------------------
 
 const CALL_ESCAPE_PARAM: &str = "def pass_through(s: string) -> string = s\n\
-def wrap(text: string) -> int64 = {\n\
+def wrap(text: string) -> i64 = {\n\
   d = pass_through(text)\n\
   string_len(d)\n\
 }\n\
-def outer(s0: string) -> int64 = {\n\
+def outer(s0: string) -> i64 = {\n\
   raw = string_concat(s0, s0)\n\
   n = wrap(raw)\n\
   add(n, string_len(raw))\n\
@@ -312,7 +312,7 @@ fn call_escape_of_parameter_retains_the_result() {
 //    retain, not a blanket retain that would leak one reference per call.
 // ---------------------------------------------------------------------------
 
-const FRESH_ONLY: &str = "def fresh_only() -> int64 = {\n\
+const FRESH_ONLY: &str = "def fresh_only() -> i64 = {\n\
   y = string_concat(\"a\", \"b\")\n\
   string_len(y)\n\
 }\n\
@@ -362,7 +362,7 @@ const BINDING_MEDIATED_RETURN: &str = "def f(p: string) -> string = {\n\
   d = p\n\
   d\n\
 }\n\
-def g2() -> int64 = {\n\
+def g2() -> i64 = {\n\
   raw = string_concat(\"ab\", \"cd\")\n\
   out = f(raw)\n\
   add(string_len(out), string_len(raw))\n\

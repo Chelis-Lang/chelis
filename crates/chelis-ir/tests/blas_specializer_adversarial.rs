@@ -12,7 +12,7 @@
 //! 1. **Non-identity cast pair** (`f32 → f64 → f32`) between Expand and Mul
 //!    must NOT specialize to BLAS. There's no cancel-pair recognizer; the
 //!    pair is structurally non-identity at the IR level.
-//! 2. **Non-identity cast pair** (`int32 → f32 → int32`) — same.
+//! 2. **Non-identity cast pair** (`i32 → f32 → i32`) — same.
 //! 3. **Reshape pair that round-trips** (`[m,k] → [k,m] → [m,k]` via two
 //!    Reshape nodes) must NOT specialize: there's no cancel-pair recognizer.
 //! 4. **Permute pair that cancels** (`[1,0]` then `[1,0]` again) must NOT
@@ -145,12 +145,12 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     );
 }
 
-/// ADV-2: An int32 → f32 → int32 cast pair is NOT a closed-list no-op.
+/// ADV-2: An i32 → f32 → i32 cast pair is NOT a closed-list no-op.
 /// Even though the round-trip data semantics is "lossy identity", the
 /// pair is structurally distinct from a single identity Cast and must
 /// not be collapsed by the closed-list cleanup.
 ///
-/// (Note: matmul with int32 operands doesn't match the BLAS-F32 signature
+/// (Note: matmul with i32 operands doesn't match the BLAS-F32 signature
 /// at the recognizer anyway, but we want to be sure NO recognizer fires
 /// — neither BLAS nor any other.)
 #[test]
@@ -212,7 +212,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
     let out = specialize_for_blas(&dag);
     assert!(
         !has_blas(&out),
-        "int32→f32→int32 cast round-trip must NOT collapse to BLAS; got BLAS specialization"
+        "i32→f32→i32 cast round-trip must NOT collapse to BLAS; got BLAS specialization"
     );
 }
 

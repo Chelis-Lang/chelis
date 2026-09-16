@@ -135,7 +135,7 @@ impl DeclaredResultClaim {
             if required < 0 || required as usize != observed {
                 return Err(format!(
                     "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
-                     numeric trap: domain in {op} at int64"
+                     numeric trap: domain in {op} at i64"
                 ));
             }
         }
@@ -430,7 +430,7 @@ fn check_signature_entry_plan(
             }
         };
         if left != right {
-            return Err(format!("{context}\nnumeric trap: domain in load at int64"));
+            return Err(format!("{context}\nnumeric trap: domain in load at i64"));
         }
     }
     Ok(())
@@ -932,7 +932,7 @@ impl<'a> EvalContext<'a> {
                         )
                     ) && !matches!(&value, RuntimeValue::Scalar(payload) if payload.dtype() == Prim::Int64)
                     {
-                        return Err("staged reshape target did not produce exactly int64".into());
+                        return Err("staged reshape target did not produce exactly i64".into());
                     }
                     values.insert(output.clone(), value);
                 }
@@ -1206,11 +1206,11 @@ impl<'a> EvalContext<'a> {
                         // the evaluator derives the same u64 seed as the compiled
                         // C lane. `literal_seed_i64` peels `(lit …)` to the raw
                         // `Atom::Int`, mirroring host lowering (host.rs reads the
-                        // raw atom and ignores the int32 default meta). Routing the
+                        // raw atom and ignores the i32 default meta). Routing the
                         // literal through `eval_expr` -> `eval_lit` instead narrows
-                        // it to int32 (spec/04-type-system.md §5.3 default),
+                        // it to i32 (spec/04-type-system.md §5.3 default),
                         // truncating then sign-extending any seed >= 2^31 into an
-                        // unrelated stream. The seed is designed int64
+                        // unrelated stream. The seed is designed i64
                         // (spec/design/checker_totality.md §C1.5 item 5).
                         //
                         // The `eval_expr` fallback below is defensive/forward-looking,
@@ -1358,11 +1358,11 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "lit missing value".to_string())?;
         // Per spec/04-type-system.md §5.3, the desugarer narrows
-        // unsuffixed integer literals to int32 and unsuffixed float
+        // unsuffixed integer literals to i32 and unsuffixed float
         // literals to f32. The type checker writes the resolved
         // primitive into the lit's `type` meta as `(t-prim {} <name>)`.
         // Honor that meta where present so a context-typed literal
-        // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
+        // (e.g. `(lit {type: (t-prim {} i64)} 42)`) carries the
         // surrounding-position dtype, not just the bare default.
         // [02-SURF-P10b]: a literal in `cast(<literal>, p)` binds at `p`.
         // Resolve that stamp through the call frame's precision bindings.
@@ -2087,7 +2087,7 @@ impl<'a> EvalContext<'a> {
                 self.precision_bindings = precision_env;
                 let value = (|| {
                     // A dimension variable declared by a tensor parameter is
-                    // also an exact runtime int64 value in the callee frame.
+                    // also an exact runtime i64 value in the callee frame.
                     // Recover it from the actual tensor shape before the
                     // arguments are moved into their ordinary bindings. This
                     // makes `expand(b, 0, k)` consume the same witnessed
@@ -2213,7 +2213,7 @@ impl<'a> EvalContext<'a> {
                     // Dimension-name order is canonical for extending the callee frame.
                     for (name, size) in dimension_bindings.into_sorted() {
                         let size = i64::try_from(size).map_err(|_| {
-                            format!("dimension binder `{name}` exceeds the exact int64 range")
+                            format!("dimension binder `{name}` exceeds the exact i64 range")
                         })?;
                         self.bindings.insert(name, RuntimeValue::int64(size));
                     }
@@ -2227,7 +2227,7 @@ impl<'a> EvalContext<'a> {
                         // at the param's DECLARED element dtype (the host-lane
                         // mirror of the DAG evaluator's Load ingress). Without
                         // this, an Int64-tagged `to_tensor` literal flows into an
-                        // int8-typed param and the arithmetic runs at the wrong
+                        // i8-typed param and the arithmetic runs at the wrong
                         // width (the chelis#718 eval-tensor cell).
                         let mut arg = match (declared.as_ref().and_then(declared_tensor_prim), arg)
                         {
@@ -2761,7 +2761,7 @@ impl<'a> EvalContext<'a> {
             // Issue #257: iterative scan that produces a rank-1 tensor
             // directly, bypassing the right-recursive Surf list build that
             // overflows the host worker stack at ~10k elements. The arg
-            // shape is `(initial: T, fn: (T, int64) -> T, n: int64)` and
+            // shape is `(initial: T, fn: (T, i64) -> T, n: i64)` and
             // the loop runs `n` times on the host with no Surf-level
             // recursion. The output precision is taken from the initial
             // value's scalar dtype.
@@ -3504,7 +3504,7 @@ impl<'a> EvalContext<'a> {
                     .get(axis)
                     .copied()
                     .ok_or_else(|| format!("shape axis {axis} out of bounds"))?;
-                // `shape` returns an extent-domain int64
+                // `shape` returns an extent-domain i64
                 // (`spec/05-risc-primitives.md` [05-DIM-2]). The closed
                 // kernel boundary rejects mixed widths, so this payload
                 // must carry the dtype the checker assigns.
@@ -4510,7 +4510,7 @@ mod legacy_capture_order_tests {
         named_axis_capture_case(
             &format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])"),
             "(sum(x, seq), sum(weights, 0i32))",
-            Err("numeric trap: division by zero in floor_div at int32"),
+            Err("numeric trap: division by zero in floor_div at i32"),
             &["entry", "initialize"],
         );
     }
@@ -4536,7 +4536,7 @@ mod legacy_capture_order_tests {
             assert_eq!(
                 ctx.prepare_named_axis_input("weights", required, &staged)
                     .unwrap_err(),
-                "numeric trap: division by zero in floor_div at int32"
+                "numeric trap: division by zero in floor_div at i32"
             );
             assert_eq!(ctx.transcript, ["initialize"]);
             assert!(!ctx.bindings.contains_key("weights"));
@@ -4804,10 +4804,7 @@ mod legacy_capture_order_tests {
         let ty = declaration_caller_frame(&mut ctx);
         for _ in 0..2 {
             let error = ctx.resolve_top_level("weights").unwrap_err();
-            assert_eq!(
-                error,
-                "numeric trap: division by zero in floor_div at int32"
-            );
+            assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
             assert_declaration_caller_frame(&ctx, &ty);
             assert!(ctx.resolving_top_levels.is_empty());
             assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
@@ -4830,7 +4827,7 @@ mod legacy_capture_order_tests {
         for _ in 0..2 {
             assert_eq!(
                 ctx.resolve_top_level("outer").unwrap_err(),
-                "numeric trap: division by zero in floor_div at int32"
+                "numeric trap: division by zero in floor_div at i32"
             );
             assert_declaration_caller_frame(&ctx, &ty);
             assert!(ctx.resolving_top_levels.is_empty());
@@ -5028,10 +5025,7 @@ mod legacy_capture_order_tests {
         let after_failure = ctx.random_counter;
         assert!(!ctx.bindings.contains_key("weights"));
         let next = admitted_call(&mut ctx, "next_draw").unwrap();
-        assert_eq!(
-            error,
-            "numeric trap: division by zero in floor_div at int32"
-        );
+        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
         assert_eq!(after_failure, 5);
         assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
         assert_eq!(ctx.random_counter, 6);
@@ -5127,10 +5121,7 @@ mod legacy_capture_order_tests {
         assert_eq!(after_failure, 5, "callee draw was not entered");
         assert_eq!(bits(&next), bits(&expected_draw(42, 5)));
         assert_eq!(ctx.random_counter, 6);
-        assert_eq!(
-            error,
-            "numeric trap: division by zero in floor_div at int32"
-        );
+        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
     }
 
     #[test]

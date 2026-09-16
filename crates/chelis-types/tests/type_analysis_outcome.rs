@@ -6,7 +6,7 @@ fn deep(source: &str) -> Vec<chelis_deep::Expr> {
 
 #[test]
 fn accepted_analysis_carries_fitness_and_the_checked_program() {
-    let exprs = deep("(def {} answer (lit {type: (t-prim {} int32)} 42))");
+    let exprs = deep("(def {} answer (lit {type: (t-prim {} i32)} 42))");
 
     let TypeAnalysisOutcome::Accepted { fitness, program } = analyze_ir_program(&exprs) else {
         panic!("valid Deep must produce an accepted type analysis");
@@ -32,7 +32,7 @@ fn rejected_analysis_carries_fitness_without_a_checked_program() {
 
 #[test]
 fn analysis_rejects_a_top_level_binding_cycle() {
-    let surf = "module Cycle\na: int32 = add(b, 1)\nb: int32 = add(a, 1)\n";
+    let surf = "module Cycle\na: i32 = add(b, 1)\nb: i32 = add(a, 1)\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 
@@ -53,7 +53,7 @@ fn analysis_rejects_a_top_level_binding_cycle() {
 #[test]
 fn analysis_accepts_finite_recursive_functions() {
     let surf =
-        "module Rec\ndef descend(n: int32) -> int32 = if eq(n, 0) then 0 else descend(sub(n, 1))\n";
+        "module Rec\ndef descend(n: i32) -> i32 = if eq(n, 0) then 0 else descend(sub(n, 1))\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 
@@ -65,7 +65,7 @@ fn analysis_accepts_finite_recursive_functions() {
 
 #[test]
 fn analysis_accepts_recursion_without_a_base_case() {
-    let surf = "module Rec\ndef forever(n: int32) -> int32 = forever(n)\n";
+    let surf = "module Rec\ndef forever(n: i32) -> i32 = forever(n)\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 
@@ -84,7 +84,7 @@ fn analysis_accepts_a_deep_finite_expression() {
     for _ in 0..32 {
         body = format!("add({body}, 1)");
     }
-    let surf = format!("module Deep\ndef value() -> int32 = {body}\n");
+    let surf = format!("module Deep\ndef value() -> i32 = {body}\n");
     let decls = chelis_surf::parser::parse_str(&surf).expect("deep Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 

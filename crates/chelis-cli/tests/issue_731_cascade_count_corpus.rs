@@ -30,7 +30,7 @@ mod common;
 
 use common::write_file;
 
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// Number of diagnostics `chelis check` reports for `program`.
 fn diagnostic_count(program: &str) -> usize {

@@ -532,8 +532,8 @@ mod build_layering_tests {
         // `dep_double` stands in for a dependency-library def; `main_value`
         // (the entry) references it. Flat top-level defs so no cross-module
         // linking is required for the raw (unlinked) test decls.
-        let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
+        let deps = parse("def dep_double(x: i32) -> i32 = add(x, x)\n");
+        let entry = parse("def main_value() ->i32 = dep_double(cast(21, i32))\n");
 
         let layered = three_layer_program(&deps, &entry);
         let monolithic = monolithic_program(&deps, &entry);
@@ -550,9 +550,9 @@ mod build_layering_tests {
     /// cache hit never masks an entry edit.
     #[test]
     fn entry_change_still_matches_monolithic() {
-        let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry_a = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
-        let entry_b = parse("def main_value() ->int32 = dep_double(cast(100, int32))\n");
+        let deps = parse("def dep_double(x: i32) -> i32 = add(x, x)\n");
+        let entry_a = parse("def main_value() ->i32 = dep_double(cast(21, i32))\n");
+        let entry_b = parse("def main_value() ->i32 = dep_double(cast(100, i32))\n");
 
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry_a),
@@ -578,7 +578,7 @@ mod build_layering_tests {
     #[test]
     fn empty_dependency_branch_matches_monolithic() {
         let deps: Vec<chelis_surf::ast::Decl> = Vec::new();
-        let entry = parse("def main_value() ->int32 = add(cast(1, int32), cast(2, int32))\n");
+        let entry = parse("def main_value() ->i32 = add(cast(1, i32), cast(2, i32))\n");
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry),
             &monolithic_program(&deps, &entry),
@@ -596,14 +596,14 @@ mod build_layering_tests {
     fn macro_hygiene_across_dependency_boundary_matches_monolithic() {
         let deps = parse(
             "macro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\
-             def dep_val(x: int32) -> int32 = dmk(x)\n",
+             def dep_val(x: i32) -> i32 = dmk(x)\n",
         );
         // The entry both invokes its own binder-minting macro AND binds a
         // name (`v_macro_0`) that a restarted hygiene counter would collide
         // with — the exact capture the reviewer's fixture exhibited.
         let entry = parse(
-            "macro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\
-             def main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+            "macro emk(a) = {\n  v = cast(7, i32)\n  add(v, a)\n}\n\
+             def main_value() ->i32 = {\n  v_macro_0 = dep_val(cast(5, i32))\n  emk(v_macro_0)\n}\n",
         );
 
         let layered = three_layer_program(&deps, &entry);
@@ -621,7 +621,7 @@ mod build_layering_tests {
     fn rejected_dependency_falls_back() {
         let stdlib_ctx = build_stdlib_context(&[]).expect("empty stdlib context");
         // `no_such_builtin` is unbound: the dependency does not compose.
-        let bad_deps = parse("def broken(x: int32) -> int32 = no_such_builtin(x)\n");
+        let bad_deps = parse("def broken(x: i32) -> i32 = no_such_builtin(x)\n");
         let built = build_library_context(&stdlib_ctx, &bad_deps).expect("build returns Ok");
         assert!(
             built.is_none(),

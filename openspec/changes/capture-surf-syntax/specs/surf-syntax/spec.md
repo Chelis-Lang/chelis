@@ -338,7 +338,7 @@ values/patterns. A record update SHALL contain at least one field.
 constructor, nested, record, tuple, as-pattern) and optional `if` guards. Matches SHALL be
 exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be supported in v1.
 Numeric literal patterns SHALL be unsuffixed; a leading minus SHALL decode directly into the
-raw negative `pat-lit` value, including negative zero and the full `int64` minimum.
+raw negative `pat-lit` value, including negative zero and the full `i64` minimum.
 
 #### Scenario: Guarded arms with distinct patterns
 
@@ -388,7 +388,7 @@ zero-axis spelling, and nonzero axes SHALL use `vmap(f, axis=n)`. The second arg
 
 ### Requirement: Numeric literal defaults
 
-An unsuffixed integer literal SHALL bind at `int32` and an unsuffixed float literal at `f32`,
+An unsuffixed integer literal SHALL bind at `i32` and an unsuffixed float literal at `f32`,
 with no implicit precision promotion. Canonical source SHALL equal the literal printer's
 decimal spelling without separators. The normal parser SHALL also accept value-preserving
 hexadecimal and binary integers, well-placed digit separators, and decimal exponent
@@ -398,12 +398,31 @@ and non-finite values SHALL be rejected. `-42` SHALL parse as unary minus applie
 #### Scenario: Defaults without promotion
 
 - **WHEN** a bare `42` and a bare `1.0` appear in unannotated positions
-- **THEN** `42` binds at `int32` and `1.0` binds at `f32`, never `int64`/`f64`
+- **THEN** `42` binds at `i32` and `1.0` binds at `f32`, never `i64`/`f64`
 
 #### Scenario: Negative literal is unary minus
 
 - **WHEN** source passes a negative argument as `f(-42)`
 - **THEN** the argument parses as unary minus applied to `42`; juxtaposition `f -42` is not a call
+
+### Requirement: Canonical integer dtype spelling
+
+Surf SHALL use `i8`, `i16`, `i32`, and `i64` as the only signed-integer dtype
+spellings in type positions and literal suffixes. Normal ingress SHALL reject
+the retired v0.18 spellings `int8`, `int16`, `int32`, and `int64`; the explicit
+v0.18 migration SHALL rewrite those spellings only where they denote dtypes or
+cast targets and SHALL preserve unrelated identifiers and string contents.
+Retired spellings SHALL NOT become implicit type variables.
+
+#### Scenario: Canonical source uses i64
+
+- **WHEN** a function parameter or literal has 64-bit signed-integer precision
+- **THEN** canonical Surf spells it `i64` or uses the `i64` literal suffix
+
+#### Scenario: Retired spelling is migration-only
+
+- **WHEN** normal Surf ingress encounters `int64` in a type position
+- **THEN** it rejects the spelling and points to the explicit v0.18 migration
 
 ### Requirement: Literal suffixes
 
@@ -418,7 +437,7 @@ where Deep preserves only the raw literal value.
 #### Scenario: Suffix fixes the literal precision
 
 - **WHEN** a literal is written `42i64`
-- **THEN** it binds at `int64` with no widening or narrowing
+- **THEN** it binds at `i64` with no widening or narrowing
 
 #### Scenario: Float suffix on integer-only literal is rejected
 
@@ -430,7 +449,7 @@ where Deep preserves only the raw literal value.
 When a tensor literal appears in a known-element-type position (typed let RHS, matching call
 argument, typed tensor return body, or `cast(_, p)`), its unsuffixed numeric literals SHALL
 adopt that element type instead of the default. Outside that closed set, literals SHALL fall
-back to the `int32`/`f32` defaults.
+back to the `i32`/`f32` defaults.
 
 #### Scenario: Typed context adopts the element type
 

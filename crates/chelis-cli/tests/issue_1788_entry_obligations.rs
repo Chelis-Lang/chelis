@@ -63,7 +63,7 @@ fn check_both_context(source: &str, eval_expected: &str, c_expected: &str, succe
             assert!(
                 rendered
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "C={c}: {rendered}"
             );
             assert!(
@@ -157,7 +157,7 @@ fn app_and_pipe_entry_source(pipe: bool, invalid_first: bool, second_skip: usize
         format!("apply({first}, twice, {second})")
     };
     format!(
-        "def cut(x: tensor[n, f32], lo: int64, extra: int64) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"argument-ran\")\n shrink(x, [[lo, add(shape(x, 0i32), extra)]])\n}}\ndef twice(x: tensor[q, f32]) -> tensor[q, f32] = add(x, x)\ndef apply(v: tensor[p, f32], f: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), w)\nout = {{\n result = {call}\n _ = print(\"following-ran\")\n result\n}}\n"
+        "def cut(x: tensor[n, f32], lo: i64, extra: i64) -> tensor[*, f32] ! {{ IO }} = {{\n _ = print(\"argument-ran\")\n shrink(x, [[lo, add(shape(x, 0i32), extra)]])\n}}\ndef twice(x: tensor[q, f32]) -> tensor[q, f32] = add(x, x)\ndef apply(v: tensor[p, f32], f: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), w)\nout = {{\n result = {call}\n _ = print(\"following-ran\")\n result\n}}\n"
     )
 }
 
@@ -177,7 +177,7 @@ fn higher_order_app_and_pipe_preserve_actual_before_entry_failure() {
                     // IR evaluator's numeric-trap formatter is reached.
                     "error: shrink axis 0 bound [1, 4] is out of range for input dim 3".into()
                 } else {
-                    format!("numeric trap: domain in {expected_op} at int64")
+                    format!("numeric trap: domain in {expected_op} at i64")
                 };
                 assert!(
                     rendered.lines().any(|line| line == expected_trap),
@@ -261,7 +261,7 @@ fn check_beta_entry(
             assert!(
                 rendered
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "C={c}: {rendered}"
             );
         } else {
@@ -302,7 +302,7 @@ fn check_indirect_entry(source: &str, succeeds: bool, argument_effects: usize) {
             assert!(
                 rendered
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "C={c}: {rendered}"
             );
             assert!(!rendered.contains("out = 7"), "C={c}: {rendered}");
@@ -312,7 +312,7 @@ fn check_indirect_entry(source: &str, succeeds: bool, argument_effects: usize) {
 
 fn indirect_literal_source(extent: usize) -> String {
     format!(
-        "{BETA_OPAQUE}def broad(x: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke(f: (tensor[2, f32]) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = f(x)\nout = {{\n result = invoke(broad, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        "{BETA_OPAQUE}def broad(x: tensor[*, f32]) -> i64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke(f: (tensor[2, f32]) -> i64, x: tensor[*, f32]) -> i64 ! {{ IO }} = f(x)\nout = {{\n result = invoke(broad, {})\n _ = print(\"following-ran\")\n result\n}}\n",
         beta_actual(extent)
     )
 }
@@ -325,7 +325,7 @@ fn indirect_callable_keeps_formal_literal_entry_boundary() {
 
 fn indirect_alias_wrapper_source(extent: usize) -> String {
     format!(
-        "{BETA_OPAQUE}type Fixed = tensor[2, f32]\ndef broad(x: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_any(f: (tensor[*, f32]) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = f(x)\ndef forward(f: (Fixed) -> int64, x: tensor[*, f32]) -> int64 ! {{ IO }} = invoke_any(f, x)\nout = {{\n local = fn (value: tensor[*, f32]) -> broad(value)\n result = forward(local, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        "{BETA_OPAQUE}type Fixed = tensor[2, f32]\ndef broad(x: tensor[*, f32]) -> i64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_any(f: (tensor[*, f32]) -> i64, x: tensor[*, f32]) -> i64 ! {{ IO }} = f(x)\ndef forward(f: (Fixed) -> i64, x: tensor[*, f32]) -> i64 ! {{ IO }} = invoke_any(f, x)\nout = {{\n local = fn (value: tensor[*, f32]) -> broad(value)\n result = forward(local, {})\n _ = print(\"following-ran\")\n result\n}}\n",
         beta_actual(extent)
     )
 }
@@ -338,7 +338,7 @@ fn indirect_callable_contract_survives_alias_local_and_wrapper_specialization() 
 
 fn indirect_repeated_binder_source(second_extent: usize) -> String {
     format!(
-        "{BETA_OPAQUE}def broad_pair(x: tensor[*, f32], y: tensor[*, f32]) -> int64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_pair(f: (tensor[seq, f32] -> tensor[seq, f32] -> int64), x: tensor[*, f32], y: tensor[*, f32]) -> int64 ! {{ IO }} = f(x, y)\nout = {{\n result = invoke_pair(broad_pair, {}, {})\n _ = print(\"following-ran\")\n result\n}}\n",
+        "{BETA_OPAQUE}def broad_pair(x: tensor[*, f32], y: tensor[*, f32]) -> i64 ! {{ IO }} = {{ _ = print(\"body-ran\")\n 7i64 }}\ndef invoke_pair(f: (tensor[seq, f32] -> tensor[seq, f32] -> i64), x: tensor[*, f32], y: tensor[*, f32]) -> i64 ! {{ IO }} = f(x, y)\nout = {{\n result = invoke_pair(broad_pair, {}, {})\n _ = print(\"following-ran\")\n result\n}}\n",
         beta_actual(2),
         beta_actual(second_extent)
     )
@@ -383,7 +383,7 @@ fn check_indirect_grad_entry(source: &str, succeeds: bool) {
             assert!(
                 rendered
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "C={c}: {rendered}"
             );
             assert!(!rendered.contains("out = tensor"), "C={c}: {rendered}");
@@ -424,7 +424,7 @@ fn beta_reduced_callbacks_keep_literal_entry_and_eager_actuals() {
             );
         }
         let source = format!(
-            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> int64, a: tensor[p, f32], b: tensor[p, f32]) -> int64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {actual}, {actual})\n"
+            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {actual}, {actual})\n"
         );
         check_beta_entry(&source, claims, 2, 0);
     }
@@ -473,7 +473,7 @@ fn beta_reduced_callbacks_preserve_signature_order() {
 fn beta_reduced_callbacks_keep_outer_and_inner_claims_independent() {
     for (first, second) in [(3, 2), (3, 3), (2, 2)] {
         let source = format!(
-            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> int64, a: tensor[p, f32], b: tensor[p, f32]) -> int64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {}, {})\n",
+            "{BETA_OPAQUE}def invoke(f: tensor[p, f32] -> i64, a: tensor[p, f32], b: tensor[p, f32]) -> i64 = f(a)\nout = invoke(fn (x: tensor[2, f32]) -> 7i64, {}, {})\n",
             beta_actual(first),
             beta_actual(second)
         );
@@ -517,7 +517,7 @@ fn beta_reduced_callbacks_run_failing_actual_before_entry() {
         let rendered = text(&output);
         assert!(!output.status.success(), "C={c}: {rendered}");
         let expected = if c {
-            "numeric trap: domain in shrink at int64"
+            "numeric trap: domain in shrink at i64"
         } else {
             "error: shrink axis 0 bound [1, 4] is out of range for input dim 3"
         };
@@ -656,7 +656,7 @@ fn higher_order_entry_is_after_arguments_and_before_following_effects() {
                 assert!(
                     rendered
                         .lines()
-                        .any(|line| line == "numeric trap: domain in load at int64"),
+                        .any(|line| line == "numeric trap: domain in load at i64"),
                     "C={c}: {rendered}"
                 );
             }
@@ -680,7 +680,7 @@ fn inline_callback_entry_precedes_body_effects_on_every_invocation() {
             assert!(
                 rendered
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "C={c}: {rendered}"
             );
             assert_eq!(

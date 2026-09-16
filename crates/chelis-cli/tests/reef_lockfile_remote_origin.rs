@@ -114,7 +114,7 @@ module_prefix = "Test"
 {deps_toml}"#,
         compiler = CURRENT_COMPILER_PIN,
     );
-    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> int32 = 0\n";
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> i32 = 0\n";
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
@@ -1196,7 +1196,7 @@ module_prefix = "{module_prefix}"
     .expect("write reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        format!("module {module_prefix}.Main\n\ndef id(x: int32) -> int32 = x\n"),
+        format!("module {module_prefix}.Main\n\ndef id(x: i32) -> i32 = x\n"),
     )
     .expect("write main.ch");
 }

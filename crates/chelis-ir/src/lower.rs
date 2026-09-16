@@ -3681,10 +3681,10 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
              should have been rejected upstream"
         ),
-        chelis_types::types::Prim::Int8 => "int8",
-        chelis_types::types::Prim::Int16 => "int16",
-        chelis_types::types::Prim::Int32 => "int32",
-        chelis_types::types::Prim::Int64 => "int64",
+        chelis_types::types::Prim::Int8 => "i8",
+        chelis_types::types::Prim::Int16 => "i16",
+        chelis_types::types::Prim::Int32 => "i32",
+        chelis_types::types::Prim::Int64 => "i64",
         chelis_types::types::Prim::Bool => "bool",
         chelis_types::types::Prim::String => "string",
     };
@@ -3982,7 +3982,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 // scalar rule below would otherwise route to the host lane
                 // before the dedicated Count lowerer could normalize it.
                 // The type checker has already proved that every selector is
-                // either a static int32 axis or a named operand dimension, so
+                // either a static i32 axis or a named operand dimension, so
                 // only the tensor operand contributes runtime requirements.
                 if name == "conv" {
                     let kids = children(list);
@@ -5140,7 +5140,7 @@ fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
 /// `Atom::Int` / `(lit {} N)` / `(cast {} N <prim>)` shapes that
 /// `reshape`/`stride` already accept also work for bound pairs. Issue
 /// Chelis-Lang/chelis#291: the headline reproducer writes the bounds as
-/// `[[cast(0, int32), cast(2, int32)]]`, and the old literal-only walker
+/// `[[cast(0, i32), cast(2, i32)]]`, and the old literal-only walker
 /// returned `None` for the `(cast ...)` element, so `extract_pair_list`
 /// fell back to an empty `bounds = vec![]` and the resulting
 /// `RiscOp::Shrink { bounds: [] }` failed backward-DAG verification with
@@ -5417,9 +5417,9 @@ fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
 /// `chelis-surf::desugar`:
 ///   * `Atom::Int(n)`
 ///   * `(lit {} <int>)`
-///   * `(cast {} <int|lit|cast> <prim>)` (the `cast(N, int64)` form
-///     is idiomatic since integer literals default to int32 and
-///     `reshape` expects `List[int64]`)
+///   * `(cast {} <int|lit|cast> <prim>)` (the `cast(N, i64)` form
+///     is idiomatic since integer literals default to i32 and
+///     `reshape` expects `List[i64]`)
 ///
 /// Returns the numeric value as `i64` when extractable. Used by
 /// [`LowerCtx::extract_dim_list`] to interpret reshape shape-list
@@ -5467,21 +5467,21 @@ pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
 }
 
 /// Recognize a `shape(operand, axis)` application — possibly wrapped in
-/// one or more `cast(..., int32)` layers — and return its `(operand,
+/// one or more `cast(..., i32)` layers — and return its `(operand,
 /// axis)` pair. The axis must be a static literal (bare int, `(lit ...)`,
 /// or `cast`-wrapped int); a runtime axis is not extractable here.
 ///
 /// This is the structural recognizer behind the issue #318 fix: the
 /// shape-derived const-broadcast idiom
-/// `insert(scalar_to_tensor(c), 0, shape(&x, cast(0, int32)))` (and the
-/// fully-`cast`-wrapped `cast(shape(&x, ...), int32)` form) carries its
+/// `insert(scalar_to_tensor(c), 0, shape(&x, cast(0, i32)))` (and the
+/// fully-`cast`-wrapped `cast(shape(&x, ...), i32)` form) carries its
 /// broadcast extent as the runtime dimension of `operand` at `axis`. The
 /// type checker collapses the `expand` *output* dim to `Lit(1)` via
 /// size-1 broadcasting, so the extent must be read from this `shape`
 /// argument's operand, not from the expand node's type.
 /// Strip any chain of `(cast {} <inner> (t-prim {} ...))` wrappers,
 /// returning the innermost non-cast expression. The expand size argument
-/// in the `tensor_full_like` idiom is `cast(var len, int32)`; peeling the
+/// in the `tensor_full_like` idiom is `cast(var len, i32)`; peeling the
 /// cast reaches the bare `var len` so [`bare_var_name`] /
 /// [`shape_app_operand_axis`] can match it (chelis#369, mirroring the
 /// `cast`-strip already in [`shape_app_operand_axis`]).
@@ -5499,7 +5499,7 @@ fn strip_cast_wrappers(expr: &Expr) -> &Expr {
 
 fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let (tag, _, kids) = stamped_parts(expr)?;
-    // Strip outer `cast(..., int32)` wrappers to reach the `shape` app.
+    // Strip outer `cast(..., i32)` wrappers to reach the `shape` app.
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
     }
@@ -5520,8 +5520,8 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
 
 /// Recognize the pipe spelling of a `shape(operand, axis)` read (chelis#569).
 ///
-/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, int32)), int64)` into
-/// `x |> shape(cast(0, int32)) |> cast(int64)`; both denote the same extent,
+/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, i32)), i64)` into
+/// `x |> shape(cast(0, i32)) |> cast(i64)`; both denote the same extent,
 /// so one recognizer answers for both and the lint cannot turn a building
 /// program into one the lowerer refuses.
 ///
@@ -5798,8 +5798,8 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                 DeepTag::Cast => {
                     // A cast leaf APPLIES the checked default ladder
                     // (spec/04 section 5.2) at recognition time, so
-                    // `cast(3.0, int32)` contributes 3 exactly and
-                    // `cast(9007199254740993, int64)` stays exact. A
+                    // `cast(3.0, i32)` contributes 3 exactly and
+                    // `cast(9007199254740993, i64)` stays exact. A
                     // trapping cast DECLINES static recognition (the
                     // section C2 decline discipline): the dynamic lowering
                     // evaluates the same cast and traps with its full
@@ -5807,7 +5807,7 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                     let inner = kids.first()?;
                     let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
                     // The [05-OP-6] rung folds through its OWN kernel, so
-                    // a statically-recognized `cast_trunc(1.9, int32)`
+                    // a statically-recognized `cast_trunc(1.9, i32)`
                     // contributes 1 rather than declining as the checked
                     // ladder would. An unrecognized selector declines.
                     let cast = match chelis_deep::cast_mode_of(kids).ok()? {
@@ -6418,7 +6418,7 @@ struct LowerCtx<'program> {
     /// chelis#369: `let`-bound names whose value is a `shape(operand,
     /// axis)` application, keyed by the bound name and holding the raw
     /// `shape(...)` Deep `Expr`. The canonical `tensor_full_like` idiom
-    /// writes `len = shape(x, 0)` then `expand(s, 0, cast(len, int32))`,
+    /// writes `len = shape(x, 0)` then `expand(s, 0, cast(len, i32))`,
     /// so the `expand` size argument is a `var len` reference, not a
     /// direct `shape(...)` app. Without this map the size-recovery path
     /// [`Self::shape_app_operand_axis_resolved`] cannot see through the
@@ -6430,7 +6430,7 @@ struct LowerCtx<'program> {
     /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
     /// over such values — the §4.7.2 `SizeClass::Static` provenance the
     /// checker follows transitively through `let` bindings). Lets a later
-    /// `expand(s, axis, cast(len, int32))` (or `len` used directly) recover
+    /// `expand(s, axis, cast(len, i32))` (or `len` used directly) recover
     /// the concrete extent instead of the pre-fix size-1 default — the exact
     /// eval-`[7]`-vs-C-`[1]` silent miscompile #469 exists to prevent when a
     /// `let`-bound static size reaches the backend. Re-binding a name to a
@@ -7764,7 +7764,7 @@ impl<'program> LowerCtx<'program> {
                             RiscOp::ExtentWitness {
                                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                                 parameter: String::new(),
-                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                                 requirements: vec![value],
                                 claims: Vec::new(),
                             },
@@ -7780,7 +7780,7 @@ impl<'program> LowerCtx<'program> {
                             RiscOp::ExtentWitness {
                                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                                 parameter: String::new(),
-                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                                 requirements: vec![value],
                                 claims: Vec::new(),
                             };
@@ -8500,7 +8500,7 @@ impl<'program> LowerCtx<'program> {
                     // chelis#369/#469: remember a `len = shape(operand, axis)`
                     // binding — OR a `let`-to-`let` alias / use-site `cast` of
                     // such a name (`a = shape(x, 0); c = a; expand(b, 0, c)`,
-                    // RT-3) — so a later `expand(s, axis, cast(len, int32))`
+                    // RT-3) — so a later `expand(s, axis, cast(len, i32))`
                     // can recover the broadcast extent through the `let`
                     // indirection (the `tensor_full_like` idiom).
                     // `resolve_shape_binding_source` follows the alias chain
@@ -8518,7 +8518,7 @@ impl<'program> LowerCtx<'program> {
                     // chelis#469/#528: remember a `len = <static int>` binding
                     // (a literal, `cast(N, _)`, or integer arithmetic over
                     // such, following prior static bindings) so a later
-                    // `expand(s, axis, cast(len, int32))` const-folds the
+                    // `expand(s, axis, cast(len, i32))` const-folds the
                     // extent instead of the size-1 default. Re-binding to a
                     // non-static value drops any stale entry (shadowing
                     // symmetry, mirroring `shape_bindings`).
@@ -8588,7 +8588,7 @@ impl<'program> LowerCtx<'program> {
         // literal's contextual dtype in the `lit` meta, so the sealed
         // payload finalizes ONCE at that dtype right here. Integer
         // atoms travel their exact i64 (no `as f64` laundering, which
-        // collapsed int64 above 2^53); an out-of-domain literal at its
+        // collapsed i64 above 2^53); an out-of-domain literal at its
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
         let raw = if let Some(val_expr) = elems.get(2) {
             match val_expr {
@@ -8791,10 +8791,10 @@ impl<'program> LowerCtx<'program> {
             }
             // [05-OP-35] A statically staged List keeps its exact spine, so
             // `len` is discrete compile-time data inside a differentiated
-            // body. Materialize that exact int64 constant before `lower_if`
+            // body. Materialize that exact i64 constant before `lower_if`
             // sees it; leaving `len` as a synthetic tensor Load would make a
             // static empty/non-empty guard look runtime-dependent and mix an
-            // int64 mask into the floating adjoint branches.
+            // i64 mask into the floating adjoint branches.
             if self.allow_host_list_ad_rewrites && func_name == "len" && elems.len() == 4 {
                 let list = self.lower_expr(&elems[3]);
                 if let Some((_, len, _)) = runtime_list_view_parts(&list) {
@@ -8803,7 +8803,7 @@ impl<'program> LowerCtx<'program> {
                 if let Some(items) = adt_cons_chain_values(&list) {
                     let value = i64::try_from(items.len()).unwrap_or_else(|_| {
                         raise_fatal_lowering_error(
-                            "statically staged List length does not fit int64",
+                            "statically staged List length does not fit i64",
                             Some(elems[3].span()),
                             elems[3].span_id().map(ToOwned::to_owned),
                         )
@@ -9072,7 +9072,7 @@ impl<'program> LowerCtx<'program> {
                         None => raise_fatal_lowering_error(
                             "`vmap` mapped axis is not a compile-time integer constant: the DAG \
                              cannot vectorize over a runtime axis (the checker admits only a \
-                             literal or a `cast(<int>, int32)` axis here; a runtime axis must be \
+                             literal or a `cast(<int>, i32)` axis here; a runtime axis must be \
                              rejected at check time). `vmap` defaults to axis 0 only when the axis \
                              argument is omitted, never when a non-constant axis is supplied",
                             Some(axis_expr.span()),
@@ -9937,7 +9937,7 @@ impl<'program> LowerCtx<'program> {
                     (
                         RtDim::InputAxis {
                             tensor: 1,
-                            axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
+                            axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
                         },
                         vec![node, source],
                     )
@@ -11788,8 +11788,8 @@ impl<'program> LowerCtx<'program> {
             // RT-2 fixup B5: lowering used to hardcode
             // `accumulator = out_ty.precision`, which assumed the
             // type checker had already widened the result for narrow
-            // operand precisions. For int8/int16 the type checker now
-            // (B1) returns int32; for bf16/f16 the user-facing result
+            // operand precisions. For i8/i16 the type checker now
+            // (B1) returns i32; for bf16/f16 the user-facing result
             // is the operand precision (per the §5.7.1 result-precision
             // table) but the IR Sum node outputs the f32 accumulator
             // and we must insert a Cast back to the operand precision
@@ -12325,7 +12325,7 @@ impl<'program> LowerCtx<'program> {
                 //   1. A statically-extractable size (a bare int, `(lit
                 //      ...)`, a `cast`-wrapped int, or a symbolic dim
                 //      variable) — issue #288's literal/symbol form
-                //      `insert(scalar_to_tensor(c), 0, cast(2, int32))`.
+                //      `insert(scalar_to_tensor(c), 0, cast(2, i32))`.
                 //
                 //   2. A `shape(operand, axis)` application — issue #318's
                 //      shape-derived form
@@ -12353,9 +12353,9 @@ impl<'program> LowerCtx<'program> {
                     // (1) A fully-static size: a literal, `cast(N, _)`,
                     //     integer arithmetic over such values, or a `let`-bound
                     //     name that folds to one (chelis#469 / #528). Const-
-                    //     folded to a concrete extent so a `sub(cast(4, int32),
-                    //     cast(1, int32))` size — or a `len = cast(7, int32)`
-                    //     followed by `cast(len, int32)` — no longer falls
+                    //     folded to a concrete extent so a `sub(cast(4, i32),
+                    //     cast(1, i32))` size — or a `len = cast(7, i32)`
+                    //     followed by `cast(len, i32)` — no longer falls
                     //     through to the size-1 default (a silent
                     //     eval-`[3, 3]`-vs-C-`[1, 3]` miscompile pre-fix).
                     if let Some(witness) = self.binding_witness_from_shape_arg(size_arg) {
@@ -12388,7 +12388,7 @@ impl<'program> LowerCtx<'program> {
                             axis: RtAxis::Lit(i32::try_from(source_axis).unwrap_or_else(|_| {
                                 raise_lowering_error(
                                     format!(
-                                        "shape axis {source_axis} exceeds the int32 axis carrier"
+                                        "shape axis {source_axis} exceeds the i32 axis carrier"
                                     ),
                                     Some(size_arg.span()),
                                     size_arg.span_id().map(ToOwned::to_owned),
@@ -12422,7 +12422,7 @@ impl<'program> LowerCtx<'program> {
                                     |_| {
                                         raise_lowering_error(
                                             format!(
-                                                "tensor axis {source_axis} exceeds the int32 axis carrier"
+                                                "tensor axis {source_axis} exceeds the i32 axis carrier"
                                             ),
                                             Some(size_arg.span()),
                                             size_arg.span_id().map(ToOwned::to_owned),
@@ -12433,7 +12433,7 @@ impl<'program> LowerCtx<'program> {
                         } else {
                             raise_fatal_lowering_error(
                                 format!(
-                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
                                 ),
                                 Some(app_span),
                                 self.current_span_id.clone(),
@@ -12454,7 +12454,7 @@ impl<'program> LowerCtx<'program> {
                     //     which refused a well-typed program on the spelling of
                     //     its extent while `eval` executed it. `RtDim::Node` is
                     //     that representation: the size becomes a rank-0
-                    //     `int64` node appended to `inputs`, the same carrier a
+                    //     `i64` node appended to `inputs`, the same carrier a
                     //     movement bound uses (chelis#616), so one place
                     //     decides literal-versus-node for every runtime extent.
                     //     A literal or named claim over the axis is checked by
@@ -12650,7 +12650,7 @@ impl<'program> LowerCtx<'program> {
             // and fabricated a bogus `Load { name: "shape" }` placeholder
             // with no inputs and a default scalar-f32 type, which produced
             // garbage in the C / grad DAG lanes. The axis must be a
-            // compile-time literal (the idiomatic `cast(N, int32)` form is
+            // compile-time literal (the idiomatic `cast(N, i32)` form is
             // accepted via `extract_int_for_dim`); a genuinely runtime axis
             // is caught by the dedicated loud arm immediately below rather
             // than reaching the fallback.
@@ -12664,7 +12664,7 @@ impl<'program> LowerCtx<'program> {
                     .and_then(|a| usize::try_from(a).ok())
                     .expect("axis literal guarded by the arm predicate");
                 let x = self.lower_expr_node(&args[0], "shape input");
-                // The checker types `shape(...)` as an exact `int64`
+                // The checker types `shape(...)` as an exact `i64`
                 // scalar ([05-DIM-2]). Pin that carrier rather than
                 // trusting a stale incoming type, so lowering cannot
                 // narrow a runtime extent.
@@ -13067,7 +13067,7 @@ impl<'program> LowerCtx<'program> {
         self.dag.add_node(
             RiscOp::Const {
                 value: scalar_from_i64("List control", Prim::Int64, value)
-                    .expect("an i64 is representable as int64"),
+                    .expect("an i64 is representable as i64"),
             },
             vec![],
             TensorType {
@@ -13115,7 +13115,7 @@ impl<'program> LowerCtx<'program> {
         }
 
         // ScatterAdd is an arithmetic carrier, so stage bools through the
-        // exact 0/1 int64 representation. The terminal checked cast restores
+        // exact 0/1 i64 representation. The terminal checked cast restores
         // the original bool type and remains value-independent for AD.
         if out_ty.precision == Prim::Bool {
             let int_ty = TensorType {
@@ -13182,7 +13182,7 @@ impl<'program> LowerCtx<'program> {
                 DimInfo::Named(_, None) => (
                     RtDim::InputAxis {
                         tensor: 1,
-                        axis: RtAxis::Lit(i32::try_from(axis - 1).expect("tensor rank fits int32")),
+                        axis: RtAxis::Lit(i32::try_from(axis - 1).expect("tensor rank fits i32")),
                     },
                     vec![table, first],
                 ),
@@ -13508,7 +13508,7 @@ impl<'program> LowerCtx<'program> {
         match &node.op {
             RiscOp::Const { value } => value.as_i64_exact(),
             // Integer count arguments are commonly materialized as
-            // `cast(<literal>, int64)` before an imported wrapper is
+            // `cast(<literal>, i64)` before an imported wrapper is
             // inlined. The checker has already established an integer
             // result type, so an exact integer input survives the cast.
             RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
@@ -13833,12 +13833,12 @@ impl<'program> LowerCtx<'program> {
     /// Resolve a reduction/gather/scatter/softmax axis expression to its
     /// compile-time-constant integer value. Recognizes the exact forms the
     /// checker admits as a constant axis: a bare int, `(lit {} n)`, and any
-    /// number of `cast(<int>, int32)` wrappers (`check_reduction_signature`
-    /// admits `sum(x, cast(1, int32))`) — delegated to the shared
+    /// number of `cast(<int>, i32)` wrappers (`check_reduction_signature`
+    /// admits `sum(x, cast(1, i32))`) — delegated to the shared
     /// [`extract_int_for_dim`] walker.
     ///
     /// Issue #364: the pre-fix body returned `0` for ANY axis it did not
-    /// statically recognize (including `cast(N, int32)` for N != 0), so a
+    /// statically recognize (including `cast(N, i32)` for N != 0), so a
     /// `cast`-axis reduction lowered to axis 0 regardless of N — silently
     /// reducing the wrong axis (and, under `grad`, differentiating the wrong
     /// reduction with eval/backend agreeing on the SAME wrong answer). A
@@ -13856,7 +13856,7 @@ impl<'program> LowerCtx<'program> {
             format!(
                 "`{op}` axis is not a compile-time integer constant: rank monomorphization \
                  cannot resolve it to a fixed axis (the checker admits only a literal or a \
-                 `cast(<int>, int32)` axis here; a runtime axis must be rejected at check time)"
+                 `cast(<int>, i32)` axis here; a runtime axis must be rejected at check time)"
             ),
             Some(expr.span()),
             expr.span_id().map(ToOwned::to_owned),
@@ -14199,11 +14199,11 @@ impl<'program> LowerCtx<'program> {
     fn extract_usize_value(&self, expr: &Expr) -> Option<usize> {
         // Recognize bare ints, `(lit {} n)`, and `(cast {} <inner> ty)`
         // wrappers via the shared `extract_int_for_dim` walker. Surf
-        // routinely wraps integer arguments in `cast(n, int32)` (e.g.
-        // `expand(x, cast(0, int32), cast(2, int32))`); without
+        // routinely wraps integer arguments in `cast(n, i32)` (e.g.
+        // `expand(x, cast(0, i32), cast(2, i32))`); without
         // unwrapping the cast this returned `None` and callers silently
         // fell back to a default (axis 0 / size 1), so `expand(...,
-        // cast(2, int32))` produced a `tensor[1]` instead of `tensor[2]`
+        // cast(2, i32))` produced a `tensor[1]` instead of `tensor[2]`
         // and the constant-broadcast idiom in issue #288 lowered to a
         // shape-mismatched `Mul`. Reject negative values (sizes/axes are
         // non-negative) so the caller's own negative-axis normalization
@@ -14229,7 +14229,7 @@ impl<'program> LowerCtx<'program> {
     /// non-scalar node, and every op inside the whitelisted vocabulary. Every
     /// arithmetic arm enters the same closed, dtype-width kernel vocabulary as
     /// `crate::eval`; constants and casts stay sealed [`ScalarValue`]s, so an
-    /// int64 condition never crosses an f64 memo slot and f16/bf16 casts are
+    /// i64 condition never crosses an f64 memo slot and f16/bf16 casts are
     /// finalized before their consumers run.
     ///
     /// Works at the DAG-node level, not the Deep-expression level, because by
@@ -14699,7 +14699,7 @@ impl<'program> LowerCtx<'program> {
                     RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::Caller,
                         parameter: name.clone(),
-                        axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits int32")),
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits i32")),
                         requirements: Vec::new(),
                         claims: Vec::new(),
                     },
@@ -14774,7 +14774,7 @@ impl<'program> LowerCtx<'program> {
         if ty.dims.get(axis) == Some(&DimInfo::Lit(1)) {
             return input;
         }
-        let rt_axis = RtAxis::Lit(i32::try_from(axis).expect("checked axis fits int32"));
+        let rt_axis = RtAxis::Lit(i32::try_from(axis).expect("checked axis fits i32"));
         let existing = self
             .binding_witnesses_for_expr(expr)
             .and_then(|(_, witnesses)| witnesses.get(axis))
@@ -14901,9 +14901,9 @@ impl<'program> LowerCtx<'program> {
                         value: chelis_types::scalar_from_i64(
                             "reshape",
                             Prim::Int64,
-                            i64::try_from(*required).expect("checked extent fits int64"),
+                            i64::try_from(*required).expect("checked extent fits i64"),
                         )
-                        .expect("int64 extent"),
+                        .expect("i64 extent"),
                     },
                     Vec::new(),
                     TensorType {
@@ -14937,7 +14937,7 @@ impl<'program> LowerCtx<'program> {
         let op = RiscOp::ExtentWitness {
             site: crate::dag::ExtentWitnessSite::ResultClaim {
                 claim,
-                axis: RtAxis::Lit(i32::try_from(axis).expect("result rank fits int32")),
+                axis: RtAxis::Lit(i32::try_from(axis).expect("result rank fits i32")),
             },
             parameter: parameter.clone(),
             axis: *observed,
@@ -14969,7 +14969,7 @@ impl<'program> LowerCtx<'program> {
         // The dependency belongs to the origin's axis, which may differ from
         // the returned axis after a permutation or inserted dimension.
         let mut site = self.dag.get(required).expect("captured claim").op.clone();
-        if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32")) {
+        if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32")) {
             let RiscOp::ExtentWitness {
                 site:
                     crate::dag::ExtentWitnessSite::ResultClaim {
@@ -14980,7 +14980,7 @@ impl<'program> LowerCtx<'program> {
             else {
                 unreachable!()
             };
-            *claimed_axis = RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32"));
+            *claimed_axis = RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32"));
             self.dag.node_mut(required).expect("captured claim").op = site;
         }
         assert!(
@@ -15092,8 +15092,7 @@ impl<'program> LowerCtx<'program> {
                     self.attach_result_claim(id, axis, required);
                     return;
                 };
-                let axis =
-                    RtAxis::Lit(i32::try_from(reshape_axis).expect("reshape rank fits int32"));
+                let axis = RtAxis::Lit(i32::try_from(reshape_axis).expect("reshape rank fits i32"));
                 // Requirements resolved before this producer can become its
                 // input edges without changing topology. A claim about a value
                 // produced before this call is checked at this call boundary.
@@ -15494,9 +15493,9 @@ impl<'program> LowerCtx<'program> {
         let required = chelis_types::scalar_from_i64(
             "load",
             Prim::Int64,
-            i64::try_from(required).expect("checked extent fits int64"),
+            i64::try_from(required).expect("checked extent fits i64"),
         )
-        .expect("int64 extent literal");
+        .expect("i64 extent literal");
         if let RiscOp::ExtentWitness { requirements, .. } =
             &mut self.dag.node_mut(witness).expect("witness").op
             && !requirements.contains(&required)
@@ -15744,10 +15743,10 @@ impl<'program> LowerCtx<'program> {
     ///
     /// ```text
     ///   len  = shape(x, 0)
-    ///   twos = insert(scalar_to_tensor(c), 0, cast(len, int32))
+    ///   twos = insert(scalar_to_tensor(c), 0, cast(len, i32))
     /// ```
     ///
-    /// so the `expand` size argument is `cast(var len, int32)`, NOT a
+    /// so the `expand` size argument is `cast(var len, i32)`, NOT a
     /// direct `shape(...)` app. The bare [`shape_app_operand_axis`] strips
     /// the `cast`, reaches `var len`, fails to match a `shape` builtin, and
     /// returns `None` — at which point the caller silently defaults the
@@ -15763,7 +15762,7 @@ impl<'program> LowerCtx<'program> {
         if let Some((operand, axis)) = shape_app_operand_axis(expr) {
             return Some((operand.clone(), axis));
         }
-        // Strip any `cast(..., int32)` wrappers to reach a bare `var name`,
+        // Strip any `cast(..., i32)` wrappers to reach a bare `var name`,
         // then follow the recorded `let len = shape(...)` binding. Because
         // `resolve_shape_binding_source` records the UNDERLYING `shape(...)`
         // app for `let`-to-`let` aliases too (chelis#469 RT-3), a single
@@ -15786,7 +15785,7 @@ impl<'program> LowerCtx<'program> {
     /// property: the recovered extent and its `shape_dep` liveness edge bind
     /// to the ACTUAL source tensor and axis, so an alias can never resolve to
     /// the wrong `Load`. Because each recorded alias already points at the
-    /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, int32)`)
+    /// underlying app, a chain (`a = shape(x, 0); c = a; d = cast(c, i32)`)
     /// resolves in one lookup per link at bind time. Mirrors how
     /// [`Self::fold_static_size`] recurses [`Self::static_size_bindings`] for
     /// the static path (`j = k; ...` folds through the alias).
@@ -15843,14 +15842,14 @@ impl<'program> LowerCtx<'program> {
                     let unsupported = Unsupported::new(
                         UnsupportedKind::Construct(
                             "an explicit random seed that is not a statically-resolvable signed \
-                             int64 value"
+                             i64 value"
                                 .to_owned(),
                         ),
                         "`with seed(...)` in IR lowering",
                         Stage::Lowering,
                         chelis_types::deliberate_rejection!(
                             "[05-RNG-1]",
-                            "an explicit random seed is a signed int64 value; lowering \
+                            "an explicit random seed is a signed i64 value; lowering \
                              reinterprets its two's-complement bits as uint64 and never \
                              substitutes zero or ambient state (Chelis-Lang/chelis#794)"
                         ),
@@ -15922,7 +15921,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
-        // [05-RNG-1] owns a signed int64 seed, not a dimension-like integer.
+        // [05-RNG-1] owns a signed i64 seed, not a dimension-like integer.
         // Require that exact checked type before recognizing the static leaf;
         // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
         // by looking only at its payload. Reinterpret the accepted signed
@@ -16057,7 +16056,7 @@ impl<'program> LowerCtx<'program> {
 
     /// Resolve a statically-known scalar and finalize it once at `target`.
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
-    /// int64 and a typed leaf retains its source dtype until the checked cast.
+    /// i64 and a typed leaf retains its source dtype until the checked cast.
     fn static_rate(&self, expr: &Expr) -> Option<StagedScalar> {
         static_controls::scalar(
             expr,
@@ -16121,7 +16120,7 @@ impl<'program> LowerCtx<'program> {
     ///
     /// Each head is interpreted as, in order: an integer dim (via
     /// [`extract_int_for_dim`], which handles `Atom::Int`, `(lit ...)`, and
-    /// `(cast ... int64)`); a `shape(operand, axis)`-derived dim (chelis#513
+    /// `(cast ... i64)`); a `shape(operand, axis)`-derived dim (chelis#513
     /// gap 1, see below); or a symbolic dim variable (via
     /// [`symbolic_dim_var_name`], which recognizes `(var {} <name>)`).
     /// Non-recognized shapes abort the walk and return `None` so the caller
@@ -16170,7 +16169,7 @@ impl<'program> LowerCtx<'program> {
         let mut srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = self.stage_host_value(elem, true) {
-                let actual = value.expect_node("int64 target producer");
+                let actual = value.expect_node("i64 target producer");
                 let slot = inputs.len();
                 inputs.push(actual);
                 computed_targets.push((axis, slot));
@@ -16200,7 +16199,7 @@ impl<'program> LowerCtx<'program> {
                     self.dag.add_node(
                         RiscOp::Const {
                             value: chelis_types::scalar_from_i64("reshape", Prim::Int64, value)
-                                .expect("exact int64 target"),
+                                .expect("exact i64 target"),
                         },
                         Vec::new(),
                         TensorType {
@@ -16482,7 +16481,7 @@ impl<'program> LowerCtx<'program> {
             // The suppression-aware raise ladder (the `reject_lowering_slice`
             // shape): a SPECULATIVE probe unwinds quietly so the host
             // evaluator/emitter keeps owning the non-DAG paths (eval of a
-            // plain `abs(int64 tensor)` forward pass is CORRECT there); an
+            // plain `abs(i64 tensor)` forward pass is CORRECT there); an
             // AD transform body raises FATAL so the branded message
             // survives the build lane's recoverable fallback (chelis#722's
             // zero gradients, the issue #197 pattern); everywhere else the
@@ -17628,7 +17627,7 @@ impl<'program> LowerCtx<'program> {
                     DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => RtDim::Lit(*value),
                     DimInfo::Named(_, None) => RtDim::InputAxis {
                         tensor: 1,
-                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
                     },
                 };
                 expanded = self.dag.add_node(
@@ -18484,20 +18483,20 @@ mod tests {
             vec![Expr::Atom(Atom::Int(9_007_199_254_740_993), span)],
             span,
         );
-        let int64 = Expr::node(
+        let i64 = Expr::node(
             DeepTag::TPrim,
             meta.clone(),
-            vec![Expr::Atom(Atom::Name("int64".into()), span)],
+            vec![Expr::Atom(Atom::Name("i64".into()), span)],
             span,
         );
-        let cast = Expr::node(DeepTag::Cast, meta, vec![literal, int64], span);
+        let cast = Expr::node(DeepTag::Cast, meta, vec![literal, i64], span);
 
         let expected = chelis_types::scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
-            .expect("in-range int64");
+            .expect("in-range i64");
         assert_eq!(
             extract_numeric_leaf(&cast),
             Some(StagedScalar::Typed(expected)),
-            "the stamped carrier must keep an exact int64 TYPED - never \
+            "the stamped carrier must keep an exact i64 TYPED - never \
              projected through f64 (chelis#1116)"
         );
     }
@@ -18526,7 +18525,7 @@ mod tests {
         let overflowing_cast = Expr::node(
             DeepTag::Cast,
             meta.clone(),
-            vec![int_lit(300), prim("int8")],
+            vec![int_lit(300), prim("i8")],
             span,
         );
         assert_eq!(
@@ -18557,7 +18556,7 @@ mod tests {
 
         // chelis#1123 red-team finding 2: negating a TYPED leaf at its
         // width's minimum overflows in the typed kernel and declines to
-        // the dynamic path, which reports "overflow in neg at int8" when
+        // the dynamic path, which reports "overflow in neg at i8" when
         // the def is actually called (the uncalled-def silence is the
         // pre-existing chelis#1132 class).
         let typed_min_neg = Expr::node(
@@ -18573,7 +18572,7 @@ mod tests {
                 Expr::node(
                     DeepTag::Cast,
                     meta.clone(),
-                    vec![int_lit(-128), prim("int8")],
+                    vec![int_lit(-128), prim("i8")],
                     span,
                 ),
             ],
@@ -18862,7 +18861,7 @@ mod tests {
     /// recover the broadcast extent from `x`'s already-lowered dim, NOT
     /// default to size 1. This lowers the exact Deep the Surf idiom
     /// produces — `insert(scalar_to_tensor(c), 0, cast(shape(&x,
-    /// cast(0,int32)), int32))` — directly through the `expand` lowering
+    /// cast(0,i32)), i32))` — directly through the `expand` lowering
     /// arm (bypassing the host-routing gate that keeps a `shape`-bearing
     /// *def* out of standalone DAG lowering), with `x: tensor[2]` bound.
     /// The recovered extent must be the concrete `2`, and the rank-0
@@ -18876,13 +18875,13 @@ mod tests {
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {} (lit {} 0) (t-prim {} i32))
                  (cast {}
                        (app {}
                             (var {} shape)
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
-                            (cast {} (lit {} 0) (t-prim {} int32)))
-                       (t-prim {} int32)))
+                            (cast {} (lit {} 0) (t-prim {} i32)))
+                       (t-prim {} i32)))
         "#;
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
@@ -18917,13 +18916,13 @@ mod tests {
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {} (lit {} 0) (t-prim {} i32))
                  (cast {}
                        (app {}
                             (var {} shape)
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
-                            (cast {} (lit {} 0) (t-prim {} int32)))
-                       (t-prim {} int32)))
+                            (cast {} (lit {} 0) (t-prim {} i32)))
+                       (t-prim {} i32)))
         "#;
         let dag = lower_with_bound_x(2, expr);
         let x_loads = dag
@@ -18964,13 +18963,13 @@ mod tests {
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                        (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 3.0)
                        (t-prim {} f32))
-                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {} (lit {} 0) (t-prim {} i32))
                  (cast {}
                        (app {}
                             (var {} shape)
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} x))
-                            (cast {} (lit {} 0) (t-prim {} int32)))
-                       (t-prim {} int32)))
+                            (cast {} (lit {} 0) (t-prim {} i32)))
+                       (t-prim {} i32)))
         "#;
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
@@ -19001,13 +19000,13 @@ mod tests {
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                 (cast {} (lit {} 0) (t-prim {} int32))
+                 (cast {} (lit {} 0) (t-prim {} i32))
                  (cast {}
                        (app {}
                             (var {} shape)
                             (borrow {} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
-                            (cast {} (lit {} 0) (t-prim {} int32)))
-                       (t-prim {} int32)))
+                            (cast {} (lit {} 0) (t-prim {} i32)))
+                       (t-prim {} i32)))
         "#;
         let dag = lower_with_bound_x(3, expr);
         let (size, dims) = only_expand(&dag);
@@ -19037,8 +19036,8 @@ mod tests {
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                 (cast {} (lit {} 0) (t-prim {} int32))
-                 (cast {} (lit {} 2) (t-prim {} int32)))
+                 (cast {} (lit {} 0) (t-prim {} i32))
+                 (cast {} (lit {} 2) (t-prim {} i32)))
         "#;
         let dag = lower_with_bound_x(2, expr);
         let (size, dims) = only_expand(&dag);
@@ -19082,14 +19081,14 @@ mod tests {
 
     /// chelis#369 (the fix): the `tensor_full_like` idiom binds the shape
     /// read to `len` first — `len = shape(x, 0)` — then uses `cast(len,
-    /// int32)` as the `expand` size. The size recovery must follow the
+    /// i32)` as the `expand` size. The size recovery must follow the
     /// `let` indirection back to the bound `shape(x, 0)` and recover the
     /// concrete extent `3`, NOT silently default to `Concrete(1)` (which
     /// is what produced the `Lit(3) vs Lit(1)` backward-DAG failure).
     #[test]
     fn issue_369_expand_let_bound_shape_recovers_extent() {
         // (let {} (bind {} len (shape x 0))
-        //   (insert (scalar_to_tensor 3.0) 0 (cast len int32)))
+        //   (insert (scalar_to_tensor 3.0) 0 (cast len i32)))
         let body = r#"
             (let {}
                  (bind {}
@@ -19097,14 +19096,14 @@ mod tests {
                        (app {}
                             (var {} shape)
                             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-                            (cast {} (lit {} 0) (t-prim {} int32))))
+                            (cast {} (lit {} 0) (t-prim {} i32))))
                  (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                       (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                      (cast {} (lit {} 0) (t-prim {} int32))
-                      (cast {} (var {} len) (t-prim {} int32))))
+                      (cast {} (lit {} 0) (t-prim {} i32))
+                      (cast {} (var {} len) (t-prim {} i32))))
         "#;
         let dag = lower_body_with_bound_x(3, body);
         let (size, dims) = only_expand(&dag);
@@ -19145,14 +19144,14 @@ mod tests {
                        (app {}
                             (var {} shape)
                             (var {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))} x)
-                            (cast {} (lit {} 0) (t-prim {} int32))))
+                            (cast {} (lit {} 0) (t-prim {} i32))))
                  (app {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))}
                       (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                      (cast {} (lit {} 0) (t-prim {} int32))
-                      (cast {} (var {} len) (t-prim {} int32))))
+                      (cast {} (lit {} 0) (t-prim {} i32))
+                      (cast {} (var {} len) (t-prim {} i32))))
         "#;
         let dag = lower_body_with_bound_x(5, body);
         let (size, dims) = only_expand(&dag);
@@ -19177,7 +19176,7 @@ mod tests {
 
     /// chelis#369 negative parity + chelis#469/#528 positive parity: the
     /// SHAPE-recovery path must follow ONLY a genuine `let len = shape(...)`
-    /// binding — a `len` bound to a static `cast(7, int32)` must NOT
+    /// binding — a `len` bound to a static `cast(7, i32)` must NOT
     /// mis-recover `x`'s shape extent 3. It is not sourceless, though: a
     /// `let`-bound static value folds to its own extent (`SizeClass::Static`
     /// followed through the `let`), so the size resolves to `Concrete(7)`, not
@@ -19185,17 +19184,17 @@ mod tests {
     /// C-`[1]`) and not `x`'s 3.
     #[test]
     fn issue_369_expand_let_bound_non_shape_does_not_recover() {
-        // len is bound to a static int (`cast(7, int32)`), not a shape read.
+        // len is bound to a static int (`cast(7, i32)`), not a shape read.
         let body = r#"
             (let {}
-                 (bind {} len (cast {} (lit {} 7) (t-prim {} int32)))
+                 (bind {} len (cast {} (lit {} 7) (t-prim {} i32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                       (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                      (cast {} (lit {} 0) (t-prim {} int32))
-                      (cast {} (var {} len) (t-prim {} int32))))
+                      (cast {} (lit {} 0) (t-prim {} i32))
+                      (cast {} (var {} len) (t-prim {} i32))))
         "#;
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
@@ -19219,8 +19218,8 @@ mod tests {
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
         // len = shape(x, 0)          -- shape binding
-        // len = cast(5, int32)       -- re-bound to a static value
-        // expand(s, 0, cast(len, int32))  -- must recover 5, NOT the stale 3
+        // len = cast(5, i32)       -- re-bound to a static value
+        // expand(s, 0, cast(len, i32))  -- must recover 5, NOT the stale 3
         let body = r#"
             (let {}
                  (bind {}
@@ -19228,16 +19227,16 @@ mod tests {
                        (app {}
                             (var {} shape)
                             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-                            (cast {} (lit {} 0) (t-prim {} int32)))
+                            (cast {} (lit {} 0) (t-prim {} i32)))
                        len
-                       (cast {} (lit {} 5) (t-prim {} int32)))
+                       (cast {} (lit {} 5) (t-prim {} i32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                       (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
-                      (cast {} (lit {} 0) (t-prim {} int32))
-                      (cast {} (var {} len) (t-prim {} int32))))
+                      (cast {} (lit {} 0) (t-prim {} i32))
+                      (cast {} (var {} len) (t-prim {} i32))))
         "#;
         let dag = lower_body_with_bound_x(3, body);
         let (size, _dims) = only_expand(&dag);
@@ -19273,13 +19272,13 @@ mod tests {
             (def {} values
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values))
             (def {} indices
-              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices))
             (def {} out
               (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))}
                    (var {} gather)
                    (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values)
-                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
-                   (lit {type: (t-prim {} int32)} 0)))
+                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices)
+                   (lit {type: (t-prim {} i32)} 0)))
         "#;
         let dag = parse_and_lower(src);
         let gather = dag
@@ -19310,16 +19309,16 @@ mod tests {
             (def {} base
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base))
             (def {} indices
-              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+              (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices))
             (def {} updates
               (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates))
             (def {} out
               (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))}
                    (var {} scatter_replace)
                    (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base)
-                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices)
+                   (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices)
                    (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates)
-                   (lit {type: (t-prim {} int32)} 0)))
+                   (lit {type: (t-prim {} i32)} 0)))
         "#;
         let dag = parse_and_lower(src);
         let scatter = dag
@@ -19574,7 +19573,7 @@ mod tests {
                       (app {}
                         (grad {wrt: (var {} theta_local)}
                           (var {} target)
-                          (lit {type: (t-prim {} int32)} 0))
+                          (lit {type: (t-prim {} i32)} 0))
                         (var {} theta)))))
                 (defsig {}
                   lm_model
@@ -19603,7 +19602,7 @@ mod tests {
                             (app {}
                               (var {} sum)
                               (copy {} (var {} theta))
-                              (lit {type: (t-prim {} int32)} 0)))
+                              (lit {type: (t-prim {} i32)} 0)))
                           (app {}
                             (var {} add)
                             (app {}
@@ -19611,7 +19610,7 @@ mod tests {
                               (app {}
                                 (var {} sum)
                                 (copy {} (var {} theta))
-                                (lit {type: (t-prim {} int32)} 0)))
+                                (lit {type: (t-prim {} i32)} 0)))
                             (var {} x))))
                       (app {} (var {} sub) (var {} y) (var {} y_hat)))))
                 (def {}
@@ -19685,7 +19684,7 @@ mod tests {
                       (app {}
                         (grad {wrt: (var {} theta_local)}
                           (var {} target)
-                          (lit {type: (t-prim {} int32)} 0))
+                          (lit {type: (t-prim {} i32)} 0))
                         (var {} theta)))))
                 (defsig {}
                   lm_model
@@ -19714,7 +19713,7 @@ mod tests {
                             (app {}
                               (var {} sum)
                               (copy {} (var {} theta))
-                              (lit {type: (t-prim {} int32)} 0)))
+                              (lit {type: (t-prim {} i32)} 0)))
                           (app {}
                             (var {} add)
                             (app {}
@@ -19722,7 +19721,7 @@ mod tests {
                               (app {}
                                 (var {} sum)
                                 (copy {} (var {} theta))
-                                (lit {type: (t-prim {} int32)} 0)))
+                                (lit {type: (t-prim {} i32)} 0)))
                             (var {} x))))
                       (app {} (var {} sub) (var {} y) (var {} y_hat)))))
                 (def {}
@@ -19830,7 +19829,7 @@ mod tests {
                       (app {}
                         (grad {wrt: (var {} theta_local)}
                           (var {} target)
-                          (lit {type: (t-prim {} int32)} 0))
+                          (lit {type: (t-prim {} i32)} 0))
                         (var {} theta)))))
                 (defsig {}
                   lm_model
@@ -20226,9 +20225,9 @@ mod tests {
                    (var {} x)
                    (app {} (var {} Cons)
                         (app {} (var {} Cons)
-                             (lit {type: (t-prim {} int32)} 1)
+                             (lit {type: (t-prim {} i32)} 1)
                              (app {} (var {} Cons)
-                                  (lit {type: (t-prim {} int32)} 1)
+                                  (lit {type: (t-prim {} i32)} 1)
                                   (var {} Nil)))
                         (var {} Nil))
                    0.0))
@@ -20249,9 +20248,9 @@ mod tests {
                    (var {} x)
                    (app {} (var {} Cons)
                         (app {} (var {} Cons)
-                             (lit {type: (t-prim {} int32)} 1)
+                             (lit {type: (t-prim {} i32)} 1)
                              (app {} (var {} Cons)
-                                  (lit {type: (t-prim {} int32)} 1)
+                                  (lit {type: (t-prim {} i32)} 1)
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
@@ -20278,7 +20277,7 @@ mod tests {
 
     /// Issue #291: a `shrink` bound literal written as a Surf-desugared
     /// `Cons` chain whose pair elements are `cast`-wrapped ints
-    /// (`[[cast(0, int32), cast(2, int32)]]`) must lower to
+    /// (`[[cast(0, i32), cast(2, i32)]]`) must lower to
     /// `RiscOp::Shrink { bounds: [(0, 2)] }`, NOT an empty `bounds = []`.
     /// Before the fix the bound-pair walker accepted only `Atom::Int` /
     /// `(lit ...)`, so the `(cast ...)` elements dropped out and the
@@ -20288,9 +20287,9 @@ mod tests {
     #[test]
     fn lower_shrink_cast_wrapped_cons_bounds_issue_291() {
         // The exact desugared Deep that Surf emits for
-        // `shrink(x, [[cast(0, int32), cast(2, int32)]])`: an outer
+        // `shrink(x, [[cast(0, i32), cast(2, i32)]])`: an outer
         // `Cons(pair, Nil)`, where `pair` is `Cons(cast(0), Cons(cast(2),
-        // Nil))` and each `cast` wraps an int32 `lit`.
+        // Nil))` and each `cast` wraps an i32 `lit`.
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
@@ -20299,9 +20298,9 @@ mod tests {
                    (var {} x)
                    (app {} (var {} Cons)
                         (app {} (var {} Cons)
-                             (cast {} (lit {type: (t-prim {} int32)} 0) (t-prim {} int32))
+                             (cast {} (lit {type: (t-prim {} i32)} 0) (t-prim {} i32))
                              (app {} (var {} Cons)
-                                  (cast {} (lit {type: (t-prim {} int32)} 2) (t-prim {} int32))
+                                  (cast {} (lit {type: (t-prim {} i32)} 2) (t-prim {} i32))
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
@@ -20335,9 +20334,9 @@ mod tests {
                    (var {} x)
                    (app {} (var {} Cons)
                         (app {} (var {} Cons)
-                             (lit {type: (t-prim {} int32)} 0)
+                             (lit {type: (t-prim {} i32)} 0)
                              (app {} (var {} Cons)
-                                  (lit {type: (t-prim {} int32)} 2)
+                                  (lit {type: (t-prim {} i32)} 2)
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
@@ -20488,7 +20487,7 @@ mod tests {
 
     /// chelis#369 end-to-end: the `tensor_full_like` loss body — `len =
     /// shape(x, 0); twos = insert(scalar_to_tensor(2.0), 0, cast(len,
-    /// int32)); sum(mul(x, twos), 0)` — must construct a valid backward DAG
+    /// i32)); sum(mul(x, twos), 0)` — must construct a valid backward DAG
     /// and eval to the analytic gradient. `loss(x) = sum(2*x)`, so `df/dx =
     /// [2, 2, 2]`. Before the fix the `let`-bound `len` defaulted the expand
     /// extent to `Lit(1)`, so the forward `mul(x, twos)` mixed `tensor[3]`
@@ -20502,7 +20501,7 @@ mod tests {
 
         // `def loss(x: tensor[3, f32]) = {
         //    len  = shape(x, 0)
-        //    twos = insert(scalar_to_tensor(2.0), 0, cast(len, int32))
+        //    twos = insert(scalar_to_tensor(2.0), 0, cast(len, i32))
         //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
         let body = r#"
             (let {}
@@ -20511,7 +20510,7 @@ mod tests {
                        (app {}
                             (var {} shape)
                             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-                            (cast {} (lit {} 0) (t-prim {} int32))))
+                            (cast {} (lit {} 0) (t-prim {} i32))))
                  (let {}
                       (bind {}
                             twos
@@ -20520,15 +20519,15 @@ mod tests {
                                  (app {type: (t-prim {} f32)}
                                       (var {} scalar_to_tensor)
                                       (cast {type: (t-prim {} f32)} (lit {} 2.0) (t-prim {} f32)))
-                                 (cast {} (lit {} 0) (t-prim {} int32))
-                                 (cast {} (var {} len) (t-prim {} int32))))
+                                 (cast {} (lit {} 0) (t-prim {} i32))
+                                 (cast {} (var {} len) (t-prim {} i32))))
                       (app {type: (t-tensor {} (t-prim {} f32))}
                            (var {} sum)
                            (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                                 (var {} mul)
                                 (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
                                 (var {} twos))
-                           (cast {} (lit {} 0) (t-prim {} int32)))))
+                           (cast {} (lit {} 0) (t-prim {} i32)))))
         "#;
         let dag = lower_body_with_bound_x(3, body);
         // The loss is the scalar `Sum` over `mul(x, twos)`.
@@ -20619,7 +20618,7 @@ mod tests {
 
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
-            (def {} idx (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int64))} idx))
+            (def {} idx (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i64))} idx))
             (def {} w (app {} (var {} reshape) (var {} x)
                           (app {} (var {} Cons) (lit {} 4) (var {} Nil))))
             (def {} g (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -20676,7 +20675,7 @@ mod tests {
         // gather app is typed `[3]` (gather of a rank-1 values over axis 0).
         let src = r#"
             (def {} values (var {} values))
-            (def {} indices (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))} indices))
+            (def {} indices (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                    (var {} gather) (var {} values) (var {} indices) (lit {} 0)))
@@ -20802,18 +20801,18 @@ mod tests {
             BTreeMap::from([(
                 "repeat".into(),
                 parse(
-                    "(fn {} (params {} n count) (app {} (var {} insert) (lit {} 7.0) (cast {} (lit {} 0) int32) (var {} count)))",
+                    "(fn {} (params {} n count) (app {} (var {} insert) (lit {} 7.0) (cast {} (lit {} 0) i32) (var {} count)))",
                 ),
             )]),
             BTreeMap::new(),
             LinearityInfo::default(),
         );
-        let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) int64)"));
+        let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
         ctx.bindings.insert("n".into(), caller.clone());
         ctx.static_size_bindings.insert("n".into(), 3);
         let root = ctx
             .lower_expr(&parse(
-                "(app {} (var {} repeat) (cast {} (lit {} 1) int64) (var {} n))",
+                "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
             ))
             .expect_node("expanded result");
         let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
@@ -20877,7 +20876,7 @@ mod tests {
     fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
-                (lit {type: (t-prim {} int64)} -1) \
+                (lit {type: (t-prim {} i64)} -1) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
@@ -20898,7 +20897,7 @@ mod tests {
             let _ = ctx.lower_expr(&expr);
             ctx.dag
         });
-        let dag = outcome.expect("signed int64 seeds are valid");
+        let dag = outcome.expect("signed i64 seeds are valid");
         let seed = dag
             .nodes()
             .iter()
@@ -20918,7 +20917,7 @@ mod tests {
     fn issue_794_non_negative_explicit_seed_still_lowers() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
-                (lit {type: (t-prim {} int64)} 7) \
+                (lit {type: (t-prim {} i64)} 7) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
@@ -20948,27 +20947,27 @@ mod tests {
     fn issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted() {
         let cases = [
             (
-                "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+                "(lit {type: (t-prim {} i64)} -9223372036854775808)",
                 i64::MIN as u64,
             ),
             (
-                "(lit {type: (t-prim {} int64)} 9223372036854775807)",
+                "(lit {type: (t-prim {} i64)} 9223372036854775807)",
                 i64::MAX as u64,
             ),
             (
-                "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64))",
                 7,
             ),
             (
-                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} i64))",
                 1,
             ),
             (
-                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} i64))",
                 7,
             ),
             (
-                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} i64))",
                 7,
             ),
         ];
@@ -20986,7 +20985,7 @@ mod tests {
             assert_eq!(
                 ctx.extract_u64_value(&expr),
                 Some(expected),
-                "signed int64 seed control must remain admitted: {source}"
+                "signed i64 seed control must remain admitted: {source}"
             );
         }
     }
@@ -20994,16 +20993,16 @@ mod tests {
     #[test]
     fn issue_794_seed_wrappers_reject_payload_type_disagreement() {
         let cases = [
-            "(app {type: (t-prim {} int64)} (var {} neg) \
+            "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} bool)} 1))",
-            "(app {type: (t-prim {} int64)} (var {} neg) \
+            "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} f64)} 1))",
-            "(app {type: (t-prim {} int64)} (var {} neg) \
+            "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} string)} 1))",
-            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
-            "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
-                 (t-prim {} string)) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} i64))",
+            "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)",
+            "(cast {} (cast {} (lit {type: (t-prim {} i32)} 7) \
+                 (t-prim {} string)) (t-prim {} i64))",
         ];
         let ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -21027,23 +21026,23 @@ mod tests {
     /// Negative parity for the typed fold's literal ingress: a BARE atom
     /// carries no type metadata, so `extract_type_checked_scalar` declines it
     /// rather than stamping a dtype the source never wrote. The
-    /// `(cast {} 42 (t-prim {} int64))` case is the one that used to fold: the
-    /// outer cast supplied the declared int64 while the bare `42` was silently
+    /// `(cast {} 42 (t-prim {} i64))` case is the one that used to fold: the
+    /// outer cast supplied the declared i64 while the bare `42` was silently
     /// given `Prim::Int64`, which both widened this fold past the checker (a
     /// bare atom is an UNSUFFIXED seed literal it rejects) and contradicted
-    /// spec/04-type-system.md §5.3's int32/f32 literal defaults. The stamped
-    /// `(lit {type: (t-prim {} int32)} 7)` control in
+    /// spec/04-type-system.md §5.3's i32/f32 literal defaults. The stamped
+    /// `(lit {type: (t-prim {} i32)} 7)` control in
     /// `issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted`
     /// is the positive parity: an explicit stamp still folds.
     #[test]
     fn issue_794_bare_atom_seed_payload_requires_an_explicit_stamp() {
         let cases = [
             "42",
-            "(cast {} 42 (t-prim {} int64))",
-            "(cast {} 42.0 (t-prim {} int64))",
-            "(cast {} true (t-prim {} int64))",
-            "(app {type: (t-prim {} int64)} (var {} neg) 1)",
-            "(cast {} (cast {} 42 (t-prim {} int32)) (t-prim {} int64))",
+            "(cast {} 42 (t-prim {} i64))",
+            "(cast {} 42.0 (t-prim {} i64))",
+            "(cast {} true (t-prim {} i64))",
+            "(app {type: (t-prim {} i64)} (var {} neg) 1)",
+            "(cast {} (cast {} 42 (t-prim {} i32)) (t-prim {} i64))",
         ];
         let ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -21068,11 +21067,11 @@ mod tests {
     fn issue_794_seed_annotations_reject_before_lowering() {
         for (seed, reason) in [
             (
-                "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) (t-prim {} i64))",
                 "integer on lit",
             ),
             (
-                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, literal_source: integer} 7) (t-prim {} int64))",
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, literal_source: integer} 7) (t-prim {} i64))",
                 "exactly one occurrence",
             ),
         ] {
@@ -21094,7 +21093,7 @@ mod tests {
 
     #[test]
     fn issue_794_malformed_cast_modes_use_typed_unsupported_channel() {
-        let seeds = ["(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)"];
+        let seeds = ["(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)"];
         for seed in seeds {
             let source = format!(
                 "(handle-effect {{effect: random}} \
@@ -21129,7 +21128,7 @@ mod tests {
             let message = diagnostic.to_string();
             assert!(message.starts_with("unsupported:"), "{seed}: {message}");
             assert!(
-                message.contains("[05-RNG-1]") && message.contains("int64"),
+                message.contains("[05-RNG-1]") && message.contains("i64"),
                 "{seed}: {message}"
             );
         }
@@ -21159,7 +21158,7 @@ mod tests {
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
-        let diagnostic = outcome.expect_err("an f64 seed is not an int64 seed");
+        let diagnostic = outcome.expect_err("an f64 seed is not an i64 seed");
         assert!(
             diagnostic.fatal,
             "host fallback must not swallow the rejection"
@@ -21167,7 +21166,7 @@ mod tests {
         let message = diagnostic.to_string();
         assert!(message.starts_with("unsupported:"), "{message}");
         assert!(
-            message.contains("[05-RNG-1]") && message.contains("int64"),
+            message.contains("[05-RNG-1]") && message.contains("i64"),
             "{message}"
         );
     }
@@ -21176,7 +21175,7 @@ mod tests {
     fn issue_794_bool_payload_stamped_int64_uses_typed_unsupported_channel() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
-                (lit {type: (t-prim {} int64)} true) \
+                (lit {type: (t-prim {} i64)} true) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
@@ -21196,7 +21195,7 @@ mod tests {
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
-        let diagnostic = outcome.expect_err("a bool payload is not an int64 seed");
+        let diagnostic = outcome.expect_err("a bool payload is not an i64 seed");
         assert!(
             diagnostic.fatal,
             "host fallback must not swallow the rejection"
@@ -21204,7 +21203,7 @@ mod tests {
         let message = diagnostic.to_string();
         assert!(message.starts_with("unsupported:"), "{message}");
         assert!(
-            message.contains("[05-RNG-1]") && message.contains("int64"),
+            message.contains("[05-RNG-1]") && message.contains("i64"),
             "{message}"
         );
     }
@@ -21213,7 +21212,7 @@ mod tests {
     fn issue_794_runtime_explicit_seed_uses_typed_unsupported_channel() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
-                (var {type: (t-prim {} int64)} runtime_seed) \
+                (var {type: (t-prim {} i64)} runtime_seed) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
@@ -21241,7 +21240,7 @@ mod tests {
         let message = diagnostic.to_string();
         assert!(message.starts_with("unsupported:"), "{message}");
         assert!(
-            message.contains("[05-RNG-1]") && message.contains("int64"),
+            message.contains("[05-RNG-1]") && message.contains("i64"),
             "{message}"
         );
     }
@@ -21269,7 +21268,7 @@ mod tests {
         ctx.prec_substitutions.insert("p".into(), Prim::F64);
         assert_eq!(ctx.resolved_type_precision(&tensor), Some(Prim::F64));
         assert_eq!(
-            ctx.resolved_type_precision(&parse_type_expr("(t-prim {} int64)")),
+            ctx.resolved_type_precision(&parse_type_expr("(t-prim {} i64)")),
             Some(Prim::Int64)
         );
         assert_eq!(
@@ -22173,13 +22172,13 @@ mod regression_tests {
 
     #[test]
     fn uniform_like_integer_cast_bound_fails_loudly() {
-        // A dtype-changing cast (even the exactly integral 2.0 -> int32) is
+        // A dtype-changing cast (even the exactly integral 2.0 -> i32) is
         // NOT accepted as a static uniform_like bound. The lowering fails
         // loudly rather than let a cast launder the bound contract
         // (chelis#776).
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
-             (cast {{}} (lit {{}} 2.0) (t-prim {{}} int32)) \
+             (cast {{}} (lit {{}} 2.0) (t-prim {{}} i32)) \
              (lit {{}} 5.0))"
         );
         let err = std::panic::catch_unwind(|| {
@@ -22232,8 +22231,8 @@ mod regression_tests {
             .expect("expected a Pad node in the lowered DAG")
     }
 
-    const PAD_PADDING: &str = "(app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int32)} 1) \
-         (lit {type: (t-prim {} int32)} 1)) (var {} Nil))";
+    const PAD_PADDING: &str = "(app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i32)} 1) \
+         (lit {type: (t-prim {} i32)} 1)) (var {} Nil))";
 
     #[test]
     fn pad_cast_wrapped_fill_resolves_statically() {
@@ -22251,11 +22250,11 @@ mod regression_tests {
     fn issue_878_pad_fill_preserves_exact_int64_above_f64_boundary() {
         let exact = 9_007_199_254_740_993i64;
         let src = format!(
-            "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} int64))}} \
+            "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} i64))}} \
              (var {{}} pad) \
-             (lit {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} int64))}} 0) \
+             (lit {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} i64))}} 0) \
              {PAD_PADDING} \
-             (cast {{}} (lit {{}} {exact}) (t-prim {{}} int64)))"
+             (cast {{}} (lit {{}} {exact}) (t-prim {{}} i64)))"
         );
         let fill = pad_fill(&parse_and_lower_unchecked(&src));
         assert_eq!(fill.prim(), Prim::Int64);
@@ -22367,15 +22366,15 @@ mod regression_tests {
         assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
 
-    // Fix 9: Cast with (t-prim {} int32) node. Exercises the lowerer's
+    // Fix 9: Cast with (t-prim {} i32) node. Exercises the lowerer's
     // ability to read a `t-prim` precision out of a cast target. `bf16`
     // is now a check-time error (UnsupportedTensorPrecision) so the
-    // regression uses int32 as a representative non-f32 scalar target.
+    // regression uses i32 as a representative non-f32 scalar target.
     #[test]
     fn fix9_cast_with_tprim_node() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (cast {} (var {} x) (t-prim {} int32)))
+            (def {} y (cast {} (var {} x) (t-prim {} i32)))
         "#;
         let dag = parse_and_lower(src);
         let cast_node = dag
@@ -22582,7 +22581,7 @@ mod regression_tests {
         // decline so the runtime mask path retains the cast and its trap.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gt) \
-             (cast {} (lit {} 0.9) int32) (cast {} (lit {} 0) int32)) \
+             (cast {} (lit {} 0.9) i32) (cast {} (lit {} 0) i32)) \
              (lit {type: (t-prim {} f32)} 2.5) \
              (lit {type: (t-prim {} f32)} 9.0))",
         );
@@ -22647,8 +22646,8 @@ mod regression_tests {
     fn static_cond_fold_compares_int64_exactly_above_binary64_mantissa() {
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} lt) \
-             (lit {type: (t-prim {} int64)} 9007199254740992) \
-             (lit {type: (t-prim {} int64)} 9007199254740993)) \
+             (lit {type: (t-prim {} i64)} 9007199254740992) \
+             (lit {type: (t-prim {} i64)} 9007199254740993)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
         );
@@ -22656,7 +22655,7 @@ mod regression_tests {
             dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
             ),
-            "exact int64 comparison must select the then branch: {dag:?}"
+            "exact i64 comparison must select the then branch: {dag:?}"
         );
         assert!(
             !dag.nodes().iter().any(
@@ -22670,9 +22669,9 @@ mod regression_tests {
     fn static_cond_fold_declines_on_integer_overflow() {
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} lt) \
-             (app {} (var {} add) (cast {} (lit {} 127) int8) \
-                                    (cast {} (lit {} 1) int8)) \
-             (cast {} (lit {} 0) int8)) \
+             (app {} (var {} add) (cast {} (lit {} 127) i8) \
+                                    (cast {} (lit {} 1) i8)) \
+             (cast {} (lit {} 0) i8)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
         );
@@ -22692,8 +22691,8 @@ mod regression_tests {
         // the runtime mask path (Mul nodes present).
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gt) \
-             (app {} (var {} floor_div) (cast {} (lit {} 1) int64) (cast {} (lit {} 0) int64)) \
-             (cast {} (lit {} 0) int64)) \
+             (app {} (var {} floor_div) (cast {} (lit {} 1) i64) (cast {} (lit {} 0) i64)) \
+             (cast {} (lit {} 0) i64)) \
              (lit {} 1.0) (lit {} 0.0))",
         );
         assert!(
@@ -22758,7 +22757,7 @@ mod regression_tests {
                 (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} a) (var {} Nil)) \
               (app {} (var {} Cons) \
                 (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} b) (var {} Nil)))) \
-             (def {} out (app {} (var {} concat) (var {} xs) (cast {} (lit {} 0) int32)))",
+             (def {} out (app {} (var {} concat) (var {} xs) (cast {} (lit {} 0) i32)))",
         );
         let pads = dag
             .nodes()
@@ -23083,7 +23082,7 @@ mod regression_tests {
                   (var {} mul)
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
-                (lit {type: (t-prim {} int32)} 0)))
+                (lit {type: (t-prim {} i32)} 0)))
         "#;
         let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -23138,7 +23137,7 @@ mod regression_tests {
                   (var {} mul)
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
-                (lit {type: (t-prim {} int32)} 0)))
+                (lit {type: (t-prim {} i32)} 0)))
         "#;
         let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -23202,7 +23201,7 @@ mod regression_tests {
                   (var {} mul)
                   (copy {} (var {} x))
                   (copy {} (var {} x)))
-                (lit {type: (t-prim {} int32)} 0)))
+                (lit {type: (t-prim {} i32)} 0)))
         "#;
         let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}

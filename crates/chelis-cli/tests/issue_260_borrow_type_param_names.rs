@@ -52,7 +52,7 @@ fn borrow_message(stdout: &str) -> String {
 #[test]
 fn a_declared_type_parameter_is_named_not_numbered() {
     let message = borrow_message(&check_stdout(concat!(
-        "def go[t](x: t) -> int32 = {\n",
+        "def go[t](x: t) -> i32 = {\n",
         "  y = &x\n",
         "  1i32\n",
         "}\n",
@@ -68,7 +68,7 @@ fn a_borrow_diagnostic_carries_no_internal_type_id() {
     // The regression this issue is about. `?N` is inference bookkeeping and a
     // reader has no way to map it back to source (spec/04 [04-FIT-9]).
     let message = borrow_message(&check_stdout(concat!(
-        "def go[t](x: t) -> int32 = {\n",
+        "def go[t](x: t) -> i32 = {\n",
         "  y = &x\n",
         "  1i32\n",
         "}\n",
@@ -97,7 +97,7 @@ fn the_named_parameter_is_the_borrowed_one() {
     // does for collapsed dimensions, is recorded as residual scope on
     // chelis#260 rather than done here.
     let message = borrow_message(&check_stdout(concat!(
-        "def go[a, b](x: a, y: b) -> int32 = {\n",
+        "def go[a, b](x: a, y: b) -> i32 = {\n",
         "  z = &y\n",
         "  1i32\n",
         "}\n",
@@ -117,8 +117,8 @@ fn names_do_not_leak_between_signatures() {
     // The map is parked per definition. A second signature must report its
     // OWN parameter, not the one recorded for the first.
     let stdout = check_stdout(concat!(
-        "def alpha[t](x: t) -> int32 = 1i32\n",
-        "def beta[q](y: q) -> int32 = {\n",
+        "def alpha[t](x: t) -> i32 = 1i32\n",
+        "def beta[q](y: q) -> i32 = {\n",
         "  z = &y\n",
         "  1i32\n",
         "}\n",
@@ -142,7 +142,7 @@ fn a_concrete_type_still_renders_itself() {
     // This is NOT [04-FIT-10]. `f32` is a spelling the user wrote, not an
     // inference identity, so the atom's subject is the test below.
     let message = borrow_message(&check_stdout(concat!(
-        "def go(x: f32) -> int32 = {\n",
+        "def go(x: f32) -> i32 = {\n",
         "  y = &x\n",
         "  1i32\n",
         "}\n",
@@ -165,7 +165,7 @@ fn an_inference_identity_with_no_source_name_renders_as_synthesized() {
     // The residual is deliberate: Site 2 names DECLARED type parameters, and
     // this shape is what remains outside that.
     let message = borrow_message(&check_stdout(concat!(
-        "def go(x) -> int32 = {\n",
+        "def go(x) -> i32 = {\n",
         "  y = &x\n",
         "  1i32\n",
         "}\n",

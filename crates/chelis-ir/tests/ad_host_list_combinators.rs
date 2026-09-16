@@ -134,17 +134,17 @@ def bs_price(spot: f64, strike: f64, rate: f64, sigma: f64, time: f64) -> f64 = 
 def bs_total(spots: tensor[3, f64], strike: f64, rate: f64, sigma: f64, time: f64) -> f64 = {
   xs = to_list(copy(spots))
   prices = map(fn (spot: f64) -> bs_price(spot, strike, rate, sigma, time), xs)
-  tensor_to_scalar(sum(to_tensor(prices), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(prices), cast(0, i32)))
 }
 
 def bs_total_one(spots: tensor[1, f64], strike: f64, rate: f64, sigma: f64, time: f64) -> f64 = {
   xs = to_list(copy(spots))
   prices = map(fn (spot: f64) -> bs_price(spot, strike, rate, sigma, time), xs)
-  tensor_to_scalar(sum(to_tensor(prices), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(prices), cast(0, i32)))
 }
 
 def bs_total_one_delta(spots: tensor[1, f64], strike: f64, rate: f64, sigma: f64, time: f64) -> f64 =
-  tensor_to_scalar(sum(grad(bs_total_one, wrt=spots)(spots, strike, rate, sigma, time), cast(0, int32)))
+  tensor_to_scalar(sum(grad(bs_total_one, wrt=spots)(spots, strike, rate, sigma, time), cast(0, i32)))
 ";
 
 #[test]
@@ -153,7 +153,7 @@ fn subexpr_grad_through_to_list_to_tensor_identity() {
         "\
 def loss(x: tensor[3, f32]) -> f32 = {
   y = to_tensor(to_list(copy(x)))
-  tensor_to_scalar(sum(y, cast(0, int32)))
+  tensor_to_scalar(sum(y, cast(0, i32)))
 }
 out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
@@ -169,7 +169,7 @@ fn subexpr_grad_through_let_bound_to_list_map() {
 def loss(x: tensor[3, f32]) -> f32 = {
   xs = to_list(copy(x))
   ys = map(fn (v: f32) -> mul(v, v), xs)
-  tensor_to_scalar(sum(to_tensor(ys), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(ys), cast(0, i32)))
 }
 out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
@@ -185,10 +185,10 @@ fn subexpr_nested_grad_through_map_is_second_derivative() {
 def loss(x: tensor[1, f32]) -> f32 = {
   xs = to_list(copy(x))
   ys = map(fn (v: f32) -> mul(mul(v, v), v), xs)
-  tensor_to_scalar(sum(to_tensor(ys), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(ys), cast(0, i32)))
 }
 def first_derivative_sum(x: tensor[1, f32]) -> f32 =
-  tensor_to_scalar(sum(grad(loss)(x), cast(0, int32)))
+  tensor_to_scalar(sum(grad(loss)(x), cast(0, i32)))
 out = grad(first_derivative_sum)(to_tensor([cast(3.0, f32)]))
 ",
     );
@@ -282,7 +282,7 @@ fn subexpr_vmap_grad_through_map_matches_unbatched_gradients() {
 def loss(row: tensor[3, f32]) -> f32 = {
   xs = to_list(copy(row))
   ys = map(fn (v: f32) -> mul(v, v), xs)
-  tensor_to_scalar(sum(to_tensor(ys), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(ys), cast(0, i32)))
 }
 out = vmap(grad(loss))(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))
 ",
@@ -303,7 +303,7 @@ fn subexpr_grad_through_filter_uses_constant_primal_mask() {
 def loss(x: tensor[4, f32]) -> f32 = {
   selected = to_tensor(filter(fn (v: f32) -> gt(v, cast(0.0, f32)), to_list(copy(x))))
   squares = map(fn (v: f32) -> mul(v, v), to_list(selected))
-  tensor_to_scalar(sum(to_tensor(squares), cast(0, int32)))
+  tensor_to_scalar(sum(to_tensor(squares), cast(0, i32)))
 }
 out = grad(loss)(to_tensor([cast(-2.0, f32), cast(3.0, f32), cast(0.5, f32), cast(-1.0, f32)]))
 ",

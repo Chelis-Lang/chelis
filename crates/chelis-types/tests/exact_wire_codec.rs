@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 
 fn assert_scalar(wire: Value) {
     let scalar: ScalarValue = serde_json::from_value(wire.clone()).expect("canonical scalar");
-    assert_eq!(scalar.prim().name(), wire["dtype"].as_str().unwrap());
+    assert_eq!(
+        scalar.prim().interchange_name(),
+        wire["dtype"].as_str().unwrap()
+    );
     assert_element(scalar.element_ref(), &wire["bits"], &wire["value"]);
     assert_eq!(serde_json::to_value(scalar).expect("encode scalar"), wire);
     let binary = bincode::serialize(&scalar).expect("cache encode");
@@ -18,7 +21,10 @@ fn assert_scalar(wire: Value) {
 
 fn assert_storage(wire: Value) {
     let storage: TensorStorage = serde_json::from_value(wire.clone()).expect("canonical storage");
-    assert_eq!(storage.prim().name(), wire["dtype"].as_str().unwrap());
+    assert_eq!(
+        storage.prim().interchange_name(),
+        wire["dtype"].as_str().unwrap()
+    );
     let expected = wire
         .get("bits")
         .unwrap_or(&wire["values"])

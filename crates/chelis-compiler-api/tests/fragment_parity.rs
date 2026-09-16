@@ -397,7 +397,7 @@ def bs_call_scalar(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = cast(bs_
 /// standalone.
 const RECURSIVE_MODULE: &str = r#"module Frag.Recursive
 export (count_down)
-def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1))
+def count_down(n: i32) -> i32 = if eq(n, 0) then 0 else count_down(sub(n, 1))
 "#;
 
 /// Constructed: a mutually-recursive `is_even` / `is_odd` pair. A new body for
@@ -405,8 +405,8 @@ def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1)
 /// against their sibling's `defsig`. Checks clean standalone.
 const MUTUAL_RECURSION_MODULE: &str = r#"module Frag.Mutual
 export (is_even, is_odd)
-def is_even(n: int32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
+def is_even(n: i32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
+def is_odd(n: i32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 "#;
 
 /// Constructed: an effect-propagation module. `entry` is declared pure
@@ -458,8 +458,8 @@ def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
 /// full check must accept the rewritten module after PP9.
 const PINGPONG_MODULE: &str = r#"module Frag.PingPong
 export (ping, pong)
-def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
-def pong(n: int32) -> int32 = ping(sub(n, 1))
+def ping(n: i32) -> i32 = if eq(n, 0) then 0 else pong(sub(n, 1))
+def pong(n: i32) -> i32 = ping(sub(n, 1))
 "#;
 
 /// Constructed: a module carrying a top-level value-binding cycle
@@ -472,8 +472,8 @@ def pong(n: int32) -> int32 = ping(sub(n, 1))
 /// `check_ir_fitness` first and so REJECTS the cycle.
 const BINDING_CYCLE_MODULE: &str = r#"module Frag.BindingCycle
 export (a, b)
-a: int32 = add(b, 1)
-b: int32 = add(a, 1)
+a: i32 = add(b, 1)
+b: i32 = add(a, 1)
 "#;
 
 /// Constructed: a linearity module. `target(x)` takes an owned tensor
@@ -577,7 +577,7 @@ fn recursive_body_resolves_against_signature_agrees_accept() {
     let module = render_deep(RECURSIVE_MODULE);
     // A new recursive body must resolve `count_down` against its signature.
     let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = if lt(n, 1) then 0 else add(1, count_down(sub(n, 1)))\n",
+        "module M\ndef f(n: i32) -> i32 = if lt(n, 1) then 0 else add(1, count_down(sub(n, 1)))\n",
         "f",
     );
     assert_parity_mw(
@@ -593,11 +593,11 @@ fn recursive_body_resolves_against_signature_agrees_accept() {
 #[test]
 fn recursive_body_wrong_return_type_agrees_reject() {
     let module = render_deep(RECURSIVE_MODULE);
-    // The recursive call resolves against the signature, but its int32 result
-    // is cast to f32 and returned under an int32 signature: precision mismatch
+    // The recursive call resolves against the signature, but its i32 result
+    // is cast to f32 and returned under an i32 signature: precision mismatch
     // against the declared return. TYPE reject.
     let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = cast(count_down(n), f32)\n",
+        "module M\ndef f(n: i32) -> i32 = cast(count_down(n), f32)\n",
         "f",
     );
     assert_parity_mw(
@@ -618,7 +618,7 @@ fn mutual_recursion_body_resolves_sibling_agrees_accept() {
     // New body for is_even referencing the sibling is_odd: resolves against
     // is_odd's signature.
     let body = render_body(
-        "module M\ndef f(n: int32) -> bool = if lt(n, 1) then true else is_odd(sub(n, 1))\n",
+        "module M\ndef f(n: i32) -> bool = if lt(n, 1) then true else is_odd(sub(n, 1))\n",
         "f",
     );
     assert_parity_mw(
@@ -634,11 +634,11 @@ fn mutual_recursion_body_resolves_sibling_agrees_accept() {
 #[test]
 fn mutual_recursion_body_wrong_type_agrees_reject() {
     let module = render_deep(MUTUAL_RECURSION_MODULE);
-    // is_even declared to return bool; the then-branch returns the int32
-    // argument while the else-branch returns int32: TYPE reject even though
+    // is_even declared to return bool; the then-branch returns the i32
+    // argument while the else-branch returns i32: TYPE reject even though
     // the sibling reference resolves.
     let body = render_body(
-        "module M\ndef f(n: int32) -> bool = if lt(n, 1) then n else 0\n",
+        "module M\ndef f(n: i32) -> bool = if lt(n, 1) then n else 0\n",
         "f",
     );
     assert_parity_mw(
@@ -834,10 +834,7 @@ fn pingpong_drop_base_case_agrees_accept() {
     // PP9 requires both the tool and full `chelis check` to ACCEPT; any backend
     // refusal is a separate chelis#730 capability decision.
     let module = render_deep(PINGPONG_MODULE);
-    let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
-        "f",
-    );
+    let body = render_body("module M\ndef f(n: i32) -> i32 = pong(sub(n, 1))\n", "f");
     assert_parity_mw(
         "pingpong/drop_base_case",
         &module,

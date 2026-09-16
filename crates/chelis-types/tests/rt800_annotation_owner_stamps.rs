@@ -92,9 +92,9 @@ fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
 fn tuple_fold_program() -> Vec<Expr> {
     surf(
         r#"
-def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
-  idxs = range(cast(0, int64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
+def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
+  idxs = range(cast(0, i64), numel(copy(xs)))
+  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
   step = fn (state, i) -> {
     acc = state.0
     total = state.1
@@ -134,7 +134,7 @@ def twice[a](x: a) -> a = {
   second
 }
 
-answer = twice(choose(true, cast(7, int64)))
+answer = twice(choose(true, cast(7, i64)))
 "#,
     ))
     .expect("let/match/closure annotation must consume the owning types");
@@ -158,7 +158,7 @@ fn owner_stamps_are_isolated_across_context_and_parallel_sessions() {
     let context = Arc::new(
         build_type_env_from_library(&library).expect("generic library context should build"),
     );
-    let snippets = ["left = id(cast(1, int64))", "right = id(cast(2.0, f32))"];
+    let snippets = ["left = id(cast(1, i64))", "right = id(cast(2.0, f32))"];
 
     let handles: Vec<_> = snippets
         .into_iter()
@@ -189,7 +189,7 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
             "grad wrt selector",
             "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
              (def {} f (fn {} (params {} x) (var {} x)))
-             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
         ),
         (
             "vmap axis selector",
@@ -197,27 +197,27 @@ fn structural_child_roles_do_not_require_runtime_owner_stamps() {
                 (t-tensor {} (d-lit {} 2) (t-prim {} f32))
                 (t-prim {} f32)))
              (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
-             (def {} g (vmap {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+             (def {} g (vmap {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
         ),
         (
             "tuple and record selectors with cast type syntax",
             "(deftype {} Box ()
-                (variant {} Box (field {} value (t-prim {} int64))))
+                (variant {} Box (field {} value (t-prim {} i64))))
              (def {} pair (tuple {}
-                (cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} int64))
+                (cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64))
                 (record {} Box (kv {} value
-                    (cast {} (lit {type: (t-prim {} int32)} 2) (t-prim {} int64))))))
+                    (cast {} (lit {type: (t-prim {} i32)} 2) (t-prim {} i64))))))
              (def {} selected (tuple-get {} (var {} pair)
-                (lit {type: (t-prim {} int32)} 1)))
+                (lit {type: (t-prim {} i32)} 1)))
              (def {} answer (access {} (var {} selected) value))",
         ),
         (
             "let binders and match patterns",
             "(def {} answer
-                (let {} (bind {} x (lit {type: (t-prim {} int32)} 1))
+                (let {} (bind {} x (lit {type: (t-prim {} i32)} 1))
                     (match {} (var {} x)
                         (arm {} (pat-lit {} 1) ()
-                            (lit {type: (t-prim {} int32)} 2))
+                            (lit {type: (t-prim {} i32)} 2))
                         (arm {} (pat-as {} y (pat-wild {})) ()
                             (var {} y)))))",
         ),
@@ -307,8 +307,8 @@ fn raw_top_level_def_and_cast_keep_primary_owner_stamps() {
     let program = chelis_deep::parser::parse_str(
         r#"(def {} answer
               (cast {}
-                (lit {type: (t-prim {} int32)} 7)
-                (t-prim {} int64)))"#,
+                (lit {type: (t-prim {} i32)} 7)
+                (t-prim {} i64)))"#,
     )
     .expect("raw Deep owner fixture must parse");
     let checked = check_ir_program(&program)
@@ -336,11 +336,11 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
                 (arm {}
                   (pat-lit {} true)
                   (lit {type: (t-prim {} bool)} true)
-                  (lit {type: (t-prim {} int32)} 1))
+                  (lit {type: (t-prim {} i32)} 1))
                 (arm {}
                   (pat-wild {})
                   ()
-                  (lit {type: (t-prim {} int32)} 2))))"#,
+                  (lit {type: (t-prim {} i32)} 2))))"#,
     )
     .expect("guarded-arm owner fixture must parse");
     let checked = check_ir_program(&program)
@@ -362,8 +362,8 @@ fn guarded_match_arm_records_the_guard_owner_before_annotation() {
                 (lit {type: (t-prim {} bool)} true)
                 (arm {}
                   (pat-wild {})
-                  (lit {type: (t-prim {} int32)} 1)
-                  (lit {type: (t-prim {} int32)} 2))))"#,
+                  (lit {type: (t-prim {} i32)} 1)
+                  (lit {type: (t-prim {} i32)} 2))))"#,
     )
     .expect("non-boolean guard fixture must parse");
     let errors = check_ir_program(&invalid)
@@ -396,7 +396,7 @@ type Params =
 def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = match p with {
   | Params { w } => {
     d = sub(mul(&x, &w), y)
-    sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar
+    sum(mul(&d, &d), cast(0, i32)) |> tensor_to_scalar
   }
 }
 x = to_tensor([cast(2.0, f32), cast(3.0, f32)])

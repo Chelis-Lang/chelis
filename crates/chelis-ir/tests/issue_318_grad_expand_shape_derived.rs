@@ -1,9 +1,9 @@
 //! Issue #318: `grad` has no backward rule for the SHAPE-DERIVED
 //! expand-of-scalar const-broadcast. Issue #288 (PR #296) fixed the
-//! LITERAL-size form `expand(scalar_to_tensor(c), 0, cast(2, int32))`;
+//! LITERAL-size form `expand(scalar_to_tensor(c), 0, cast(2, i32))`;
 //! the canonical 0.7.x scalar-broadcast helper (`tensor_full_like` /
 //! `tensor_full_1d`) instead writes the SHAPE-DERIVED form
-//! `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), int32))`, whose
+//! `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), i32))`, whose
 //! broadcast extent is a *runtime/symbolic* dimension rather than a
 //! literal. That form still failed.
 //!
@@ -12,9 +12,9 @@
 //! module Repro.GradExpandShape
 //! def f(x: tensor[n, f32]) -> f32 = {
 //!   k = expand(scalar_to_tensor(cast(3.0, f32)),
-//!              cast(0, int32),
-//!              cast(shape(&x, cast(0, int32)), int32))
-//!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
+//!              cast(0, i32),
+//!              cast(shape(&x, cast(0, i32)), i32))
+//!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
 //! def df(x: tensor[n, f32]) -> tensor[n, f32] = grad(f)(x)
 //! ```
@@ -43,7 +43,7 @@
 //! operand dim during lowering (see the lowering-level siblings
 //! `issue_318_expand_shape_arg_*` in `crates/chelis-ir/src/lower.rs`,
 //! which drive the REAL `expand` lowering arm with the exact
-//! `cast(shape(&x, ...), int32)` Deep the Surf idiom emits and are the
+//! `cast(shape(&x, ...), i32)` Deep the Surf idiom emits and are the
 //! tests that detect the lowering failure).
 //!
 //! SCOPE OF THIS FILE: it does NOT exercise the lowering fix. It
@@ -100,8 +100,8 @@ fn vec_lit_f32(n: usize) -> TensorType {
 const SOURCE_SHAPES: [&[usize]; 2] = [&[], &[1]];
 
 /// The two broadcast-extent encodings whose backward must be identical.
-/// `Literal` is the #288 form `cast(2, int32)`; `ShapeDerived` is the
-/// #318 form `cast(shape(&x, 0), int32)`, where the extent is the
+/// `Literal` is the #288 form `cast(2, i32)`; `ShapeDerived` is the
+/// #318 form `cast(shape(&x, 0), i32)`, where the extent is the
 /// runtime/symbolic dimension carried by `x`.
 #[derive(Clone, Copy)]
 enum Extent {

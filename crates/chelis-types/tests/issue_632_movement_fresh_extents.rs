@@ -147,7 +147,7 @@ fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
         r#"
 module Repro.SigStride
 sig f: tensor[n, f32] -> tensor[u, f32]
-def f(x) = stride(x, cast(2, int64))
+def f(x) = stride(x, cast(2, i64))
 "#,
         "sig-symbol direct-return stride",
     );

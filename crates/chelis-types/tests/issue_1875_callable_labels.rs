@@ -22,12 +22,12 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "deferred gather retained name",
             true,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) = sum(apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g)),row)",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32]) = sum(apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g)),row)",
         ),
         (
             "deferred gather false result",
             false,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) -> tensor[e,1,f32] = apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g))",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32]) -> tensor[e,1,f32] = apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g))",
         ),
         (
             "deferred trace retained name",
@@ -42,22 +42,22 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "deferred scatter retained name",
             true,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
         ),
         (
             "deferred scatter bad updates",
             false,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
         ),
         (
             "deferred scatter_replace retained name",
             true,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
         ),
         (
             "deferred scatter_replace bad updates",
             false,
-            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
         ),
         (
             "expand bare nonunit",
@@ -112,7 +112,7 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "gather retained name",
             true,
-            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int64]) = sum(gather(tag2(x,g),i,1i32),row)",
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i64]) = sum(gather(tag2(x,g),i,1i32),row)",
         ),
         (
             "trace retained name",
@@ -122,7 +122,7 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "gather declared identity wrong",
             false,
-            "def run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int64]) -> tensor[e,1,f32] = gather(tag2(x,g),i,1i32)",
+            "def run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i64]) -> tensor[e,1,f32] = gather(tag2(x,g),i,1i32)",
         ),
         (
             "trace declared identity wrong",
@@ -132,7 +132,7 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "unresolved gather lambda at binding rejects",
             false,
-            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) = { f = fn (v) -> gather(v,i,1i32)\n sum(f(tag2(x,g)),row) }",
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32]) = { f = fn (v) -> gather(v,i,1i32)\n sum(f(tag2(x,g)),row) }",
         ),
         (
             "unresolved trace lambda at binding rejects",
@@ -142,22 +142,22 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         (
             "scatter symbolic",
             true,
-            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[row,1,int64], u: tensor[row,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[row,1,i64], u: tensor[row,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
         ),
         (
             "scatter different name",
             false,
-            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[other,1,int64], u: tensor[other,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[other,1,i64], u: tensor[other,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
         ),
         (
             "scatter known fits",
             true,
-            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[3,1,int64], u: tensor[3,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
+            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[3,1,i64], u: tensor[3,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
         ),
         (
             "scatter known overshoot",
             false,
-            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[5,1,int64], u: tensor[5,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
+            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[5,1,i64], u: tensor[5,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
         ),
         (
             "where symbolic",

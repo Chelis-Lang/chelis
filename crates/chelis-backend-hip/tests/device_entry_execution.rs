@@ -286,7 +286,7 @@ fn compile_source(
             "chelis_device_metadata indices[8]",
         );
     }
-    if mutation == Some("flat-index-int32") {
+    if mutation == Some("flat-index-i32") {
         let old = "chelis_flat_to_indices(chelis_device_metadata flat";
         assert!(source.contains(old));
         source = source.replace(old, "chelis_flat_to_indices(int flat");
@@ -485,7 +485,7 @@ fn generated_entry_mutations_cannot_return_borrows_or_truncate_kernel_coordinate
     );
     run(&compile(33, false, Some("rank-eight")), "positive", false);
     run(
-        &compile(1, false, Some("flat-index-int32")),
+        &compile(1, false, Some("flat-index-i32")),
         "positive",
         false,
     );

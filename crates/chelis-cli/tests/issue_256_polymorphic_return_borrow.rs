@@ -56,7 +56,7 @@
 //!     fix remains untouched here.
 //!
 //! Negative test parity: a `&` borrow on a genuinely non-tensor binding
-//! (a stack `int32`) must still be rejected. The error surfaces from
+//! (a stack `i32`) must still be rejected. The error surfaces from
 //! the inference-layer `borrow` arm before linearity runs.
 
 use assert_cmd::Command;
@@ -125,10 +125,10 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
         &fixture,
         "module Issue256PolyReturnChain\n\
          def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
-           six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
-           perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
-           five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\
-           mean(five, cast(4, int32))\n\
+           six = reshape(x, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(2, i64), cast(2, i64)])\n\
+           perm = permute(six, cast(0, i32), cast(1, i32), cast(2, i32), cast(4, i32), cast(3, i32), cast(5, i32))\n\
+           five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
+           mean(five, cast(4, i32))\n\
          }\n\
          def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward(x: tensor[2, 4, 4, 4, f32]) -> bool = {\n\
@@ -162,10 +162,10 @@ fn id4_roundtrip_workaround_still_works() {
         &fixture,
         "module Issue256Id4Workaround\n\
          def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
-           six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
-           perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
-           five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\
-           mean(five, cast(4, int32))\n\
+           six = reshape(x, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(2, i64), cast(2, i64)])\n\
+           perm = permute(six, cast(0, i32), cast(1, i32), cast(2, i32), cast(4, i32), cast(3, i32), cast(5, i32))\n\
+           five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
+           mean(five, cast(4, i32))\n\
          }\n\
          def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def id4[a, c, h, w](x: tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = x\n\
@@ -203,7 +203,7 @@ fn borrow_of_non_tensor_is_still_rejected() {
         &fixture,
         "module Issue256NonTensor\n\
          def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
-         def forward(x: int32) -> bool = consume_t(&x)\n",
+         def forward(x: i32) -> bool = consume_t(&x)\n",
     );
     fmt_inplace(&fixture);
 
@@ -211,13 +211,13 @@ fn borrow_of_non_tensor_is_still_rejected() {
     let kinds = error_kinds(&json);
     assert!(
         !kinds.is_empty(),
-        "borrow of int32 against a &tensor parameter must be rejected; got clean score {json}"
+        "borrow of i32 against a &tensor parameter must be rejected; got clean score {json}"
     );
     assert!(
         kinds
             .iter()
             .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
-        "borrow of int32 must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+        "borrow of i32 must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
     );
     let messages: Vec<String> = json["errors"]
         .as_array()
@@ -226,8 +226,8 @@ fn borrow_of_non_tensor_is_still_rejected() {
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("int32")),
-        "rejection diagnostic should mention `int32`; got {messages:?}"
+        messages.iter().any(|m| m.contains("i32")),
+        "rejection diagnostic should mention `i32`; got {messages:?}"
     );
 }
 
@@ -305,10 +305,10 @@ fn borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected() {
     write_file(
         &fixture,
         "module Issue256NonTensorRecordPolyConsumer\n\
-         type Config = | Config { lr: f32, bs: int32 }\n\
+         type Config = | Config { lr: f32, bs: i32 }\n\
          def consume_any[a](t: a) -> bool = true\n\
          def forward() -> bool = {\n\
-           c = Config { lr: 0.1, bs: cast(32, int32) }\n\
+           c = Config { lr: 0.1, bs: cast(32, i32) }\n\
            consume_any(&c)\n\
          }\n",
     );
@@ -331,7 +331,7 @@ fn borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected() {
 /// Extended negative parity: a tuple of scalars borrowed against a
 /// `&tensor[..]` parameter must still be rejected. The inference
 /// borrow arm accepts `Type::Tuple(_)` unconditionally; the rejection
-/// surfaces from the call-site type mismatch (`(int32, int32)` vs
+/// surfaces from the call-site type mismatch (`(i32, i32)` vs
 /// `tensor[..]`). This locks the adjacent path the linearity loosening
 /// does not affect, so a future refactor that moves the tuple-of-scalars
 /// classification to linearity does not silently regress.
@@ -344,7 +344,7 @@ fn borrow_of_scalar_tuple_is_rejected() {
         "module Issue256ScalarTupleBorrowRejected\n\
          def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward() -> bool = {\n\
-           pair = (cast(1, int32), cast(2, int32))\n\
+           pair = (cast(1, i32), cast(2, i32))\n\
            consume_t(&pair)\n\
          }\n",
     );
@@ -354,7 +354,7 @@ fn borrow_of_scalar_tuple_is_rejected() {
     let kinds = error_kinds(&json);
     assert!(
         !kinds.is_empty(),
-        "borrow of (int32, int32) against a &tensor parameter must be rejected; got clean score {json}"
+        "borrow of (i32, i32) against a &tensor parameter must be rejected; got clean score {json}"
     );
     assert!(
         kinds
@@ -451,7 +451,7 @@ fn borrow_of_free_var_against_polymorphic_consumer_is_rejected() {
 
 /// Round-2 soundness lock, end-to-end variant: the same free-var borrow
 /// reached through a CONCRETE caller that instantiates the polymorphic
-/// parameter at a non-tensor type (`int32`). This is the fully-terminating
+/// parameter at a non-tensor type (`i32`). This is the fully-terminating
 /// program a user could actually write: no recursion, a concrete `main`,
 /// and a non-tensor value flowing into a `&` borrow. It must be rejected
 /// so a non-tensor never reaches the (borrow-type-erased) backend.
@@ -467,7 +467,7 @@ fn borrow_of_free_var_instantiated_at_int32_is_rejected() {
            v = seed\n\
            consume_any(&v)\n\
          }\n\
-         def main() -> bool = use_it(cast(42, int32))\n",
+         def main() -> bool = use_it(cast(42, i32))\n",
     );
     fmt_inplace(&fixture);
 
@@ -482,7 +482,7 @@ fn borrow_of_free_var_instantiated_at_int32_is_rejected() {
         kinds
             .iter()
             .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
-        "free-var-at-int32 borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+        "free-var-at-i32 borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
     );
 }
 
@@ -540,14 +540,14 @@ fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
     write_file(
         &fixture,
         "module Issue256DeferredNonCarryingAdt\n\
-         type Config = | Config { lr: f32, bs: int32 }\n\
+         type Config = | Config { lr: f32, bs: i32 }\n\
          sig consume_config: &Config -> bool\n\
          def consume_config(c) = true\n\
          def use_it[a](seed: a) -> bool = {\n\
            v = seed\n\
            consume_config(&v)\n\
          }\n\
-         def main() -> bool = use_it(Config { lr: 0.1, bs: cast(32, int32) })\n",
+         def main() -> bool = use_it(Config { lr: 0.1, bs: cast(32, i32) })\n",
     );
     fmt_inplace(&fixture);
 

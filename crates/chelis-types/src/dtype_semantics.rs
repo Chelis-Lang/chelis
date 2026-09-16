@@ -360,7 +360,7 @@ impl ScalarValue {
     }
 
     /// Widen to f64. Exact for every float width, bool, and integers up
-    /// to 2^53; EXPLICITLY LOSSY for int64 magnitudes above 2^53 (the
+    /// to 2^53; EXPLICITLY LOSSY for i64 magnitudes above 2^53 (the
     /// section C3 read-side contract names the loss instead of hiding it).
     pub fn as_f64_lossy(&self) -> f64 {
         match self.bits {
@@ -634,7 +634,7 @@ impl TensorReduceOp {
     }
 }
 
-/// Closed exact-comparison reduction set. The result is an int64 index;
+/// Closed exact-comparison reduction set. The result is an i64 index;
 /// operands remain at their stored dtype throughout comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgReduceOp {
@@ -1173,7 +1173,7 @@ macro_rules! compare_values {
 }
 
 /// Compare finalized operands at their exact matching dtype. In
-/// particular, int64 never crosses f64 and half values compare only after
+/// particular, i64 never crosses f64 and half values compare only after
 /// their ingress finalization.
 pub fn compare_scalars(
     op: CompareOp,
@@ -1202,7 +1202,7 @@ pub fn compare_scalars(
 
 /// Sealed per-dtype element buffer (section C3's storage decision:
 /// per-dtype buffers, not finalize-on-write over `Vec<f64>`; f64 storage
-/// cannot represent exact int64 above 2^53, chelis#684).
+/// cannot represent exact i64 above 2^53, chelis#684).
 #[derive(Debug, Clone, PartialEq)]
 enum Buf {
     F64(Vec<f64>),
@@ -1309,7 +1309,7 @@ impl TensorStorage {
         }
     }
 
-    /// Widen every element to f64. Exact except for int64 magnitudes
+    /// Widen every element to f64. Exact except for i64 magnitudes
     /// above 2^53, hence the lossy name (section C3 read-side contract).
     pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
         match &self.buf {
@@ -2691,7 +2691,7 @@ fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
 
 /// Count true elements in explicitly ordered groups through the closed typed
 /// kernel boundary. The input must use exact Bool storage and the result is
-/// exact int64. Empty groups produce the specified zero identity.
+/// exact i64. Empty groups produce the specified zero identity.
 pub fn count_tensor_groups(
     input: &TensorStorage,
     groups: &[Vec<usize>],
@@ -2767,7 +2767,7 @@ pub fn reduce_tensor_groups(
     finalize_tensor(op.name(), result, raw).map_err(Into::into)
 }
 
-/// Reduce explicitly ordered groups to exact int64 winner indices. Values
+/// Reduce explicitly ordered groups to exact i64 winner indices. Values
 /// are compared at their stored dtype and never cross binary64 for integer
 /// inputs; first-seen wins ties.
 pub fn arg_reduce_tensor_groups(
@@ -3402,8 +3402,8 @@ pub fn cast_trunc_tensor(
     //
     // The bulk `finalize_tensor` path cannot express this: `int_buf`
     // domain-checks the WHOLE buffer before it width-checks any of it,
-    // so `[300.9, NaN] -> int8` raises Domain there while C raises
-    // Overflow at element 0. Only int64 (where out-of-range and
+    // so `[300.9, NaN] -> i8` raises Domain there while C raises
+    // Overflow at element 0. Only i64 (where out-of-range and
     // non-finite are both caught in the same pass) is unaffected.
     // `cast_value`'s checked rung is per-element for the same reason;
     // agreeing with the other lane outranks the section C5 bulk-loop
@@ -4402,7 +4402,7 @@ mod tests {
             assert_eq!(fin_i(prim, max).unwrap().as_i64_exact(), Some(max));
             assert_eq!(fin_i(prim, min).unwrap().as_i64_exact(), Some(min));
         }
-        // int64 from an exact i64 wide value can never overflow.
+        // i64 from an exact i64 wide value can never overflow.
         assert_eq!(
             fin_i(Prim::Int64, i64::MAX).unwrap().as_i64_exact(),
             Some(i64::MAX)
@@ -4527,7 +4527,7 @@ mod tests {
                 .as_f64_lossy(),
             2048.0
         );
-        // int64 ingress from i64 is total (cannot trap by construction).
+        // i64 ingress from i64 is total (cannot trap by construction).
         assert_eq!(
             scalar_from_i64("ingress", Prim::Int64, 9007199254740993)
                 .unwrap()
@@ -5033,7 +5033,7 @@ mod tests {
 
     #[test]
     fn global_sum_uses_explicit_accumulator_and_canonical_order() {
-        let int8 = finalize_tensor(
+        let i8 = finalize_tensor(
             "test",
             Prim::Int8,
             RawTensor::Int(vec![i64::from(i8::MAX), 1, -1]),
@@ -5044,14 +5044,14 @@ mod tests {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
-            &int8,
+            &i8,
             &one_group(3),
         )
         .unwrap();
         assert_eq!(widened.prim(), Prim::Int32);
         assert_eq!(widened.to_i64_exact_vec(), Some(vec![i64::from(i8::MAX)]));
 
-        let int32 = finalize_tensor(
+        let i32 = finalize_tensor(
             "test",
             Prim::Int32,
             RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
@@ -5063,7 +5063,7 @@ mod tests {
                     accumulator: Prim::Int32,
                     result: Prim::Int32,
                 },
-                &int32,
+                &i32,
                 &one_group(3),
             ),
             Err(NumericKernelError::Trap(NumericTrap::Overflow {
@@ -5234,7 +5234,7 @@ mod tests {
                 prim: Prim::Int8
             }
             .to_string(),
-            "numeric trap: overflow in add at int8"
+            "numeric trap: overflow in add at i8"
         );
         assert_eq!(
             NumericTrap::Domain {
@@ -5250,7 +5250,7 @@ mod tests {
                 prim: Prim::Int64
             }
             .to_string(),
-            "numeric trap: division by zero in trunc_div at int64"
+            "numeric trap: division by zero in trunc_div at i64"
         );
     }
 
@@ -5446,7 +5446,7 @@ mod tests {
         // Exact-int source finalizes from the exact integer, same rule.
         let v = cast_raw("cast", RawScalar::Int(2049), Prim::F16).unwrap();
         assert_eq!(v.as_f64_lossy(), 2048.0);
-        // int64 above 2^53 to f64 is the LOSSY-BY-DESIGN float direction
+        // i64 above 2^53 to f64 is the LOSSY-BY-DESIGN float direction
         // ([04-NUM-6]): RNE, never a trap.
         let v = cast_raw("cast", RawScalar::Int(9_007_199_254_740_993), Prim::F64).unwrap();
         assert_eq!(v.as_f64_lossy(), 9_007_199_254_740_992.0);
@@ -5473,9 +5473,9 @@ mod tests {
         // Pre-rework this wrapped two's-complement (300 -> 44). The checked
         // default TRAPS; wrapping is chelis#759's future NAMED form.
         let err = cast_raw("cast", RawScalar::Int(300), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
         let err = cast_raw("cast", RawScalar::Int(-129), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
     }
 
     #[test]
@@ -5485,7 +5485,7 @@ mod tests {
 
         for fractional in [3.5, -3.5] {
             let err = cast_raw("cast", RawScalar::Float(fractional), Prim::Int8).unwrap_err();
-            assert_eq!(err.to_string(), "numeric trap: domain in cast at int8");
+            assert_eq!(err.to_string(), "numeric trap: domain in cast at i8");
         }
     }
 
@@ -5494,17 +5494,17 @@ mod tests {
         // Pre-rework this saturated (300.0 -> 127). The checked default
         // TRAPS; saturation is chelis#759's future NAMED form.
         let err = cast_raw("cast", RawScalar::Float(300.0), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
         let err = cast_raw("cast", RawScalar::Float(1.0e300), Prim::Int64).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int64");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i64");
     }
 
     #[test]
     fn cast_raw_non_finite_float_to_int_traps_domain() {
         let err = cast_raw("cast", RawScalar::Float(f64::NAN), Prim::Int32).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at i32");
         let err = cast_raw("cast", RawScalar::Float(f64::INFINITY), Prim::Int32).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at i32");
     }
 
     #[test]
@@ -5550,13 +5550,13 @@ mod tests {
         // Identity short-circuit.
         let same = cast_scalar("cast", v, Prim::Int64).unwrap();
         assert_eq!(same.as_i64_exact(), Some(9_007_199_254_740_993));
-        // Exact integer wide: above 2^53 an int64 -> int64-family cast must
+        // Exact integer wide: above 2^53 an i64 -> i64-family cast must
         // not launder through f64 (that laundering is the chelis#684 bug
         // shape this module exists to end).
         let narrowed = cast_scalar("cast", v, Prim::Int32).unwrap_err();
         assert_eq!(
             narrowed.to_string(),
-            "numeric trap: overflow in cast at int32"
+            "numeric trap: overflow in cast at i32"
         );
     }
 

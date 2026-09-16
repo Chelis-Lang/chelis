@@ -3,7 +3,7 @@ total_nodes = 23
 diagnostics = 2
 
 [0] kind = PrecisionMismatch
-    message = precision mismatch: expected int32, got f32
+    message = precision mismatch: expected i32, got f32
     severity = 0.8
     expected = None
     got = None
@@ -11,7 +11,7 @@ diagnostics = 2
     span_id = None
     hint = Insert explicit cast
 [1] kind = PrecisionMismatch
-    message = filter expects a callback that returns bool; precision mismatch: expected int32, got bool
+    message = filter expects a callback that returns bool; precision mismatch: expected i32, got bool
     severity = 0.8
     expected = None
     got = None

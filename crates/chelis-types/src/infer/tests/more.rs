@@ -37,7 +37,7 @@ fn empty_program() {
 #[test]
 fn def_with_fn_body() {
     check_ok(
-        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)})) (app {} (var {} add) (var {} x) (var {} x))))",
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} i32)})) (app {} (var {} add) (var {} x) (var {} x))))",
     );
     check_err(
         "(def {} double (fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x))))",
@@ -49,7 +49,7 @@ fn def_with_fn_body() {
 fn nested_let() {
     check_ok(
         "(def {} result
-           (let {} (bind {} x (lit {type: (t-prim {} int32)} 1))
+           (let {} (bind {} x (lit {type: (t-prim {} i32)} 1))
              (let {} (bind {} y (var {} x))
                (var {} y))))",
     );
@@ -69,7 +69,7 @@ fn if_with_tensor_branches() {
 fn fn_applied_to_args() {
     check_ok(
         "(def {} f (fn {} (params {} x) (var {} x)))
-         (def {} result (app {} (var {} f) (lit {type: (t-prim {} int32)} 42)))",
+         (def {} result (app {} (var {} f) (lit {type: (t-prim {} i32)} 42)))",
     );
 }
 
@@ -78,12 +78,12 @@ fn adt_with_fields() {
     check_ok(
         "(deftype {} Pair ()
            (variant {} MkPair
-             (field {} fst (t-prim {} int32))
+             (field {} fst (t-prim {} i32))
              (field {} snd (t-prim {} f32))))
          (def {} p
            (record {}
              MkPair
-             (kv {} fst (lit {type: (t-prim {} int32)} 1))
+             (kv {} fst (lit {type: (t-prim {} i32)} 1))
              (kv {} snd (lit {type: (t-prim {} f32)} 2.0))))",
     );
 }
@@ -99,7 +99,7 @@ fn pipe_with_lambda() {
 
 #[test]
 fn total_nodes_counted() {
-    let result = check("(def {} x (lit {type: (t-prim {} int32)} 42))");
+    let result = check("(def {} x (lit {type: (t-prim {} i32)} 42))");
     assert!(result.total_nodes > 0, "expected some total nodes");
 }
 
@@ -107,7 +107,7 @@ fn total_nodes_counted() {
 fn tuple_three_elems() {
     check_ok(
         "(def {} t (tuple {}
-           (lit {type: (t-prim {} int32)} 1)
+           (lit {type: (t-prim {} i32)} 1)
            (lit {type: (t-prim {} f32)} 2.0)
            (lit {type: (t-prim {} bool)} true)))",
     );
@@ -119,7 +119,7 @@ fn tuple_three_elems() {
 #[test]
 fn fix1_tensor_op_rejects_non_tensor_args() {
     check_err(
-        "(def {} r (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+        "(def {} r (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         CheckErrorKind::PrecisionMismatch,
     );
 }
@@ -128,13 +128,13 @@ fn fix1_tensor_op_rejects_non_tensor_args() {
 #[test]
 fn fix2_unsound_generalization_rejected() {
     // x is a monomorphic param, y = x so y is also monomorphic.
-    // Applying y to both int32 and bool should fail.
+    // Applying y to both i32 and bool should fail.
     check_err(
         "(def {} test \
            (fn {} (params {} x) \
              (let {} (bind {} y (var {} x)) \
                (tuple {} \
-                 (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} i32)} 1)) \
                  (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
         CheckErrorKind::PrecisionMismatch,
     );
@@ -150,7 +150,7 @@ fn level_generalization_quantifies_only_the_ignored_inner_argument() {
            (fn {} (params {} x) \
              (let {} (bind {} y (fn {} (params {} z) (var {} x))) \
                (tuple {} \
-                 (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} i32)} 1)) \
                  (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
     );
 }
@@ -184,7 +184,7 @@ fn independent_binding_generalization_visits_zero_environment_bindings() {
 #[test]
 fn fix3_defsig_enforced() {
     check_err(
-        "(defsig {} f (t-fn {} (t-prim {} int32) (t-prim {} int32))) \
+        "(defsig {} f (t-fn {} (t-prim {} i32) (t-prim {} i32))) \
          (def {} f (lit {type: (t-prim {} bool)} true))",
         CheckErrorKind::TypeMismatch,
     );
@@ -213,9 +213,9 @@ fn fix4_dvar_names_shared() {
 #[test]
 fn fix5_if_condition_must_be_bool() {
     check_err(
-        "(if {} (lit {type: (t-prim {} int32)} 0) \
-                (lit {type: (t-prim {} int32)} 1) \
-                (lit {type: (t-prim {} int32)} 2))",
+        "(if {} (lit {type: (t-prim {} i32)} 0) \
+                (lit {type: (t-prim {} i32)} 1) \
+                (lit {type: (t-prim {} i32)} 2))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -225,10 +225,10 @@ fn fix5_if_condition_must_be_bool() {
 fn fix6a_wildcard_exhaustive() {
     check_ok(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
-         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42))) \
          (def {} result \
            (match {} (var {} x) \
-             (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))",
+             (arm {} (pat-wild {}) () (lit {type: (t-prim {} i32)} 0))))",
     );
 }
 
@@ -237,7 +237,7 @@ fn fix6a_wildcard_exhaustive() {
 fn fix6b_pat_as_binds_name() {
     check_ok(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone)) \
-         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 42))) \
+         (def {} x (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 42))) \
          (def {} result \
            (match {} (var {} x) \
              (arm {} (pat-as {} whole (pat-wild {})) () (var {} whole))))",
@@ -481,9 +481,9 @@ fn fix9_logical_ops_reject_non_bool_tensors() {
 
 #[test]
 fn fix9b_logical_ops_reject_non_tensor() {
-    // and(int32, int32) should fail — requires tensor
+    // and(i32, i32) should fail — requires tensor
     check_err(
-        "(def {} r (app {} (var {} and) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))",
+        "(def {} r (app {} (var {} and) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} i32)} 2)))",
         CheckErrorKind::TypeMismatch,
     );
 }
@@ -511,7 +511,7 @@ fn fix9d_logical_ops_accept_bool_tensors() {
 #[test]
 fn fix10_fitness_has_untyped_nodes() {
     let result = check(
-        "(def {} good (lit {type: (t-prim {} int32)} 42)) \
+        "(def {} good (lit {type: (t-prim {} i32)} 42)) \
                         (def {} bad (var {} nope))",
     );
     let report = crate::fitness::FitnessReport::from_infer_result(&result);
@@ -556,7 +556,7 @@ fn fix11b_pat_record_accepts_valid_field() {
 fn fix12_structure_score_measured() {
     // check_program runs tag validator — structure should be 1.0 for valid programs
     let exprs =
-        chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} int32)} 42))").unwrap();
+        chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
     let report = crate::fitness::check_program(&exprs);
     assert!(
         (report.components.structure - 1.0).abs() < 0.01,
@@ -668,8 +668,8 @@ roundtrip = to_list(to_tensor(ys))
 fn surf_pad_sequences_type_checks() {
     let checked = checked_surf(
         r#"
-tokens: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
-padded = pad_sequences(tokens, cast(0, int64))
+tokens: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]
+padded = pad_sequences(tokens, cast(0, i64))
 "#,
     );
     assert!(checked.annotated_exprs().len() >= 2);
@@ -686,8 +686,8 @@ exists = file_exists("dataset.txt")
 names = list_dir(".")
 mapped = mmap_file("dataset.txt")
 mapped_len = mmap_len(mapped)
-prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
-padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], cast(4, int64), cast(0, int64))
+prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
+padded = pad_sequences_to([[cast(1, i64)], [cast(2, i64), cast(3, i64)]], cast(4, i64), cast(0, i64))
 "#,
     );
     assert!(checked.annotated_exprs().len() >= 9);
@@ -697,13 +697,13 @@ padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], 
 // literal `width` argument. The result type carries `Dim::Lit(width)`
 // for that axis (not `Dim::Wildcard`), so a declared return type with
 // the matching concrete width type-checks and a mismatched one is
-// rejected. The width arrives as `cast(N, int64)` in every caller.
+// rejected. The width arrives as `cast(N, i64)` in every caller.
 
 #[test]
 fn pad_sequences_to_literal_width_matches_declared_shape() {
     let decls = chelis_surf::parser::parse_str(
         "def f() -> tensor[1, 4, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
     )
     .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -719,7 +719,7 @@ fn pad_sequences_to_literal_width_matches_declared_shape() {
 fn pad_sequences_to_wrong_literal_width_is_rejected() {
     let decls = chelis_surf::parser::parse_str(
         "def f() -> tensor[1, 5, f32] = \
-         pad_sequences_to([[cast(10.0, f32)]], cast(4, int64), cast(0.0, f32))\n",
+         pad_sequences_to([[cast(10.0, f32)]], cast(4, i64), cast(0.0, f32))\n",
     )
     .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -739,8 +739,8 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
         "sig demo_unify: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
          def demo_unify(a, b) = a\n\
          def test_mismatch() -> tensor[s, d, f32] = {\n\
-           q = pad_sequences_to([[cast(0.0, f32)]], cast(8, int64), cast(0.0, f32))\n\
-           k = pad_sequences_to([[cast(0.0, f32)]], cast(5, int64), cast(0.0, f32))\n\
+           q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
+           k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
            demo_unify(q, k)\n\
          }\n",
     )
@@ -762,10 +762,10 @@ fn surf_dict_and_iteration_builtins_type_check() {
     let checked = checked_surf(
         r#"
 keys: List[string] = ["alpha", "beta"]
-ids: List[int64] = [cast(1, int64), cast(2, int64)]
+ids: List[i64] = [cast(1, i64), cast(2, i64)]
 pairs = zip(keys, ids)
 indexed = enumerate(keys)
-vocab: Dict[string, int64] = dict_of(pairs)
+vocab: Dict[string, i64] = dict_of(pairs)
 found = dict_contains(vocab, "alpha")
 id = dict_get(vocab, "beta")
 only_keys = dict_keys(vocab)
@@ -783,7 +783,7 @@ fn surf_3h_tensor_numeric_builtins_type_check() {
 def projection(
   x: tensor[batch, seq, hidden, f32],
   w: tensor[hidden, out_dim, f32],
-  token_ids: tensor[batch, seq, int64],
+  token_ids: tensor[batch, seq, i64],
   mask: tensor[batch, seq, out_dim, bool],
   table: tensor[vocab, out_dim, f32]
 ) -> tensor[batch, seq, out_dim, f32] = {
@@ -948,7 +948,7 @@ fn issue631_concat_dynamic_axis_wildcards_all_axes() {
     let result = infer_surf(
         r#"
 module Repro.ConcatDynAxis
-def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: int32) -> tensor[4, 3, f32] =
+def cat_dyn(a: tensor[2, 3, f32], b: tensor[2, 3, f32], ax: i32) -> tensor[4, 3, f32] =
   concat([a, b], ax)
 "#,
     );
@@ -1184,7 +1184,7 @@ def cat_shadow(rows: List[tensor[2, f32]]) -> tensor[9, f32] =
 fn surf_3h_sort_and_trace_type_check() {
     let checked = checked_surf(
         r#"
-def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, int64], tensor[batch, f32]) = {
+def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, i64], tensor[batch, f32]) = {
   diag = diagonal(x, 1, 2)
   sorted = sort(diag, 1)
   values = sorted.0
@@ -1254,7 +1254,7 @@ fn surf_scatter_replace_rejects_unknown_mode() {
             r#"
 def bad(
   base: tensor[seq, hidden, f32],
-  ids: tensor[seq, int64],
+  ids: tensor[seq, i64],
   updates: tensor[seq, hidden, f32]
 ) -> tensor[seq, hidden, f32] =
   scatter(base, ids, updates, 0, "last")
@@ -1302,7 +1302,7 @@ fn surf_scatter_replace_accepts_static_duplicate_indices() {
         &chelis_surf::parser::parse_str(
             r#"
 base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
-ids: List[int64] = [cast(1, int64), cast(1, int64)]
+ids: List[i64] = [cast(1, i64), cast(1, i64)]
 idx = to_tensor(ids)
 updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
 out = scatter(base, idx, updates, 0, "replace")
@@ -1317,11 +1317,11 @@ out = scatter(base, idx, updates, 0, "replace")
 fn surf_map_filter_fold_type_check() {
     let checked = checked_surf(
         r#"
-def inc(x: int64) -> int64 = add(x, cast(1, int64))
-xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+def inc(x: i64) -> i64 = add(x, cast(1, i64))
+xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
 mapped = map(inc, xs)
-filtered = filter(fn (x: int64) -> eq(mod(x, cast(2, int64)), cast(0, int64)), mapped)
-total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
+filtered = filter(fn (x: i64) -> eq(mod(x, cast(2, i64)), cast(0, i64)), mapped)
+total = fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), filtered)
 "#,
     );
     assert!(checked.annotated_exprs().len() >= 5);
@@ -1332,7 +1332,7 @@ fn surf_append_rejects_wrong_element_type() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
+xs: List[i64] = [cast(1, i64)]
 bad = append(xs, "oops")
 "#,
         )
@@ -1353,8 +1353,8 @@ fn surf_filter_rejects_non_bool_callback() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
         )
         .expect("surf parse"),
@@ -1376,7 +1376,7 @@ fn surf_dict_entries_rejects_non_dict_input() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
+xs: List[i64] = [cast(1, i64)]
 bad = dict_entries(xs)
 "#,
         )
@@ -1417,8 +1417,8 @@ fn surf_fold_rejects_accumulator_mismatch() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
         )
         .expect("surf parse"),
@@ -1428,7 +1428,7 @@ bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
         err.errors.iter().any(|error| error.message.contains("fold")
             && error.message.contains("accumulator")
             && error.message.contains("string")
-            && error.message.contains("int64")),
+            && error.message.contains("i64")),
         "expected accumulator mismatch, got {:?}",
         err.errors
     );
@@ -1438,9 +1438,9 @@ fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
     chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
-  idxs = range(cast(0, int64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
+def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
+  idxs = range(cast(0, i64), numel(copy(xs)))
+  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
   step = fn (state, i) -> {
 acc = state.0
 total = state.1
@@ -1483,17 +1483,17 @@ fn surf_collection_helper_builtins_type_check() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
-prefix = take(xs, cast(2, int64))
-suffix = drop(xs, cast(1, int64))
-groups = chunk(xs, cast(2, int64))
-scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
-buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
-exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], xs)
-flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
-base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-extended = dict_insert(base, "beta", cast(2, int64))
-merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
+prefix = take(xs, cast(2, i64))
+suffix = drop(xs, cast(1, i64))
+groups = chunk(xs, cast(2, i64))
+scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
+buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
+exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], xs)
+flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
+base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+extended = dict_insert(base, "beta", cast(2, i64))
+merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
 trimmed = dict_remove(merged, "gamma")
 "#,
         )
@@ -1507,7 +1507,7 @@ fn surf_take_rejects_non_integer_count() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
 bad = take(xs, "two")
 "#,
         )
@@ -1528,7 +1528,7 @@ fn surf_dict_insert_rejects_value_type_mismatch() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 bad = dict_insert(base, "beta", "two")
 "#,
         )
@@ -1539,7 +1539,7 @@ bad = dict_insert(base, "beta", "two")
         err.errors
             .iter()
             .any(|error| error.message.contains("dict_insert")
-                || error.message.contains("int64")
+                || error.message.contains("i64")
                 || error.message.contains("string")),
         "expected dict value mismatch, got {:?}",
         err.errors
@@ -1551,7 +1551,7 @@ fn surf_dict_merge_rejects_mismatched_dict_value_types() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-lhs: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+lhs: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 rhs: Dict[string, string] = dict_of([("beta", "two")])
 bad = dict_merge(lhs, rhs)
 "#,
@@ -1564,7 +1564,7 @@ bad = dict_merge(lhs, rhs)
             .iter()
             .any(|error| error.message.contains("dict_merge")
                 || error.message.contains("Dict")
-                || error.message.contains("int64")
+                || error.message.contains("i64")
                 || error.message.contains("string")),
         "expected dict merge mismatch, got {:?}",
         err.errors
@@ -1576,8 +1576,8 @@ fn surf_scan_rejects_accumulator_mismatch() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
         )
         .expect("surf parse"),
@@ -1587,7 +1587,7 @@ bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
         err.errors.iter().any(|error| error.message.contains("scan")
             && error.message.contains("accumulator")
             && error.message.contains("string")
-            && error.message.contains("int64")),
+            && error.message.contains("i64")),
         "expected scan accumulator mismatch, got {:?}",
         err.errors
     );
@@ -1598,8 +1598,8 @@ fn surf_partition_rejects_non_bool_callback() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
         )
         .expect("surf parse"),
@@ -1621,8 +1621,8 @@ fn surf_flat_map_rejects_non_list_callback() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = flat_map(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
         )
         .expect("surf parse"),
@@ -1642,7 +1642,7 @@ fn surf_flatten_rejects_non_nested_list_input() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
+xs: List[i64] = [cast(1, i64)]
 bad = flatten(xs)
 "#,
         )
@@ -1663,8 +1663,8 @@ fn surf_dict_remove_rejects_mismatched_key_type() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-bad = dict_remove(base, cast(7, int64))
+base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
+bad = dict_remove(base, cast(7, i64))
 "#,
         )
         .expect("surf parse"),
@@ -1673,7 +1673,7 @@ bad = dict_remove(base, cast(7, int64))
     assert!(
         err.errors.iter().any(|error| {
             error.message.contains("dict_remove")
-                || (error.message.contains("string") && error.message.contains("int64"))
+                || (error.message.contains("string") && error.message.contains("i64"))
         }),
         "expected dict_remove key mismatch, got {:?}",
         err.errors
@@ -1685,7 +1685,7 @@ fn surf_chunk_rejects_non_integer_size() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
-xs: List[int64] = [cast(1, int64)]
+xs: List[i64] = [cast(1, i64)]
 bad = chunk(xs, "two")
 "#,
         )
@@ -1876,9 +1876,9 @@ fn issue_293_incompatible_callback_still_rejected() {
     // Negative parity: the fix must NOT over-loosen unification. Here
     // the callback's second parameter `q` is multiplied with `t`
     // (a `tensor[n, f32]`), so `q` must be `tensor[n, f32]`. But the
-    // `inner_p` argument supplied at the call site is a scalar `int32`,
+    // `inner_p` argument supplied at the call site is a scalar `i32`,
     // which is bound to the same `P`. `P` cannot be both a tensor and a
-    // scalar int32, so this must still produce a clear mismatch.
+    // scalar i32, so this must still produce a clear mismatch.
     let result = infer_surf(
         r#"
 module Repro.BadCallback
@@ -1989,8 +1989,8 @@ fn declared_named_dimension_requires_its_own_signature_parameter() {
 }
 
 /// A *return-only* dim var (it appears in the declared return but in
-/// NO parameter tensor position, e.g. `arange[n](start: int32, stop:
-/// int32) -> tensor[n, int32]`) is NOT param-bound. The body wildcard
+/// NO parameter tensor position, e.g. `arange[n](start: i32, stop:
+/// i32) -> tensor[n, i32]`) is NOT param-bound. The body wildcard
 /// must stay `Wildcard`: narrowing it to the unbound var would leak a
 /// free dim var into callers (the RT-39+44 soundness regression,
 /// commit 8067c9ce).
@@ -2068,8 +2068,8 @@ fn const_col_chain_propagates_declared_dim_to_callers() {
     let checked = checked_surf(
         r#"
 def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
-  nn = cast(shape(copy(spots), cast(0, int32)), int64)
-  reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])
+  nn = cast(shape(copy(spots), cast(0, i32)), i64)
+  reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))), [nn, cast(1, i64)])
 }
 def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cast(1.0, f64))
 "#,

@@ -68,7 +68,7 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
     let mut source = String::from("module Profile.Issue1316\n");
     for index in 0..definitions {
         source.push_str(&format!(
-            "def f{index}(x: int32) -> int32 = {}\n",
+            "def f{index}(x: i32) -> i32 = {}\n",
             function_body(index, definitions, shape)
         ));
     }
@@ -334,8 +334,8 @@ fn issue_1316_malformed_group_rejects_in_both_drivers() {
 fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
     let declarations = chelis_surf::parser::parse_str(
         "module Profile.Errors\n\
-         def first(x: int32) -> int32 = missing_first(x)\n\
-         def second(x: int32) -> int32 = missing_second(x)\n",
+         def first(x: i32) -> i32 = missing_first(x)\n\
+         def second(x: i32) -> i32 = missing_second(x)\n",
     )
     .expect("fixture parses");
     let program = chelis_surf::desugar::desugar_program(&declarations);

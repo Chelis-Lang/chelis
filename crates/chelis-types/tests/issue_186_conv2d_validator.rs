@@ -98,7 +98,7 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
                (def {} k (lit {type: (t-tensor {} (d-lit {} 8) (d-lit {} 3) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0)) \
                (def {type: (t-tensor {} (d-lit {} 1) (d-lit {} 8) (d-lit {} 6) (d-lit {} 6) (t-prim {} f32))} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
-                   (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))";
+                   (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
     let res = check_ir_program(&deep);
     if let Err(rep) = res {
@@ -516,12 +516,12 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 4,
 /// and emits a DimensionMismatch instead.
 ///
 /// Driven through the direct-Deep entry so we can pass an i64
-/// literal without tripping Surf's int32 default-literal range
+/// literal without tripping Surf's i32 default-literal range
 /// guard (which would mask the actual validator overflow path).
-/// The lit's declared `:type` is left as int32 because
+/// The lit's declared `:type` is left as i32 because
 /// `extract_int_literal` reads the atom value (i64-wide) regardless
-/// of the declared type tag and the HM signature expects int32
-/// stride/padding; using int32 here keeps HM clean so the
+/// of the declared type tag and the HM signature expects i32
+/// stride/padding; using i32 here keeps HM clean so the
 /// validator's overflow check is the only diagnostic that fires.
 #[test]
 fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
@@ -531,7 +531,7 @@ fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
                (def {} k (lit {type: (t-tensor {} (d-lit {} 8) (d-lit {} 3) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0)) \
                (def {} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
-                   (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 4611686018427387905) (lit {type: (t-prim {} int64)} 4611686018427387905)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 4611686018427387905) (lit {type: (t-prim {} int64)} 4611686018427387905)) (var {} Nil)))))";
+                   (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 4611686018427387905) (lit {type: (t-prim {} i64)} 4611686018427387905)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 4611686018427387905) (lit {type: (t-prim {} i64)} 4611686018427387905)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
     // Must NOT panic. Result is allowed to be Err with the overflow
     // diagnostic.
@@ -551,10 +551,10 @@ fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
 /// `input + 2 * padding` overflows when `input` itself is at the
 /// i64 ceiling.
 ///
-/// stride/padding lit type tag is kept int32 because
+/// stride/padding lit type tag is kept i32 because
 /// `extract_int_literal` reads the atom's i64 value regardless of
 /// tag; the input dim is a `d-lit` (dimension-level int) so the
-/// out-of-range-for-int32 value-literal validator does not fire on
+/// out-of-range-for-i32 value-literal validator does not fire on
 /// it.
 #[test]
 fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
@@ -566,7 +566,7 @@ fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
          (def {{}} k (lit {{type: (t-tensor {{}} (d-lit {{}} 8) (d-lit {{}} 3) (d-lit {{}} 3) (d-lit {{}} 3) (t-prim {{}} f32))}} 0)) \
          (def {{}} y \
            (app {{}} (var {{}} conv) (var {{}} x) (var {{}} k) \
-             (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} int64)}} 1) (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} int64)}} 1) (var {{}} Nil))) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} int64)}} 1) (lit {{type: (t-prim {{}} int64)}} 1)) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} int64)}} 1) (lit {{type: (t-prim {{}} int64)}} 1)) (var {{}} Nil)))))"
+             (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (var {{}} Nil))) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (var {{}} Nil)))))"
     );
     let deep = parse_deep(&src).expect("deep parse");
     let res = check_ir_program(&deep);
@@ -1118,12 +1118,12 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
 /// [05-OP-51]: runtime stride values are legal and retain runtime guards.
 #[test]
 fn issue186_deep_conv_nonliteral_stride_is_checker_legal() {
-    let src = "(def {type: (t-prim {} int64)} stride_v (lit {type: (t-prim {} int64)} 1)) \
+    let src = "(def {type: (t-prim {} i64)} stride_v (lit {type: (t-prim {} i64)} 1)) \
                (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))} 0)) \
                (def {} k (lit {type: (t-tensor {} (d-lit {} 8) (d-lit {} 3) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0)) \
                (def {type: (t-tensor {} (d-lit {} 1) (d-lit {} 8) (d-lit {} 6) (d-lit {} 6) (t-prim {} f32))} y \
                  (app {} (var {} conv) (var {} x) (var {} k) \
-                   (app {} (var {} Cons) (var {} stride_v) (app {} (var {} Cons) (var {} stride_v) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))";
+                   (app {} (var {} Cons) (var {} stride_v) (app {} (var {} Cons) (var {} stride_v) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
     check_ir_program(&deep).expect("runtime stride metadata is not a type error");
 }

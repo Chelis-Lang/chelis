@@ -19,7 +19,7 @@
 //! * `boundary_seed_cross_function_parity`: chelis#771 seed width through the
 //!   handler-scope threading path (seed cannot be baked at the op site), at
 //!   i32::MAX + 1.
-//! * `negative_dp_seed_parity`: a `.dp`-only reachable negative int64 seed;
+//! * `negative_dp_seed_parity`: a `.dp`-only reachable negative i64 seed;
 //!   the checker now rejects it (Phase 1 F2) rather than letting both lanes
 //!   silently fall back to seed 0.
 //! * `handle_effect_extra_child`: spec/03 gives `handle-effect` the shape
@@ -45,7 +45,7 @@ use common::{
 const PAR_BOUND_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
   (handle-effect {effect: random}
-    (lit {type: (t-prim {} int64)} 42)
+    (lit {type: (t-prim {} i64)} 42)
     (app {} (var {} uniform_like)
       (copy {} (var {} template))
       (par {} 2.0 3.0)
@@ -55,7 +55,7 @@ const PAR_BOUND_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {
 const DOUBLE_NEG_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
   (handle-effect {effect: random}
-    (lit {type: (t-prim {} int64)} 42)
+    (lit {type: (t-prim {} i64)} 42)
     (app {} (var {} uniform_like)
       (copy {} (var {} template))
       (app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 3.0)))
@@ -65,7 +65,7 @@ const DOUBLE_NEG_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit 
 const NEGATIVE_SEED_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0.0))
 (def {} sampled
   (handle-effect {effect: random}
-    (lit {type: (t-prim {} int64)} -1)
+    (lit {type: (t-prim {} i64)} -1)
     (app {} (var {} uniform_like)
       (copy {} (var {} template))
       (lit {type: (t-prim {} f32)} 0.0)
@@ -74,9 +74,9 @@ const NEGATIVE_SEED_DP: &str = r#"(def {} template (lit {type: (t-tensor {} (d-l
 
 const EXTRA_CHILD_DP: &str = r#"(def {} out
   (handle-effect {effect: random}
-    (lit {type: (t-prim {} int64)} 42)
+    (lit {type: (t-prim {} i64)} 42)
     (lit {type: (t-prim {} f32)} 2.5)
-    (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} int64)} 2))))
+    (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} i64)} 2))))
 "#;
 
 const BOUNDARY_CROSS_FN_CH: &str = "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
@@ -269,8 +269,8 @@ fn redteam_boundary_seed_cross_function_parity() {
     assert_f32_bit_equal("boundary cross-fn run-to-run", &c1, &c2);
 }
 
-/// A `.dp`-only reachable negative int64 seed: the checker's suffix rule used to
-/// accept `(lit {type: int64} -1)` (score 1) while the DAG lowering's
+/// A `.dp`-only reachable negative i64 seed: the checker's suffix rule used to
+/// accept `(lit {type: i64} -1)` (score 1) while the DAG lowering's
 /// `extract_usize_value` rejected negatives and silently fell back, so both
 /// lanes ran the DEFAULT stream: seed -1 and seed 0 produced identical output
 /// ("distinct seeds yield distinct streams" [05-RNG-1] fails). chelis#794
@@ -280,7 +280,7 @@ fn redteam_boundary_seed_cross_function_parity() {
 #[test]
 fn redteam_negative_dp_seed_not_silently_dropped() {
     let score = check_score(NEGATIVE_SEED_DP, ".dp");
-    assert_eq!(score, 1.0, "signed int64 literal must be admitted");
+    assert_eq!(score, 1.0, "signed i64 literal must be admitted");
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("negseed-out");
     let c_src = build_c(NEGATIVE_SEED_DP, ".dp", "negseed", &out_dir);
@@ -306,7 +306,7 @@ fn redteam_negative_dp_seed_not_silently_dropped() {
 
 /// spec/03: `(handle-effect {effect: name} arg body)` — exactly two children.
 /// [04-TOT-3]: a structurally malformed form SHALL be rejected. The third
-/// child here is an ill-typed subtree (`add(f32, int64)`) that
+/// child here is an ill-typed subtree (`add(f32, i64)`) that
 /// `infer_handle_effect` never visits; Phase 1 rejects `handle-effect` with
 /// `!= 2` children, so this must score below 1.0.
 #[test]

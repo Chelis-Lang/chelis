@@ -23,6 +23,17 @@ fn manifest() -> serde_json::Value {
     serde_json::from_str(include_str!("fixtures/cache_wire_v3/producer.json")).unwrap()
 }
 
+fn migrated_v018(source: &str) -> String {
+    chelis_surf::format::migrate_source_v018(source)
+        .expect("historical source must migrate to the current canonical spelling")
+}
+
+fn migrate_historical_package_for_current_compiler(package: &Path) {
+    let source_path = package.join("mylib/src/math.ch");
+    let source = fs::read_to_string(&source_path).expect("read historical package source");
+    fs::write(source_path, migrated_v018(&source)).expect("write migrated package source");
+}
+
 #[test]
 fn historical_artifacts_match_the_recorded_actual_producer() {
     let evidence = manifest();
@@ -131,10 +142,10 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
 #[test]
 fn current_numeric_subcontexts_roundtrip_through_actual_cache_codecs() {
     let evidence = manifest();
-    let std_decls =
-        chelis_surf::parser::parse_str(evidence["stdlib_source"].as_str().unwrap()).unwrap();
-    let dep_decls =
-        chelis_surf::parser::parse_str(evidence["dependency_source"].as_str().unwrap()).unwrap();
+    let std_source = migrated_v018(evidence["stdlib_source"].as_str().unwrap());
+    let dep_source = migrated_v018(evidence["dependency_source"].as_str().unwrap());
+    let std_decls = chelis_surf::parser::parse_str(&std_source).unwrap();
+    let dep_decls = chelis_surf::parser::parse_str(&dep_source).unwrap();
     let std_context = build_stdlib_context(&std_decls).unwrap();
     let lib_context = build_library_context(&std_context, &dep_decls)
         .unwrap()
@@ -263,7 +274,8 @@ fn historical_caches_contain_actual_old_scalar_and_storage_positional_bytes() {
 
 #[test]
 fn current_stdlib_cache_preserves_scalar_storage_bits_and_checked_reconstruction() {
-    let decls = chelis_surf::parser::parse_str(historical_producer::NUMERIC_SOURCE).unwrap();
+    let source = migrated_v018(historical_producer::NUMERIC_SOURCE);
+    let decls = chelis_surf::parser::parse_str(&source).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let expected = expected_numeric_payloads(true);
     assert_eq!(
@@ -308,6 +320,7 @@ fn current_compiled_disk_and_worker_preserve_scalar_storage_bits_and_reconstruct
     let directory = tempfile::tempdir().unwrap();
     let package = directory.path().join("package");
     historical_producer::package_fixture(&package);
+    migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let context = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
     let expected = expected_numeric_payloads(true);
@@ -377,11 +390,11 @@ fn change_numeric_bits(payload: &mut [u8], storage: bool) {
 #[test]
 fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed() {
     let directory = tempfile::tempdir().unwrap();
-    let source = format!(
+    let source = migrated_v018(&format!(
         "{}{}",
         historical_producer::NUMERIC_SOURCE,
         historical_producer::WITNESS_SOURCE
-    );
+    ));
     let decls = chelis_surf::parser::parse_str(&source).unwrap();
     let context = build_stdlib_context(&decls).unwrap();
     let key = stdlib_cache_key(&decls, [0x5a; 32]);
@@ -390,6 +403,7 @@ fn cache_reconstruction_rejects_changed_numeric_bits_after_checksum_recomputed()
     let std_bytes = fs::read(&std_path).unwrap();
     let package = directory.path().join("package");
     historical_producer::package_fixture(&package);
+    migrate_historical_package_for_current_compiler(&package);
     let reef_home = directory.path().join("reef-home");
     let compiled = chelis_compiler_api::compile_reef_context(&reef_home, &package).unwrap();
     let compiled_bytes = compiled.encode().unwrap();

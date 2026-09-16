@@ -27,7 +27,7 @@ fn formatted(source: &str) -> String {
 
 #[test]
 fn sig_carries_a_binder_list_with_a_float_bound() {
-    let text = deep_text("sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]");
+    let text = deep_text("sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]");
     assert!(
         text.contains("dtype_bounds: {p: float}"),
         "expected a float bound on the defsig, got:\n{text}"
@@ -168,7 +168,7 @@ fn a_bound_requires_a_family_after_the_colon() {
 
 #[test]
 fn an_empty_binder_list_stays_rejected_on_a_sig() {
-    surf_parse("sig f[]: int32 -> int32").expect_err("must reject `[]`");
+    surf_parse("sig f[]: i32 -> i32").expect_err("must reject `[]`");
 }
 
 // === Canonical formatting ===
@@ -176,8 +176,8 @@ fn an_empty_binder_list_stays_rejected_on_a_sig() {
 #[test]
 fn canonical_form_spells_a_bound_with_one_space() {
     assert_eq!(
-        formatted("sig linspace[p:Float]: p -> p -> int64 -> tensor[n, p]").trim(),
-        "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]"
+        formatted("sig linspace[p:Float]: p -> p -> i64 -> tensor[n, p]").trim(),
+        "sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]"
     );
 }
 

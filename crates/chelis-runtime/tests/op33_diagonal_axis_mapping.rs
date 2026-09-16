@@ -437,7 +437,7 @@ fn diagonal_preserves_stored_bits_for_bool_and_int64_in_both_axis_orders() {
         assert_eq!(
             observed,
             [i64::MIN, -9_007_199_254_740_993, -1, i64::MIN + 1],
-            "int64 diagonal at axes (2, 0) did not preserve exact stored values"
+            "i64 diagonal at axes (2, 0) did not preserve exact stored values"
         );
         chelis_tensor_release(out);
         chelis_tensor_release(wide);

@@ -13,9 +13,9 @@
 //!
 //! ```text
 //! def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {
-//!   nn = cast(shape(copy(spots), cast(0, int32)), int64)
-//!   reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))),
-//!           [nn, cast(1, int64)])
+//!   nn = cast(shape(copy(spots), cast(0, i32)), i64)
+//!   reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))),
+//!           [nn, cast(1, i64)])
 //! }
 //! ```
 //!
@@ -72,8 +72,8 @@ use tempfile::tempdir;
 /// `vmap` lane kernel reduces.
 const REPRO: &str = "\
 def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {\n\
-  nn = cast(shape(copy(spots), cast(0, int32)), int64)\n\
-  reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])\n\
+  nn = cast(shape(copy(spots), cast(0, i32)), i64)\n\
+  reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))), [nn, cast(1, i64)])\n\
 }\n\
 def prices[n](spots: tensor[n, f32], k: f32) -> tensor[n, f32] = {\n\
   kc = const_col(spots, cast(k, f64))\n\

@@ -6,7 +6,7 @@
 //!
 //! The evaluator read the seed by routing the literal through `eval_lit`,
 //! which narrows an unsuffixed integer to the spec/04-type-system.md §5.3
-//! int32 default: `4294967295 as i32` = `-1`, sign-extended to the u64 seed
+//! i32 default: `4294967295 as i32` = `-1`, sign-extended to the u64 seed
 //! `0xFFFF_FFFF_FFFF_FFFF`. The C host lane reads the raw i64 atom and seeds
 //! `(uint64_t)4294967295`. Same source seed, completely unrelated streams
 //! (0/8 elements agreed). The fix reads a *literal* seed at full i64 width in
@@ -105,7 +105,7 @@ fn assert_f32_bit_equal(label: &str, eval: &[f64], c: &[f64]) {
     }
 }
 
-/// The three seeds in chelis#771: the `2^31 - 1` control (fits int32, so it
+/// The three seeds in chelis#771: the `2^31 - 1` control (fits i32, so it
 /// samples the same stream both lanes even pre-fix), the exact `2^31` boundary,
 /// and the max-u32 case. A matching seed produces a bit-identical f32 stream in
 /// both lanes. Pre-fix the boundary and max cases sampled unrelated streams

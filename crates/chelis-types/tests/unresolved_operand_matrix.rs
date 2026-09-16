@@ -200,9 +200,9 @@ fn app_post_tensor_routes_validate_a_late_bound_operand() {
             route: "sort",
             decl: "x: tensor[2, 4, f32]",
             valid_call: "sort($, 0i32)",
-            valid_result: "(tensor[2, 4, f32], tensor[2, 4, int64])",
+            valid_result: "(tensor[2, 4, f32], tensor[2, 4, i64])",
             invalid_call: "sort($, 7i32)",
-            invalid_result: "(tensor[2, 4, f32], tensor[2, 4, int64])",
+            invalid_result: "(tensor[2, 4, f32], tensor[2, 4, i64])",
             diagnostic: "sort axis 7 out of bounds for rank 2",
         },
     ] {
@@ -218,65 +218,65 @@ fn app_post_collection_and_host_routes_validate_a_late_bound_operand() {
     for row in [
         Row {
             route: "len",
-            decl: "x: List[int32]",
+            decl: "x: List[i32]",
             valid_call: "len($)",
-            valid_result: "int64",
+            valid_result: "i64",
             invalid_call: "len(to_tensor($))",
-            invalid_result: "int64",
+            invalid_result: "i64",
             diagnostic: "len expects List or Dict input",
         },
         Row {
             route: "append",
-            decl: "x: List[int32]",
+            decl: "x: List[i32]",
             valid_call: "append($, 1i32)",
-            valid_result: "List[int32]",
+            valid_result: "List[i32]",
             invalid_call: "append(to_tensor($), 1i32)",
-            invalid_result: "List[int32]",
+            invalid_result: "List[i32]",
             diagnostic: "append expects List input",
         },
         Row {
             route: "enumerate",
-            decl: "x: List[int32]",
+            decl: "x: List[i32]",
             valid_call: "enumerate($)",
-            valid_result: "List[(int64, int32)]",
+            valid_result: "List[(i64, i32)]",
             invalid_call: "enumerate(to_tensor($))",
-            invalid_result: "List[(int64, int32)]",
+            invalid_result: "List[(i64, i32)]",
             diagnostic: "enumerate expects List input",
         },
         Row {
             route: "rank",
             decl: "x: tensor[3, f32]",
             valid_call: "rank($)",
-            valid_result: "int32",
+            valid_result: "i32",
             invalid_call: "rank(to_list($))",
-            invalid_result: "int32",
+            invalid_result: "i32",
             diagnostic: "rank expects tensor input",
         },
         Row {
             route: "numel",
             decl: "x: tensor[3, f32]",
             valid_call: "numel($)",
-            valid_result: "int64",
+            valid_result: "i64",
             invalid_call: "numel(to_list($))",
-            invalid_result: "int64",
+            invalid_result: "i64",
             diagnostic: "numel expects tensor input",
         },
         Row {
             route: "shape",
             decl: "x: tensor[3, f32]",
             valid_call: "shape($, 0i32)",
-            valid_result: "int64",
+            valid_result: "i64",
             invalid_call: "shape(to_list($), 0i32)",
-            invalid_result: "int64",
+            invalid_result: "i64",
             diagnostic: "shape expects tensor input",
         },
         Row {
             route: "string_len",
             decl: "x: string",
             valid_call: "string_len($)",
-            valid_result: "int64",
+            valid_result: "i64",
             invalid_call: "string_len(to_int($))",
-            invalid_result: "int64",
+            invalid_result: "i64",
             diagnostic: "string_len expects string input",
         },
     ] {
@@ -299,7 +299,7 @@ fn an_error_operand_still_suppresses_the_routes_own_diagnostic() {
             "cumsum",
             "def f(x: tensor[3, f32]) -> tensor[3, f32] = cumsum(nope(x), 7i32)\n",
         ),
-        ("len", "def f(x: List[int32]) -> int64 = len(nope(x))\n"),
+        ("len", "def f(x: List[i32]) -> i64 = len(nope(x))\n"),
     ] {
         let errors = check(program).expect_err("the unbound callee is an error");
         assert!(
@@ -336,11 +336,11 @@ fn an_operand_that_never_binds_is_rejected_at_the_declaration_boundary() {
     for (route, program) in [
         (
             "permute",
-            "def f() -> int32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n",
         ),
         (
             "reshape",
-            "def f() -> int32 = {\n  g = fn (t) -> reshape(t, [6i64])\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> reshape(t, [6i64])\n  1i32\n}\n",
         ),
     ] {
         let errors = check(program).expect_err("a never-bound operand is not a typed program");
@@ -432,7 +432,7 @@ fn app_tensor_ledger_family_validates_a_late_bound_operand() {
         },
         Row {
             route: "scatter_elements",
-            decl: "x: tensor[3, f32], i: tensor[3, int64], u: tensor[3, f32], bad: tensor[2, f32]",
+            decl: "x: tensor[3, f32], i: tensor[3, i64], u: tensor[3, f32], bad: tensor[2, f32]",
             valid_call: "scatter_elements($, i, u, 0i32)",
             valid_result: "tensor[3, f32]",
             invalid_call: "scatter_elements($, i, bad, 0i32)",
@@ -492,32 +492,32 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
         ),
         (
             "string_contains",
-            "def f(x: int32) -> bool = {\n  g = fn (t) -> string_contains(t, \"a\")\n  g(x)\n}\n",
-            "precision mismatch: expected string, got int32",
+            "def f(x: i32) -> bool = {\n  g = fn (t) -> string_contains(t, \"a\")\n  g(x)\n}\n",
+            "precision mismatch: expected string, got i32",
         ),
         (
             "dict_get",
-            "def f(d: Dict[string, int32], k: int32) -> int32 = {\n  g = fn (t) -> dict_get(d, t)\n  g(k)\n}\n",
-            "precision mismatch: expected string, got int32",
+            "def f(d: Dict[string, i32], k: i32) -> i32 = {\n  g = fn (t) -> dict_get(d, t)\n  g(k)\n}\n",
+            "precision mismatch: expected string, got i32",
         ),
         (
             "dict_insert",
-            "def f(d: Dict[string, int32], k: int32) -> Dict[string, int32] = {\n  g = fn (t) -> dict_insert(d, t, 1i32)\n  g(k)\n}\n",
-            "precision mismatch: expected string, got int32",
+            "def f(d: Dict[string, i32], k: i32) -> Dict[string, i32] = {\n  g = fn (t) -> dict_insert(d, t, 1i32)\n  g(k)\n}\n",
+            "precision mismatch: expected string, got i32",
         ),
         (
             "expand",
-            "def f(x: tensor[1, f32], a: int32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
+            "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
             "but no tensor in scope carries it",
         ),
         (
             "cast",
-            "def f(x: List[int32]) -> f32 = {\n  g = fn (t) -> cast(t, f32)\n  g(x)\n}\n",
+            "def f(x: List[i32]) -> f32 = {\n  g = fn (t) -> cast(t, f32)\n  g(x)\n}\n",
             "cast requires tensor or prim type",
         ),
         (
             "sum",
-            "def f(x: tensor[3, 2, f32], a: int64) -> tensor[2, f32] = {\n  g = fn (v) -> sum(x, v)\n  g(a)\n}\n",
+            "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, f32] = {\n  g = fn (v) -> sum(x, v)\n  g(a)\n}\n",
             "is neither a compile-time constant nor a named axis of the operand",
         ),
     ] {
@@ -572,7 +572,7 @@ fn a_chain_of_suspended_calls_settles_in_one_declaration() {
 /// REGRESSION TEST for the count, DISPOSITION LOCK for the wording.
 #[test]
 fn a_never_bound_operand_is_reported_exactly_once() {
-    let never = "def f() -> int32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n";
+    let never = "def f() -> i32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n";
     let errors = check(never).expect_err("a never-bound operand is not a typed program");
     assert_eq!(
         errors.len(),
@@ -654,7 +654,7 @@ fn run_cell(cell: &Cell) {
             match *route {
                 "add" => "bool",
                 "shl" | "shr" => "f32",
-                _ => "int32",
+                _ => "i32",
             },
         );
     } else {
@@ -698,9 +698,9 @@ fn a_late_bound_secondary_operand_is_validated_too() {
         },
         Cell {
             route: "index",
-            resolved_invalid: "def f(xs: List[int32], k: f32) -> int32 = index(xs, k)\n",
-            late_invalid: "def f(xs: List[int32], k: f32) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
-            late_valid: "def f(xs: List[int32], k: int64) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
+            resolved_invalid: "def f(xs: List[i32], k: f32) -> i32 = index(xs, k)\n",
+            late_invalid: "def f(xs: List[i32], k: f32) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
+            late_valid: "def f(xs: List[i32], k: i64) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
             diagnostic: "index expects integer index, got f32",
         },
         Cell {
@@ -709,44 +709,44 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // rewrites the SIBLING tensor-concat branch of this same match and
             // leaves this arm alone.
             route: "concat",
-            resolved_invalid: "def f(x: List[int32], y: List[f32]) -> List[int32] = concat(x, y)\n",
-            late_invalid: "def f(x: List[int32], y: List[f32]) -> List[int32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
-            late_valid: "def f(x: List[int32], y: List[int32]) -> List[int32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
-            diagnostic: "precision mismatch: expected int32, got f32",
+            resolved_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = concat(x, y)\n",
+            late_invalid: "def f(x: List[i32], y: List[f32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
+            late_valid: "def f(x: List[i32], y: List[i32]) -> List[i32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
+            diagnostic: "precision mismatch: expected i32, got f32",
         },
         Cell {
             route: "zip",
-            resolved_invalid: "def f(x: List[int32], y: int32) -> List[(int32, int32)] = zip(x, y)\n",
-            late_invalid: "def f(x: List[int32], y: int32) -> List[(int32, int32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
-            late_valid: "def f(x: List[int32], y: List[int32]) -> List[(int32, int32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
-            diagnostic: "zip expects List inputs, got List int32 and int32",
+            resolved_invalid: "def f(x: List[i32], y: i32) -> List[(i32, i32)] = zip(x, y)\n",
+            late_invalid: "def f(x: List[i32], y: i32) -> List[(i32, i32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
+            late_valid: "def f(x: List[i32], y: List[i32]) -> List[(i32, i32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
+            diagnostic: "zip expects List inputs, got List i32 and i32",
         },
         Cell {
             route: "dict_merge",
-            resolved_invalid: "def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = dict_merge(d, e)\n",
-            late_invalid: "def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
-            late_valid: "def f(d: Dict[string, int32], e: Dict[string, int32]) -> Dict[string, int32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
-            diagnostic: "precision mismatch: expected int32, got f32",
+            resolved_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = dict_merge(d, e)\n",
+            late_invalid: "def f(d: Dict[string, i32], e: Dict[string, f32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
+            late_valid: "def f(d: Dict[string, i32], e: Dict[string, i32]) -> Dict[string, i32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
+            diagnostic: "precision mismatch: expected i32, got f32",
         },
         Cell {
             route: "split sizes",
             resolved_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
             late_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
-            late_valid: "def f(x: tensor[4, f32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
+            late_valid: "def f(x: tensor[4, f32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
             diagnostic: "split expects List[int] sizes",
         },
         Cell {
             route: "split input",
-            resolved_invalid: "def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
-            late_invalid: "def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
-            late_valid: "def f(x: tensor[4, f32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
+            resolved_invalid: "def f(x: List[i32], s: List[i64]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
+            late_invalid: "def f(x: List[i32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
+            late_valid: "def f(x: tensor[4, f32], s: List[i64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
             diagnostic: "split expects tensor input and List[int] sizes",
         },
         Cell {
             route: "take",
-            resolved_invalid: "def f(x: List[int32], k: f32) -> List[int32] = take(x, k)\n",
-            late_invalid: "def f(x: List[int32], k: f32) -> List[int32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[int32], k: int64) -> List[int32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
+            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = take(x, k)\n",
+            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
             diagnostic: "take expects integer count, got f32",
         },
         Cell {
@@ -754,16 +754,16 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // diagnostic interpolates the callee name and a shared arm that
             // named one of them would pass with the other silently wrong.
             route: "drop",
-            resolved_invalid: "def f(x: List[int32], k: f32) -> List[int32] = drop(x, k)\n",
-            late_invalid: "def f(x: List[int32], k: f32) -> List[int32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[int32], k: int64) -> List[int32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            resolved_invalid: "def f(x: List[i32], k: f32) -> List[i32] = drop(x, k)\n",
+            late_invalid: "def f(x: List[i32], k: f32) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[i32], k: i64) -> List[i32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
             diagnostic: "drop expects integer count, got f32",
         },
         Cell {
             route: "chunk",
-            resolved_invalid: "def f(x: List[int32], k: f32) -> List[List[int32]] = chunk(x, k)\n",
-            late_invalid: "def f(x: List[int32], k: f32) -> List[List[int32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
-            late_valid: "def f(x: List[int32], k: int64) -> List[List[int32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
+            resolved_invalid: "def f(x: List[i32], k: f32) -> List[List[i32]] = chunk(x, k)\n",
+            late_invalid: "def f(x: List[i32], k: f32) -> List[List[i32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[i32], k: i64) -> List[List[i32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
             diagnostic: "chunk expects integer size, got f32",
         },
         Cell {
@@ -771,17 +771,17 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             // axis or step that bound late slipped past the route's own guard
             // while the tensor was already settled.
             route: "permute axis",
-            resolved_invalid: "def f(x: tensor[3, 2, f32], a: int64) -> tensor[2, 3, f32] = permute(x, a, 0i32)\n",
-            late_invalid: "def f(x: tensor[3, 2, f32], a: int64) -> tensor[2, 3, f32] = {\n  g = fn (v) -> permute(x, v, 0i32)\n  g(a)\n}\n",
+            resolved_invalid: "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, 3, f32] = permute(x, a, 0i32)\n",
+            late_invalid: "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, 3, f32] = {\n  g = fn (v) -> permute(x, v, 0i32)\n  g(a)\n}\n",
             late_valid: "def f(x: tensor[3, 2, f32]) -> tensor[2, 3, f32] = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  g(x)\n}\n",
-            diagnostic: "permute expects int32 axis indices, got int64",
+            diagnostic: "permute expects i32 axis indices, got i64",
         },
         Cell {
             route: "stride step",
-            resolved_invalid: "def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
-            late_invalid: "def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
+            resolved_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
+            late_invalid: "def f(x: tensor[2, 4, f32], a: i32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
             late_valid: "def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = {\n  g = fn (t) -> stride(t, 1i64, 2i64)\n  g(x)\n}\n",
-            diagnostic: "stride expects int64 strides (write 2i64), got int32",
+            diagnostic: "stride expects i64 strides (write 2i64), got i32",
         },
     ] {
         run_cell(&cell);
@@ -798,11 +798,11 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     for (route, program) in [
         (
             "len",
-            "def f() -> int32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
         ),
         (
             "index",
-            "def f(xs: List[int32]) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  1i32\n}\n",
+            "def f(xs: List[i32]) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  1i32\n}\n",
         ),
     ] {
         let errors =
@@ -822,7 +822,7 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     }
 
     check(
-        "def f(c: tensor[3, bool], b: tensor[3, f32]) -> int32 = {\n  \
+        "def f(c: tensor[3, bool], b: tensor[3, f32]) -> i32 = {\n  \
          g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
     )
     .unwrap_or_else(|e| {
@@ -833,7 +833,7 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     });
 
     // The standard library's own shape, reduced to one declaration.
-    check("def f() -> Dict[string, int32] = dict_of([])\n").unwrap_or_else(|e| {
+    check("def f() -> Dict[string, i32] = dict_of([])\n").unwrap_or_else(|e| {
         panic!(
             "dict_of: the declared result decides an empty literal's element type, and the \
              operand never binds:\n{}",
@@ -842,15 +842,14 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     });
 
     // Applied once, validly: still accepted, and the route ran.
-    check("def f(x: List[int32]) -> int64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
+    check("def f(x: List[i32]) -> i64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
         .unwrap_or_else(|e| panic!("len: a valid binding must check:\n{}", summary(&e)));
 
     // Applied once, invalidly: rejected with the ROUTE's own text. Accepting
     // the never-bound case is not the same as not checking; this is the cell
     // that separates the two.
-    let errors =
-        check("def f(x: tensor[3, f32]) -> int64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
-            .expect_err("len over a tensor must be rejected once the operand binds");
+    let errors = check("def f(x: tensor[3, f32]) -> i64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
+        .expect_err("len over a tensor must be rejected once the operand binds");
     assert!(
         errors
             .iter()
@@ -901,7 +900,7 @@ fn a_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     // validation of a call that did NOT fail eagerly: the same route, invalid
     // only in the operand that binds late, still rejects.
     let errors = check(
-        "def f(x: int32) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1i64)\n  g(x)\n}\n",
+        "def f(x: i32) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1i64)\n  g(x)\n}\n",
     )
     .expect_err("string_slice over a late-bound non-string must be rejected");
     assert!(
@@ -959,7 +958,7 @@ fn run_dtype_cell(row: &DtypeCell) {
             match row.cell.route {
                 "add" => "bool",
                 "shl" | "shr" => "f32",
-                _ => "int32",
+                _ => "i32",
             },
         );
         return;
@@ -991,10 +990,10 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "sqrt",
-                resolved_invalid: "def f(x: int32) -> int32 = sqrt(x)\n",
-                late_invalid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: i32) -> i32 = sqrt(x)\n",
+                late_invalid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
                 late_valid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
-                diagnostic: "sqrt does not accept argument type int32 in this context",
+                diagnostic: "sqrt does not accept argument type i32 in this context",
             },
             resolved_valid: "def f(x: f32) -> f32 = sqrt(x)\n",
         },
@@ -1004,10 +1003,10 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "and",
-                resolved_invalid: "def f(x: int32) -> int32 = and(x, x)\n",
-                late_invalid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: i32) -> i32 = and(x, x)\n",
+                late_invalid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
                 late_valid: "def f(x: bool) -> bool = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
-                diagnostic: "and does not accept argument type int32 in this context",
+                diagnostic: "and does not accept argument type i32 in this context",
             },
             resolved_valid: "def f(x: bool) -> bool = and(x, x)\n",
         },
@@ -1016,30 +1015,30 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
                 route: "add",
                 resolved_invalid: "def f(x: bool) -> bool = add(x, x)\n",
                 late_invalid: "def f(x: bool) -> bool = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
-                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
+                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
                 diagnostic: "add on bool operands is not admitted",
             },
-            resolved_valid: "def f(x: int32) -> int32 = add(x, x)\n",
+            resolved_valid: "def f(x: i32) -> i32 = add(x, x)\n",
         },
         // The reduction family's own dtype rule, reached from the first-argument
         // arm of `validate_numeric_and_reduction_arguments`.
         DtypeCell {
             cell: Cell {
                 route: "mean",
-                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n",
-                late_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[i32] = mean(x, 0i32)\n",
+                late_invalid: "def f(x: tensor[3, i32]) -> tensor[i32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
-                diagnostic: "mean on operand precision `int32` is not admitted",
+                diagnostic: "mean on operand precision `i32` is not admitted",
             },
             resolved_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n",
         },
         DtypeCell {
             cell: Cell {
                 route: "softmax",
-                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = softmax(x, 0i32)\n",
-                late_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] = softmax(x, 0i32)\n",
+                late_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
-                diagnostic: "softmax on operand precision `int32` is not admitted",
+                diagnostic: "softmax on operand precision `i32` is not admitted",
             },
             resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = softmax(x, 0i32)\n",
         },
@@ -1050,8 +1049,8 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-float template)",
-                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 diagnostic: "uniform_like expects a float tensor template",
             },
@@ -1060,8 +1059,8 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-tensor template)",
-                resolved_invalid: "def f(x: int32) -> int32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
-                late_invalid: "def f(x: int32) -> int32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                resolved_invalid: "def f(x: i32) -> i32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(x: i32) -> i32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 diagnostic: "uniform_like expects tensor template input",
             },
@@ -1073,22 +1072,22 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "mod",
-                resolved_invalid: "def f(x: int64) -> int64 = mod(x, 3i32)\n",
-                late_invalid: "def f(x: int64) -> int64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
-                diagnostic: "mod requires matching integer arguments, got int64 and int32",
+                resolved_invalid: "def f(x: i64) -> i64 = mod(x, 3i32)\n",
+                late_invalid: "def f(x: i64) -> i64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
+                diagnostic: "mod requires matching integer arguments, got i64 and i32",
             },
-            resolved_valid: "def f(x: int32) -> int32 = mod(x, 3i32)\n",
+            resolved_valid: "def f(x: i32) -> i32 = mod(x, 3i32)\n",
         },
         DtypeCell {
             cell: Cell {
                 route: "bitand",
-                resolved_invalid: "def f(x: int64) -> int64 = bitand(x, 3i32)\n",
-                late_invalid: "def f(x: int64) -> int64 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
-                diagnostic: "bitand requires matching integer arguments, got int64 and int32",
+                resolved_invalid: "def f(x: i64) -> i64 = bitand(x, 3i32)\n",
+                late_invalid: "def f(x: i64) -> i64 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
+                diagnostic: "bitand requires matching integer arguments, got i64 and i32",
             },
-            resolved_valid: "def f(x: int32) -> int32 = bitand(x, 3i32)\n",
+            resolved_valid: "def f(x: i32) -> i32 = bitand(x, 3i32)\n",
         },
         // The shift operators, whose admissibility was two boolean
         // disjunctions rather than match arms until this repair.
@@ -1097,20 +1096,20 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
                 route: "shl",
                 resolved_invalid: "def f(x: f32) -> f32 = shl(x, 1i32)\n",
                 late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
-                diagnostic: "shl requires integer lhs and shift amount, got f32 and int32",
+                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
+                diagnostic: "shl requires integer lhs and shift amount, got f32 and i32",
             },
-            resolved_valid: "def f(x: int32) -> int32 = shl(x, 1i32)\n",
+            resolved_valid: "def f(x: i32) -> i32 = shl(x, 1i32)\n",
         },
         DtypeCell {
             cell: Cell {
                 route: "shr",
                 resolved_invalid: "def f(x: f32) -> f32 = shr(x, 1i32)\n",
                 late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
-                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
-                diagnostic: "shr requires integer lhs and shift amount, got f32 and int32",
+                late_valid: "def f(x: i32) -> i32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
+                diagnostic: "shr requires integer lhs and shift amount, got f32 and i32",
             },
-            resolved_valid: "def f(x: int32) -> int32 = shr(x, 1i32)\n",
+            resolved_valid: "def f(x: i32) -> i32 = shr(x, 1i32)\n",
         },
     ] {
         run_dtype_cell(&row);
@@ -1127,24 +1126,24 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
     for (route, program) in [
         (
             "sqrt",
-            "def f() -> int32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
         ),
         (
             "mod",
-            "def f() -> int32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
         ),
         (
             "shl",
-            "def f() -> int32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
         ),
         (
             "uniform_like",
-            "def f() -> int32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+            "def f() -> i32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
         ),
     ] {
         if matches!(route, "sqrt" | "mod" | "shl") {
             let family = if route == "sqrt" { "Float" } else { "Int" };
-            let parameter = if route == "sqrt" { "f32" } else { "int32" };
+            let parameter = if route == "sqrt" { "f32" } else { "i32" };
             let errors = check(program).expect_err("a new family requirement cannot escape");
             assert!(
                 errors.iter().any(|error| {
@@ -1181,11 +1180,11 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
 fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
     for (route, program) in [
         ("sqrt", "def f(x: f32) -> f32 = sqrt(nope(x))\n"),
-        ("mod", "def f(x: int32) -> int32 = mod(nope(x), 3i32)\n"),
-        ("shl", "def f(x: int32) -> int32 = shl(nope(x), 1i32)\n"),
+        ("mod", "def f(x: i32) -> i32 = mod(nope(x), 3i32)\n"),
+        ("shl", "def f(x: i32) -> i32 = shl(nope(x), 1i32)\n"),
         (
             "add",
-            "def f(x: int32) -> int32 = {\n  g = fn (t) -> add(t, nope(x))\n  g(x)\n}\n",
+            "def f(x: i32) -> i32 = {\n  g = fn (t) -> add(t, nope(x))\n  g(x)\n}\n",
         ),
     ] {
         let errors = check(program).expect_err("the unbound callee is an error");
@@ -1217,7 +1216,7 @@ fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
 /// the string routes.
 #[test]
 fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
-    let program = "def f(x: int32) -> int32 = {\n  g = fn (t) -> mod(t, 3.0f32)\n  g(x)\n}\n";
+    let program = "def f(x: i32) -> i32 = {\n  g = fn (t) -> mod(t, 3.0f32)\n  g(x)\n}\n";
     let errors = check(program).expect_err("mod over a float shift amount must be rejected");
     let hits = errors
         .iter()
@@ -1237,8 +1236,8 @@ fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     // NEGATIVE TWIN. Cancelling a failed call's suspension must not cancel a
     // call that did not fail eagerly: the same operator, invalid only in the
     // operand that binds late, still rejects.
-    let errors = check("def f(x: int64) -> int64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n")
-        .expect_err("mod over a late-bound int64 must be rejected");
+    let errors = check("def f(x: i64) -> i64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n")
+        .expect_err("mod over a late-bound i64 must be rejected");
     assert!(
         errors.iter().any(|e| e
             .message
@@ -1271,18 +1270,18 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
         ),
         (
             "div",
-            "def f(x: int32) -> int32 = {\n  g = fn (t) -> div(t, 2i32)\n  g(x)\n}\n",
-            "div on integer operand precision `int32` is not admitted",
+            "def f(x: i32) -> i32 = {\n  g = fn (t) -> div(t, 2i32)\n  g(x)\n}\n",
+            "div on integer operand precision `i32` is not admitted",
         ),
         (
             "sum (non-tensor operand)",
-            "def f(x: int32) -> int32 = {\n  g = fn (t) -> sum(t, 0i32)\n  g(x)\n}\n",
-            "sum expects tensor input, got int32",
+            "def f(x: i32) -> i32 = {\n  g = fn (t) -> sum(t, 0i32)\n  g(x)\n}\n",
+            "sum expects tensor input, got i32",
         ),
         (
             "dropout",
-            "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = {\n  g = fn (t) -> dropout(t, 0.5f32)\n  g(x)\n}\n",
-            "tensor precision mismatch: f32 vs int32",
+            "def f(x: tensor[3, i32]) -> tensor[3, i32] ! {Random} = {\n  g = fn (t) -> dropout(t, 0.5f32)\n  g(x)\n}\n",
+            "tensor precision mismatch: f32 vs i32",
         ),
         (
             "test_assert_close_tensor",
@@ -1312,7 +1311,7 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
 #[test]
 fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
     const HELPER: &str = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
-    const INT_TEXT: &str = "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`";
+    const INT_TEXT: &str = "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `i32`";
 
     for (label, program) in [
         (
@@ -1322,7 +1321,7 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
         (
             "a nested call's declared result",
             format!(
-                "{HELPER}def h() -> tensor[3, int32] = to_tensor([1i32, 2i32, 4i32])\n\
+                "{HELPER}def h() -> tensor[3, i32] = to_tensor([1i32, 2i32, 4i32])\n\
                  f = g(h())\n"
             ),
         ),
@@ -1333,13 +1332,13 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
         (
             "a tuple element of a declared parameter",
             format!(
-                "{HELPER}def pick(pair: (tensor[3, int32], int32)) -> tensor[int32] = g(pair.0)\n\
+                "{HELPER}def pick(pair: (tensor[3, i32], i32)) -> tensor[i32] = g(pair.0)\n\
                  f = pick((to_tensor([1i32, 2i32, 4i32]), 7i32))\n"
             ),
         ),
     ] {
         let Err(errors) = check(&program) else {
-            panic!("{label}: the int32 instantiation must be rejected");
+            panic!("{label}: the i32 instantiation must be rejected");
         };
         assert!(
             errors.iter().any(|e| e.message.contains(INT_TEXT)),
@@ -1358,7 +1357,7 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
     ))
     .expect("an f32 instantiation of the same helper is well typed");
     check(&format!(
-        "{HELPER}def pick(pair: (tensor[3, f32], int32)) -> tensor[f32] = g(pair.0)\n\
+        "{HELPER}def pick(pair: (tensor[3, f32], i32)) -> tensor[f32] = g(pair.0)\n\
          f = pick((to_tensor([1.0f32, 2.0f32, 4.0f32]), 7i32))\n"
     ))
     .expect("the same tuple projection at f32 is admitted");
@@ -1373,13 +1372,13 @@ fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
     const HELPER: &str = "def id_dt[p](x: tensor[3, p]) -> tensor[3, p] = x\n";
 
     let errors = check(&format!(
-        "{HELPER}def f() -> tensor[int32] = \
+        "{HELPER}def f() -> tensor[i32] = \
          (fn (v) -> mean(id_dt(v), 0i32))(to_tensor([1i32, 2i32, 4i32]))\n"
     ))
-    .expect_err("a precision that binds to int32 one application later must be rejected");
+    .expect_err("a precision that binds to i32 one application later must be rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
-            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`"
+            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `i32`"
         )),
         "the discharged rejection names the BOUND dtype, not the binder:\n{}",
         summary(&errors)
@@ -1463,10 +1462,10 @@ fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
 #[test]
 fn every_family_policy_route_rejects_an_inadmissible_instantiation() {
     for (body, elements, family, dtype) in [
-        ("sqrt(x)", "1i32, 4i32, 9i32", "Float", "int32"),
-        ("div(x, x)", "1i32, 4i32, 9i32", "Float", "int32"),
+        ("sqrt(x)", "1i32, 4i32, 9i32", "Float", "i32"),
+        ("div(x, x)", "1i32, 4i32, 9i32", "Float", "i32"),
         ("trunc_div(x, x)", "1.0f32, 4.0f32, 9.0f32", "Int", "f32"),
-        ("softmax(x, 0i32)", "1i32, 2i32, 4i32", "Float", "int32"),
+        ("softmax(x, 0i32)", "1i32, 2i32, 4i32", "Float", "i32"),
     ] {
         let program = format!(
             "def g[p: {family}](x: tensor[3, p]) -> tensor[3, p] = {body}\nf = g(to_tensor([{elements}]))\n"
@@ -1497,14 +1496,14 @@ fn every_family_policy_route_rejects_an_inadmissible_instantiation() {
 #[test]
 fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     const FAMILY: &str = "type variable bounded by dtype family `Float` (the active float dtypes) \
-         cannot be instantiated at `int32`";
+         cannot be instantiated at `i32`";
 
     check("def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
         .expect("the signature's own bound makes the declaration well typed");
 
     let errors = check(
         "def g[p: Float](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
-         def f() -> tensor[3, int32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
+         def f() -> tensor[3, i32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
     )
     .expect_err("the integer instantiation must be rejected");
     assert!(
@@ -1543,7 +1542,7 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
 /// admissible.
 ///
 /// REGRESSION TEST, both assertions, from round 1's P1-1 probes. On
-/// `a36c7c581` the first was REJECTED naming `int32`, a dtype the call's
+/// `a36c7c581` the first was REJECTED naming `i32`, a dtype the call's
 /// operand does not carry, and the second was ACCEPTED at score 1 with the
 /// compiled C lane printing `f = 2` for a true 2.3333333.
 #[test]
@@ -1560,14 +1559,14 @@ fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
 
     let errors = check(&format!(
         "{HELPER}t = to_tensor([1.0f32, 2.0f32, 4.0f32])\n\
-         def pick() -> tensor[int32] = {{\n  \
+         def pick() -> tensor[i32] = {{\n  \
          t = to_tensor([1i32, 2i32, 4i32])\n  g(t)\n}}\n\
          f = pick()\n"
     ))
-    .expect_err("the local int32 binding is what `g` receives, so the program is rejected");
+    .expect_err("the local i32 binding is what `g` receives, so the program is rejected");
     assert!(
         errors.iter().any(|e| e.message.contains(
-            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`"
+            "type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `i32`"
         )),
         "the rejection must name the LOCAL binding's dtype:\n{}",
         summary(&errors)
@@ -1595,11 +1594,11 @@ fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
         ] {
             let result = check(&program);
             if rejects {
-                let errors = result.expect_err("the referenced binding carries int32");
+                let errors = result.expect_err("the referenced binding carries i32");
                 assert!(
                     errors.iter().any(|error| error
                         .message
-                        .contains("type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `int32`")),
+                        .contains("type variable bounded by dtype family `Float` (the active float dtypes) cannot be instantiated at `i32`")),
                     "{}",
                     summary(&errors)
                 );
@@ -1632,9 +1631,9 @@ fn bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation(
         assert_family_error(&errors, "Numeric", "bool");
         check(&format!(
             "def g[p: Numeric](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
-             def f() -> tensor[3, int32] = g(to_tensor([1i32, 2i32, 4i32]))\n"
+             def f() -> tensor[3, i32] = g(to_tensor([1i32, 2i32, 4i32]))\n"
         ))
-        .expect("the same arithmetic at int32 is admitted");
+        .expect("the same arithmetic at i32 is admitted");
     }
 }
 
@@ -1648,7 +1647,7 @@ fn the_spellings_the_argument_reader_does_not_resolve_remain_unreached() {
     // Historical identity retained for the class oracle. Every former residual
     // is now a rejection, paired with the same bounded program at f32.
     for (dtype, values, accepts) in [
-        ("int32", "[1i32, 2i32, 4i32]", false),
+        ("i32", "[1i32, 2i32, 4i32]", false),
         ("f32", "[1.0f32, 2.0f32, 4.0f32]", true),
     ] {
         let helper = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
@@ -1688,13 +1687,13 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
     for (route, program, _diagnostic) in [
         (
             "softmax",
-            "def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n",
-            "softmax on operand precision `int32` is not admitted",
+            "def f() -> tensor[3, i32] = softmax(to_tensor([]), 0i32)\n",
+            "softmax on operand precision `i32` is not admitted",
         ),
         (
             "sqrt",
-            "def f() -> tensor[3, int32] = sqrt(to_tensor([]))\n",
-            "sqrt on operand precision `int32` is not admitted",
+            "def f() -> tensor[3, i32] = sqrt(to_tensor([]))\n",
+            "sqrt on operand precision `i32` is not admitted",
         ),
         (
             "add",
@@ -1708,7 +1707,7 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
         assert_family_error(
             &errors,
             if route == "add" { "Numeric" } else { "Float" },
-            if route == "add" { "bool" } else { "int32" },
+            if route == "add" { "bool" } else { "i32" },
         );
     }
 
@@ -1809,7 +1808,7 @@ fn expect_exact_error(program: &str, expected: &str) {
 fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
     let program = |declared: &str| {
         format!(
-            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
              def probe(t: tensor[4, 3, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => sum(a, 0) }}, (t, 1i32))\n"
         )
     };
@@ -1850,7 +1849,7 @@ fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
 fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
     let program = |declared: &str| {
         format!(
-            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
              def probe(t: tensor[4, 3, f32], w: tensor[3, 5, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => matmul(a, w) }}, (t, 1i32))\n"
         )
     };
@@ -1990,7 +1989,7 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
     for (case, program, kind, diagnostic) in [
         (
             "pattern arity disagrees with the scrutinee",
-            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+            "def apply_p[b](f: ((tensor[4, 3, f32], i32)) -> b, r: (tensor[4, 3, f32], i32)) -> b = f(r)\n\
              def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_p(fn (q) -> match q with { | (a, k, z) => sum(a, 0) }, (t, 1i32))\n",
             "ArityMismatch",
             "tuple length mismatch: 2 vs 3",
@@ -2117,7 +2116,7 @@ fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
         format!(
             "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> {declared} = apply_v(fn (v) -> sum(gather(v, i, 0i32), 0), t)\n"
+             def probe(t: tensor[4, 3, f32], i: tensor[2, i32]) -> {declared} = apply_v(fn (v) -> sum(gather(v, i, 0i32), 0), t)\n"
         )
     };
 
@@ -2125,7 +2124,7 @@ fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     expect_exact_error(
         &program("tensor[99, f32]"),
         &signature_mismatch(
-            "tensor[4, 3, f32], tensor[2, int32]",
+            "tensor[4, 3, f32], tensor[2, i32]",
             "tensor[3, f32]",
             "tensor[99, f32]",
         ),
@@ -2177,7 +2176,7 @@ fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     let program = |declared: &str| {
         format!(
             "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
-             def probe(t: tensor[4, 3, f32], i: tensor[2, int32], u: tensor[2, 3, f32]) -> {declared} = apply_v(fn (v) -> sum(scatter_replace(v, i, u, 0i32), 0), t)\n"
+             def probe(t: tensor[4, 3, f32], i: tensor[2, i32], u: tensor[2, 3, f32]) -> {declared} = apply_v(fn (v) -> sum(scatter_replace(v, i, u, 0i32), 0), t)\n"
         )
     };
 
@@ -2185,7 +2184,7 @@ fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
     expect_exact_error(
         &program("tensor[99, f32]"),
         &signature_mismatch(
-            "tensor[4, 3, f32], tensor[2, int32], tensor[2, 3, f32]",
+            "tensor[4, 3, f32], tensor[2, i32], tensor[2, 3, f32]",
             "tensor[3, f32]",
             "tensor[99, f32]",
         ),
@@ -2262,10 +2261,10 @@ f=g(to_tensor([1i32, 2i32, 4i32]))
     for body in [
         "mean(x, 0i32)",
         "{\n y = x\n x = to_tensor([1.0f32, 2.0f32, 3.0f32])\n mean(y, 0i32)\n}",
-        "{\n h = fn (y: int32) -> mean(x, 0i32)\n h(1i32)\n}",
+        "{\n h = fn (y: i32) -> mean(x, 0i32)\n h(1i32)\n}",
     ] {
         for (dtype, values, rejects) in [
-            ("int32", "[1i32, 2i32, 4i32]", true),
+            ("i32", "[1i32, 2i32, 4i32]", true),
             ("f32", "[1.0f32, 2.0f32, 4.0f32]", false),
         ] {
             let program = format!(
@@ -2273,7 +2272,7 @@ f=g(to_tensor([1i32, 2i32, 4i32]))
             );
             let result = check(&program);
             if rejects {
-                let errors = result.expect_err("the captured parameter still carries int32");
+                let errors = result.expect_err("the captured parameter still carries i32");
                 assert_family_error(&errors, "Float", dtype);
             } else {
                 result.expect("the captured float parameter remains admissible");
@@ -2326,7 +2325,7 @@ fn every_family_route_checks_concrete_helper_instantiations() {
             if float == (op == "trunc_div") {
                 let errors =
                     result.expect_err(&format!("{op}: inadmissible concrete instantiation"));
-                assert_family_error(&errors, family, if float { "f32" } else { "int32" });
+                assert_family_error(&errors, family, if float { "f32" } else { "i32" });
             } else {
                 result.unwrap_or_else(|errors| panic!("{op}: {}", summary(&errors)));
             }

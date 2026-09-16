@@ -55,7 +55,7 @@ fn call_witness_checks_each_literal_and_returns_the_observed_extent() {
             assert!(
                 error
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "{error}"
             );
             assert!(

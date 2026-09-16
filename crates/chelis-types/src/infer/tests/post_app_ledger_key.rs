@@ -67,7 +67,7 @@ fn a_route_that_re_registers_during_a_replay_keeps_the_original_key() {
 #[test]
 fn two_distinct_eager_calls_keep_distinct_keys() {
     let keys = check_and_take_keys(
-        "def f(a: List[int32], b: List[int32]) -> int64 = {\n  \
+        "def f(a: List[i32], b: List[i32]) -> i64 = {\n  \
          g = fn (t) -> len(t)\n  \
          h = fn (u) -> len(u)\n  \
          add(g(a), h(b))\n}\n",

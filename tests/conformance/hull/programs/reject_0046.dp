@@ -1,2 +1,3 @@
-(deftype {} Maybe () (variant {} Just (t-prim {} int32)) (variant {} Nothing))
-(def {} g (app {} (var {} Just) (lit {type: (t-prim {} int32)} 1)))
+(deftype {} Maybe () (variant {} Just (t-prim {} i32)) (variant {} Nothing))
+
+(def {} g (app {} (var {} Just) (lit {type: (t-prim {} i32)} 1)))

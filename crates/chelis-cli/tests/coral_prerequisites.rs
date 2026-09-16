@@ -17,7 +17,7 @@ fn coral_prerequisites() {
 
 type Column =
   | FloatCol(tensor[4, f32])
-  | IntCol(tensor[4, int64])
+  | IntCol(tensor[4, i64])
 
 def get_float(c: Column) -> tensor[4, f32] = match c with {
   | FloatCol(t) => t
@@ -65,7 +65,7 @@ value = make_dict()
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, bool] =
+def filter_bools(mask: tensor[4, bool], indices: tensor[2, i64]) -> tensor[2, bool] =
   gather(mask, indices, 0)
 "#,
     );
@@ -91,8 +91,8 @@ def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, 
 
 import Std.Tensor.Construct (arange)
 
-ar_0_4 = arange(cast(0, int32), cast(4, int32))
-ar_2_6 = arange(cast(2, int32), cast(6, int32))
+ar_0_4 = arange(cast(0, i32), cast(4, i32))
+ar_2_6 = arange(cast(2, i32), cast(6, i32))
 "#,
     );
     Command::cargo_bin("chelis")
@@ -186,7 +186,7 @@ fn coral_where_indices_all_false_returns_empty_tensor() {
     // Previously this panicked the evaluator because `numel` floored zero-
     // length tensors to 1, tripping the length assertion in `from_vec`.
     // After the 3t cleanup fix, the evaluator honors the zero dimension and
-    // the empty mask path produces a legitimate `tensor[0, int64]`.
+    // the empty mask path produces a legitimate `tensor[0, i64]`.
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices-empty");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -319,7 +319,7 @@ fn coral_comparison_ops_broadcast_tensor_scalar() {
         r#"module Demo.Main
 
 def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
-def mk_ints() -> tensor[3, int64] = (to_tensor([cast(1, int64), cast(2, int64), cast(3, int64)]) : tensor[3, int64])
+def mk_ints() -> tensor[3, i64] = (to_tensor([cast(1, i64), cast(2, i64), cast(3, i64)]) : tensor[3, i64])
 def mk_bools() -> tensor[3, bool] = to_tensor([true, false, true])
 
 xs_print = mk_xs()
@@ -331,7 +331,7 @@ gte_mask = gte(mk_xs(), 2.0)
 lte_mask = lte(mk_xs(), 2.0)
 cmplt_mask = cmplt(mk_xs(), 2.0)
 gt_left = gt(1.5, mk_xs())
-gt_ints = gt(mk_ints(), cast(1, int64))
+gt_ints = gt(mk_ints(), cast(1, i64))
 eq_bools = eq(mk_bools(), true)
 "#,
     );
@@ -402,7 +402,7 @@ eq_bools = eq(mk_bools(), true)
 }
 
 /// Negative parity for the comparison-op broadcast: mismatched precision
-/// (e.g. `tensor[3, f32]` vs `int64` scalar) must still be rejected, so a
+/// (e.g. `tensor[3, f32]` vs `i64` scalar) must still be rejected, so a
 /// silent precision coercion can't sneak in. Ordered comparisons on bool
 /// tensors must also still error (bool ordering has no defined meaning;
 /// only `eq`/`neq` accept bool).
@@ -411,7 +411,7 @@ eq_bools = eq(mk_bools(), true)
 fn coral_comparison_ops_reject_mismatched_precision() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-mismatch");
 
-    // f32 tensor vs int64 scalar must fail.
+    // f32 tensor vs i64 scalar must fail.
     // Issue #207: type errors now produce exit 2; assert on stdout
     // content only (the dedicated invariant test covers the exit code).
     write_file(
@@ -419,7 +419,7 @@ fn coral_comparison_ops_reject_mismatched_precision() {
         r#"module Demo.Main
 
 xs = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
-bad = gt(xs, cast(1, int64))
+bad = gt(xs, cast(1, i64))
 "#,
     );
     Command::cargo_bin("chelis")

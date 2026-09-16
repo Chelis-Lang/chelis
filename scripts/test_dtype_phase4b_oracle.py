@@ -238,7 +238,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "is a\n> dedicated reduction and is not a `cast` plus `sum` lowering",
-            "lowers to `sum(cast(x, int64), axis)`",
+            "lowers to `sum(cast(x, i64), axis)`",
         )
         self.assert_contract_fails("OP-29.*dedicated reduction")
 
@@ -268,13 +268,13 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "`csv_int` | `(List[Dict[string,string]], int64, string) -> int64`",
-                "`csv_int` | `(List[Dict[string,f64]], int32, string) -> int32`",
+                "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
+                "`csv_int` | `(List[Dict[string,f64]], i32, string) -> i32`",
                 "OP-3.*csv_int",
             ),
             (
                 "It never\n> truncates or rounds a float\n> into an integer",
-                "It truncates float variants into int64",
+                "It truncates float variants into i64",
                 "OP-3.*never truncates",
             ),
             (
@@ -296,7 +296,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_json_numeric_construction_never_implicitly_widens(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly int64",
+            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly i64",
             "`JsonFloat(value)` accepts any float and widens it to f64",
         )
         self.assert_contract_fails("OP-4.*exactly f64")
@@ -305,7 +305,7 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "emits a stored `JsonInt` int64\n> as its exact decimal digits",
+                "emits a stored `JsonInt` i64\n> as its exact decimal digits",
                 "emits every stored number through f64",
                 "OP-5.*exact decimal digits",
             ),
@@ -407,11 +407,11 @@ class ContractValidationTests(unittest.TestCase):
     def test_integer_form_json_overflow_never_falls_back_to_jnum(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "An integer-form token outside int64 range SHALL ingest as\n"
+            "An integer-form token outside i64 range SHALL ingest as\n"
             "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
             " never\n"
             "> selects a lossy float image for an integer-form token.",
-            "An integer-form token outside int64 range falls back to `JNum`.",
+            "An integer-form token outside i64 range falls back to `JNum`.",
         )
         self.assert_contract_fails("OP-2.*JsonBigInt")
 
@@ -537,8 +537,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_host_numeric_builtin_manifest_has_no_specialized_compatibility_identities(self) -> None:
         block = self.repository_atom("05-OP-38")
         for identity in (
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
-            "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`",
+            "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
         ):
             with self.subTest(identity=identity):
@@ -793,7 +793,7 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         for old, new, message in (
             ("excluding spare storage capacity", "including spare storage capacity", "OP-33.*excluding spare"),
-            ("takes rank and every target extent as exact tagged\n> int64 scalars", "takes unclassified integer metadata", "OP-33.*exact tagged int64"),
+            ("takes rank and every target extent as exact tagged\n> i64 scalars", "takes unclassified integer metadata", "OP-33.*exact tagged i64"),
             ("changes no metadata, ownership, or\n> payload", "may mutate the descriptor", "OP-33.*changes no metadata"),
             ("preserves every stored element bit", "converts elements through f32", "OP-33.*preserves every stored element bit"),
         ):
@@ -903,7 +903,7 @@ class ContractValidationTests(unittest.TestCase):
         mutations = (
             (
                 "Scatter indices have any active signed-integer dtype",
-                "Scatter indices are limited to int32 or int64",
+                "Scatter indices are limited to i32 or i64",
                 "OP-33.*any active signed-integer",
             ),
             (
@@ -918,9 +918,9 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "There is no public string\n"
-                "> scatter mode and no int32/int64-only dispatch exception",
-                "An int32/int64-only compatibility dispatch remains available",
-                "OP-33.*no int32/int64-only",
+                "> scatter mode and no i32/i64-only dispatch exception",
+                "An i32/i64-only compatibility dispatch remains available",
+                "OP-33.*no i32/i64-only",
             ),
         )
         for old, new, message in mutations:
@@ -937,7 +937,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "`gather` admits an index tensor of any active signed-integer dtype",
-            "`gather` admits only int32 and int64 index tensors",
+            "`gather` admits only i32 and i64 index tensors",
         )
         self.assert_contract_fails("OP-33.*any active signed-integer")
 
@@ -2001,8 +2001,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_process_stdlib_identities_require_io_effects(self) -> None:
         self.replace(
             Path("spec/registry/stdlib_numeric_manifest.md"),
-            "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
-            "`process::run` | `(string,List[string])->(int64,string,string)`",
+            "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
+            "`process::run` | `(string,List[string])->(i64,string,string)`",
         )
         self.assert_contract_fails("OP-35.*process::run")
 
@@ -2071,7 +2071,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_linspace_has_no_nonpositive_count_compatibility_case(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "requires finite endpoints and\n> int64 `count >= 1`",
+            "requires finite endpoints and\n> i64 `count >= 1`",
             "accepts nonpositive counts as a one-element result",
         )
         self.assert_contract_fails("OP-35.*count >= 1")
@@ -2105,8 +2105,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_stdlib_manifest_uses_rank_polymorphic_sort_and_generic_scalar_equality(self) -> None:
         block = self.repository_atom("05-OP-35")
         self.assertIn(
-            "`sort::sort` | `(&tensor[..r,p_numeric],int32)->"
-            "(tensor[..r,p_numeric],tensor[..r,int64])`",
+            "`sort::sort` | `(&tensor[..r,p_numeric],i32)->"
+            "(tensor[..r,p_numeric],tensor[..r,i64])`",
             block,
         )
         self.assertIn(
@@ -2121,7 +2121,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "Numeric\n> tokens follow [05-OP-2]",
-            "Integer-form tokens outside int64 fall back to `JsonFloat`",
+            "Integer-form tokens outside i64 fall back to `JsonFloat`",
         )
         self.assert_contract_fails("OP-35.*Numeric tokens")
 
@@ -2169,7 +2169,7 @@ class ContractValidationTests(unittest.TestCase):
                 "| `tensor/construct::arange` | "
                 "`(p_int,p_int)->tensor[n,p_int]` |",
                 "| `tensor/construct::arange` | "
-                "`(int32,int32)->tensor[n,int32]` |",
+                "`(i32,i32)->tensor[n,i32]` |",
                 "OP-35.*exact manifest",
             ),
             (
@@ -2180,7 +2180,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "returns the increasing half-open same-dtype sequence",
-                "returns an int64 sequence for every endpoint dtype",
+                "returns an i64 sequence for every endpoint dtype",
                 "OP-35.*same-dtype sequence",
             ),
             (
@@ -2261,8 +2261,8 @@ class ContractValidationTests(unittest.TestCase):
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
-                "(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E",
-                "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
+                "(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E",
+                "(f32,((f32,i64)->f32),i64)->tensor[n,f32]",
             ),
         }
         for atom, (old, new) in mutations.items():
@@ -2335,7 +2335,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "`p_int` over all active signed\n> integers",
-                "`p_int` over int64 only",
+                "`p_int` over i64 only",
                 "OP-35.*p_int",
             ),
             (
@@ -2555,7 +2555,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/04-type-system.md"),
-                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at i64`",
                 "`numeric trap: domain in <op> at <prim>`",
                 "runtime extent guard trap line",
             ),
@@ -2619,7 +2619,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> "
                 "tensor[D_plus,p]` | Insert a new dimension of width `size` "
                 "at position `axis`, producing rank `rank(x) + 1`.",
                 "| `insert` | unspecified |",
@@ -2737,7 +2737,7 @@ class ContractValidationTests(unittest.TestCase):
             normalized,
         )
         self.assertIn("`bf16` | `f32`, `f64` | `bf16`", text)
-        self.assertIn("`int32` | `int32`, `int64` | accumulator dtype `a`", text)
+        self.assertIn("`i32` | `i32`, `i64` | accumulator dtype `a`", text)
 
     def test_backend_neutral_contract_keeps_all_ten_active_primitives(self) -> None:
         self.replace(
@@ -2921,7 +2921,7 @@ class ContractValidationTests(unittest.TestCase):
             (
                 "interpreted in exact arithmetic and normalized before either "
                 "representation\n> check",
-                "checked for int64 representation before normalization",
+                "checked for i64 representation before normalization",
             ),
             (
                 "removable trailing zeros do not cause `Overflow`",
@@ -2992,7 +2992,7 @@ class ContractValidationTests(unittest.TestCase):
         normalized = self.repository_atom("05-OP-35")
         self.assertIn(
             "`assert_shape` requires its expected list to contain only nonnegative "
-            "int64 extents and compares its length and every entry to the tensor's "
+            "i64 extents and compares its length and every entry to the tensor's "
             "complete shape in axis order",
             normalized,
         )
@@ -3060,11 +3060,11 @@ class ContractValidationTests(unittest.TestCase):
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
-            "`tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]`",
-            "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]`",
+            "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
+            "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
-            "`test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}`",
+            "`test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}`",
         ):
             with self.subTest(signature=signature):
                 self.assertIn(signature, block)
@@ -3077,20 +3077,20 @@ class ContractValidationTests(unittest.TestCase):
                 "(&tensor[n,p_float],p_float)->tensor[n,p_float]!{Random}",
             ),
             (
-                "(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]",
-                "(&tensor[a,1,b,p],int32)->tensor[a,b,p]",
+                "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",
+                "(&tensor[a,1,b,p],i32)->tensor[a,b,p]",
             ),
             (
-                "(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]",
-                "(List[tensor[d,p]],int32)->tensor[rows,d,p]",
+                "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]",
+                "(List[tensor[d,p]],i32)->tensor[rows,d,p]",
             ),
             (
-                "(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]",
-                "(&tensor[d,p],int32)->tensor[1,d,p]",
+                "(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]",
+                "(&tensor[d,p],i32)->tensor[1,d,p]",
             ),
             (
-                "(&tensor[..r,bool])->tensor[hits,int64]",
-                "(&tensor[n,bool])->tensor[hits,int64]",
+                "(&tensor[..r,bool])->tensor[hits,i64]",
+                "(&tensor[n,bool])->tensor[hits,i64]",
             ),
             (
                 "| `test::assert_close_tensor` | "
@@ -3105,8 +3105,8 @@ class ContractValidationTests(unittest.TestCase):
                 "`(&tensor[n,p],&tensor[n,p],string)->unit!{Test}` |",
             ),
             (
-                "(&tensor[..r,p],List[int64],string)->unit!{Test}",
-                "(&tensor[n,p],int64,string)->unit!{Test}",
+                "(&tensor[..r,p],List[i64],string)->unit!{Test}",
+                "(&tensor[n,p],i64,string)->unit!{Test}",
             ),
         )
         for old, new in mutations:
@@ -3189,8 +3189,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_duration_overflow_is_on_the_final_days_field(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "final normalized `days` field has no int64 representation",
-            "any intermediate component total exceeds int64",
+            "final normalized `days` field has no i64 representation",
+            "any intermediate component total exceeds i64",
         )
         self.assert_contract_fails("OP-35.*final normalized")
 
@@ -3208,7 +3208,7 @@ class ContractValidationTests(unittest.TestCase):
             Path("spec/05-risc-primitives.md"),
             "A negative year uses `-` followed by exactly\n"
             "> `max(4, digits(|year|))` decimal digits, where `|year|` is the exact\n"
-            "> mathematical magnitude rather than an int64 `abs`",
+            "> mathematical magnitude rather than an i64 `abs`",
             "A negative year uses an implementation-defined number of digits",
         )
         self.assert_contract_fails("OP-35.*negative year")
@@ -3270,8 +3270,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_num11_preserves_device_and_binding_metadata_domains(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),
-            "A language binding or device descriptor SHALL preserve rank as int32\n"
-            "> and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor SHALL preserve rank as i32\n"
+            "> and each extent, stride, element count, and byte capacity as i64",
             "A language binding or device descriptor MAY narrow rank, extents,\n"
             "> strides, element counts, and byte capacities to an implementation width",
         )
@@ -3965,7 +3965,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "`ScatterElements` SHALL take an index tensor of any active signed-integer dtype",
-            "`ScatterElements` SHALL take only int32 or int64 indices",
+            "`ScatterElements` SHALL take only i32 or i64 indices",
         )
         self.assert_contract_fails("05-SPARSE-1.*active signed-integer")
 

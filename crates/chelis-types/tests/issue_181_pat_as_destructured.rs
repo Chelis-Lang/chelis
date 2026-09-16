@@ -111,7 +111,7 @@ fn render(expr: &Expr) -> String {
 #[test]
 fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
     // type FooState[a] = | FooState { x: a, y: a }
-    // def use_foo[n](state: FooState[tensor[n, f32]]) -> int32 = {
+    // def use_foo[n](state: FooState[tensor[n, f32]]) -> i32 = {
     //   match state with {
     //     | (pat-as {} whole (pat-record {} FooState (kv {} x (pat-var {} x))
     //                                                (kv {} y (pat-var {} y)))) => 0
@@ -126,7 +126,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
   (defsig {} use_foo
     (t-fn {}
       (t-adt {} FooState (t-tensor {} (d-var {} n) (t-prim {} f32)))
-      (t-prim {} int32)))
+      (t-prim {} i32)))
   (def {} use_foo
     (fn {}
       (params {} (state {type: (t-adt {} FooState (t-tensor {} (d-var {} n) (t-prim {} f32)))}))
@@ -139,7 +139,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
               (kv {} x (pat-var {} x))
               (kv {} y (pat-var {} y))))
           ()
-          (lit {type: (t-prim {} int32)} 0))))))
+          (lit {type: (t-prim {} i32)} 0))))))
 "#;
     let exprs = deep(src);
     let checked = check_typed_program(&exprs).expect("type check should succeed");

@@ -371,7 +371,7 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 WireDimInfo::Named { size: None, .. } => {}
             }
         }
-        let dtype = Prim::parse_name(&node.output_type.precision)
+        let dtype = Prim::parse_interchange_name(&node.output_type.precision)
             .ok_or_else(|| reject("unknown output dtype"))?;
         match &node.op {
             WireRiscOp::Sum { axis: a, .. }

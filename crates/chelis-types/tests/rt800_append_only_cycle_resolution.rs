@@ -14,7 +14,7 @@ fn assert_checks(source: &str) {
 fn self_recursive_function_is_prebound_without_diagnostic_erasure() {
     assert_checks(
         r#"
-def countdown(n: int32) =
+def countdown(n: i32) =
   if eq(n, 0) then 0 else countdown(sub(n, 1))
 "#,
     );
@@ -24,9 +24,9 @@ def countdown(n: int32) =
 fn mutually_recursive_functions_are_prebound_without_diagnostic_erasure() {
     assert_checks(
         r#"
-def is_even(n: int32) =
+def is_even(n: i32) =
   if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: int32) =
+def is_odd(n: i32) =
   if eq(n, 0) then false else is_even(sub(n, 1))
 "#,
     );
@@ -37,9 +37,9 @@ fn module_mutual_cycle_uses_the_canonical_dependency_schedule() {
     assert_checks(
         r#"
 module Cycle
-def is_even(n: int32) =
+def is_even(n: i32) =
   if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: int32) =
+def is_odd(n: i32) =
   if eq(n, 0) then false else is_even(sub(n, 1))
 "#,
     );
@@ -47,13 +47,13 @@ def is_odd(n: int32) =
 
 #[test]
 fn context_check_prebinds_new_cycle_and_keeps_library_names_visible() {
-    let library = surf("def dec(n: int32) = sub(n, 1)");
+    let library = surf("def dec(n: i32) = sub(n, 1)");
     let context = build_type_env_from_library(&library).expect("library checks");
     let new_code = surf(
         r#"
-def is_even(n: int32) =
+def is_even(n: i32) =
   if eq(n, 0) then true else is_odd(dec(n))
-def is_odd(n: int32) =
+def is_odd(n: i32) =
   if eq(n, 0) then false else is_even(dec(n))
 "#,
     );
@@ -65,7 +65,7 @@ def is_odd(n: int32) =
 fn genuinely_unknown_callable_still_reports_exactly_once() {
     let result = check_ir_with_context(
         &TypeEnv::empty(),
-        &surf("def caller(n: int32) -> int32 = missing(n)"),
+        &surf("def caller(n: i32) -> i32 = missing(n)"),
     )
     .expect_err("unknown call must reject");
     let unbound = result
@@ -108,7 +108,7 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
     (app {} (var {} later) (var {} n))))
 (def {} later
   (fn {} (params {} n)
-    (app {} (var {} add) (var {} n) (lit {type: (t-prim {} int32)} 1))))
+    (app {} (var {} add) (var {} n) (lit {type: (t-prim {} i32)} 1))))
 "#,
     )
     .expect("Deep fixture parses");

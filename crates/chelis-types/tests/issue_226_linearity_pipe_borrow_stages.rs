@@ -37,7 +37,7 @@ fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>>
 
 #[test]
 fn pipe_into_shape_with_explicit_axis_does_not_consume() {
-    // Minimal repro of issue #226. `table |> shape(cast(0, int32))`
+    // Minimal repro of issue #226. `table |> shape(cast(0, i32))`
     // calls `shape(table, 0)` which is a borrow-arg builtin at arg 0.
     // The piped value (`table`) lands at the borrow position, so the
     // pipe must not consume `table`, and the later `gather(table, ...)`
@@ -46,9 +46,9 @@ fn pipe_into_shape_with_explicit_axis_does_not_consume() {
         r#"
 def f[batch, seq, max_seq, hidden](
     table: tensor[max_seq, hidden, f32],
-    ids: &tensor[batch, seq, int64]
+    ids: &tensor[batch, seq, i64]
 ) -> tensor[batch, seq, hidden, f32] = {
-  max_seq_dim = table |> shape(cast(0, int32))
+  max_seq_dim = table |> shape(cast(0, i32))
   gather(table, ids, 0)
 }
 "#,

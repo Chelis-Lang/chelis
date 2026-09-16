@@ -173,7 +173,7 @@ fn missing_live_actual_does_not_promote_or_enter_a_declaration() {
 #[test]
 fn selected_host_ignores_unrelated_inputs_and_unselected_sibling() {
     let source = format!(
-        "{}\ndef sibling() -> int32 = {{ _ = print(\"sibling\")\n floor_div(1i32, 0i32) }}\n",
+        "{}\ndef sibling() -> i32 = {{ _ = print(\"sibling\")\n floor_div(1i32, 0i32) }}\n",
         sampled_client("x: tensor[seq, f32]", "sum(x, seq)")
     );
     let prepared = prepare(&source);
@@ -208,7 +208,7 @@ fn invalid_live_shape_is_rejected_before_entering_the_host_body() {
 }
 
 const INTEGER_HOST: &str =
-    "def main(x: tensor[n, int32]) -> tensor[n, n, int32] = insert(x, 1, shape(x, 0))\n";
+    "def main(x: tensor[n, i32]) -> tensor[n, n, i32] = insert(x, 1, shape(x, 0))\n";
 
 #[test]
 fn shape_reading_host_preserves_declared_integer_values() {
@@ -236,7 +236,7 @@ fn shape_reading_host_preserves_declared_integer_values() {
 fn nonintegral_actual_reaches_the_declared_integer_ingress_trap() {
     let prepared = prepare(INTEGER_HOST);
     // Host ingress finalizes at the declared dtype; mismatched tags alone are
-    // not an invalidity. A nonintegral f32 cannot become an int32 parameter.
+    // not an invalidity. A nonintegral f32 cannot become an i32 parameter.
     let error = prepared
         .eval_root(input(&["3fc00000", "40000000"]), "main")
         .unwrap_err();
@@ -245,7 +245,7 @@ fn nonintegral_actual_reaches_the_declared_integer_ingress_trap() {
     assert_eq!(error.errors.len(), 1, "{error:?}");
     assert_eq!(
         error.errors[0].message,
-        "numeric trap: domain in param at int32"
+        "numeric trap: domain in param at i32"
     );
 }
 

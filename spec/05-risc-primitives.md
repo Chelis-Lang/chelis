@@ -136,7 +136,7 @@ at the explicit `floor_div` / `trunc_div` integer primitives below.
 **`floor_div` semantics.** `floor_div(a, b)` computes
 `floor(a / b)` element-wise, rounding the quotient toward −∞.
 
-- **Integer operands** (int8, int16, int32, int64) — the result is
+- **Integer operands** (i8, i16, i32, i64) — the result is
   the largest integer `q` with `q * b ≤ a` (for `b > 0`). It is
   realized as native truncating `/` plus a sign correction:
   `q = a / b; r = a % b; if (r != 0 && ((r < 0) != (b < 0))) q -= 1`.
@@ -293,19 +293,19 @@ adjoint contract beside the primitives it composes. It remains Tier 2 and
 lowers exactly as [05-OP-11] specifies.
 
 For this table, `Axis+` denotes one or more unique compile-time positional
-`int32` axes or one or more unique named axes under spec/04 §4.5.3. `D \ K`
+`i32` axes or one or more unique named axes under spec/04 §4.5.3. `D \ K`
 denotes the input dimensions with the complete selected axis set `K` removed.
 
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
 | `sum` | `(&tensor[D,p], axes: Axis+, accumulator: prec = default(p)) -> tensor[D \ K,sum_result(p,accumulator)]` | Sum over every selected axis. `accumulator` controls the running precision; `sum_result` is §5.7.1's result-precision rule. | Reverse the canonical highest-original-position-first single-axis composition at operand precision `p` |
-| `count` | `(&tensor[D,bool], axes: Axis+) -> tensor[D \ K,int64]` | Count true elements over the complete selected axis set in one dedicated reduction | Non-differentiable; `grad` rejects it |
+| `count` | `(&tensor[D,bool], axes: Axis+) -> tensor[D \ K,i64]` | Count true elements over the complete selected axis set in one dedicated reduction | Non-differentiable; `grad` rejects it |
 | `mean` | `(&tensor[D,p_float], axes: Axis+) -> tensor[D \ K,p_float]` | Arithmetic mean over every selected axis | Reverse the canonical highest-original-position-first single-axis composition |
 | `max_reduce` | `(&tensor[D,p], axes: Axis+) -> tensor[D \ K,p]` | Maximum over every selected axis | Reverse the canonical composition; each step routes a NaN result to its first NaN or splits `g` among equal selected extrema, including infinities |
 | `min_reduce` | `(&tensor[D,p], axes: Axis+) -> tensor[D \ K,p]` | Minimum over every selected axis | Reverse the canonical composition; each step routes a NaN result to its first NaN or splits `g` among equal selected extrema, including infinities |
 | `prod_reduce` | `(&tensor[D,p], axes: Axis+) -> tensor[D \ K,p]` | Product over every selected axis | Reverse-mode derivative of the exact canonical composition of balanced product trees |
-| `argmax_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,int64]` | Lowest axis index of the maximum or first NaN | Non-differentiable; `grad` rejects it |
-| `argmin_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,int64]` | Lowest axis index of the minimum or first NaN | Non-differentiable; `grad` rejects it |
+| `argmax_reduce` | `(&tensor[d1,...,dn,p], axis: i32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,i64]` | Lowest axis index of the maximum or first NaN | Non-differentiable; `grad` rejects it |
+| `argmin_reduce` | `(&tensor[d1,...,dn,p], axis: i32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,i64]` | Lowest axis index of the minimum or first NaN | Non-differentiable; `grad` rejects it |
 
 > **[05-OP-11]** `mean(x, axes...) -> result` admits a tensor operand of
 > `f16`, `bf16`, `f32`, or `f64` and returns the same float dtype with the
@@ -337,7 +337,7 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > float operands, the adjoint divides the upstream cotangent equally among all
 > elements that compare equal to the selected non-NaN maximum. This includes
 > equal positive or negative infinities. The tie count `k` is
-> counted exactly as `int64`, converted once to the operand float dtype under
+> counted exactly as `i64`, converted once to the operand float dtype under
 > [04-NUM-14], and each selected element receives ordinary dtype-width
 > `div(g, k)`. When the forward result is NaN, its full cotangent flows to the
 > first NaN selected by the forward rule and every other element receives
@@ -382,13 +382,13 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > reverse mode differentiates the composed graph in reverse order.
 
 > **[05-OP-15]** `argmax_reduce(x, axis) -> result` admits every active
-> signed integer and float tensor dtype and returns `int64` indices with the
+> signed integer and float tensor dtype and returns `i64` indices with the
 > selected axis removed. If the slice contains NaNs, it returns the lowest
 > axis index containing NaN; otherwise it returns the lowest axis index whose
 > stored value is maximal. Comparisons never convert through another dtype.
 > A zero-length axis is a type error when statically known. If an
 > execution-time extent is zero, the operation traps `Domain` as operation
-> `argmax_reduce` at result dtype `int64`. It has no accumulator and is
+> `argmax_reduce` at result dtype `i64`. It has no accumulator and is
 > non-differentiable: `grad` rejects it.
 
 > **[05-OP-16]** `argmin_reduce(x, axis) -> result` has the signature, dtype,
@@ -397,10 +397,10 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > otherwise the lowest axis index whose stored value is minimal.
 
 > **[05-OP-29]** `count(x, axes...) -> result` admits exactly a `bool` tensor operand
-> and returns an `int64` tensor whose dimensions are the operand dimensions
+> and returns an `i64` tensor whose dimensions are the operand dimensions
 > with every selected axis removed. Axis selection follows
 > `spec/04-type-system.md` §4.5.3: a concrete-rank operand admits one or more
-> unique compile-time `int32` positional axes, while the rank-polymorphic form
+> unique compile-time `i32` positional axes, while the rank-polymorphic form
 > admits one or more unique named axes. Missing axes, mixed positional/named
 > axes, duplicate normalized positions or names, absent or ambiguous names,
 > dynamic axes, and out-of-range positional axes are type errors. The dedicated
@@ -409,9 +409,9 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > also the canonical wire order. For each result position, the selected source elements
 > are visited in original row-major order and each true element contributes
 > exact `1i64` while each false element contributes exact `0i64`. Their sum
-> uses the canonical balanced tree below with checked `int64` addition; an
+> uses the canonical balanced tree below with checked `i64` addition; an
 > unrepresentable result traps `Overflow` as operation `count` at dtype
-> `int64`. If any selected extent is zero, the result is `0i64`. This is a
+> `i64`. If any selected extent is zero, the result is `0i64`. This is a
 > dedicated reduction and is not a `cast` plus `sum` lowering. It is not a
 > composition of nested `count` calls. Numeric, scalar `bool`, `string`, reserved dtype spellings, and all
 > other operands are type errors. `count` has no accumulator. A differentiated
@@ -461,11 +461,11 @@ the formula examples below already use (`axis=-1` for the last axis).
 > is a named dimension of the operand and follows the operand rule above.
 
 The reduction axis must resolve statically: a literal, a
-`cast(N, int32)`-wrapped literal, or a named operand dimension as specified by
+`cast(N, i32)`-wrapped literal, or a named operand dimension as specified by
 `spec/04-type-system.md` §4.5.3. Because the output shape is "remove the
 dimension at position `axis`", the type checker cannot determine which
 dimension is dropped from a runtime integer value. A reduction whose axis is
-a runtime expression (for example a function-parameter `int32`) is rejected
+a runtime expression (for example a function-parameter `i32`) is rejected
 at the reduction call site with a diagnostic naming the constant-or-named-axis
 requirement, rather than leaving the output shape unresolved (chelis#259).
 The same constraint and diagnostic apply to `expand`'s broadcast axis and
@@ -490,11 +490,11 @@ in `spec/04-type-system.md` §5.7.1; this primitive doc is the operational
 location of the parameter on the IR node.
 
 The default rows are `bf16/f16 -> f32 -> bf16/f16`, `f32 -> f32 ->
-f32`, `f64 -> f64 -> f64`, `int8/int16 -> int32 -> int32`, `int32 ->
-int32 -> int32`, and `int64 -> int64 -> int64`. An explicit wider
+f32`, `f64 -> f64 -> f64`, `i8/i16 -> i32 -> i32`, `i32 ->
+i32 -> i32`, and `i64 -> i64 -> i64`. An explicit wider
 accumulator is equally part of the signature: `bf16` and `f16` additionally
 admit `f64` while returning the operand dtype; `f32` admits `f64` and returns
-`f64`; and `int8`, `int16`, and `int32` admit `int64` and return `int64`.
+`f64`; and `i8`, `i16`, and `i32` admit `i64` and return `i64`.
 Thus every non-reduced-float result has the selected accumulator dtype, not
 merely the default or a narrow-integer special case.
 
@@ -508,16 +508,16 @@ explicitly request a narrower-than-default accumulator are a type error per
 `argmin_reduce` do not take an accumulator parameter. Their exact accumulator
 and result rules are the [05-OP-11..16] contracts above; in particular, the
 value extrema and product return the operand dtype, while index reductions
-return `int64`.
+return `i64`.
 
 ### 2.3.1 Windowed Reduction
 
 | Name | Signature | Semantics | AD adjoint |
 |---|---|---|---|
-| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Each window splits `g` equally among equal non-NaN maxima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
-| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Each window splits `g` equally among equal non-NaN minima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
-| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
-| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[i64], strides: List[i64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Each window splits `g` equally among equal non-NaN maxima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[i64], strides: List[i64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Each window splits `g` equally among equal non-NaN minima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
+| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[i64], strides: List[i64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
+| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[i64], strides: List[i64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
 
 Within each window, `reduce_window_max` and `reduce_window_min` inspect values
 in row-major window order. The first NaN is the forward result when any NaN is
@@ -539,17 +539,17 @@ windowed reduction.
 
 > **[05-RWIN-1]** `reduce_window_*` SHALL receive equal-length, non-empty
 > `window_shape` and `strides` lists; their length SHALL NOT exceed the input
-> rank; and every entry SHALL be a positive int64. These lists and symbolic
+> rank; and every entry SHALL be a positive i64. These lists and symbolic
 > input extents may be runtime values. A statically proved violation is a type
 > error; otherwise the same violation traps `Domain` before any tensor read or
 > output allocation. It never becomes an empty-list default, truncated rank,
 > static-parameter signature, or backend assertion.
 
-- `window_shape` and `strides` are int64 lists of equal length
+- `window_shape` and `strides` are i64 lists of equal length
   `n >= 1`.
 - The trailing `n` axes of the input are the windowed axes. The
   leading `rank(input) - n` axes pass through unchanged.
-- Each windowed entry must be a positive int64. `window_shape[i] >= 1`
+- Each windowed entry must be a positive i64. `window_shape[i] >= 1`
   and `strides[i] >= 1`.
 - The output rank equals the input rank. Leading dims match the
   input; trailing dim `i` is
@@ -605,7 +605,7 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
   NaN in row-major window order and zero to the rest. Otherwise split `g`
   equally among the `k` positions equal to the selected non-NaN extreme,
   including equal positive or negative infinities, so each
-  receives `g / k`; `k` is counted as exact `int64`, converted once to the
+  receives `g / k`; `k` is counted as exact `i64`, converted once to the
   operand float dtype under [04-NUM-14], and ordinary dtype-width `div`
   performs the quotient. Contributions from overlapping windows add. `x` is
   read to locate the selected value and tie set.
@@ -654,7 +654,7 @@ For `sum`, source values enter the tree in the selected accumulator dtype and
 every addition finalizes at that dtype. For `prod_reduce`, every multiplication
 executes at [04-NUM-8]'s arithmetic width and finalizes once to operand storage
 before the next tree level. For `count`, leaves are exact `0i64` or
-`1i64` and every pair uses checked `int64` addition. These rules govern float
+`1i64` and every pair uses checked `i64` addition. These rules govern float
 result bits, [04-NUM-12] integer-overflow occurrence, and reverse-mode traversal
 of the `prod_reduce` tree. A left fold, stride-4 cascade, library-dependent
 tree, or compatibility mode is not conforming.
@@ -663,13 +663,13 @@ tree, or compatibility mode is not conforming.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `reshape` | `(&tensor[D_old,p], shape: List<int64>) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
-| `permute` | `(&tensor[d1,...,dn,p], axes: int32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
-| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | Set the size-1 dimension at position `axis` to width `size`. Rank is unchanged and the operand's extent at `axis` is 1. Does NOT copy data. |
-| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | Insert a new dimension of width `size` at position `axis`, producing rank `rank(x) + 1`. Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
-| `pad` | `(&tensor[D,p], padding: List<List<int64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
-| `shrink` | `(&tensor[D,p], bounds: List<List<int64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
-| `stride` | `(&tensor[D,p], strides: int64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
+| `reshape` | `(&tensor[D_old,p], shape: List<i64>) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
+| `permute` | `(&tensor[d1,...,dn,p], axes: i32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
+| `expand` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D',p]` | Set the size-1 dimension at position `axis` to width `size`. Rank is unchanged and the operand's extent at `axis` is 1. Does NOT copy data. |
+| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D_plus,p]` | Insert a new dimension of width `size` at position `axis`, producing rank `rank(x) + 1`. Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
+| `pad` | `(&tensor[D,p], padding: List<List<i64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
+| `shrink` | `(&tensor[D,p], bounds: List<List<i64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
+| `stride` | `(&tensor[D,p], strides: i64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
 
 `expand` and `insert` each take the (tensor, axis, size) triop
 positionally; a two-argument list form is an arity error. `expand` sets an
@@ -677,7 +677,7 @@ existing size-1 axis and leaves the rank alone; `insert` adds an axis and
 raises the rank by one. The named-axis form (`insert(x, new, size)` with a
 dimension name) and the four-argument anchored form belong to `insert` and
 remain as `spec/04-type-system.md` §4.5.3 states them. Where the axis is
-positional it is axis-domain `int32`; `size` is extent-domain `int64` in
+positional it is axis-domain `i32`; `size` is extent-domain `i64` in
 every form, which makes the canonical broadcast idiom
 `insert(b, axis, shape(x, axis))` well-typed by construction.
 
@@ -696,7 +696,7 @@ every form, which makes the canonical broadcast idiom
 > **[05-OP-65]** `axis_movement(arguments...) -> result` governs exactly
 > `permute`, `expand`, and `insert`, with the signatures, dimension mapping,
 > and adjoints in §2.4. Their positional axes and permutation entries are
-> `int32`; sizes are `int64`, under [05-DIM-1..3]. `permute` requires a
+> `i32`; sizes are `i64`, under [05-DIM-1..3]. `permute` requires a
 > permutation of the operand's axes. `expand` preserves rank and requires an
 > extent-1 operand axis; `insert` adds one axis, including at the trailing
 > position. Named-axis forms retain spec/04 §4.5.3's distinct contract.
@@ -717,33 +717,33 @@ every form, which makes the canonical broadcast idiom
 > **[05-DIM-1]** Every movement and shape argument is exactly one of two
 > KINDS, and the kind determines its dtype. An EXTENT-DOMAIN quantity
 > measures or indexes along an axis - a dimension extent, a slice bound, a
-> pad amount, a stride step - and SHALL be `int64`. An AXIS-DOMAIN quantity
-> names an axis - a rank index, a permutation entry - and SHALL be `int32`.
+> pad amount, a stride step - and SHALL be `i64`. An AXIS-DOMAIN quantity
+> names an axis - a rank index, a permutation entry - and SHALL be `i32`.
 > No movement argument is both, and within this movement and shape
 > surface no lane SHALL accept one kind's dtype in the other kind's
 > position.
 
-> **[05-DIM-2]** `shape(x, axis)` SHALL return `int64`. Its result is an
+> **[05-DIM-2]** `shape(x, axis)` SHALL return `i64`. Its result is an
 > extent-domain quantity under [05-DIM-1], and it is the canonical producer
 > of the values that reach every extent-domain slot. Its `axis` parameter is
-> axis-domain and remains `int32`.
+> axis-domain and remains `i32`.
 
 The split is by what the quantity can grow to, not by where it appears. An
 extent-domain value scales with the data: a dimension extent, an offset into
 one, or a step across one is bounded only by tensor size. An axis-domain
-value is bounded by rank, which is small and statically known, so `int32` is
+value is bounded by rank, which is small and statically known, so `i32` is
 permanent headroom rather than a limit anyone can reach.
 
 [05-DIM-1] scopes to movement and shape arguments. The axis parameters of
 reduction and concatenation ops are governed by [05-DIM-3].
 
 > **[05-DIM-3]** Every positional axis-domain argument to an operation SHALL
-> be `int32`, including movement, shape, reduction, ordering, gathering,
+> be `i32`, including movement, shape, reduction, ordering, gathering,
 > scattering, splitting, and concatenation operations. A symbolic dimension
 > name used as a rank-polymorphic axis anchor is not a scalar axis-domain
 > value and retains the named-dimension rules of spec/04 §4.5.3. The
 > `window_shape` and `strides` arguments to every
-> `reduce_window_*` operation SHALL be extent-domain `List[int64]`. No
+> `reduce_window_*` operation SHALL be extent-domain `List[i64]`. No
 > evaluator, lowering, runtime, binding, or compiled lane SHALL accept a
 > wider or narrower substitute for either carrier.
 
@@ -761,12 +761,12 @@ survive.
 Two boundary notes. Extent-domain slots do not adopt literals: no
 `spec/04-type-system.md` §5.6 position reaches a list literal or a
 scalar against a remote callee signature, so an extent literal states
-`int64` itself, with a suffix or an explicit `cast`
+`i64` itself, with a suffix or an explicit `cast`
 (`reshape(x, [2i64, 2i64])`, `stride(x, 2i64)`), and an unsuffixed
-`int32` literal in an extent slot is a type error whose diagnostic names
+`i32` literal in an extent slot is a type error whose diagnostic names
 the fix. §5.6 records why that adoption set stays closed. And
 arithmetic on extents is ordinary program arithmetic: it computes at the
-declared `int64` width like every other op ([04-NUM-8]), with no narrower
+declared `i64` width like every other op ([04-NUM-8]), with no narrower
 internal substitute. The width of the loop counters and addressing
 expressions a backend synthesizes is governed by [04-NUM-8]'s
 synthesized-arithmetic clause, not by this section.
@@ -785,7 +785,7 @@ as a `RtDim`:
   resolving it to a slice.
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
   rank-0 integer scalar. The index is absolute: `inputs[0]` is always the
-  tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `int32`
+  tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `i32`
   axis scalar a node-valued `InputAxis` axis names, and any shape-only tensor
   operand an `InputAxis` names.
 - `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
@@ -793,9 +793,9 @@ as a `RtDim`:
 - `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
   directly from that tensor's shape metadata: `t` is an absolute index into
   the owning node's `inputs` naming a tensor operand, and `a` is a normalized
-  `int32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
+  `i32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
   normalizes a negative literal statically) or an absolute input index naming
-  a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
+  a rank-0 `i32` scalar (a computed axis under [05-OP-7]). Legal only as an
   `expand` or `insert` size or a `reshape` target. It is the folded
   extent-argument form of §2.5.1 for a direct `shape(x, axis)` extent
   argument and, in an `expand` or `insert` size, for an in-scope dimension
@@ -831,7 +831,7 @@ operand-shape agreement at equal rank whenever a non-static extent is
 involved (chelis#664; rank-0 scalar operands are the backend's broadcast
 idiom and are exempt). A dim whose extent
 is computed by the op at run time is an *op-declared* symbolic dim bound from
-the executed [05-DIM-1] int64 value; a second site
+the executed [05-DIM-1] i64 value; a second site
 computing a different value for the same symbol traps (the
 over-unification guard). The guard does not fire on a direct-return
 `shrink -> stride` chain under one sig symbol: anonymous
@@ -894,20 +894,20 @@ dependency and fails closed when its input is absent (chelis#351).
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int64` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
+| `shape` | `(&tensor[d1,...,dn,p], axis: i32) -> i64` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
 
-The Surf `shape(tensor, axis)` builtin types this read as an `int64` scalar
+The Surf `shape(tensor, axis)` builtin types this read as an `i64` scalar
 per [05-DIM-2] — extent-domain out, axis-domain in.
 
 #### Runtime extent read atom
 
 > **[05-OP-7]** The runtime extent read (`shape(x, axis)`; C ABI
 > `chelis_tensor_shape`) returns the stored extent of `x` along `axis` as
-> an exact `int64` ([05-DIM-2]). The read is metadata-exact at every
+> an exact `i64` ([05-DIM-2]). The read is metadata-exact at every
 > tensor dtype `p`: it performs no arithmetic and no width change on the
 > stored extent, so [04-NUM-8]'s arithmetic-width table is not engaged
 > and the value crosses the boundary exactly ([04-NUM-11]). Its `axis`
-> operand is axis-domain `int32` ([05-DIM-1]); a negative value first
+> operand is axis-domain `i32` ([05-DIM-1]); a negative value first
 > normalizes by adding the rank exactly once, and an axis still outside
 > `0..rank` is a loud error. The read has a zero-cotangent adjoint: it
 > contributes exact zero to the tensor input and to the discrete axis, does
@@ -922,8 +922,8 @@ Two semantic use shapes exist, and they are distinct:
   a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
   value position), a `shape()` read remains a dedicated typed extent operation
-  whose int32 `axis` is an ordinary checked runtime value. It produces a
-  rank-zero int64 scalar equal to the input's runtime extent and must never
+  whose i32 `axis` is an ordinary checked runtime value. It produces a
+  rank-zero i64 scalar equal to the input's runtime extent and must never
   lower as a `Load`, missing-input default, constant-axis guess, or placeholder.
 
 `shape` reads only the input's shape metadata, never its element values, so it
@@ -936,7 +936,7 @@ values rather than baked at codegen time.
 
 > **[05-SHAPE-1]** A scalar `Shape` value is legal in every language execution
 > mode for every active tensor element dtype and for a literal or computed
-> int32 axis. Its exact int64 result and zero-cotangent rule are
+> i32 axis. Its exact i64 result and zero-cotangent rule are
 > target-independent. No lowering may replace the axis or extent with a
 > constant, default, stub, host-width integer, or compile-time-only signature.
 
@@ -956,8 +956,8 @@ compile-time-only alias.
 > the registered binding identities in
 > `spec/registry/python_tensor_metadata.md`, incorporated by reference.
 > It borrows a validated tensor descriptor and returns all extents in axis
-> order as exact nonnegative `int64` values, exposed as Python integers.
-> The result length equals the descriptor's dynamic int32 rank, including
+> order as exact nonnegative `i64` values, exposed as Python integers.
+> The result length equals the descriptor's dynamic i32 rank, including
 > an empty vector for rank zero. It reads no tensor elements and preserves
 > every extent at every active element dtype and admitted device under
 > [04-NUM-11]. No host-width conversion, fixed-rank truncation, fabricated
@@ -1041,7 +1041,7 @@ compile-time-only alias.
 > random-call ordinal, element index, bounds, operation, and dtype. Every lane
 > that supports that operation and dtype produces the same stream and stored
 > result bits; compiler version and target do not vary this result. Reinterpret the
-> signed int64 seed as its uint64 two's-complement bits. For zero-based call
+> signed i64 seed as its uint64 two's-complement bits. For zero-based call
 > ordinal `c` and flat element index `i`, the source word is
 > `splitmix64(seed_bits XOR rotl64(splitmix64(c),17) XOR
 > rotl64(splitmix64(i),41))`; the unit value is the exact rational formed by
@@ -1265,7 +1265,7 @@ index operand.
 > updates, and output SHALL have identical precision. A non-integer index dtype
 > or a precision mismatch is a type error, never an implicit cast. The public C
 > gather and scatter callables in [05-OP-33] have this same complete index-dtype
-> domain; they have no int32/int64-only exception.
+> domain; they have no i32/i64-only exception.
 
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
@@ -1386,7 +1386,7 @@ The tensor-lane Surf builtin
 > **[05-OP-66]** `indexed_tensor(arguments...) -> result` governs exactly
 > `Gather`, `ScatterAdd`, `Scatter`, and `ScatterElements`, with §3.5's
 > hyperplane or element-wise signatures, output dimensions, bounds, duplicate
-> handling, and adjoint rules. Every positional axis is `int32` under
+> handling, and adjoint rules. Every positional axis is `i32` under
 > [05-DIM-3]. Indices retain any active signed-integer dtype at its exact
 > stored width under [05-SPARSE-1]; they are never silently widened or narrowed.
 > Gathering and replacement admit every active tensor element dtype, including
@@ -1420,7 +1420,7 @@ host execution is not a lesser language lane and does not change legality.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T, int64) -> T ! E, n: int64) -> tensor[n, ..state_shape(T), element(T)] ! E` | Iteratively apply `fn(prev, i)` for `i in 0..n` and stack the `n` resulting states along a new leading axis. |
+| `tensor_scan` | `(initial: T, fn: (T, i64) -> T ! E, n: i64) -> tensor[n, ..state_shape(T), element(T)] ! E` | Iteratively apply `fn(prev, i)` for `i in 0..n` and stack the `n` resulting states along a new leading axis. |
 
 `T` is either an active tensor-element scalar primitive or a tensor of any
 rank at one active element dtype, including bool. `state_shape(T)` is empty
@@ -1436,7 +1436,7 @@ exactly once per iteration in that order; when `n = 0`, the result is empty
 and the callback is not invoked, so no callback effect occurs. The empty
 result retains every initial-state extent, including zero trailing extents;
 no callback invocation is needed to discover its shape. Size and extent
-arithmetic is checked int64 arithmetic. A zero-sized tensor state still
+arithmetic is checked i64 arithmetic. A zero-sized tensor state still
 invokes the callback exactly n times.
 
 The `tensor_scan` accumulator and emitted elements remain at `T` for every
@@ -1453,7 +1453,7 @@ recurrence: cotangents from the returned elements and later recurrence states
 combine at each callback invocation in reverse iteration order, using that
 callback's ordinary adjoint. The integer and bool forms are forward-only.
 `vmap` maps `initial` and every mapped callback capture pointwise while the
-int64 iteration index and `n` remain shared; every mapped lane executes the
+i64 iteration index and `n` remain shared; every mapped lane executes the
 same positional iteration sequence.
 
 **Negative parity for `tensor_scan`**: a non-callable second argument,
@@ -1514,8 +1514,8 @@ traps `Test` with its supplied label and the operation name.
 >
 > | identity | exact signature |
 > |---|---|
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
-> | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | `tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E` |
+> | `process_run` | `(string,List[string])->(i64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 > | `test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
@@ -1555,7 +1555,7 @@ traps `Test` with its supplied label and the operation name.
 > forward-only and its source and `pad` components are non-differentiable
 > under spec/06 §2.1. The operation has no public accumulator parameter.
 
-> **[05-OP-10]** `pad_sequences_to(sequences: List[List[T]], width: int64,
+> **[05-OP-10]** `pad_sequences_to(sequences: List[List[T]], width: i64,
 > pad: T) -> tensor[len(sequences), width, T]` has the same dtype,
 > element-movement, float-domain differentiation, and no-public-accumulator
 > rules as [05-OP-9]. `width` SHALL be non-negative. Result element `(r, c)` for
@@ -1611,7 +1611,7 @@ The atoms below are the normative numeric authority for the family, in
 the sense `spec/design/capability_table.md` §New numeric ops requires: a
 callable in these families has exactly the numeric behavior its
 governing atom states, and a numeric behavior no atom governs does not
-ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` and
+ship. `io/json::Json`'s numeric capacity (`JsonInt(i64)` and
 `JsonBigInt(string)` beside `JsonFloat(f64)`) is decided by [05-OP-2] and its
 exact ADT identity by [05-OP-34].
 
@@ -1669,8 +1669,8 @@ exact ADT identity by [05-OP-34].
 > distinctions ([04-NUM-11]; `spec/design/dtype_semantics.md` §C6 "type
 > the boundary"). A JSON number token containing `.`, `e`, or `E` SHALL
 > ingest as `JsonFloat` carrying the correctly-rounded f64 of the token; any
-> other number token SHALL ingest as `JsonInt` carrying its exact int64
-> value. An integer-form token outside int64 range SHALL ingest as
+> other number token SHALL ingest as `JsonInt` carrying its exact i64
+> value. An integer-form token outside i64 range SHALL ingest as
 > `JsonBigInt` carrying the token's exact decimal spelling; ingestion never
 > selects a lossy float image for an integer-form token.
 > A float-form token whose f64 image is non-finite is a loud error. CSV cells are TEXT at
@@ -1679,39 +1679,39 @@ exact ADT identity by [05-OP-34].
 > ASCII space/tab tolerated: float accessors accept the full grammar,
 > integer accessors accept only its integer subset (a `.`/`e`/`E`
 > production refuses loudly, naming the float accessor), and an
-> integer cell outside int64 range is a loud Overflow-kind error, never
+> integer cell outside i64 range is a loud Overflow-kind error, never
 > an f64 fallback. An empty or non-conforming cell is a loud error in
 > every numeric accessor — no NaN, no default, no skip.
 
 #### Exact read atom
 
-> **[05-OP-3]** `io/json::json_int` returns the stored `JsonInt` int64
+> **[05-OP-3]** `io/json::json_int` returns the stored `JsonInt` i64
 > exactly and returns `None` for every other variant, including `JsonBigInt`.
 > `io/json::json_bigint` returns a stored `JsonBigInt`'s exact decimal string
 > and returns `None` for every other variant, including an in-range
 > `JsonInt`; converting that string to a numeric dtype is a caller decision
 > through an explicit parse, never an implicit widening. `io/json::json_float`
 > returns a stored `JsonFloat` f64 exactly; on `JsonInt` it performs the named
-> lossy int64-to-f64 widening (exact for magnitudes at or below 2^53), and on
+> lossy i64-to-f64 widening (exact for magnitudes at or below 2^53), and on
 > every other variant, including `JsonBigInt`, it returns `None`. It never
 > truncates or rounds a float
 > into an integer. The exact numeric CSV identities and argument order are:
 >
 > | identity | exact signature |
 > |---|---|
-> | `csv_int` | `(List[Dict[string,string]], int64, string) -> int64` |
-> | `csv_ints` | `(List[Dict[string,string]], string) -> List[int64]` |
-> | `csv_f64` | `(List[Dict[string,string]], int64, string) -> f64` |
+> | `csv_int` | `(List[Dict[string,string]], i64, string) -> i64` |
+> | `csv_ints` | `(List[Dict[string,string]], string) -> List[i64]` |
+> | `csv_f64` | `(List[Dict[string,string]], i64, string) -> f64` |
 > | `csv_f64s` | `(List[Dict[string,string]], string) -> List[f64]` |
-> | `csv_nrows` | `(List[Dict[string,string]]) -> int64` |
+> | `csv_nrows` | `(List[Dict[string,string]]) -> i64` |
 >
 > The scalar accessors take `(table, zero_based_row, column)` in that order.
 > The plural accessors take `(table, column)` and return exactly one value per
 > source row in source order, so the result List has the table's runtime
 > length. CSV integer reads (`csv_int`, `csv_ints`) parse the selected text
-> cell under [05-OP-2]'s exact integer grammar and return int64; CSV float
+> cell under [05-OP-2]'s exact integer grammar and return i64; CSV float
 > reads (`csv_f64`, `csv_f64s`) parse the full finite f64 grammar. Structural
-> counts (`csv_nrows`) return the outer List length as exact int64. A missing
+> counts (`csv_nrows`) return the outer List length as exact i64. A missing
 > column, out-of-range row,
 > empty/nonconforming cell, or wrong numeric grammar is a loud error naming the
 > exact accessor; no JSON variant or default cell is fabricated. These text
@@ -1721,7 +1721,7 @@ exact ADT identity by [05-OP-34].
 #### Exact construction atom
 
 > **[05-OP-4]** `JsonFloat(value)` accepts exactly f64 and
-> `JsonInt(value)` accepts exactly int64; every other operand width is a type
+> `JsonInt(value)` accepts exactly i64; every other operand width is a type
 > error naming an explicit checked cast. `JsonBigInt(value)` accepts exactly
 > `string`; the canonical-form check is [05-OP-5]'s serialization rule, not a
 > constructor special case. No construction path widens or narrows a
@@ -1732,7 +1732,7 @@ exact ADT identity by [05-OP-34].
 
 #### Numeric serialization atom
 
-> **[05-OP-5]** `io/json::to_json` emits a stored `JsonInt` int64
+> **[05-OP-5]** `io/json::to_json` emits a stored `JsonInt` i64
 > as its exact decimal digits with no fractional part and no float
 > round-trip, and a stored f64 through the [05-OBS-1] shortest-
 > round-trip channel (`format_element` at `f64`; the §8.1 grammar —
@@ -1740,7 +1740,7 @@ exact ADT identity by [05-OP-34].
 > JSON number token). A stored `JsonBigInt` emits its stored string verbatim
 > as the number token after validating that it is the canonical integer form
 > - an optional `-` followed by a nonzero leading digit and decimal digits -
-> denoting a value outside int64 range; any other stored string is a loud
+> denoting a value outside i64 range; any other stored string is a loud
 > serialization error, so a serialized document reparses to the identical
 > variant structure. A non-finite `JsonFloat` is a loud serialization error.
 > Equal documents serialize to identical bytes. `to_csv` accepts only the
@@ -1808,7 +1808,7 @@ exact ADT identity by [05-OP-34].
 >
 > Every public tensor descriptor observes as contiguous row-major storage
 > through a view. It has rank in `0..=INT32_MAX` read through
-> `chelis_tensor_rank` and exactly `rank` nonnegative int64 extents read
+> `chelis_tensor_rank` and exactly `rank` nonnegative i64 extents read
 > through `chelis_tensor_shape`; a rank-zero descriptor has no extents. Its
 > element count is the checked product of the extents, with the rank-zero
 > empty product equal to one. There is no rank-eight limit. A read view or
@@ -1875,7 +1875,7 @@ exact ADT identity by [05-OP-34].
 > `spec/registry/c_container_boundary.md`, which this atom incorporates by
 > reference. The signature is part of each identity.
 >
-> All lengths, indices, offsets, sizes, and returned counts are exact `int64`.
+> All lengths, indices, offsets, sizes, and returned counts are exact `i64`.
 > Negative lengths, indices, offsets, and counts trap `Domain`; an indexed
 > read outside its container and a positive-length foreign buffer with a null
 > pointer also trap `Domain`. Every result-length and allocation arithmetic
@@ -1884,7 +1884,7 @@ exact ADT identity by [05-OP-34].
 > positive size and permits only its final chunk to be shorter.
 > `chelis_range_i64(start, end)` is the half-open increasing sequence and is
 > empty when `end <= start`; enumeration pairs each value with its exact
-> zero-based int64 index. String indices count Unicode scalar values, not
+> zero-based i64 index. String indices count Unicode scalar values, not
 > encoded bytes. A slice whose nonnegative start is at or beyond the scalar
 > length is empty; otherwise it takes at most `len` scalars and truncates at
 > the end.
@@ -1919,10 +1919,10 @@ exact ADT identity by [05-OP-34].
 > renders as `None` when it owns no child and otherwise as `Some(` followed by
 > `R` of its child and `)`, the exact spelling of the ADT rule for those two
 > constructors. A mapped file renders as `<mapped-file:` followed by its exact
-> int64 byte length in decimal digits and then `>`. No structure
+> i64 byte length in decimal digits and then `>`. No structure
 > inserts quoting or escaping. The grammar is deliberately non-injective:
 > unit and an empty tuple both render `()`, and string bytes are unquoted.
-> `read_bytes` and `mmap_read` return int64 elements in `0..=255`; mapped
+> `read_bytes` and `mmap_read` return i64 elements in `0..=255`; mapped
 > reads also require `offset + length` to lie within the mapped file.
 > Each of `chelis_print_list`, `chelis_print_tuple`, `chelis_print_dict`, and
 > `chelis_print_adt` writes exactly `R` of its argument followed by one byte
@@ -1961,7 +1961,7 @@ exact ADT identity by [05-OP-34].
 > Every entry validates every observable input-descriptor invariant from
 > [05-OP-31] and [05-OP-44], including dtype, shape, element count, capacity,
 > alignment, live-owner state, and write-guard state, before reading data. The
-> rank is nonnegative and representable as int32; every extent
+> rank is nonnegative and representable as i32; every extent
 > is nonnegative; a positive-rank shape pointer passed to allocation or entry
 > borrow is non-null; and a nonempty entry borrow has a non-null,
 > representation-aligned data pointer. Shape
@@ -1971,8 +1971,8 @@ exact ADT identity by [05-OP-34].
 > before allocation or element access. Each language operation follows its
 > own axis atom: [05-AXIS-1] governs the reduction, `expand`, and `insert`
 > family, while
-> [05-OP-7]/[05-SHAPE-1] admits a computed int32 axis for `shape`. C-family
-> unboxed axis parameters are runtime int32 values. Every signed axis accepted by this C family first
+> [05-OP-7]/[05-SHAPE-1] admits a computed i32 axis for `shape`. C-family
+> unboxed axis parameters are runtime i32 values. Every signed axis accepted by this C family first
 > applies §2.3's one-step negative normalization; an axis still out of range
 > then traps `Domain`.
 >
@@ -1984,7 +1984,7 @@ exact ADT identity by [05-OP-34].
 > write guard is allowed; it neither copies payload nor changes input ownership.
 > Null input and malformed or nonzero exemplars trap `Domain`; unrepresentable
 > output metadata traps `Overflow`. Numeric metadata failures name `alloc_like`
-> at `int64` under [04-NUM-9]. Rank zero retains one element and any zero
+> at `i64` under [04-NUM-9]. Rank zero retains one element and any zero
 > extent retains zero elements. This allocation operation has no cotangent or
 > accumulator.
 >
@@ -2007,10 +2007,10 @@ exact ADT identity by [05-OP-34].
 > `chelis_tensor_stride` projects the checked contiguous suffix stride at the
 > normalized axis; `chelis_tensor_byte_count` projects the checked logical byte
 > count at the tensor's declared representation, excluding spare storage capacity.
-> Both return exact int64 metadata. These observations, like rank, shape, and
+> Both return exact i64 metadata. These observations, like rank, shape, and
 > element count, remain valid during an active write guard and access no elements.
 > `chelis_tensor_check_reshape` takes rank and every target extent as exact tagged
-> int64 scalars; the decoded rank must fit nonnegative int32. It validates the
+> i64 scalars; the decoded rank must fit nonnegative i32. It validates the
 > target rank, extents, contiguous
 > suffix strides, element count, logical byte count, and target allocation domain,
 > and requires the target count to equal the input count. It reads only metadata,
@@ -2021,12 +2021,12 @@ exact ADT identity by [05-OP-34].
 > products, strides, byte counts, or allocation projections trap `Overflow`.
 >
 > `chelis_tensor_elementwise_index_step` validates input and domain tensor metadata
-> and returns exact int64 zero for a rank-zero input, or one when the input shape
+> and returns exact i64 zero for a rank-zero input, or one when the input shape
 > is identical to the domain shape. Any other shape pairing traps `Domain`, even
 > when the element counts agree or are zero. Input and domain dtypes may differ.
 > `chelis_tensor_elementwise_index_step_for_shape` applies the same rule to an
-> iteration domain supplied as exact tagged int64 rank and extents. The decoded
-> rank must fit nonnegative int32; positive rank requires a non-null shape pointer.
+> iteration domain supplied as exact tagged i64 rank and extents. The decoded
+> rank must fit nonnegative i32; positive rank requires a non-null shape pointer.
 > It validates every extent and the exact zero-aware element product before
 > selecting the scalar or identity step. An iteration domain requires neither
 > storage byte counts nor contiguous suffix strides. Negative rank or extents,
@@ -2038,30 +2038,30 @@ exact ADT identity by [05-OP-34].
 > as its loop bound, and maps a domain index `i` to the input index `i * step`.
 > These internal scalar projections do not introduce language-level broadcasting.
 >
-> `chelis_tensor_unravel_index` converts an exact tagged int64 linear index into
-> rank-many canonical int64 scalars in row-major axis order.
-> `chelis_tensor_flat_index` converts rank-many exact tagged int64 coordinates
-> into an exact int64 linear index. Both use the tensor's checked shape, count,
+> `chelis_tensor_unravel_index` converts an exact tagged i64 linear index into
+> rank-many canonical i64 scalars in row-major axis order.
+> `chelis_tensor_flat_index` converts rank-many exact tagged i64 coordinates
+> into an exact i64 linear index. Both use the tensor's checked shape, count,
 > and strides. The linear index must be in `[0, count)` and each coordinate in
 > `[0, extent)`; an empty tensor admits no index, while rank zero admits exactly
 > linear index zero and an empty coordinate tuple. Positive rank requires a
 > non-null coordinate pointer to rank-many scalars, writable for unraveling.
 > The caller supplies the complete array and preserves the tensor's borrowed
 > storage; unraveling writes only the coordinate array. Invalid indices, null
-> required pointers, and noncanonical or non-int64 scalar carriers trap `Domain`;
+> required pointers, and noncanonical or non-i64 scalar carriers trap `Domain`;
 > unrepresentable coordinate-buffer projections or offsets trap `Overflow`.
 >
 > `chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target
-> shape supplied as exact tagged int64 rank and extents, including checked count,
+> shape supplied as exact tagged i64 rank and extents, including checked count,
 > contiguous strides, logical bytes at the input representation, and target
-> allocation projection. Rank must fit nonnegative int32; positive rank requires
-> a non-null shape pointer. Permutation additionally takes rank-many exact tagged int64 axes
+> allocation projection. Rank must fit nonnegative i32; positive rank requires
+> a non-null shape pointer. Permutation additionally takes rank-many exact tagged i64 axes
 > (non-null at positive rank), normalizes each negative axis once, requires a
 > bijection of the input axes, and requires each target extent to equal its
 > selected input extent. Input and target ranks are equal. Expansion with equal
 > ranks replaces a unit input axis; expansion with target rank one greater inserts
 > an axis. The expansion axis normalizes against the target rank, its target
-> extent is any nonnegative int64, and every other extent equals its corresponding
+> extent is any nonnegative i64, and every other extent equals its corresponding
 > input extent. No other rank relationship is admitted. Invalid axis, rank, or
 > extent relationships trap `Domain`, including on empty targets; unrepresentable
 > target metadata or scratch projections trap `Overflow`. Generated callers
@@ -2072,43 +2072,43 @@ exact ADT identity by [05-OP-34].
 >
 > `chelis_tensor_pad_shape`, `chelis_tensor_shrink_shape`, and
 > `chelis_tensor_stride_shape` derive a complete checked target shape from the
-> input metadata and rank-many exact tagged int64 bounds. The supplied tagged
-> int64 rank must equal the input rank. Padding requires nonnegative before/after
+> input metadata and rank-many exact tagged i64 bounds. The supplied tagged
+> i64 rank must equal the input rank. Padding requires nonnegative before/after
 > amounts and computes `input + before + after` with checked addition. Shrinking
 > requires `0 <= start <= end <= input` and computes `end - start`; equal endpoints
 > describe an empty axis. Striding requires positive steps and computes the exact
 > ceiling quotient without an overflowing intermediate sum. Each validates the
 > complete target count, suffix strides, representation bytes, and target allocation
-> domain before writing rank-many canonical int64 scalars to the caller's output
+> domain before writing rank-many canonical i64 scalars to the caller's output
 > array. Positive rank requires non-null bound and output arrays. Rank zero admits
 > empty arrays and retains one element. Empty targets do not bypass bound checks.
 > Callers preserve operation extent claims and require the computed shape to equal
 > the shape submitted for allocation or repurpose, before either occurs.
 >
-> `chelis_tensor_affine_index` takes rank-many exact tagged int64 coordinates,
+> `chelis_tensor_affine_index` takes rank-many exact tagged i64 coordinates,
 > nonnegative offsets, and positive steps. It computes each coordinate as
 > `coordinate * step + offset` with checked arithmetic, requires both the original
 > coordinate to be nonnegative and the resulting coordinate to be inside the
-> tensor's extent, and returns the checked row-major int64 index. Positive rank
+> tensor's extent, and returns the checked row-major i64 index. Positive rank
 > requires all three arrays; rank zero admits empty arrays and returns zero.
 > Empty tensors admit no index. These four operations access metadata only, remain
 > valid during a write guard, and change no tensor metadata, payload, or ownership.
 > They have no cotangent or accumulator. Malformed carriers, pointers, ranks, bounds,
 > or indices trap `Domain`; unrepresentable metadata or arithmetic traps `Overflow`.
-> Numeric failures use [04-NUM-9]'s canonical line at `int64`, with operation `pad`,
+> Numeric failures use [04-NUM-9]'s canonical line at `i64`, with operation `pad`,
 > `shrink`, `stride`, or `affine_index`, respectively.
 >
 > `chelis_metadata_plan_new` constructs an independently owned, opaque
-> contiguous metadata plan from an exact tagged int64 rank and rank-many exact
-> tagged int64 extents. The canonical tagged exemplar selects the active dtype;
+> contiguous metadata plan from an exact tagged i64 rank and rank-many exact
+> tagged i64 extents. The canonical tagged exemplar selects the active dtype;
 > its payload is not a tensor value and is not converted. Rank is nonnegative
-> and fits int32. Extents are nonnegative. Construction checks element count,
+> and fits i32. Extents are nonnegative. Construction checks element count,
 > logical representation bytes, canonical suffix strides and target allocation
 > projection before returning. It allocates metadata only, never tensor storage.
 >
-> `chelis_metadata_plan_view` instead retains rank-many exact tagged int64
+> `chelis_metadata_plan_view` instead retains rank-many exact tagged i64
 > supplied strides and checks its reachable byte span against an exact tagged
-> int64 byte capacity. This zero-offset, forward-capacity API admits only
+> i64 byte capacity. This zero-offset, forward-capacity API admits only
 > nonnegative strides, including zero; a negative stride traps `Domain`.
 > This admission limit does not restrict language tensor movement semantics.
 > All rank, extent, stride, exemplar and capacity domains are validated before
@@ -2126,28 +2126,28 @@ exact ADT identity by [05-OP-34].
 > Plans own their immutable metadata and retain no caller array pointers.
 > `chelis_metadata_plan_rank`, `shape`, `strides`, `count`, `byte_count`, and
 > `dtype` return exact immutable observations of that plan; the shape and stride
-> projections are rank-many int64 arrays, null at rank zero, and remain valid
+> projections are rank-many i64 arrays, null at rank zero, and remain valid
 > only while the plan lives. Count and byte count are logical observations.
-> `chelis_metadata_plan_check_capacity` validates a canonical nonnegative int64
+> `chelis_metadata_plan_check_capacity` validates a canonical nonnegative i64
 > capacity and requires that it contain the plan's reachable span, with checked
 > target projection. The caller separately proves the actual allocation and
 > rejects disagreement between its owner and a transported capacity. A plan
 > neither adopts tensor storage nor proves an arbitrary foreign capacity claim.
-> `chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical
-> row-major index and returns its exact int64 byte offset in the plan's storage.
+> `chelis_metadata_plan_byte_offset` takes a canonical tagged i64 logical
+> row-major index and returns its exact i64 byte offset in the plan's storage.
 > The index must satisfy `0 <= index < count`; an empty plan admits no index,
 > and rank zero admits exactly index zero with offset zero. Supplied strides
 > determine the offset after checked logical coordinate decoding; zero strides
 > repeat the same storage location. The result remains inside the previously
 > checked reachable span. It neither reads payload nor changes plan ownership.
 > Invalid indices or carriers trap `Domain`; arithmetic or target projection
-> overflow traps `Overflow`, with operation `metadata_plan` at int64.
+> overflow traps `Overflow`, with operation `metadata_plan` at i64.
 >
 > `chelis_metadata_plan_release` consumes the live plan exactly once; all
 > observations require a live plan of the correct kind. These operations have
 > no cotangent or accumulator and change no tensor payload or ownership.
 > Invalid domains trap `Domain`; unrepresentable metadata, offsets, span or
-> target projections trap `Overflow`, using [04-NUM-9]'s canonical int64 failure
+> target projections trap `Overflow`, using [04-NUM-9]'s canonical i64 failure
 > line with operation `metadata_plan`. Failure precedes payload allocation or
 > access and never returns a repaired or partial plan.
 >
@@ -2160,7 +2160,7 @@ exact ADT identity by [05-OP-34].
 > reachable span exceeds its logical bytes is rejected before allocation.
 >
 > `chelis_device_tensor_borrow` consumes one live metadata plan, validates its
-> reachable span against a canonical tagged int64 byte capacity, and retains
+> reachable span against a canonical tagged i64 byte capacity, and retains
 > metadata while borrowing the supplied device storage. A nonempty plan requires
 > a non-null, representation-aligned data pointer. The caller proves the real
 > allocation capacity, device, and storage lifetime through the final borrow use;
@@ -2168,8 +2168,8 @@ exact ADT identity by [05-OP-34].
 > its slot or input owner and may not escape as an owned result.
 >
 > `chelis_device_tensor_import` validates every field of a generated raw packet
-> before constructing a borrowed owner: nonnegative int32 rank, complete aligned
-> rank-many int64 shape and stride arrays, closed dtype, zero reserved bytes,
+> before constructing a borrowed owner: nonnegative i32 rank, complete aligned
+> rank-many i64 shape and stride arrays, closed dtype, zero reserved bytes,
 > borrowed ownership value zero, exact count, nonnegative byte capacity and the
 > shared checked reachable span. It checks rank-many array byte projections
 > before array reads. It snapshots metadata and retains no packet or
@@ -2183,7 +2183,7 @@ exact ADT identity by [05-OP-34].
 > storage or one for owned storage, and zero reserved bytes. The observation
 > grants no right to mutate metadata or release an owner through a packet address.
 >
-> `chelis_device_tensor_device` returns the owner's exact nonnegative int32
+> `chelis_device_tensor_device` returns the owner's exact nonnegative i32
 > HIP device identity, recorded from the runtime context at construction. A
 > nonempty borrow/import also requires official pointer attributes to identify
 > device storage on that same device. Empty owners bind to the actual construction
@@ -2225,12 +2225,12 @@ exact ADT identity by [05-OP-34].
 > release and restores the calling thread's prior current device. Invalid field,
 > count, dtype, capacity, device, or ownership domains trap
 > `Domain`; unrepresentable metadata or offsets trap `Overflow`, before payload
-> allocation or access, using `metadata_plan` at int64. These device operations
+> allocation or access, using `metadata_plan` at i64. These device operations
 > have no cotangent or accumulator and perform no numeric dtype conversion.
 >
 > `chelis_tensor_reduction_plan` snapshots checked tensor metadata;
 > `chelis_shape_reduction_plan` constructs the corresponding metadata-only virtual
-> domain from exact tagged int64 rank and extents. Both take a nonempty list of
+> domain from exact tagged i64 rank and extents. Both take a nonempty list of
 > distinct original axes in strictly descending order after one-step negative
 > normalization, an exact tagged scalar whose
 > dtype selects the result representation, and a closed `chelis_reduction_op`
@@ -2254,11 +2254,11 @@ exact ADT identity by [05-OP-34].
 > tensor storage and perform no payload or ownership action on their input tensor;
 > construction and observation remain valid during tensor write guards. Invalid
 > domains trap `Domain`, unrepresentable arithmetic traps `Overflow`, and failures
-> retain [04-NUM-9]'s canonical primitive identity at int64. These metadata operations
+> retain [04-NUM-9]'s canonical primitive identity at i64. These metadata operations
 > have no cotangent or arithmetic accumulator and do not select a reduction algorithm.
 >
 > `chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)
-> update metadata before output allocation or reuse. Its exact tagged int64 axis
+> update metadata before output allocation or reuse. Its exact tagged i64 axis
 > normalizes once against the base rank. The closed `chelis_sparse_op` identifies
 > gather, scatter-add, replace-scatter, or element-wise scatter; canonical numeric
 > failure identities are respectively `gather`, `scatter`, `scatter_replace`, and
@@ -2274,17 +2274,17 @@ exact ADT identity by [05-OP-34].
 > normalization; `chelis_sparse_count` observes the checked iteration count.
 > `chelis_sparse_index_slot` maps an in-range row-major iteration position to its
 > index-tensor slot. `chelis_sparse_data_index` maps that position and its exact
-> tagged int64 selected index to the base-tensor position, requiring the selected
+> tagged i64 selected index to the base-tensor position, requiring the selected
 > index in `[0, base.shape[axis])`. Empty iteration domains admit no index. The
 > mapping preserves section 3.5's row-major update order and selects no arithmetic
 > algorithm. `chelis_sparse_check_target` requires the exact result rank and shape,
-> transported as canonical tagged int64 scalars, before allocation or reuse;
+> transported as canonical tagged i64 scalars, before allocation or reuse;
 > positive array lengths require complete non-null arrays.
 > `chelis_sparse_plan_release` consumes the live plan exactly once. Plans retain
 > no tensor payload or ownership and remain valid after source release or repurpose;
 > observations may run concurrently while the plan remains live. Malformed carriers
 > and invalid domains trap `Domain`; unrepresentable metadata or offsets trap
-> `Overflow`, retaining [04-NUM-9]'s canonical primitive identity at int64. These
+> `Overflow`, retaining [04-NUM-9]'s canonical primitive identity at i64. These
 > metadata operations have no cotangent or arithmetic accumulator.
 >
 > `chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands
@@ -2302,12 +2302,12 @@ exact ADT identity by [05-OP-34].
 > `chelis_matmul_index` maps an in-range batch and per-matrix element to that
 > part's checked complete tensor index. Empty domains admit no index.
 >
-> `chelis_matmul_check_target` requires the exact tagged int64 result rank and
+> `chelis_matmul_check_target` requires the exact tagged i64 result rank and
 > shape before allocation or reuse; positive array lengths require complete non-null
 > arrays. `chelis_matmul_check_scratch` checks a selected matrix count's bytes and
 > allocation projection at an exact tagged exemplar's representation.
 > `chelis_matmul_check_vendor` checks all dimensions against a positive exact tagged
-> int64 maximum supplied from the selected vendor argument type before conversion.
+> i64 maximum supplied from the selected vendor argument type before conversion.
 > A computation with no matrix calls (empty output or zero contraction extent)
 > requires no vendor projection. Empty outputs owe no unused per-matrix products
 > or scratch. A zero contraction with a nonempty result retains its zero identity.
@@ -2317,11 +2317,11 @@ exact ADT identity by [05-OP-34].
 > no tensor storage and remain valid after source release or repurpose, including
 > concurrent observations while live. Invalid carriers, shapes, selectors, or
 > indices trap `Domain`; unrepresentable arithmetic or target projections trap
-> `Overflow`, with [04-NUM-9]'s canonical `matmul` identity at int64. There is no
+> `Overflow`, with [04-NUM-9]'s canonical `matmul` identity at i64. There is no
 > cotangent or arithmetic accumulator for these metadata operations.
 >
 > `chelis_tensor_check_literal` validates a complete result shape and literal
-> element count, both carried as exact tagged int64 values, against a canonical
+> element count, both carried as exact tagged i64 values, against a canonical
 > zero exemplar of the literal's element dtype. Shape rank, extents, strides,
 > count, representation bytes, and target allocation projection must be valid;
 > the literal count must be nonnegative and equal the checked result element
@@ -2330,11 +2330,11 @@ exact ADT identity by [05-OP-34].
 > before destination allocation or reuse and before reading the literal buffer.
 > All active storage dtypes are admitted without payload conversion. Malformed
 > metadata or count mismatch traps `Domain`; unrepresentable metadata traps
-> `Overflow`, with canonical `const` identity at int64. This metadata check has
+> `Overflow`, with canonical `const` identity at i64. This metadata check has
 > no cotangent or accumulator.
 >
 > `chelis_tensor_write_literal` takes a live tensor write guard, an exact tagged
-> int64 count, and that many complete, stable, nonoverlapping `chelis_scalar`
+> i64 count, and that many complete, stable, nonoverlapping `chelis_scalar`
 > values. Zero count permits a null value pointer. The count must equal the
 > destination's checked element count. Every source carrier must be canonical and
 > have the destination dtype; all carriers and the complete source array's target
@@ -2342,19 +2342,19 @@ exact ADT identity by [05-OP-34].
 > element bit is preserved at its declared representation width, with no dtype
 > conversion or arithmetic accumulator. Metadata or carrier mismatch traps
 > `Domain`, and an unrepresentable source array traps `Overflow`, with canonical
-> `const` identity at int64. The write guard remains live and exclusively owns the
+> `const` identity at i64. The write guard remains live and exclusively owns the
 > destination throughout; the operation neither ends it nor retains the source.
 > This constant-storage ingress has no cotangent.
 >
 > `chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and
 > `chelis_tensor_affine_plan` snapshot complete source and result metadata for
 > the exact row-major movements in [05-MOV-1], independently of tensor payload.
-> Permutation takes a tagged int64 rank and complete array of tagged int64 axes;
+> Permutation takes a tagged i64 rank and complete array of tagged i64 axes;
 > it requires a bijection after one-step negative axis normalization. Expansion
-> takes a tagged int64 axis and extent plus the closed `EXPAND` or `INSERT` form:
+> takes a tagged i64 axis and extent plus the closed `EXPAND` or `INSERT` form:
 > `EXPAND` replaces a unit axis without changing rank, and `INSERT` adds an axis.
 > Negative axes normalize once against the result rank. Affine movement takes a
-> tagged int64 rank and complete tagged int64 bound arrays with the closed `PAD`,
+> tagged i64 rank and complete tagged i64 bound arrays with the closed `PAD`,
 > `SHRINK`, or `STRIDE` form. Padding's arrays are before/after; shrinking's are
 > start/end; stride's first array is positive steps and its second pointer is
 > unused. Rank must equal source rank. All positive array lengths require complete
@@ -2363,9 +2363,9 @@ exact ADT identity by [05-OP-34].
 > The opaque plan validates its own projection storage before allocation.
 >
 > `chelis_movement_extent` observes the closed `SOURCE` or `RESULT` shape at a
-> tagged int64 axis with one-step negative normalization. `chelis_movement_count`
+> tagged i64 axis with one-step negative normalization. `chelis_movement_count`
 > returns the source count for padding and result count for other forms.
-> `chelis_movement_index` maps an in-range tagged int64 position in that domain
+> `chelis_movement_index` maps an in-range tagged i64 position in that domain
 > to the padded destination index or other forms' source index. Each projection
 > uses checked exact coordinate/stride arithmetic without per-index scratch;
 > empty domains admit no index. `chelis_movement_check_target` requires a complete
@@ -2375,13 +2375,13 @@ exact ADT identity by [05-OP-34].
 > after source release or repurpose, and admits concurrent observations while live.
 > Malformed carriers, selectors or domains trap `Domain`; unrepresentable metadata
 > or projections trap `Overflow`, retaining the selected canonical `permute`,
-> `expand`, `insert`, `pad`, `shrink`, or `stride` identity at int64. Invalid
+> `expand`, `insert`, `pad`, `shrink`, or `stride` identity at i64. Invalid
 > operation selectors and null plans use `movement`. These metadata operations have no
 > cotangent or arithmetic accumulator and do not alter payload arithmetic.
 >
 > `chelis_tensor_window_plan` snapshots the complete input and valid-padding
 > result metadata from [05-RWIN-1]'s positive trailing window and stride lists,
-> transported as equal-length arrays of exact tagged int64 values. The tagged
+> transported as equal-length arrays of exact tagged i64 values. The tagged
 > length is nonzero and does not exceed input rank; each input spatial extent
 > admits its window. Positive array lengths require complete non-null arrays.
 > Leading extents pass through unchanged, including zero extents. The independently
@@ -2397,7 +2397,7 @@ exact ADT identity by [05-OP-34].
 > coordinate/stride arithmetic; either empty domain admits no index.
 > `chelis_window_check_tensor` requires a tensor's exact shape and dtype to match
 > the selected side. `chelis_window_check_target` requires a submitted rank and
-> complete shape, transported as canonical tagged int64 scalars, to match that
+> complete shape, transported as canonical tagged i64 scalars, to match that
 > side before allocation or reuse. `chelis_window_plan_release` consumes the live
 > plan once; concurrent observations require the plan to remain live.
 >
@@ -2405,12 +2405,12 @@ exact ADT identity by [05-OP-34].
 > `reduce_window_sum`, `reduce_window_mean`, `reduce_window_max`,
 > `reduce_window_min`, or `reduce_window_grad`. Invalid domains and malformed
 > carriers trap `Domain`; unrepresentable metadata or offsets trap `Overflow`,
-> using [04-NUM-9]'s selected identity at int64. These metadata operations have
+> using [04-NUM-9]'s selected identity at i64. These metadata operations have
 > no cotangent or arithmetic accumulator and do not select or alter OP39's
 > arithmetic algorithm or dtype admission. An invalid operation selector or null
 > plan traps `Domain` with identity `reduce_window`.
 >
-> `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
+> `chelis_tensor_reshape` accepts a live, flat `List<i64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent
 > owner with the target shape, and preserves every stored element bit in row-major
@@ -2421,7 +2421,7 @@ exact ADT identity by [05-OP-34].
 >
 > `concat` requires a nonempty list of tensors with one common rank and dtype and equal
 > non-concatenated extents and copies parts in list order. `split` requires
-> nonnegative int64 sizes whose checked sum equals the selected extent and
+> nonnegative i64 sizes whose checked sum equals the selected extent and
 > returns consecutive pieces in size-list order. Both preserve element bits;
 > on floats their adjoints are respectively split by source extents and
 > concat in source order. Integer and bool forms are forward-only.
@@ -2449,7 +2449,7 @@ exact ADT identity by [05-OP-34].
 > their exact stored mathematical values, are zero-based, and must lie in the
 > selected base-axis extent. Any negative or out-of-range index traps `Domain`
 > before any write. Indices have no cotangent. There is no public string
-> scatter mode and no int32/int64-only dispatch exception.
+> scatter mode and no i32/i64-only dispatch exception.
 >
 > `cmplt` requires identical shapes and identical active signed-integer or
 > float dtypes, compares stored values without conversion, and returns native
@@ -2467,7 +2467,7 @@ exact ADT identity by [05-OP-34].
 > type error.
 >
 > `sort` admits signed-integer and float tensors and returns `(values,
-> indices)`, with values at the input shape/dtype and exact int64 indices at
+> indices)`, with values at the input shape/dtype and exact i64 indices at
 > the same shape. Each axis slice is stable ascending: NaNs follow all
 > non-NaNs; non-NaNs use numeric order; signed zeros compare equal; and equal
 > values and NaNs retain increasing source-axis order. Stored representations
@@ -2640,7 +2640,7 @@ exact ADT identity by [05-OP-34].
 > never replaces them.
 >
 > `chelis_tensor_repurpose` is the one descriptor-metadata mutation. Its rank
-> and each shape extent arrive as exact `int64` `chelis_scalar` values; any
+> and each shape extent arrive as exact `i64` `chelis_scalar` values; any
 > other scalar dtype or a nonzero reserved byte traps `Domain`. It
 > succeeds only when the descriptor has exactly one live owner, its storage
 > has exactly one live descriptor, the storage is runtime-owned, and no write
@@ -2695,7 +2695,7 @@ exact ADT identity by [05-OP-34].
 > a numeric field binds to [05-OP-35] or another exact numeric operation atom.
 > [05-OP-2] governs `io/json::Json`'s exact
 > integer/float source distinction. `JsonBigInt` carries the exact decimal
-> spelling of an integer-form source token outside int64 range ([05-OP-2]);
+> spelling of an integer-form source token outside i64 range ([05-OP-2]);
 > it is source-faithful text, never a float funnel, and its string field
 > compares and renders byte-exactly. Decimal, date, duration, vocabulary,
 > merge-rank, inverse-vocabulary, and unknown-token invariants are checked by
@@ -2725,13 +2725,13 @@ exact ADT identity by [05-OP-34].
 > arithmetic is checked and a composed trap propagates at its first specified
 > operation. Decimal rational and calendar ordinal computations explicitly
 > named as mathematical below use an exact internal domain; only their named
-> int64 input and final-representation boundaries can trap `Overflow`, and no
+> i64 input and final-representation boundaries can trap `Overflow`, and no
 > host integer width becomes observable. JSON access follows [05-OP-2..5]: an
-> integer-form token outside int64 ingests as `JsonBigInt` and never becomes
+> integer-form token outside i64 ingests as `JsonBigInt` and never becomes
 > `JsonFloat`; `json_int`
 > refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
 > big-integer projection, while `json_float` performs [05-OP-3]'s named
-> int64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
+> i64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
 > unchanged. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
@@ -2779,7 +2779,7 @@ exact ADT identity by [05-OP-34].
 > `decimal` traps `Domain`. Syntactically valid digits and their scale are
 > interpreted in exact arithmetic and normalized before either representation
 > check. Both forms trap `Overflow`, rather than returning `None`, exactly when
-> the resulting canonical coefficient or scale has no int64 representation;
+> the resulting canonical coefficient or scale has no i64 representation;
 > removable trailing zeros do not cause `Overflow`.
 >
 > `decimal_from_int(v)` is the canonical
@@ -2787,7 +2787,7 @@ exact ADT identity by [05-OP-34].
 > multiplication, equality, and ordering use exact mathematical rationals;
 > no alignment power, product, or comparison converts through float.
 > Arithmetic returns the unique canonical representable pair and traps
-> `Overflow` when no such int64 coefficient/scale pair exists. The five
+> `Overflow` when no such i64 coefficient/scale pair exists. The five
 > comparison callables are the ordinary exact-rational `=`, `<`, `<=`, `>`,
 > and `>=` relations named by their suffixes. `decimal_div` rejects a zero
 > divisor or negative result scale. It rounds the exact rational to the
@@ -2824,7 +2824,7 @@ exact ADT identity by [05-OP-34].
 > at a string key only for `JsonObject`; each `json_string`, `json_int`,
 > `json_bigint`, `json_float`, `json_bool`, `json_array`, and `json_object`
 > returns `Some`
-> only for its named variant, except [05-OP-3]'s explicit int64-to-f64 case.
+> only for its named variant, except [05-OP-3]'s explicit i64-to-f64 case.
 > `json_is_null` is true exactly for `Some(JsonNull)`. Every other shape,
 > including `None`, returns `None` or false without fabricating a payload.
 > Serialization follows [05-OP-5], uses compact JSON punctuation, and escapes
@@ -2909,7 +2909,7 @@ exact ADT identity by [05-OP-34].
 > endpoints and returns the increasing half-open same-dtype sequence. Its
 > length and every step are checked in exact mathematical integers; an
 > unrepresentable length or element traps `Overflow`. `linspace` requires finite endpoints and
-> int64 `count >= 1`; count one returns `[start]`, while a larger count includes the
+> i64 `count >= 1`; count one returns `[start]`, while a larger count includes the
 > exact stored start and stop. For interior position `i`, the exact
 > mathematical rational `i/(count-1)` is rounded once to `p_float`, then the
 > declared `p_float` composition `start + (stop-start)*weight` executes in that
@@ -2922,7 +2922,7 @@ exact ADT identity by [05-OP-34].
 > rank once and then require `0 <= axis <= input_rank`.
 > Stack rejects an empty list or any inconsistent input dimension list or
 > dtype. `where_indices`
-> returns the increasing row-major int64 flat indices of true elements. The
+> returns the increasing row-major i64 flat indices of true elements. The
 > float `squeeze` and `unsqueeze` adjoints are the reverse reshape graph.
 > The float `stack` adjoint slices the output cotangent along the inserted axis
 > in increasing input-list order and returns a `List` of tensor cotangents with
@@ -2954,16 +2954,16 @@ exact ADT identity by [05-OP-34].
 > dtype. Float elements use the same numeric-equality rule as scalar
 > `assert_eq`; signed-integer and bool elements use exact equality. It reports
 > the first unequal row-major element. `assert_shape` requires its expected list
-> to contain only nonnegative int64 extents and compares its length and every
+> to contain only nonnegative i64 extents and compares its length and every
 > entry to the tensor's complete shape in axis order; a negative expected
 > extent is a `Domain` failure. Exact tensor assertions report the first row-major
 > mismatch. A failed assertion is a branded `Test` failure with
 > its label, never a panic, inert stub, or default result.
 >
-> `mmap_size(path)` returns the exact nonnegative byte length as int64 and
-> traps `Overflow` when the platform length has no int64 image.
+> `mmap_size(path)` returns the exact nonnegative byte length as i64 and
+> traps `Overflow` when the platform length has no i64 image.
 > `read_head_bytes(path, count)` requires `count >= 0` and returns the first
-> `min(count, file_length)` bytes as exact int64 values in `0..=255`.
+> `min(count, file_length)` bytes as exact i64 values in `0..=255`.
 > Each call returns the length or byte prefix observed by one successful host
 > filesystem operation. Any error actually reported by open, stat, or read
 > propagates as `IO`; concurrent mutation may yield a valid observed snapshot
@@ -2971,20 +2971,20 @@ exact ADT identity by [05-OP-34].
 > for an error or promises detection of a mutation that the host did not report.
 >
 > Date operations use the proleptic Gregorian calendar with astronomical
-> int64 years. `try_date` returns `None` for an invalid month/day and otherwise
+> i64 years. `try_date` returns `None` for an invalid month/day and otherwise
 > the exact fields; `date` traps `Domain` for the same invalid input. Every
 > operation accepting `Date` validates it first. With `ordinal` and
 > `from_ordinal` denoting the exact proleptic-Gregorian bijection,
 > `add_days(d,n) = from_ordinal(ordinal(d) + n)`,
 > `sub_days(d,n) = from_ordinal(ordinal(d) - n)`, and
 > `days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`. This mathematical
-> ordinal arithmetic traps `Overflow` only if its final Date year or int64
+> ordinal arithmetic traps `Overflow` only if its final Date year or i64
 > day difference is unrepresentable; `sub_days` treats
-> `int64::MIN` mathematically rather than negating it at width. `duration`
+> `i64::MIN` mathematically rather than negating it at width. `duration`
 > forms the exact mathematical component total and applies Euclidean division
 > by 86400: `days` is the floor quotient and the nonnegative remainder supplies
 > hours in `0..23` and minutes/seconds in `0..59`. It traps `Overflow` exactly
-> when that final normalized `days` field has no int64 representation. Valid
+> when that final normalized `days` field has no i64 representation. Valid
 > date comparisons are lexicographic on `(year, month, day)`.
 > `day_of_year` is one-based; `day_of_week` fixes `1970-01-01` as Thursday
 > and returns Monday through Sunday in calendar order, while
@@ -2993,12 +2993,12 @@ exact ADT identity by [05-OP-34].
 > Date text has one canonical form. Years `0000` through `9999` use exactly
 > four digits. A negative year uses `-` followed by exactly
 > `max(4, digits(|year|))` decimal digits, where `|year|` is the exact
-> mathematical magnitude rather than an int64 `abs`, with leading zeros to that width;
+> mathematical magnitude rather than an i64 `abs`, with leading zeros to that width;
 > a year above 9999 uses `+` plus its unpadded decimal digits.
 > Month and day are two digits, separated as `year-MM-DD`.
 > `date_to_string` emits that form for a valid Date and traps `Domain` for an
 > invalid raw constructor value. `parse_date` accepts only that canonical form
-> and returns `None` for a syntax error, an int64-unrepresentable year, or an
+> and returns `None` for a syntax error, an i64-unrepresentable year, or an
 > invalid calendar date.
 >
 > A tokenizer operation first validates that vocabulary IDs are injective,
@@ -3013,7 +3013,7 @@ exact ADT identity by [05-OP-34].
 > inverse vocabulary, using the unknown-token string exactly when the ID is
 > absent, and concatenates the resulting token strings with no separator.
 > `batch_encode` requires `max_length >= 0`, truncates on the
-> right, and right-pads with the exact int64 `pad_value`.
+> right, and right-pads with the exact i64 `pad_value`.
 > `try_load_tokenizer` accepts a JSON object whose `model` is an object with
 > exact string `type: "BPE"`, a `vocab` object of unique string keys to unique
 > `JsonInt` IDs, a `merges` array of strings each containing exactly two
@@ -3241,7 +3241,7 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-48]** Signature: `sigmoid(x)`, `tanh(x)`, `silu(x)`, and `gelu(x)` preserve one
 > float scalar or tensor's shape and dtype; `softmax(x,axis)` takes a float
-> tensor and an axis-domain int32 and returns the same tensor type.
+> tensor and an axis-domain i32 and returns the same tensor type.
 >
 > Domain: All active float dtypes are admitted at [04-NUM-8]'s widths.
 > Integer/bool/string operands are type errors. Softmax's axis obeys
@@ -3274,8 +3274,8 @@ path even though bare `round` under `grad` remains a structural
 > its named-axis and anchored insert forms.
 >
 > Domain: Every active tensor element dtype is admitted without conversion.
-> Axis positions/permutations are int32; extents, bounds, padding, and steps
-> are int64. Runtime arguments and named dimensions obey [05-DIM-1..3] and
+> Axis positions/permutations are i32; extents, bounds, padding, and steps
+> are i64. Runtime arguments and named dimensions obey [05-DIM-1..3] and
 > spec/04 section 4.7; kernel capacity cannot narrow these domains.
 >
 > Result: Reshape preserves row-major element sequence and total element
@@ -3303,8 +3303,8 @@ path even though bare `round` under `grad` remains a structural
 
 #### Shape and scalar boundaries
 
-> **[05-OP-50]** Signature: `rank(x)` and `numel(x)` borrow a tensor and return int32 and
-> int64 respectively; `scalar_to_tensor(x)` maps one active tensor-element
+> **[05-OP-50]** Signature: `rank(x)` and `numel(x)` borrow a tensor and return i32 and
+> i64 respectively; `scalar_to_tensor(x)` maps one active tensor-element
 > scalar to a rank-zero tensor; `tensor_to_scalar(x)` borrows a rank-zero
 > tensor and returns its element scalar.
 >
@@ -3317,7 +3317,7 @@ path even though bare `round` under `grad` remains a structural
 > mathematical product, with rank-zero product one. The boundary conversions
 > preserve the dtype and stored bits exactly.
 >
-> Failure: An unrepresentable int32 rank or int64 element count traps
+> Failure: An unrepresentable i32 rank or i64 element count traps
 > Overflow. Non-tensor observations, string scalar construction, and
 > nonzero-rank extraction are type errors; there is no rank-erasing
 > fallback.
@@ -3326,13 +3326,13 @@ path even though bare `round` under `grad` remains a structural
 > conversion has the inverse shape conversion as adjoint; integer/bool
 > differentiated data is structurally rejected.
 >
-> Accumulator: Only exact checked int64 metadata multiplication for numel; no floating accumulator.
+> Accumulator: Only exact checked i64 metadata multiplication for numel; no floating accumulator.
 
 #### Contractions and normalization graphs
 
 > **[05-OP-51]** Signature: `matmul(a,b)` uses section 4.1's batched matrix signature;
 > `einsum(equation,a,b)` takes a string equation and two tensors;
-> `conv(input,kernel,strides:List[int64],padding:List[(int64,int64)])` uses section 4.5's
+> `conv(input,kernel,strides:List[i64],padding:List[(i64,i64)])` uses section 4.5's
 > layout; `layer_norm(x,gamma,beta,epsilon:p)` uses section 4.4's trailing-axis
 > normalization and affine parameters.
 >
@@ -3357,7 +3357,7 @@ path even though bare `round` under `grad` remains a structural
 > exact dtype-zero cells. Each kernel extent is positive and fits its padded
 > input extent. Output extent j is
 > floor((input[j]+low[j]+high[j]-kernel[j])/strides[j])+1,
-> computed in checked int64 arithmetic. Products visit
+> computed in checked i64 arithmetic. Products visit
 > (input-channel,kernel-axis-0,...,kernel-axis-r-1) in row-major order for each
 > output before the contraction tree. A zero input-channel extent is an empty
 > contraction with dtype-zero result; zero batch or output-channel extents
@@ -3399,7 +3399,7 @@ path even though bare `round` under `grad` remains a structural
 >
 > Domain: Indices use any active signed-integer dtype at their exact stored
 > width. Tensor data and updates share one active element dtype; axis is
-> int32. The selected scatter mode is explicitly add or replace. Bool data
+> i32. The selected scatter mode is explicitly add or replace. Bool data
 > may be selected/replaced but cannot enter numeric addition.
 >
 > Result: Gather selects the indexed source cells. Add scatter accumulates
@@ -3426,13 +3426,13 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-53]** Signature: `where(condition,a,b)` uses a bool condition and same-shaped
 > same-dtype branches; `cumsum(x,axis)` preserves x's shape with the default
-> sum result dtype, while `sort(x,axis)` returns (values, int64 indices) at
+> sum result dtype, while `sort(x,axis)` returns (values, i64 indices) at
 > that shape; `diagonal(x,axis1,axis2)` and `trace(x,axis1,axis2)` select
 > and reduce the paired axes; `clamp(x,low,high)` preserves its numeric
 > operand shape; `split(x,axis,sizes)` returns a List of tensor slices with
-> int64 sizes.
+> i64 sizes.
 >
-> Domain: Axis arguments are int32. Where, diagonal, and split admit every
+> Domain: Axis arguments are i32. Where, diagonal, and split admit every
 > active tensor element dtype by exact selection. Cumsum, sort, trace, and
 > clamp admit the arithmetic dtype domains and parameter shapes specified
 > for their corresponding tensor operations in [05-OP-33]. No parameter or
@@ -3464,17 +3464,17 @@ path even though bare `round` under `grad` remains a structural
 
 #### List structure and counts
 
-> **[05-OP-54]** Signature: `len(xs)` accepts List[T] or Dict[K,V] and returns int64;
-> `index(xs,i)` takes List[T] and int64 and returns T; `append(xs,x)` and
-> `concat(xs,ys)` return List[T]; `take(xs,n)` and `drop(xs,n)` take int64
+> **[05-OP-54]** Signature: `len(xs)` accepts List[T] or Dict[K,V] and returns i64;
+> `index(xs,i)` takes List[T] and i64 and returns T; `append(xs,x)` and
+> `concat(xs,ys)` return List[T]; `take(xs,n)` and `drop(xs,n)` take i64
 > counts; `chunk(xs,n)` returns List[List[T]]; `range(start,end)` takes
-> int64 endpoints and returns List[int64]. Separately, `drop(value)`
+> i64 endpoints and returns List[i64]. Separately, `drop(value)`
 > consumes one value and returns unit.
 >
 > Domain: List elements retain their exact type, recursively, with no
-> numeric conversion. Element/count/index quantities are int64. The two
+> numeric conversion. Element/count/index quantities are i64. The two
 > concat forms are disjoint: List concatenation takes a List second
-> argument; tensor concatenation takes an int32 axis and is governed by
+> argument; tensor concatenation takes an i32 axis and is governed by
 > [05-OP-62]. The one-argument drop is explicit lifetime consumption, not a
 > List count default.
 >
@@ -3486,7 +3486,7 @@ path even though bare `round` under `grad` remains a structural
 > start. Drop(value) performs the ordinary linear release.
 >
 > Failure: Negative index/count, out-of-bounds index, nonpositive chunk
-> size, wrong arity/type, and unrepresentable int64 counts fail loudly.
+> size, wrong arity/type, and unrepresentable i64 counts fail loudly.
 > Clamping take/drop at length is their stated semantics and never applies
 > to index.
 >
@@ -3505,7 +3505,7 @@ path even though bare `round` under `grad` remains a structural
 > `partition(f,xs)` use T->bool; `fold(f,init,xs)` and `scan(f,init,xs)` use
 > (A,T)->A; `flat_map(f,xs)` uses T->List[U]; `flatten(xss)` takes
 > List[List[T]]; `zip(xs,ys)` returns List[(T,U)]; `enumerate(xs)` returns
-> List[(int64,T)]. Callback effects E are preserved in the result function's
+> List[(i64,T)]. Callback effects E are preserved in the result function's
 > effects.
 >
 > Domain: Element and accumulator types may be recursive checked types, with
@@ -3518,12 +3518,12 @@ path even though bare `round` under `grad` remains a structural
 > partition returns retained and rejected Lists in original order. Fold
 > returns the final state; scan returns the successive post-step states.
 > Flat-map flattens each callback result in order. Flatten removes one List
-> layer. Zip stops at the shorter length. Enumerate uses zero-based int64
+> layer. Zip stops at the shorter length. Enumerate uses zero-based i64
 > indices.
 >
 > Failure: Callback traps propagate at their actual invocation; incompatible
 > callback/result types or unavailable effects are type errors. An
-> index/count beyond int64 traps Overflow, never wraps. No callback may be
+> index/count beyond i64 traps Overflow, never wraps. No callback may be
 > elided merely because its result is unused.
 >
 > Adjoint: Use spec/06 section 2.10.1's exact executed List/callback graph:
@@ -3621,14 +3621,14 @@ path even though bare `round` under `grad` remains a structural
 
 #### String identities
 
-> **[05-OP-58]** Signature: `string_len(s)` returns int64; `string_concat(a,b)` returns
-> string; `string_slice(s,start,length)` takes int64 offsets and returns
+> **[05-OP-58]** Signature: `string_len(s)` returns i64; `string_concat(a,b)` returns
+> string; `string_slice(s,start,length)` takes i64 offsets and returns
 > string; `string_contains`, `string_starts_with`, and `string_ends_with`
 > take two strings and return bool; `string_trim(s)` returns string.
 >
 > Domain: String length and slicing count Unicode scalar values, not UTF-8
 > bytes or grapheme clusters. Strings are not normalized; offset/count
-> quantities are exact int64. The operations are pure.
+> quantities are exact i64. The operations are pure.
 >
 > Result: Concatenation preserves both strings' bytes. Slice selects up to
 > length scalar values starting at start, returning empty at or beyond the
@@ -3637,7 +3637,7 @@ path even though bare `round` under `grad` remains a structural
 > White_Space characters and preserves the interior bytes.
 >
 > Failure: Negative slice start/length is a domain error; unrepresentable
-> int64 lengths trap Overflow. Wrong types/arity are type errors, not
+> i64 lengths trap Overflow. Wrong types/arity are type errors, not
 > stringification or parsing fallbacks.
 >
 > Adjoint: These string operations structurally reject differentiation; no numeric cotangent is fabricated.
@@ -3646,7 +3646,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Explicit text parsers
 
-> **[05-OP-59]** Signature: `to_int(text: string)->Option[int64]` and `to_float(text:
+> **[05-OP-59]** Signature: `to_int(text: string)->Option[i64]` and `to_float(text:
 > string)->Option[f64]` explicitly select their result dtype.
 >
 > Domain: Both parsers consume the whole string after trimming surrounding
@@ -3656,13 +3656,13 @@ path even though bare `round` under `grad` remains a structural
 > and case-insensitive `inf`, `infinity`, or `nan`. No collection or
 > non-string argument is implicitly rendered.
 >
-> Result: A valid in-range integer yields its exact int64. A valid float
+> Result: A valid in-range integer yields its exact i64. A valid float
 > yields the correctly rounded f64, including IEEE overflow to infinity,
 > underflow with signed zero, and an explicitly parsed exceptional value.
 > The Option variants retain the chosen dtype. These named parsers do not
 > replace JSON/CSV's distinct [05-OP-2] grammar and refusal rules.
 >
-> Failure: Malformed text and out-of-range int64 yield None. Parsing never
+> Failure: Malformed text and out-of-range i64 yield None. Parsing never
 > returns a numeric zero for failure and never widens an integer result
 > through f64. Wrong input types are type errors.
 >
@@ -3677,11 +3677,11 @@ path even though bare `round` under `grad` remains a structural
 > `test_assert(condition:bool,label:string)->unit!{Test}` are the
 > observation/control identities. `read_file(path)->string`,
 > `write_file(path,text)->unit`, `read_lines(path)->List[string]`,
-> `read_bytes(path)->List[int64]`, `file_exists(path)->bool`,
+> `read_bytes(path)->List[i64]`, `file_exists(path)->bool`,
 > `list_dir(path)->List[string]`, and `mmap_file(path)->MappedFile` take
 > string paths with IO effects.
-> `mmap_read(mapped,offset,length)->List[int64]` and
-> `mmap_len(mapped)->int64` borrow the mapped handle and take exact int64
+> `mmap_read(mapped,offset,length)->List[i64]` and
+> `mmap_len(mapped)->i64` borrow the mapped handle and take exact i64
 > offsets/counts.
 >
 > Domain: All argument/result types and effects are exact. Observation
@@ -3708,12 +3708,12 @@ path even though bare `round` under `grad` remains a structural
 > effect rules. No executable effect is replaced by a zero-cotangent path.
 >
 > Accumulator: None; all returned byte counts and offsets are exact checked
-> int64.
+> i64.
 
 #### CSV text structure
 
 > **[05-OP-61]** Signature: `parse_csv(text:string)->List[Dict[string,string]]`;
-> `csv_str(table,row:int64,column:string)->string`;
+> `csv_str(table,row:i64,column:string)->string`;
 > `csv_strs(table,column:string)->List[string]`; and
 > `csv_cols(table)->List[string]` operate on the text-table representation.
 >
@@ -3738,7 +3738,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Tensor concatenation
 
-> **[05-OP-62]** Signature: `concat(parts:List[tensor[..r,p]],axis:int32)->tensor[..r,p]`
+> **[05-OP-62]** Signature: `concat(parts:List[tensor[..r,p]],axis:i32)->tensor[..r,p]`
 > concatenates a nonempty List of equal-rank tensors along one existing
 > axis; the List/List overload is [05-OP-54].
 >
@@ -3748,7 +3748,7 @@ path even though bare `round` under `grad` remains a structural
 > section 4.5.4, including ragged direct List literals and guarded runtime
 > extents.
 >
-> Result: The selected result extent is the checked int64 sum of source
+> Result: The selected result extent is the checked i64 sum of source
 > extents. Other extents are preserved. Source tensors contribute in List
 > order; stored element bits and dtype are unchanged.
 >
@@ -3760,7 +3760,7 @@ path even though bare `round` under `grad` remains a structural
 > boundaries, preserving the input List's recursive shape. Axis values have
 > zero cotangent; integer/bool differentiated data structurally rejects.
 >
-> Accumulator: Only checked int64 metadata addition; no forward numeric element accumulator.
+> Accumulator: Only checked i64 metadata addition; no forward numeric element accumulator.
 
 #### Checked cast identity
 
@@ -3802,7 +3802,7 @@ First align the leading batch axes explicitly: prepend missing axes with
 `insert`, then use `expand` only on an existing extent of one whose target
 extent differs. Incompatible non-unit extents are rejected. Let `b` be the
 number of aligned batch axes, and `acc` the resolved accumulator precision.
-The graph uses zero-based axis indices (int32) and int64 extents:
+The graph uses zero-based axis indices (i32) and i64 extents:
 
 ```
 1. A_expanded = insert(A, b+2, k)             ;; [..., i, j, k]
@@ -3844,7 +3844,7 @@ the documented default before lowering. The IR `RiscOp::Matmul` node always
 carries a populated accumulator-precision field. The full default table and
 rationale are in `spec/04-type-system.md` §5.7.1.
 
-Integer matmul (operands of `int8` / `int16` / `int32` / `int64`) is not
+Integer matmul (operands of `i8` / `i16` / `i32` / `i64`) is not
 admitted in the active matmul signature; see `spec/04-type-system.md` §5.7.2
 for rationale. Use `reduce_sum` over an explicit `insert`+`mul` lowering for
 integer inner products.
@@ -3928,7 +3928,7 @@ reverses this graph for the input, both affine parameters, and epsilon.
 ```
 conv(input: tensor[batch, in_c, s0, ..., s(r-1), p],
      kernel: tensor[out_c, in_c, k0, ..., k(r-1), p],
-     strides: List[int64], padding: List[(int64, int64)])
+     strides: List[i64], padding: List[(i64, i64)])
   → tensor[batch, out_c, o0, ..., o(r-1), p]
 ```
 
@@ -4000,7 +4000,7 @@ with `insert` or unit-axis `expand` before this composition.
 6. output = matmul(weights, v)
 ```
 
-The permutation supplies every axis as a positional int32 argument,
+The permutation supplies every axis as a positional i32 argument,
 exchanging only the last two. `scale_exp` and `negative_infinity_exp` insert
 all score axes into rank-zero tensors containing the supplied scale and
 dtype negative infinity.

@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn host_only_builtin_routes_host() {
         let checked =
-            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("result"), Some(&Lane::Host));
     }
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn transitive_host_propagates() {
         let checked = check_program_from_source(
-            "a: List[int32] = [cast(1, int32)]\nb = concat(a, a)\nc = len(b)\n",
+            "a: List[i32] = [cast(1, i32)]\nb = concat(a, a)\nc = len(b)\n",
         );
         let result = infer_realizability(&checked, C_PRIMS);
         // concat is HostOnly → b is Host
@@ -1417,7 +1417,7 @@ mod tests {
     #[test]
     fn function_parameter_names_do_not_become_manifest_runtime_inputs() {
         let checked = check_program_from_source(
-            "value: List[int32] = [cast(1, int32)]\n\
+            "value: List[i32] = [cast(1, i32)]\n\
              def square(value: tensor[2, f32]) -> tensor[2, f32] = mul(value, value)\n",
         );
         let square_body = checked
@@ -1475,9 +1475,9 @@ mod tests {
     #[test]
     fn recursive_function_name_does_not_become_a_runtime_input() {
         let checked = check_program_from_source(
-            "def recur[n](x: tensor[n, f32], i: int64) -> tensor[n, f32] =\n\
-               if lte(i, cast(0, int64)) then x else recur(x, sub(i, cast(1, int64)))\n\
-             out = recur(to_tensor([1.0, 2.0]), cast(2, int64))\n",
+            "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
+               if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
+             out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
         );
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(
@@ -1494,7 +1494,7 @@ mod tests {
 
     #[test]
     fn module_wrapped_defs_receive_realizability_entries() {
-        let checked = check_program_from_source("module Demo.Root\nvalue = cast(7, int64)\n");
+        let checked = check_program_from_source("module Demo.Root\nvalue = cast(7, i64)\n");
         let result = infer_realizability(&checked, C_PRIMS);
         assert!(
             result.lane_by_def.contains_key("value"),
@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn nullary_observation_thunk_routes_to_the_host_value_path() {
-        let checked = check_program_from_source("def answer() -> int64 = cast(42, int64)\n");
+        let checked = check_program_from_source("def answer() -> i64 = cast(42, i64)\n");
         let result = infer_realizability(&checked, EVAL_PRIMS);
         assert_eq!(result.lane_by_def.get("answer"), Some(&Lane::Host));
         assert!(
@@ -1540,13 +1540,13 @@ mod tests {
                 Expr::node(
                     DeepTag::TPrim,
                     Metadata::default(),
-                    vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+                    vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
                     span,
                 ),
                 Expr::node(
                     DeepTag::TPrim,
                     Metadata::default(),
-                    vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+                    vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
                     span,
                 ),
             ],
@@ -1602,7 +1602,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_lists_value_roots_with_lanes() {
         let checked =
-            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1643,7 +1643,7 @@ mod tests {
         let ty = Expr::node(
             DeepTag::TPrim,
             Metadata::default(),
-            vec![Expr::Atom(Atom::Name("int32".to_string()), span)],
+            vec![Expr::Atom(Atom::Name("i32".to_string()), span)],
             span,
         );
         let type_env = BTreeMap::from([("answer".to_string(), ty)]);
@@ -1675,9 +1675,8 @@ mod tests {
     // something an individual runtime may rediscover after lowering.
     #[test]
     fn compute_root_manifest_expands_nested_tuple_roots_depth_first() {
-        let checked = check_program_from_source(
-            "result = (cast(1, int32), (cast(2, int32), cast(3, int32)))\n",
-        );
+        let checked =
+            check_program_from_source("result = (cast(1, i32), (cast(2, i32), cast(3, i32)))\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1695,8 +1694,8 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_static_record_adt_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair { left: int32, right: int32 }\n\
-             result = Pair { left: cast(1, int32), right: cast(2, int32) }\n",
+            "type Pair = | Pair { left: i32, right: i32 }\n\
+             result = Pair { left: cast(1, i32), right: cast(2, i32) }\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1713,8 +1712,8 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_static_positional_adt_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair(int32, int32)\n\
-             result = Pair(cast(1, int32), cast(2, int32))\n",
+            "type Pair = | Pair(i32, i32)\n\
+             result = Pair(cast(1, i32), cast(2, i32))\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1731,9 +1730,9 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_dynamic_adt_variant_as_bare_root() {
         let checked = check_program_from_source(
-            "type Choice = | First(int32) | Second(int32)\n\
+            "type Choice = | First(i32) | Second(i32)\n\
              def choose(flag: bool) -> Choice = \
-               if flag then First(cast(1, int32)) else Second(cast(2, int32))\n\
+               if flag then First(cast(1, i32)) else Second(cast(2, i32))\n\
              result = choose(true)\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
@@ -1751,7 +1750,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_builtin_recursive_list_as_bare_root() {
         let checked =
-            check_program_from_source("result: List[int32] = [cast(1, int32), cast(2, int32)]\n");
+            check_program_from_source("result: List[i32] = [cast(1, i32), cast(2, i32)]\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1781,7 +1780,7 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_pure_nullary_thunks() {
-        let checked = check_program_from_source("def answer() -> int32 = cast(42, int32)\n");
+        let checked = check_program_from_source("def answer() -> i32 = cast(42, i32)\n");
         let realizability = infer_realizability(&checked, EVAL_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1797,9 +1796,9 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_pure_nullary_tuple_and_record_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair { left: int32, right: int32 }\n\
-             def tupled() -> (int32, int32) = (cast(1, int32), cast(2, int32))\n\
-             def answer() -> Pair = Pair { left: cast(3, int32), right: cast(4, int32) }\n",
+            "type Pair = | Pair { left: i32, right: i32 }\n\
+             def tupled() -> (i32, i32) = (cast(1, i32), cast(2, i32))\n\
+             def answer() -> Pair = Pair { left: cast(3, i32), right: cast(4, i32) }\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1911,8 +1910,8 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_dynamic_shape_value_roots() {
         let checked = check_program_from_source(
-            "rows: List[List[int64]] = [[cast(1, int64)], [cast(2, int64)]]\n\
-             padded = pad_sequences(rows, cast(0, int64))\n",
+            "rows: List[List[i64]] = [[cast(1, i64)], [cast(2, i64)]]\n\
+             padded = pad_sequences(rows, cast(0, i64))\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);

@@ -45,9 +45,7 @@ pub(super) fn check_scatter_elements(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "scatter_elements expects int32 or int64 tensor indices, got {other}"
-                        ),
+                        format!("scatter_elements expects i32 or i64 tensor indices, got {other}"),
                     ),
                     vec![],
                 ),
@@ -62,7 +60,7 @@ pub(super) fn check_scatter_elements(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "scatter_elements expects int32 or int64 tensor indices, got tensor[..., {}]",
+                        "scatter_elements expects i32 or i64 tensor indices, got tensor[..., {}]",
                         index_prec.name()
                     ),
                 ),

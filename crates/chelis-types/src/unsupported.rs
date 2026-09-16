@@ -671,7 +671,7 @@ mod tests {
         let kinds = [
             UnsupportedKind::Builtin("floor".into()),
             UnsupportedKind::Op("MaxReduce".into()),
-            UnsupportedKind::Dtype("int64".into()),
+            UnsupportedKind::Dtype("i64".into()),
             UnsupportedKind::EffectKind("teleport".into()),
             UnsupportedKind::Construct("a non-literal window list".into()),
             UnsupportedKind::HostType("f16".into()),

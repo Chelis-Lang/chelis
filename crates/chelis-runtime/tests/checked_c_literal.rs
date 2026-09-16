@@ -95,7 +95,7 @@ fn literal_metadata_failures_have_the_canonical_const_identity() {
         assert!(
             String::from_utf8_lossy(&output.stderr)
                 .lines()
-                .any(|s| s == format!("numeric trap: {class} in const at int64")),
+                .any(|s| s == format!("numeric trap: {class} in const at i64")),
             "{case}: {output:?}"
         );
     }
@@ -232,7 +232,7 @@ fn every_literal_carrier_is_validated_before_any_destination_write() {
         assert!(
             String::from_utf8_lossy(&output.stderr)
                 .lines()
-                .any(|s| s == "numeric trap: domain in const at int64"),
+                .any(|s| s == "numeric trap: domain in const at i64"),
             "{case}: {output:?}"
         );
     }

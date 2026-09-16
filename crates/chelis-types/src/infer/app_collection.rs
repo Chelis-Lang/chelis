@@ -72,7 +72,7 @@ pub(crate) fn decide_collection_constraint(
         CollectionConstraint::Index { list, index, .. } => {
             match index {
                 Type::Prim(Prim::Int64) => {}
-                other => return Err(format!("index expects int64 index, got {other}")),
+                other => return Err(format!("index expects i64 index, got {other}")),
             }
             match list {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -108,7 +108,7 @@ pub(crate) fn decide_collection_constraint(
                     && rhs_args.len() == 1 =>
             {
                 // The element equation, not just `(List, List)` membership:
-                // `concat(List[f32], List[int64])` satisfies membership and
+                // `concat(List[f32], List[i64])` satisfies membership and
                 // violates the rule.
                 if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
                     return Err(format!(

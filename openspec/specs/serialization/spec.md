@@ -14,7 +14,10 @@ invariant-carrying opaque types.
 ### Requirement: Text serialization forms
 
 `.ch` SHALL be Surf source text in UTF-8 and `.dp` SHALL be Deep source text in UTF-8, with Deep
-canonical printing defined by the deep-syntax capability.
+canonical printing defined by the deep-syntax capability. Their signed-integer
+dtype names SHALL therefore use the language spellings `i8`, `i16`, `i32`, and
+`i64`. Existing compiler-API JSON and WireDag dtype fields SHALL retain their
+separate interchange spellings `int8`, `int16`, `int32`, and `int64`.
 
 #### Scenario: Deep text is UTF-8 canonical
 
@@ -25,6 +28,11 @@ canonical printing defined by the deep-syntax capability.
 
 - **WHEN** a `.ch` file is read
 - **THEN** it is interpreted as UTF-8 Surf source text
+
+#### Scenario: Text and interchange vocabularies remain distinct
+
+- **WHEN** an `i64` Chelis type is encoded in an existing compiler-API dtype field
+- **THEN** the source text uses `i64` while the interchange field remains `int64`
 
 ### Requirement: Binary Shell metadata artifact
 

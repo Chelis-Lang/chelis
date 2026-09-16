@@ -329,7 +329,7 @@ fn a_refuted_claim_through_a_dim_variable_root_traps_on_both_lanes() {
     );
     let eval_stderr = String::from_utf8_lossy(&eval.stderr).to_string();
     assert!(
-        eval_stderr.contains("numeric trap: domain in load at int64"),
+        eval_stderr.contains("numeric trap: domain in load at i64"),
         "[04-NUM-9]'s exact trap line: {eval_stderr}"
     );
     assert!(
@@ -363,7 +363,7 @@ fn a_refuted_claim_through_a_dim_variable_root_traps_on_both_lanes() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     assert!(
-        compiled_output.contains("numeric trap: domain in load at int64"),
+        compiled_output.contains("numeric trap: domain in load at i64"),
         "C reports the same trap line as eval: {compiled_output}"
     );
     assert!(
@@ -908,7 +908,7 @@ fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() 
     assert!(
         eval_stderr
             .lines()
-            .any(|line| line == "numeric trap: domain in load at int64"),
+            .any(|line| line == "numeric trap: domain in load at i64"),
         "the canonical entry trap is a separate line: {eval_stderr}"
     );
 
@@ -937,7 +937,7 @@ fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() 
     assert!(
         compiled_output
             .lines()
-            .any(|line| line == "numeric trap: domain in load at int64"),
+            .any(|line| line == "numeric trap: domain in load at i64"),
         "and [04-NUM-9]'s exact entry trap line: {compiled_output}"
     );
 }

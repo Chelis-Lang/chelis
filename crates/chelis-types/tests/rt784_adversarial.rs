@@ -293,7 +293,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
+        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, i64)))\n  cast(0.0, f32)\n}\n",
         "missing_v",
         "expand error-size main-pass",
     );

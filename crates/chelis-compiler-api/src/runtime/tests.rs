@@ -123,12 +123,12 @@ fn issue_1829_entry_source(depth: usize, tensor_result: bool) -> String {
     } else {
         for level in 0..depth {
             source.push_str(&format!(
-                "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
+                "def f{level}(x: i64) -> i64 = add(f{next}(x), f{next}(x))\n",
                 next = level + 1
             ));
         }
-        source.push_str(&format!("def f{depth}(x: int64) -> int64 = x\n"));
-        source.push_str("seed = cast(1, int64)\n");
+        source.push_str(&format!("def f{depth}(x: i64) -> i64 = x\n"));
+        source.push_str("seed = cast(1, i64)\n");
     }
     source.push_str("result = f0(seed)\n");
     source
@@ -213,17 +213,15 @@ fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
     // Unused helpers: they inflate the per-application clone cost the fix
     // removes, without being reached by the fold body's classification.
     for level in 0..HELPERS {
-        source.push_str(&format!(
-            "def helper{level}(x: int64) -> int64 = add(x, x)\n"
-        ));
+        source.push_str(&format!("def helper{level}(x: i64) -> i64 = add(x, x)\n"));
     }
     // One closure, applied once per list element by `fold`. Each application
     // routes through `admit_execution_profile`. `result` is a top-level value
     // binding so the interpreter evaluates it rather than binding the fold's
     // callable as a thunk.
     source.push_str(&format!(
-        "result = fold(fn (acc: int64, x: int64) -> add(acc, x), \
-         cast(0, int64), range(cast(0, int64), cast({APPLICATIONS}, int64)))\n"
+        "result = fold(fn (acc: i64, x: i64) -> add(acc, x), \
+         cast(0, i64), range(cast(0, i64), cast({APPLICATIONS}, i64)))\n"
     ));
 
     let checked = checked_surf(&source);
@@ -355,7 +353,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         "transform failure commits the entered prefix, not the lowering's predicted total"
     );
     ctx.bindings.insert("argument".into(), argument);
-    let nested_gradient = chelis_deep::parser::parse_str("(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 7) (app {} (grad {} (var {} invalid_loss)) (var {} argument)))").unwrap().pop().unwrap();
+    let nested_gradient = chelis_deep::parser::parse_str("(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 7) (app {} (grad {} (var {} invalid_loss)) (var {} argument)))").unwrap().pop().unwrap();
     assert_eq!(
         ctx.eval_expr(&nested_gradient).unwrap_err(),
         "numeric trap: domain in dropout at f32"
@@ -421,7 +419,7 @@ fn with_seed_uniform_like_evaluates_body() {
 x = with seed(7i64) {
   tensor_to_scalar(
 uniform_like(
-  trace(pad_sequences_to([[0.0]], cast(1, int64), cast(0.0, f32)), cast(0, int32), cast(1, int32)),
+  trace(pad_sequences_to([[0.0]], cast(1, i64), cast(0.0, f32)), cast(0, i32), cast(1, i32)),
   0.0,
   1.0
 )
@@ -439,10 +437,10 @@ uniform_like(
 }
 
 /// chelis#771: `literal_seed_i64` reads a `with seed(...)` literal at full
-/// i64 width, peeling the `(lit {type: (t-prim {} int32)} n)` wrapper the
-/// desugarer attaches (desugar.rs:1564-1569) and ignoring the int32 default
+/// i64 width, peeling the `(lit {type: (t-prim {} i32)} n)` wrapper the
+/// desugarer attaches (desugar.rs:1564-1569) and ignoring the i32 default
 /// meta — so the evaluator's effective u64 seed matches the C lane's
-/// `(uint64_t)n` instead of `eval_lit`'s int32-narrowed value.
+/// `(uint64_t)n` instead of `eval_lit`'s i32-narrowed value.
 #[test]
 fn literal_seed_read_at_full_i64_width() {
     use chelis_deep::Span;
@@ -455,12 +453,12 @@ fn literal_seed_read_at_full_i64_width() {
         elements.extend(children);
         Expr::List(List { elements }, sp)
     };
-    // (lit {type: (t-prim {} int32)} 4294967295) — the exact shape desugar
+    // (lit {type: (t-prim {} i32)} 4294967295) — the exact shape desugar
     // emits for `seed(4294967295)`.
     let int32_seed_lit = |n: i64| {
         let t_int32 = node(
             "t-prim",
-            vec![Expr::Atom(Atom::Name("int32".to_string()), sp)],
+            vec![Expr::Atom(Atom::Name("i32".to_string()), sp)],
         );
         Expr::List(
             List {
@@ -479,7 +477,7 @@ fn literal_seed_read_at_full_i64_width() {
         )
     };
 
-    // The peel reads the raw i64 atom regardless of the int32 meta.
+    // The peel reads the raw i64 atom regardless of the i32 meta.
     let lit = int32_seed_lit(4_294_967_295);
     assert_eq!(literal_seed_i64(&lit), Some(4_294_967_295));
     assert_eq!(literal_seed_i64(&lit).unwrap() as u64, 4_294_967_295_u64);
@@ -511,11 +509,11 @@ fn ownership_drop_is_unit_and_does_not_shadow_list_drop_runtime() {
 x = {
   t = to_tensor([cast(1.0, f32), cast(2.0, f32)])
   values = to_list(t)
-  actual = index(values, cast(0, int64))
+  actual = index(values, cast(0, i64))
   _ = drop(t)
   actual
 }
-y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int64))
+y = index(drop([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
 "#,
     );
 
@@ -586,7 +584,7 @@ fn unbounded_sig_declared_cast_target_is_rejected_at_check_time() {
         r#"
 sig recast_int: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
-i16_value = recast_int(cast(257, int16), [cast(0, int16)])
+i16_value = recast_int(cast(257, i16), [cast(0, i16)])
 "#,
         "p_int",
         "recast_int",
@@ -605,8 +603,8 @@ sig recast_int[p_int: Int]: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
 sig recast_float[p_float: Float]: p_float -> List[p_float] -> p_float
 def recast_float(value, witness) = cast(value, p_float)
-i16_value = recast_int(cast(257, int16), [cast(0, int16)])
-i64_value = recast_int(cast(4294967297, int64), [cast(0, int64)])
+i16_value = recast_int(cast(257, i16), [cast(0, i16)])
+i64_value = recast_int(cast(4294967297, i64), [cast(0, i64)])
 f32_value = recast_float(cast(1.5, f32), [cast(0.0, f32)])
 f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
 "#,
@@ -646,7 +644,7 @@ fn tensor_cast_without_actualized_target_rejects_instead_of_reusing_source_dtype
 fn bounded_cast_target_does_not_accept_conflicting_precisions() {
     let source = r#"
 def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = choose_and_cast(cast(1, int16), cast(2, int64))
+value = choose_and_cast(cast(1, i16), cast(2, i64))
 "#;
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -656,8 +654,8 @@ value = choose_and_cast(cast(1, int16), cast(2, int64))
         errors.errors.iter().any(|error| {
             let message = error.message.to_ascii_lowercase();
             message.contains("precision mismatch")
-                && message.contains("int16")
-                && message.contains("int64")
+                && message.contains("i16")
+                && message.contains("i64")
         }),
         "the checker should report the conflicting concrete precisions"
     );
@@ -671,7 +669,7 @@ fn unbounded_cast_target_is_rejected_before_any_precision_mismatch() {
     expect_unbounded_cast_target_rejection(
         r#"
 def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = choose_and_cast(cast(1, int16), cast(2, int64))
+value = choose_and_cast(cast(1, i16), cast(2, i64))
 "#,
         "p_int",
         "choose_and_cast",
@@ -685,9 +683,9 @@ fn unbounded_cast_target_in_nested_calls_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
 def inner[p_int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
-def outer[p_int](witness: List[p_int]) -> int64 =
-  inner(cast(4294967297, int64), [cast(0, int64)])
-value = outer([cast(7, int16)])
+def outer[p_int](witness: List[p_int]) -> i64 =
+  inner(cast(4294967297, i64), [cast(0, i64)])
+value = outer([cast(7, i16)])
 "#,
         "p_int",
         "inner",
@@ -702,9 +700,9 @@ fn bounded_cast_target_uses_fresh_specialization_for_nested_calls() {
     let checked = checked_surf(
         r#"
 def inner[p_int: Int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
-def outer[p_int: Int](witness: List[p_int]) -> int64 =
-  inner(cast(4294967297, int64), [cast(0, int64)])
-value = outer([cast(7, int16)])
+def outer[p_int: Int](witness: List[p_int]) -> i64 =
+  inner(cast(4294967297, i64), [cast(0, i64)])
+value = outer([cast(7, i16)])
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -721,9 +719,9 @@ value = outer([cast(7, int16)])
 fn unbounded_cast_target_with_an_empty_container_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
-def empty_witness[p_int](items: List[p_int], value: int64) -> p_int =
+def empty_witness[p_int](items: List[p_int], value: i64) -> p_int =
   cast(value, p_int)
-def make_i16() -> int16 = empty_witness([], cast(257, int64))
+def make_i16() -> i16 = empty_witness([], cast(257, i64))
 value = make_i16()
 "#,
         "p_int",
@@ -737,9 +735,9 @@ value = make_i16()
 fn bounded_cast_target_uses_contextual_specialization_for_empty_container() {
     let checked = checked_surf(
         r#"
-def empty_witness[p_int: Int](items: List[p_int], value: int64) -> p_int =
+def empty_witness[p_int: Int](items: List[p_int], value: i64) -> p_int =
   cast(value, p_int)
-def make_i16() -> int16 = empty_witness([], cast(257, int64))
+def make_i16() -> i16 = empty_witness([], cast(257, i64))
 value = make_i16()
 "#,
     );
@@ -758,9 +756,9 @@ value = make_i16()
 fn unbounded_cast_target_behind_an_adt_argument_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
-def option_witness[p_int](item: Option[p_int], value: int64) -> p_int =
+def option_witness[p_int](item: Option[p_int], value: i64) -> p_int =
   cast(value, p_int)
-value = option_witness(Some(cast(0, int16)), cast(257, int64))
+value = option_witness(Some(cast(0, i16)), cast(257, i64))
 "#,
         "p_int",
         "option_witness",
@@ -773,9 +771,9 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
 fn bounded_cast_target_uses_checked_adt_specialization() {
     let checked = checked_surf(
         r#"
-def option_witness[p_int: Int](item: Option[p_int], value: int64) -> p_int =
+def option_witness[p_int: Int](item: Option[p_int], value: i64) -> p_int =
   cast(value, p_int)
-value = option_witness(Some(cast(0, int16)), cast(257, int64))
+value = option_witness(Some(cast(0, i16)), cast(257, i64))
 "#,
     );
 
@@ -794,8 +792,8 @@ fn unbounded_cast_target_in_a_map_callback_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
 def recast[p_int](value: p_int) -> p_int = cast(value, p_int)
-values = map(recast, [cast(127, int8)])
-value = index(values, cast(0, int64))
+values = map(recast, [cast(127, i8)])
+value = index(values, cast(0, i64))
 "#,
         "p_int",
         "recast",
@@ -809,8 +807,8 @@ fn bounded_cast_target_survives_map_callback_specialization() {
     let checked = checked_surf(
         r#"
 def recast[p_int: Int](value: p_int) -> p_int = cast(value, p_int)
-values = map(recast, [cast(127, int8)])
-value = index(values, cast(0, int64))
+values = map(recast, [cast(127, i8)])
+value = index(values, cast(0, i64))
 "#,
     );
 
@@ -829,7 +827,7 @@ fn unbounded_cast_target_in_a_fold_callback_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
 def keep_left[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = fold(keep_left, cast(127, int8), [cast(1, int8)])
+value = fold(keep_left, cast(127, i8), [cast(1, i8)])
 "#,
         "p_int",
         "keep_left",
@@ -843,7 +841,7 @@ fn bounded_cast_target_survives_fold_callback_specialization() {
     let checked = checked_surf(
         r#"
 def keep_left[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = fold(keep_left, cast(127, int8), [cast(1, int8)])
+value = fold(keep_left, cast(127, i8), [cast(1, i8)])
 "#,
     );
 
@@ -869,7 +867,7 @@ def nonnegative[p_int: Int](value: p_int) -> bool =
   gte(cast(value, p_int), cast(0, p_int))
 def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)
-scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
+scanned = scan(keep_left_hof, cast(7, i8), [cast(1, i8)])
 "#,
         "p_int",
         "keep_left_hof",
@@ -889,13 +887,13 @@ def nonnegative[p_int: Int](value: p_int) -> bool =
 def keep_left_hof[p_int: Int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)
 def singleton[p_int: Int](value: p_int) -> List[p_int] = [cast(value, p_int)]
-def keep_state[p_int: Int](state: p_int, index: int64) -> p_int = cast(state, p_int)
+def keep_state[p_int: Int](state: p_int, index: i64) -> p_int = cast(state, p_int)
 
-filtered = filter(nonnegative, [cast(-1, int8), cast(2, int8)])
-scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
-partitioned = partition(nonnegative, [cast(-1, int8), cast(2, int8)])
-flattened = flat_map(singleton, [cast(3, int8)])
-generated = tensor_scan(cast(9, int8), keep_state, cast(2, int64))
+filtered = filter(nonnegative, [cast(-1, i8), cast(2, i8)])
+scanned = scan(keep_left_hof, cast(7, i8), [cast(1, i8)])
+partitioned = partition(nonnegative, [cast(-1, i8), cast(2, i8)])
+flattened = flat_map(singleton, [cast(3, i8)])
+generated = tensor_scan(cast(9, i8), keep_state, cast(2, i64))
 "#,
     );
 
@@ -963,14 +961,14 @@ fn generic_test_assert_eq_float_match_returns_unit() {
 
 #[test]
 fn generic_test_assert_eq_int_match_and_mismatch() {
-    let ok = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(3, int64), "i")"#);
+    let ok = checked_surf(r#"x = test_assert_eq(cast(3, i64), cast(3, i64), "i")"#);
     let outcome = evaluate_host_program(&ok, &UnordMap::new()).expect("int match should eval");
     assert!(matches!(
         outcome.host_bindings.get("x"),
         Some(RuntimeValue::Unit)
     ));
 
-    let bad = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(5, int64), "i")"#);
+    let bad = checked_surf(r#"x = test_assert_eq(cast(3, i64), cast(5, i64), "i")"#);
     let err =
         evaluate_host_program(&bad, &UnordMap::new()).expect_err("int mismatch should surface Err");
     assert!(
@@ -1374,7 +1372,7 @@ fn test_assert_close_tensor_runtime_non_float_tolerance_uses_canonical_renderer(
         ],
     )
     .expect_err("a non-float tolerance must fail defensively at runtime");
-    assert!(error.contains("expected float tolerance, got int32 0"));
+    assert!(error.contains("expected float tolerance, got i32 0"));
 }
 
 #[test]
@@ -1459,8 +1457,8 @@ fn first_tensor_shape(outcome: &RuntimeOutcome, name: &str) -> Vec<usize> {
 fn host_runtime_matmul_2x2_identity_passthrough() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -1557,28 +1555,27 @@ y = div(a, b)
 // dispatch itself rejects a mixed pair rather than re-precisioning it.
 
 /// The full check→eval pipeline rejects `div(1.0, 4)` at type-check, so
-/// the const-fold to 0.25 is never reached. `4` is an `int32` literal
-/// (§5.3), making this the same mixed `(f32, int32)` pair as the
+/// the const-fold to 0.25 is never reached. `4` is an `i32` literal
+/// (§5.3), making this the same mixed `(f32, i32)` pair as the
 /// bound-variable form.
 #[test]
 fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
     let decls = chelis_surf::parser::parse_str("out = div(1.0, 4)").expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let err = chelis_types::check_ir_program(&exprs).expect_err(
-        "chelis#458: div(1.0, 4) is a mixed (f32, int32) pair and must be a type error",
-    );
+    let err = chelis_types::check_ir_program(&exprs)
+        .expect_err("chelis#458: div(1.0, 4) is a mixed (f32, i32) pair and must be a type error");
     assert!(
         err.errors.iter().any(|e| matches!(
             e.kind,
             chelis_types::errors::CheckErrorKind::PrecisionMismatch
         )),
-        "spec §5.1: mixed (f32, int32) div must surface a PrecisionMismatch; got: {:?}",
+        "spec §5.1: mixed (f32, i32) div must surface a PrecisionMismatch; got: {:?}",
         err.errors
     );
 }
 
 /// Runtime backstop: even if a future type-checker hole let a mixed
-/// `(f32, int32)` scalar pair reach the host evaluator, the closed kernel
+/// `(f32, i32)` scalar pair reach the host evaluator, the closed kernel
 /// dispatcher
 /// must reject it rather than re-precisioning to a 0.25 float fold (the old
 /// 0.9.0 `_ => Prim::F32` fallback). The mixed pair is neither int-int nor
@@ -1588,7 +1585,7 @@ fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() 
     let lhs = RuntimeValue::scalar_like_float(chelis_types::types::Prim::F32, 1.0)
         .expect("f32 scalar 1.0");
     let rhs =
-        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("int32 scalar 4");
+        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("i32 scalar 4");
     let result = numeric_binop(
         &[lhs, rhs],
         Some(chelis_types::IntBinOp::TruncDiv),
@@ -1596,7 +1593,7 @@ fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() 
     );
     assert!(
         result.is_err(),
-        "chelis#458 / spec §5.1: a mixed (f32, int32) scalar div must be rejected by the \
+        "chelis#458 / spec §5.1: a mixed (f32, i32) scalar div must be rejected by the \
          host dispatch, NOT silently re-precisioned and folded to 0.25; got Ok({result:?})"
     );
 }
@@ -1620,8 +1617,8 @@ y = recip(a)
 fn host_runtime_matmul_2x3_3x2_basic() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -1637,7 +1634,7 @@ y = matmul(a, b)
 fn host_runtime_permute_2x2_transpose_swaps_off_diagonal() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = permute(a, 1, 0)
 "#,
     );
@@ -1652,7 +1649,7 @@ y = permute(a, 1, 0)
 fn host_runtime_permute_2x3_transpose_to_3x2() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
 y = permute(a, 1, 0)
 "#,
     );
@@ -1670,8 +1667,8 @@ y = permute(a, 1, 0)
 fn host_runtime_sum_axis1_reduces_2x3_to_2() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-y = sum(a, cast(1, int32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+y = sum(a, cast(1, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -1684,8 +1681,8 @@ y = sum(a, cast(1, int32))
 fn host_runtime_sum_axis0_reduces_2x3_to_3() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-y = sum(a, cast(0, int32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+y = sum(a, cast(0, i32))
 "#,
     );
     let outcome =
@@ -1722,7 +1719,7 @@ cast(0.08847743272781372, f32),
 cast(0.7682217955589294, f32),
 cast(0.49625658988952637, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome_right = evaluate_host_program(&checked_right, &UnordMap::new())
@@ -1781,7 +1778,7 @@ cast(0.13203048706054688, f32),
 cast(0.30742114782333374, f32),
 cast(0.6340786814689636, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome_left = evaluate_host_program(&checked_left, &UnordMap::new())
@@ -1956,7 +1953,7 @@ fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
 /// A zero extent means zero elements wherever the zero sits, so both shapes
 /// below describe the same empty operand and the derived reduction count is
 /// zero for both. A left-to-right checked fold reaches `BIG * BIG` first,
-/// which is not an int64, and so accepted one permutation while rejecting the
+/// which is not an i64, and so accepted one permutation while rejecting the
 /// other. The C runtime holds the same invariant in
 /// `crates/chelis-runtime/tests/op33_int64_extent_domain.rs`.
 #[test]
@@ -2389,7 +2386,7 @@ fn host_runtime_sum_f32_n1_n2_n3_bit_exact() {
     ] {
         let src = format!(
             "seq = {expr}\n\
-             y = sum(seq, cast(0, int32))\n"
+             y = sum(seq, cast(0, i32))\n"
         );
         let checked = checked_surf(&src);
         let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2420,7 +2417,7 @@ cast(0.0, f32) / cast(0.0, f32),
 cast(4.0, f32),
 cast(5.0, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome =
@@ -2448,7 +2445,7 @@ cast(-1.0, f32) / cast(0.0, f32),
 cast(2.0, f32),
 cast(3.0, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome =
@@ -2467,8 +2464,8 @@ fn host_runtime_matmul_shared_axis_mismatch_errors() {
     // Build a 2x3 and a 2x2 — shared axis is 3 vs 2, must fail.
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -2494,7 +2491,7 @@ fn host_runtime_expand_inserts_new_leading_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
-y = insert(b, cast(0, int32), cast(3, int64))
+y = insert(b, cast(0, i32), cast(3, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2513,7 +2510,7 @@ fn host_runtime_expand_inserts_trailing_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = insert(b, cast(1, int32), cast(2, int64))
+y = insert(b, cast(1, i32), cast(2, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2536,7 +2533,7 @@ fn host_runtime_insert_singleton_input_adds_an_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(7.0, f32)])
-y = insert(b, cast(0, int32), cast(4, int64))
+y = insert(b, cast(0, i32), cast(4, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2557,8 +2554,8 @@ fn host_runtime_expand_negative_count_errors() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-negative_count = sub(shape(b, cast(0, int32)), cast(3, int64))
-y = insert(b, cast(0, int32), negative_count)
+negative_count = sub(shape(b, cast(0, i32)), cast(3, i64))
+y = insert(b, cast(0, i32), negative_count)
 "#,
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
@@ -2631,7 +2628,7 @@ fn host_runtime_softmax_uniform_input_is_uniform_output() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2656,7 +2653,7 @@ fn host_runtime_softmax_two_class_matches_reference() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(1.0, f32), cast(0.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome =
@@ -2681,7 +2678,7 @@ fn host_runtime_softmax_numerical_stability_handles_large_inputs() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(1000.0, f32), cast(1000.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2808,7 +2805,7 @@ fn host_runtime_softmax_nan_input_propagates_nan() {
 #[test]
 fn host_runtime_softmax_axis_out_of_bounds_errors() {
     // Issue #216: cast-wrapped out-of-bounds softmax axis is now
-    // caught at infer time (the checker peels the `cast(N, int32)`
+    // caught at infer time (the checker peels the `cast(N, i32)`
     // wrapper via `extract_int_for_dim` and applies the rank-bounds
     // check). Pre-fix the cast hid the literal from
     // `extract_int_literal` and the rejection only fired in the
@@ -2817,7 +2814,7 @@ fn host_runtime_softmax_axis_out_of_bounds_errors() {
     // emitting the diagnostic moved upstream.
     let src = r#"
 x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = softmax(x, cast(5, int32))
+y = softmax(x, cast(5, i32))
 "#;
     let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(src).expect("surf parse"),
@@ -2901,7 +2898,7 @@ fn host_runtime_max_reduce_no_nan_is_unchanged() {
 // reject mismatched (dtype, bits) pairs at construction time. The
 // public constructor `RuntimeValue::scalar` is the only checked
 // path; the typed convenience constructors (`int_lit`, `float_lit`,
-// `int64`, `float64`, `scalar_like_*`) are implementation-internal
+// `i64`, `float64`, `scalar_like_*`) are implementation-internal
 // and statically-correct by construction.
 // ----------------------------------------------------------------
 
@@ -2915,12 +2912,12 @@ fn scalar_construction_is_sealed_and_width_checked() {
     // enforce: out-of-width integers trap instead of wrapping, and every
     // constructed scalar reports the dtype it was finalized at.
     let trapped = RuntimeValue::scalar_like_int(Prim::Int8, 200)
-        .expect_err("int8 cannot hold 200; finalize must trap, not wrap");
+        .expect_err("i8 cannot hold 200; finalize must trap, not wrap");
     assert!(
         trapped.contains("overflow"),
         "the trap must carry the branded overflow diagnostic, got: {trapped}"
     );
-    let ok = RuntimeValue::scalar_like_int(Prim::Int8, 127).expect("127 fits int8");
+    let ok = RuntimeValue::scalar_like_int(Prim::Int8, 127).expect("127 fits i8");
     match ok {
         RuntimeValue::Scalar(payload) => assert_eq!(payload.dtype(), Prim::Int8),
         other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
@@ -2972,7 +2969,7 @@ fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
 
 /// chelis#729 Phase 1, dtype-semantics C3: scalar values nested in the
 /// execution wire are dtype-tagged carriers too. Lists, tuples, and ADTs may
-/// not silently widen all integer values to int64 or all floats to f64.
+/// not silently widen all integer values to i64 or all floats to f64.
 #[test]
 fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
     let cases = [
@@ -3089,7 +3086,7 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
 }
 
 /// Negative-test parity for the exact list bridge: same-family dtypes are
-/// still heterogeneous. Accepting int8 beside int16 or f64 beside f32 would
+/// still heterogeneous. Accepting i8 beside i16 or f64 beside f32 would
 /// perform an implicit cast that the checker never authorized.
 #[test]
 fn list_tensor_bridges_reject_same_family_dtype_substitution() {
@@ -3130,10 +3127,10 @@ fn prim_from_name_resolves_active_dtype_names() {
         ("f64", Prim::F64),
         ("f16", Prim::F16),
         ("bf16", Prim::Bf16),
-        ("int8", Prim::Int8),
-        ("int16", Prim::Int16),
-        ("int32", Prim::Int32),
-        ("int64", Prim::Int64),
+        ("i8", Prim::Int8),
+        ("i16", Prim::Int16),
+        ("i32", Prim::Int32),
+        ("i64", Prim::Int64),
         ("bool", Prim::Bool),
     ] {
         assert_eq!(
@@ -3253,10 +3250,10 @@ fn render_value_tensor_elements_follow_tag_class() {
 }
 
 /// Tag-vs-bits disagreements print the BITS (spec/05 section 8.1): an
-/// int64-tagged slot holding 187.5 (the live `mean`-of-int64 example,
+/// i64-tagged slot holding 187.5 (the live `mean`-of-i64 example,
 /// chelis#724 territory) renders 187.5, never a truncated 187; a
 /// bool-tagged slot holding 2.0 renders 2.0, never `true`; an
-/// int8-tagged slot holding 400 renders 400.0's bits faithfully rather
+/// i8-tagged slot holding 400 renders 400.0's bits faithfully rather
 /// than a wrapped/saturated lie.
 #[test]
 fn tag_storage_disagreement_is_unconstructible() {
@@ -3266,7 +3263,7 @@ fn tag_storage_disagreement_is_unconstructible() {
     // that state unrepresentable: the construction chokepoint traps at
     // finalize instead, so nothing out-of-domain can reach the renderer.
     let trapped = RuntimeTensorValue::from_wide("test", Prim::Int64, vec![1], vec![187.5])
-        .expect_err("a fractional value in an int64 buffer must Domain-trap");
+        .expect_err("a fractional value in an i64 buffer must Domain-trap");
     assert!(
         trapped.contains("domain"),
         "branded domain trap, got: {trapped}"
@@ -3278,7 +3275,7 @@ fn tag_storage_disagreement_is_unconstructible() {
         "branded domain trap, got: {trapped}"
     );
     let trapped = RuntimeTensorValue::from_wide("test", Prim::Int8, vec![1], vec![400.0])
-        .expect_err("400 in an int8 buffer must Overflow-trap");
+        .expect_err("400 in an i8 buffer must Overflow-trap");
     assert!(
         trapped.contains("overflow"),
         "branded overflow trap, got: {trapped}"
@@ -3507,18 +3504,18 @@ fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
 /// diagnostic and an exit channel agree on every payload.
 #[test]
 fn fo_diag_scalars_carry_their_dtype_and_own_width_digits() {
-    // Exact int64 above 2^53 -- the [#723] case. 9007199254740993 has no
+    // Exact i64 above 2^53 -- the [#723] case. 9007199254740993 has no
     // f64 twin, so a rendering that funnels through double reports
     // ...992.
     let big = int_scalar_of(Prim::Int64, 9_007_199_254_740_993);
-    assert_eq!(describe_value(&big), "int64 9007199254740993");
+    assert_eq!(describe_value(&big), "i64 9007199254740993");
     assert!(
         !describe_value(&big).contains("9007199254740992"),
         "the f64 image must not reach the diagnostic channel"
     );
 
-    assert_eq!(describe_value(&int_scalar_of(Prim::Int32, -5)), "int32 -5");
-    assert_eq!(describe_value(&int_scalar_of(Prim::Int8, 127)), "int8 127");
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int32, -5)), "i32 -5");
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int8, 127)), "i8 127");
 
     // Own-width floats: the f32 prints its shortest-at-f32 digits, and the
     // f64 holding the same f32's image prints the wider, different string.
@@ -3669,15 +3666,12 @@ fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
 }
 
 /// `describe_fields` tags every field, because a malformed-shape
-/// diagnostic has to say WHY the shape was rejected: `[int32 5]` under a
+/// diagnostic has to say WHY the shape was rejected: `[i32 5]` under a
 /// `JNum` names the reason an untagged `[5]` does not.
 #[test]
 fn fo_diag_field_lists_tag_every_field() {
     assert_eq!(describe_fields(&[]), "[]");
-    assert_eq!(
-        describe_fields(&[int_scalar_of(Prim::Int32, 5)]),
-        "[int32 5]"
-    );
+    assert_eq!(describe_fields(&[int_scalar_of(Prim::Int32, 5)]), "[i32 5]");
     assert_eq!(
         describe_fields(&[
             scalar_of(Prim::F32, 0.1f32 as f64),

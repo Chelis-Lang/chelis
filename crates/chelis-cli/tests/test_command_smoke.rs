@@ -57,33 +57,33 @@ fn make_shared_name_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf)
         &pkg.join("src/helpers.ch"),
         "module Smoke.Helpers\n\
          export (same)\n\
-         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+         def same(a: i64, b: i64) -> bool = eq(a, b)\n",
     );
     write_file(
         &pkg.join("src/other.ch"),
         "module Smoke.Other\n\
          export (same)\n\
-         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+         def same(a: i64, b: i64) -> bool = eq(a, b)\n",
     );
     (dir, pkg)
 }
 
 /// chelis#1261's two test files: `a_import.ch` imports the package's `same`
-/// over `int64`, `b_local.ch` declares an unrelated local `same` over lists.
+/// over `i64`, `b_local.ch` declares an unrelated local `same` over lists.
 fn write_import_collision_files(pkg: &Path) {
     write_file(
         &pkg.join("tests/a_import.ch"),
         "module Smoke.Tests.UsesImport\n\
          import Smoke.Helpers (same)\n\
          def test_uses_import() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"1 == 1\")\n",
     );
     write_file(
         &pkg.join("tests/b_local.ch"),
         "module Smoke.Tests.LocalSame\n\
-         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def same(xs: List[i64], ys: List[i64]) -> bool = eq(len(xs), len(ys))\n\
          def test_local_same() -> unit = \
-         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+         test_assert(same([cast(1, i64)], [cast(2, i64)]), \"same length\")\n",
     );
 }
 
@@ -593,7 +593,7 @@ def test_second() -> unit = test_assert(true, "second")
 
 /// The chelis#1261 reproducer: `tests/b_local.ch` declares a local `same` over
 /// lists while `tests/a_import.ch` explicitly imports the package's `same` over
-/// `int64`. Under `--batch-mode auto` the two files used to be merged into one
+/// `i64`. Under `--batch-mode auto` the two files used to be merged into one
 /// compilation unit, where B's declaration captured A's import, so the batch
 /// failed to compile and the whole suite silently degraded to per-file.
 #[test]
@@ -641,16 +641,16 @@ fn chelis_test_auto_batch_local_def_before_sibling_import_demotes_the_importer()
     write_file(
         &pkg.join("tests/a_local.ch"),
         "module Smoke.Tests.LocalFirst\n\
-         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def same(xs: List[i64], ys: List[i64]) -> bool = eq(len(xs), len(ys))\n\
          def test_local_same() -> unit = \
-         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+         test_assert(same([cast(1, i64)], [cast(2, i64)]), \"same length\")\n",
     );
     write_file(
         &pkg.join("tests/b_import.ch"),
         "module Smoke.Tests.ImportSecond\n\
          import Smoke.Helpers (same)\n\
          def test_uses_import() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"1 == 1\")\n",
     );
 
     let output = Command::cargo_bin("chelis")
@@ -734,13 +734,13 @@ fn chelis_test_auto_batch_shared_property_name_uses_file_isolation() {
     write_file(
         &pkg.join("tests/a_first.ch"),
         "module Smoke.Tests.PropertyFirst\n\
-         @property shared_bound forall(x: int32) where x > 0:\n  x > 0\n\
+         @property shared_bound forall(x: i32) where x > 0:\n  x > 0\n\
          def test_first() -> unit = test_assert(true, \"first\")\n",
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         "module Smoke.Tests.PropertySecond\n\
-         @property shared_bound forall(y: int32) where y > 1:\n  y > 0\n\
+         @property shared_bound forall(y: i32) where y > 1:\n  y > 0\n\
          def test_second() -> unit = test_assert(true, \"second\")\n",
     );
 
@@ -884,13 +884,13 @@ fn chelis_test_auto_batch_shared_import_of_one_module_stays_batched() {
         &pkg.join("tests/a_one.ch"),
         "module Smoke.Tests.One\n\
          import Smoke.Helpers (same)\n\
-         def test_one() -> unit = test_assert(same(cast(1, int64), cast(1, int64)), \"one\")\n",
+         def test_one() -> unit = test_assert(same(cast(1, i64), cast(1, i64)), \"one\")\n",
     );
     write_file(
         &pkg.join("tests/b_two.ch"),
         "module Smoke.Tests.Two\n\
          import Smoke.Helpers (same)\n\
-         def test_two() -> unit = test_assert(same(cast(2, int64), cast(2, int64)), \"two\")\n",
+         def test_two() -> unit = test_assert(same(cast(2, i64), cast(2, i64)), \"two\")\n",
     );
 
     let stderr = forced_batch_abort_stderr(&pkg);
@@ -910,14 +910,14 @@ fn chelis_test_auto_batch_same_name_from_two_modules_uses_file_isolation() {
         "module Smoke.Tests.FromHelpers\n\
          import Smoke.Helpers (same)\n\
          def test_from_helpers() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"helpers\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"helpers\")\n",
     );
     write_file(
         &pkg.join("tests/b_other.ch"),
         "module Smoke.Tests.FromOther\n\
          import Smoke.Other (same)\n\
          def test_from_other() -> unit = \
-         test_assert(same(cast(2, int64), cast(2, int64)), \"other\")\n",
+         test_assert(same(cast(2, i64), cast(2, i64)), \"other\")\n",
     );
 
     Command::cargo_bin("chelis")
@@ -956,7 +956,7 @@ fn chelis_test_auto_batch_wildcard_import_uses_file_isolation() {
         "module Smoke.Tests.Wildcard\n\
          import Smoke.Helpers (..)\n\
          def test_wildcard() -> unit = \
-         test_assert(same(cast(3, int64), cast(3, int64)), \"wildcard\")\n",
+         test_assert(same(cast(3, i64), cast(3, i64)), \"wildcard\")\n",
     );
 
     Command::cargo_bin("chelis")
@@ -989,9 +989,9 @@ fn chelis_test_auto_batch_sig_beside_its_def_stays_batched() {
     write_file(
         &pkg.join("tests/a_sig.ch"),
         "module Smoke.Tests.SigAndDef\n\
-         sig helper: int64 -> bool\n\
-         def helper(x: int64) -> bool = eq(x, x)\n\
-         def test_helper() -> unit = test_assert(helper(cast(1, int64)), \"helper\")\n",
+         sig helper: i64 -> bool\n\
+         def helper(x: i64) -> bool = eq(x, x)\n\
+         def test_helper() -> unit = test_assert(helper(cast(1, i64)), \"helper\")\n",
     );
     write_file(
         &pkg.join("tests/b_plain.ch"),
@@ -1431,7 +1431,7 @@ fn chelis_test_infinite_recursion_times_out_and_suite_continues() {
 -- recursion with no base case overflows the 32 MB test-worker stack
 -- before the timeout deadline fires). 10_000_000 iterations consistently
 -- exceeds the --timeout 2 budget used below.
-def test_infinite() -> unit = test_assert(eq(fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), range(cast(0, int64), cast(10000000, int64))), cast(0, int64)), "never")
+def test_infinite() -> unit = test_assert(eq(fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), range(cast(0, i64), cast(10000000, i64))), cast(0, i64)), "never")
 
 def test_quick() -> unit = test_assert(true, "quick")
 "#,

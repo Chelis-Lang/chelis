@@ -61,7 +61,7 @@ def assert_result(result: dict, family: str, good: bool) -> None:
             "literal": ("load", "claimed = 4", "x axis 0 = 5"),
         }[family]
         assert result["exit"] != 0, result
-        header = f"numeric trap: domain in {operation} at int64"
+        header = f"numeric trap: domain in {operation} at i64"
         assert header in result["stderr"].splitlines(), result
         tokens = re.findall(r"[A-Za-z0-9_.-]+", result["stderr"])
         for record in (claim, actual):

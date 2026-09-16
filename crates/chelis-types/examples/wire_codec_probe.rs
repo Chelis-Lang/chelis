@@ -57,7 +57,7 @@ fn observation<T: Serialize>(value: &T, dtype: Prim, elements: Vec<Value>) -> Va
     // Encoder errors abort this probe; only the actual decode failure above is
     // reported as a rejected input. A broken encoder cannot impersonate rejection.
     json!({
-        "dtype": dtype.name(), "elements": elements,
+        "dtype": dtype.interchange_name(), "elements": elements,
         "json": serde_json::to_value(value).expect("encode observation JSON"),
         "binary": hex(&bincode::serialize(value).expect("encode observation binary")),
     })
@@ -67,7 +67,7 @@ fn main() {
     let vocabulary: Vec<_> = RuntimeDType::ALL
         .iter()
         .map(|dtype| {
-            let prim = Prim::parse_name(dtype.name()).expect("runtime primitive");
+            let prim = Prim::parse_interchange_name(dtype.name()).expect("runtime primitive");
             let kind = if prim.is_float() {
                 "float"
             } else if prim.is_integer() {

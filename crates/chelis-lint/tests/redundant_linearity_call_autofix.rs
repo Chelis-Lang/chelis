@@ -514,7 +514,7 @@ fn f12_warning_suppressed_on_2arg_list_drop_in_pipe_form() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("pipe_list_drop.ch");
     let source = "\
-def f(xs: List[int64], n: int64) -> List[int64] = xs |> drop(n)
+def f(xs: List[i64], n: i64) -> List[i64] = xs |> drop(n)
 ";
     write_and_format(&path, source);
 

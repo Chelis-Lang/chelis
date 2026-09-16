@@ -475,7 +475,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, i8, i16, i32, i64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -483,6 +483,12 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `t-var` | `(t-var {} name)` | Type variable |
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
+
+Canonical Deep uses `i8`, `i16`, `i32`, and `i64` for signed integer
+primitives. The retired v0.18 children `int8`, `int16`, `int32`, and `int64`
+are rejected at normal Deep ingress. `chelis migrate deep --from 0.18`
+rewrites only the primitive-name child of a `t-prim`; it does not rewrite
+ordinary symbols, identifiers, strings, metadata, or interchange payloads.
 
 #### 2.5.1 Type-expression resolution and binders
 
@@ -492,6 +498,8 @@ environment or a cached compiler context. Resolution is fail-closed:
 - `t-prim` has exactly one symbol child and that symbol is in the language or
   explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
   §1.1. An unknown primitive name is a type error, not an inference hole.
+  A retired v0.18 integer spelling is a migration error, never a `t-var`
+  candidate.
 - `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
   header and exactly that header's declared number of nominal arguments.
   A type-kinded slot contains a type expression. A dimension-kinded slot
@@ -833,7 +841,7 @@ their declared shapes under [03-META-2]. No `app`
 normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
 `var`, `app`, and `record` structures. Because Surf negative
 numerals are unary minus rather than signed tokens, a negative Deep `lit`
-normalizes to the equivalent `neg` application. The full `int64` minimum uses
+normalizes to the equivalent `neg` application. The full `i64` minimum uses
 Surf's directly representable signed-minimum literal; a narrower signed minimum
 uses `sub(neg(max), 1)` so its positive magnitude never overflows that literal
 width.
@@ -855,7 +863,7 @@ round-trip failure.
 A negative `pat-lit` is not normalized to an application because patterns do
 not contain expression nodes. It resugars as minus followed by the one
 unsuffixed canonical numeric pattern token, including `-0.0` and the full
-`int64` minimum.
+`i64` minimum.
 
 ### 6.4 Literal Normalization
 
@@ -881,7 +889,7 @@ and primitive family have one closed canonical pairing:
 
 | Value atom | Permitted primitive family |
 |---|---|
-| integer | `int8`, `int16`, `int32`, `int64` |
+| integer | `i8`, `i16`, `i32`, `i64` |
 | float | `f16`, `bf16`, `f32`, `f64` |
 | boolean | `bool` |
 | string | `string` |
@@ -903,10 +911,10 @@ and the checker validates its closed atom/primitive/uniqueness contract before
 any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
-`int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
+`i32` (i.e. its `lit` node carries `{type: (t-prim {} i32)}`); an
 unsuffixed float literal binds at type `f32`. The lexer accepts i64/f64
 ranges so that out-of-range literals produce a useful diagnostic before
-defaulting; the desugarer/type-checker narrows the value to `int32` /
+defaulting; the desugarer/type-checker narrows the value to `i32` /
 `f32` before Deep is materialized. See `spec/04-type-system.md` §5.3 for
 the type-system statement. The narrowing is overridable only by an
 explicit literal suffix (§6.4.1), the contextual tensor-literal inference
@@ -926,10 +934,10 @@ the Surf suffix set (`spec/02-surf-syntax.md` §P10a):
 | `f64` | `(t-prim {} f64)` | `1.0f64` |
 | `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
 | `f16` | `(t-prim {} f16)` | `1.0f16` |
-| `i8` | `(t-prim {} int8)` | `42i8` |
-| `i16` | `(t-prim {} int16)` | `42i16` |
-| `i32` | `(t-prim {} int32)` | `42i32` |
-| `i64` | `(t-prim {} int64)` | `42i64` |
+| `i8` | `(t-prim {} i8)` | `42i8` |
+| `i16` | `(t-prim {} i16)` | `42i16` |
+| `i32` | `(t-prim {} i32)` | `42i32` |
+| `i64` | `(t-prim {} i64)` | `42i64` |
 
 In canonical Deep, a suffixed literal MAY be written either with the
 suffix on the literal token (the producer-friendly shape) or as a `lit`

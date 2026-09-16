@@ -75,6 +75,6 @@ fn operation_slot_is_the_canonical_raising_primitive() {
             prim: Prim::Int8,
         }
         .to_string(),
-        "numeric trap: overflow in sum at int8"
+        "numeric trap: overflow in sum at i8"
     );
 }

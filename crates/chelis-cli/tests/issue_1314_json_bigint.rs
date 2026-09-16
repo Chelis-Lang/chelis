@@ -1,7 +1,7 @@
 //! Executable acceptance for chelis#1314's source-faithful JSON integer lane.
 //!
 //! These calls resolve through the packaged `Std.Io.Json` module. They pin
-//! exact out-of-int64 ingestion, accessor refusal, canonical serialization,
+//! exact out-of-i64 ingestion, accessor refusal, canonical serialization,
 //! and the loud/non-throwing serializer pair at the public CLI surface.
 
 use assert_cmd::Command;
@@ -161,27 +161,27 @@ fn json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c(
 import Std.Io.Json (JsonNull, JsonInt, JsonFloat, JsonObject, parse_json, to_json)
 
 ba = to_json(JsonObject(dict_of([
-  ("b", JsonInt(cast(1, int64))),
+  ("b", JsonInt(cast(1, i64))),
   ("a", JsonFloat(2.0f64))
 ])))
 ab = to_json(JsonObject(dict_of([
   ("a", JsonFloat(2.0f64)),
-  ("b", JsonInt(cast(1, int64)))
+  ("b", JsonInt(cast(1, i64)))
 ])))
 equal_mappings = eq(ba, ab)
 empty_object = to_json(parse_json("{}"))
 nested = to_json(JsonObject(dict_of([
   ("outer", JsonObject(dict_of([
-    ("z", JsonInt(cast(3, int64))),
-    ("m", JsonInt(cast(4, int64)))
+    ("z", JsonInt(cast(3, i64))),
+    ("m", JsonInt(cast(4, i64)))
   ]))),
   ("a", JsonNull)
 ])))
 unicode_and_escaped = to_json(JsonObject(dict_of([
-  ("😀", JsonInt(cast(4, int64))),
-  ("é", JsonInt(cast(3, int64))),
-  ("a\\", JsonInt(cast(2, int64))),
-  ("a\"", JsonInt(cast(1, int64)))
+  ("😀", JsonInt(cast(4, i64))),
+  ("é", JsonInt(cast(3, i64))),
+  ("a\\", JsonInt(cast(2, i64))),
+  ("a\"", JsonInt(cast(1, i64)))
 ])))
 "#,
     );
@@ -208,7 +208,7 @@ unicode_and_escaped = to_json(JsonObject(dict_of([
 }
 
 /// PR #1302 red-team finding P0-1: every earlier bigint *ingestion* test
-/// ran the eval lane only, so compiled `parse_json` of any out-of-int64
+/// ran the eval lane only, so compiled `parse_json` of any out-of-i64
 /// integer token heap-corrupted (a block-close release of the
 /// parameter-aliasing `digits` binding inside `canonical_bigint_text`
 /// freed the caller's string) while the suite stayed green. This drives

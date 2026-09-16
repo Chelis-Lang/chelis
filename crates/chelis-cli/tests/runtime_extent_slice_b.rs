@@ -81,7 +81,7 @@
 //!
 //! Section 4.7 makes a runtime extent guard a typed operation-precondition
 //! guard under [04-NUM-9], so the complete user-facing line is
-//! `numeric trap: domain in <op> at int64`, with no prefix and no suffix. The
+//! `numeric trap: domain in <op> at i64`, with no prefix and no suffix. The
 //! `<op>` slot names the operation introducing the guarded extent, which for
 //! an all-interface class is "the `load` primitive of the later witness in
 //! signature order". Section 4.7 also requires each lane to convey the
@@ -107,8 +107,8 @@ use common::{gcc_available, link_generated};
 const RUNTIME_BOUND_SHRINK_SIGMOID: &str = "module Repro.M1\n\
 sig f: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
-k = shape(x, cast(0, int32))\n  \
-z = cast((k - k), int64)\n  \
+k = shape(x, cast(0, i32))\n  \
+z = cast((k - k), i64)\n  \
 s = shrink(x, [[z, k]])\n  \
 sigmoid(s)\n\
 }\n\
@@ -119,8 +119,8 @@ out = f(to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32), cast(4.0, f3
 const RUNTIME_BOUND_SHRINK_RELU: &str = "module Repro.M1\n\
 sig f: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
-k = shape(x, cast(0, int32))\n  \
-z = cast((k - k), int64)\n  \
+k = shape(x, cast(0, i32))\n  \
+z = cast((k - k), i64)\n  \
 s = shrink(x, [[z, k]])\n  \
 relu(s)\n\
 }\n\
@@ -398,14 +398,14 @@ fn runtime_bound_shrink_relu_builds_and_matches_eval_exactly() {
 // ===========================================================================
 
 /// The exact [04-NUM-9] line an extent guard renders. `<op>` varies with the
-/// operation introducing the guarded extent; `<prim>` is always `int64`,
+/// operation introducing the guarded extent; `<prim>` is always `i64`,
 /// because the guard finalizes an extent under [05-DIM-1] rather than a
 /// tensor element.
 fn domain_trap_line(op: &str) -> String {
-    format!("numeric trap: domain in {op} at int64")
+    format!("numeric trap: domain in {op} at i64")
 }
 
-const DIV_ZERO_TRAP: &str = "numeric trap: division by zero in floor_div at int64";
+const DIV_ZERO_TRAP: &str = "numeric trap: division by zero in floor_div at i64";
 
 /// Build to C, link, run, and return the binary's exit STATUS plus its combined
 /// output. A build or link failure panics: those are defects in the fixture or
@@ -530,7 +530,7 @@ fn vmap_ordinary_shape_value_executes_on_both_lanes() {
     for (name, result_type, body, printed) in [
         (
             "read",
-            "int64",
+            "i64",
             "shape(x, 0)",
             "tensor(shape=[2], data=[3, 3])",
         ),
@@ -644,7 +644,7 @@ fn vmap_ordinary_shape_preserves_the_nested_gradient_claim() {
             assert!(stderr.contains("claimed = 2"), "{stderr}");
             assert!(stderr.contains("shrink axis 1 = 3"), "{stderr}");
             assert!(
-                stderr.contains("numeric trap: domain in shrink at int64"),
+                stderr.contains("numeric trap: domain in shrink at i64"),
                 "{stderr}"
             );
             assert!(!stderr.contains("extent source(s)"), "{stderr}");
@@ -1492,7 +1492,7 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
     // body carries the entry guard (`seed`'s own sub-expression is another
     // `run__tensor_M`, called before the print in both variants).
-    let trap = "chelis_numeric_trap(\"numeric trap: domain in load at int64\")";
+    let trap = "chelis_numeric_trap(\"numeric trap: domain in load at i64\")";
     let kernel_prefix = format!("static void {}__tensor_", authored_c_symbol("run"));
     let (kernel_name, kernel) = emitted
         .match_indices(&kernel_prefix)
@@ -2103,7 +2103,7 @@ fn a_zero_positional_replacement_declares_an_empty_axis_on_c() {
 /// equality classes the compiled lanes read.
 ///
 /// The trap renders as `spec/04-type-system.md` [04-NUM-9] requires, at
-/// `int64` because the guarded result is an extent under [05-DIM-1] and not a
+/// `i64` because the guarded result is an extent under [05-DIM-1] and not a
 /// tensor element.
 ///
 /// `<op>` is `load`, not `expand`, and which lane answers moved under B2h
@@ -2647,7 +2647,7 @@ fn a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes() {
 // into `DimInfo::Named` and is what a signature witness carries.
 //
 // Rendering: §4.7 makes this a typed operation-precondition guard under
-// [04-NUM-9], so the complete line is `numeric trap: domain in load at int64`
+// [04-NUM-9], so the complete line is `numeric trap: domain in load at i64`
 // and the accompanying context names each disagreeing source, its axis and its
 // observed value. The assertions below check the trap line byte-exactly and
 // the context by content, never by an invented cross-lane format.
@@ -2929,7 +2929,7 @@ fn issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c() {
 
 /// chelis#665's reproducer in current Surf. The issue's text predates S2a, so
 /// the rank-RAISING form is `insert`, the axis carrier is `0i32` and the size
-/// carrier is int64.
+/// carrier is i64.
 const EXPAND_OVER_STRIDE: &str = "module Repro.ExpandOverStride\n\
      sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
      def f(x) = insert(stride(x, 2i64), 0i32, shape(x, 0i32))\n\
@@ -4370,7 +4370,7 @@ fn issue_1907_literal_non_positive_stride_steps_are_rejected_statically() {
 /// `out = tensor(shape=[5], data=[0.0, 1.0, 2.0, 3.0, 0.0])` and exited ZERO
 /// under a declared `tensor[2, f32]`, while the C binary exited 1 reporting
 /// the generic `Domain: movement target shape mismatch` before
-/// `numeric trap: domain in pad at int64` - a trap, but one naming the
+/// `numeric trap: domain in pad at i64` - a trap, but one naming the
 /// allocation rather than the claim, and arriving at the movement plan's
 /// target check rather than at the claim's guard.
 #[test]
@@ -4637,7 +4637,7 @@ const OVERSHOOT_CLAIMS: [&str; 3] = ["2", "6", "k"];
 /// weaker at exactly that: it would let both lanes drift together with nothing
 /// left to notice.
 const OVERSHOOT_RENDERING: &str =
-    "Domain: shrink bounds outside input extent\nnumeric trap: domain in shrink at int64\n";
+    "Domain: shrink bounds outside input extent\nnumeric trap: domain in shrink at i64\n";
 
 /// The same two lines under the eval lane's reporter, which prefixes `error: `
 /// to the first line of every diagnostic it raises. That prefix is the only
@@ -5467,13 +5467,13 @@ const COMPILE_TIME_RECORD_PROJECTION: &str = "module Repro.StaticRecord\n\
      out = f(to_tensor([1.0f32, 2.0f32]))\n";
 
 /// chelis#569's `with_pipe_cast` in today's canonical spelling. The v0.18
-/// lambda the issue quotes (`|> fn (p) -> cast(p, int64)`) is now a parse
-/// error; `|> cast(int64)` is what the parser and the formatter produce.
+/// lambda the issue quotes (`|> fn (p) -> cast(p, i64)`) is now a parse
+/// error; `|> cast(i64)` is what the parser and the formatter produce.
 const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
      sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
      def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = \
-     { a_dim = x |> shape(cast(0, int32)) |> cast(int64)\n\
-     expand(b, cast(0, int32), a_dim) }\n\
+     { a_dim = x |> shape(cast(0, i32)) |> cast(i64)\n\
+     expand(b, cast(0, i32), a_dim) }\n\
      out = broadcast_rows(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
 
 /// chelis#569's `with_direct_cast`: the form that builds, and the one
@@ -5483,8 +5483,8 @@ const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
 /// still loses its shape source at lowering (chelis#1791, out of scope here).
 const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
      def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-     a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
-     expand(b, cast(0, int32), a_dim)\n\
+     a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
+     expand(b, cast(0, i32), a_dim)\n\
      }\n\
      xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
      bias = to_tensor([0.25f32])\n\
@@ -5494,8 +5494,8 @@ const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32]
 /// the upstream value's class, so a runtime scalar stays sourceless through
 /// however many stages.
 const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
-     sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
-     def f(x: tensor[a, f32], k: int32) = { a_dim = k |> cast(int64)\n\
+     sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+     def f(x: tensor[a, f32], k: i32) = { a_dim = k |> cast(i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
 
 /// The projection with an axis the field does not have.
@@ -5767,7 +5767,7 @@ fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
     assert!(formatted.status.success(), "fmt must succeed");
     let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
     assert!(
-        rewritten.contains("a_dim = x |> shape(cast(0, int32)) |> cast(int64)"),
+        rewritten.contains("a_dim = x |> shape(cast(0, i32)) |> cast(i64)"),
         "the pipe form is what the tools produce: {rewritten}"
     );
 
@@ -5864,7 +5864,7 @@ const COLLIDING_PROJECTION_PATHS: &str = "module Repro.CollidingPaths\n\
 const LET_BOUND_RECORD_SHAPE_READ: &str = "module Repro.LetBoundRecordRead\n\
      type Inputs = | Inputs { q: tensor[batch, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
-     def f(inp: Inputs) = { a_dim = cast(shape(inp.q, cast(0, int32)), int64)\n\
+     def f(inp: Inputs) = { a_dim = cast(shape(inp.q, cast(0, i32)), i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 
@@ -5873,7 +5873,7 @@ const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecor
      type Inputs = | Inputs { q: tensor[batch, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = \
-     { a_dim = inp.q |> shape(cast(0, int32)) |> cast(int64)\n\
+     { a_dim = inp.q |> shape(cast(0, i32)) |> cast(i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
 
@@ -5884,7 +5884,7 @@ const LET_VALUE_RECORD_EXPAND: &str = "module Repro.LetValueRecordExpand\n\
      type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = \
-     { y = expand(inp.b, cast(0, int32), shape(inp.q, cast(0, int32)))\n\
+     { y = expand(inp.b, cast(0, i32), shape(inp.q, cast(0, i32)))\n\
      y }\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.5f32]) })\n";
 
@@ -6045,7 +6045,7 @@ const TYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.TypedLambdaBeside\n
      def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = expand((fn (t: tensor[1, f32]) -> scale(t))(inp.b), 0i32, \
-     shape(inp.q, cast(0, int32)))\n\
+     shape(inp.q, cast(0, i32)))\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
 
 /// The untyped twin, whose binder the earlier readers did handle.
@@ -6054,7 +6054,7 @@ const UNTYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.UntypedLambdaBesi
      def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
      sig f: Inputs -> tensor[batch, f32]\n\
      def f(inp: Inputs) = expand((fn (t) -> scale(t))(inp.b), 0i32, \
-     shape(inp.q, cast(0, int32)))\n\
+     shape(inp.q, cast(0, i32)))\n\
      out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
 
 /// Round 2, P1-1. A typed binder that does not shadow the record base no
@@ -6173,7 +6173,7 @@ fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval() 
 /// classes rather than matching a spelling, so a repair keyed to one operator
 /// would leave the rest rejecting. `div` is absent deliberately:
 /// `spec/05-risc-primitives.md` section 2.1 makes it float-only, so it cannot
-/// carry an `int64` extent and a row for it would fail on precision before
+/// carry an `i64` extent and a row for it would fail on precision before
 /// reaching the size class.
 ///
 /// Each row states the arithmetic and the extent it computes from `n = 4`.
@@ -6266,7 +6266,7 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
     let dir = tempfile::tempdir().expect("tempdir");
     let source = |k: &str| {
         format!(
-            "def f(b: tensor[f32], x: tensor[n, f32], k: int64) -> tensor[n, f32] = \
+            "def f(b: tensor[f32], x: tensor[n, f32], k: i64) -> tensor[n, f32] = \
              insert(b, 0, add(shape(x, 0), k))\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
@@ -6298,7 +6298,7 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
 #[test]
 fn a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def g(x: tensor[n, f32]) -> int64 = shape(x, 0)\n\
+    let source = "def g(x: tensor[n, f32]) -> i64 = shape(x, 0)\n\
                   def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   insert(b, 0, add(shape(x, 0), g(x)))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
@@ -6328,7 +6328,7 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
         ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)"),
     ] {
         let source = format!(
-            "def f(b: tensor[f32], k: int64) -> tensor[m, f32] = insert(b, 0, {size})\n\
+            "def f(b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, {size})\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              out = f(seed, 3i64)\n"
         );
@@ -6353,7 +6353,7 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
 #[test]
 fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], k: int64) -> tensor[m, f32] = insert(b, 0, k)\n\
+    let source = "def f(b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, k)\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   out = f(seed, 3i64)\n";
     let (ok, out) = eval_result(&dir, "bare_scalar.ch", source);
@@ -6556,7 +6556,7 @@ fn checked_arithmetic_operators_reach_the_same_guard_on_c() {
 const NAMED_BYSTANDER_AXIS_ONE: &str = "module Repro.Ax1\n\
 sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, 4, f32]\n\
 def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = \
-mul(features, expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64)))\n\
+mul(features, expand(mask, 1i32, cast(shape(features, cast(1, i32)), i64)))\n\
 out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), \
 to_tensor([[1.0f32], [2.0f32]]))\n";
 
@@ -6564,7 +6564,7 @@ to_tensor([[1.0f32], [2.0f32]]))\n";
 const NAMED_BYSTANDER_AXIS_ZERO: &str = "module Repro.Ax0\n\
 sig f: tensor[4, batch, f32] -> tensor[1, batch, f32] -> tensor[4, batch, f32]\n\
 def f(features: tensor[4, batch, f32], mask: tensor[1, batch, f32]) = \
-mul(features, expand(mask, 0i32, cast(shape(features, cast(0, int32)), int64)))\n\
+mul(features, expand(mask, 0i32, cast(shape(features, cast(0, i32)), i64)))\n\
 out = f(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32], [5.0f32, 6.0f32], [7.0f32, 8.0f32]]), \
 to_tensor([[1.0f32, 2.0f32]]))\n";
 
@@ -6573,7 +6573,7 @@ to_tensor([[1.0f32, 2.0f32]]))\n";
 const NAMED_BYSTANDER_NO_CONSUMER: &str = "module Repro.NoConsumer\n\
 sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, 4, f32]\n\
 def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = \
-expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64))\n\
+expand(mask, 1i32, cast(shape(features, cast(1, i32)), i64))\n\
 out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), \
 to_tensor([[1.0f32], [2.0f32]]))\n";
 
@@ -6590,7 +6590,7 @@ to_tensor([[1.0f32], [2.0f32]]))\n";
 const NAMED_BYSTANDER_RANK_ONE: &str = "module Repro.Rank1\n\
 sig f: tensor[4, f32] -> tensor[1, f32] -> tensor[4, f32]\n\
 def f(features: tensor[4, f32], mask: tensor[1, f32]) = \
-mul(features, expand(mask, 0i32, cast(shape(features, cast(0, int32)), int64)))\n\
+mul(features, expand(mask, 0i32, cast(shape(features, cast(0, i32)), i64)))\n\
 out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), to_tensor([1.0f32]))\n";
 
 /// expand.named_bystander.consumer.c, with its eval lane as the byte-identity
@@ -6645,7 +6645,7 @@ fn a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too() {
 /// EVIDENTIARY STATUS: regression test on the C lane, disposition lock on eval.
 /// On `6abca2406` the C binary built and then aborted with ``extent `1`:
 /// claimed = 1, features axis 1 = 4`` and `numeric trap: domain in load at
-/// int64`, exit 134, while eval printed the correct value. With no binary
+/// i64`, exit 134, while eval printed the correct value. With no binary
 /// consumer nothing verified the prepared type, so the defect surfaced as a
 /// divergence rather than as the build error the two rows above recorded.
 #[test]
@@ -6688,7 +6688,7 @@ fn a_named_bystander_expand_with_no_consumer_agrees_across_lanes() {
 /// EVIDENTIARY STATUS: regression tests on the C lane, disposition locks on
 /// eval. Reverting `emit.rs` to `origin/main` and rerunning, both binaries
 /// abort with ``extent `1`: claimed = 1, features axis 1 = 4`` and
-/// `numeric trap: domain in load at int64` while eval prints these exact
+/// `numeric trap: domain in load at i64` while eval prints these exact
 /// values.
 #[test]
 fn a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes() {
@@ -6700,13 +6700,13 @@ fn a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes() {
         (
             "bystander_reduction",
             "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, f32]\n",
-            "sum(expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64)), 1)",
+            "sum(expand(mask, 1i32, cast(shape(features, cast(1, i32)), i64)), 1)",
             "out = tensor(shape=[2], data=[4.0, 8.0])",
         ),
         (
             "bystander_free_result",
             "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, m, f32]\n",
-            "expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64))",
+            "expand(mask, 1i32, cast(shape(features, cast(1, i32)), i64))",
             "out = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])",
         ),
     ];
@@ -7537,7 +7537,7 @@ fn the_checker_refuses_a_static_pad_extent_a_declaration_refutes() {
 /// EVIDENTIARY STATUS: disposition lock on both lanes. Measured at
 /// `a5fee66b9`, this program already printed
 /// ``extent `100`: claimed = 100, concat axis 0 = 8`` and
-/// `numeric trap: domain in concat at int64`, exiting 1 on eval and 134 on the
+/// `numeric trap: domain in concat at i64`, exiting 1 on eval and 134 on the
 /// linked binary. This change neither introduces nor alters it.
 #[test]
 fn the_host_path_concat_claim_still_names_concat_on_both_lanes() {
@@ -8215,7 +8215,7 @@ fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
 const PIPED_SHAPE_SOURCED_EXPAND: &str = "module Repro.PipeShape\n\
 sig f: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
 }\n\
 out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
@@ -8225,7 +8225,7 @@ out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 const DIRECT_SHAPE_SOURCED_EXPAND: &str = "module Repro.DirectShape\n\
 sig f: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
 }\n\
 out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
@@ -8327,8 +8327,8 @@ fn a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs() {
 const BARE_STAGE_AT_A_CALL_SITE: &str = "module Repro.PipeCallSite\n\
 sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
-expand(b, cast(0, int32), a_dim)\n\
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
+expand(b, cast(0, i32), a_dim)\n\
 }\n\
 out = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> g(to_tensor([0.25f32]))\n";
 
@@ -8337,8 +8337,8 @@ out = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> g(to_tensor([0.25f32]))\n";
 const APPLIED_STAGE_AT_A_CALL_SITE: &str = "module Repro.AppliedCallSite\n\
 sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
-expand(b, cast(0, int32), a_dim)\n\
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
+expand(b, cast(0, i32), a_dim)\n\
 }\n\
 out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
 
@@ -8346,8 +8346,8 @@ out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
 const DIRECT_CALL_FOR_LINT_FIX: &str = "module Repro.LintFixCallSite\n\
 sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
-expand(b, cast(0, int32), a_dim)\n\
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
+expand(b, cast(0, i32), a_dim)\n\
 }\n\
 out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
 
@@ -8491,20 +8491,20 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
 // verdict a user sees is `chelis check`'s.
 // ---------------------------------------------------------------------------
 
-/// The issue's reproducer B, whose size is a cast over a bare `int32`
+/// The issue's reproducer B, whose size is a cast over a bare `i32`
 /// parameter and so has no tensor shape source.
 const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
-sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
-def f(x: tensor[a, f32], k: int32) = {\n  \
-a_dim = k |> cast(int64)\n  \
+sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: i32) = {\n  \
+a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
 }\n";
 
 /// The same program with the `expand` written directly.
 const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
-sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
-def f(x: tensor[a, f32], k: int32) = {\n  \
-a_dim = k |> cast(int64)\n  \
+sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: i32) = {\n  \
+a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
 }\n";
 
@@ -8554,8 +8554,8 @@ fn a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli() {
 /// candidate: it names `reshape` and reaches host-only builtins.
 const STAGED_RUNTIME_SHAPED_COLUMN: &str = "module Repro.StagedColumn\n\
 def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {\n  \
-nn = cast(shape(copy(spots), cast(0, int32)), int64)\n  \
-reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])\n\
+nn = cast(shape(copy(spots), cast(0, i32)), i64)\n  \
+reshape(to_tensor(map(fn (i: i64) -> v, range(cast(0, i64), nn))), [nn, cast(1, i64)])\n\
 }\n\
 def prices[n](spots: tensor[n, f32], k: f32) -> tensor[n, f32] = {\n  \
 kc = const_col(spots, cast(k, f64))\n  \
@@ -8593,7 +8593,7 @@ fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
     // Declining staging must retain the host path's reshape-size check.
     let invalid = STAGED_RUNTIME_SHAPED_COLUMN
         .replace("tensor[n, 1, f64]", "tensor[n, 2, f64]")
-        .replace("[nn, cast(1, int64)]", "[nn, cast(2, int64)]")
+        .replace("[nn, cast(1, i64)]", "[nn, cast(2, i64)]")
         .replace("tensor[1, f64]", "tensor[2, f64]");
     let (eval_ok, eval_error) = eval_result(&dir, "invalid_column.ch", &invalid);
     assert!(
@@ -8928,7 +8928,7 @@ fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
             3,
             1,
             2,
-            "numeric trap: domain in load at int64",
+            "numeric trap: domain in load at i64",
         ),
         ("first_extra_equal", 2, 2, 1, 2, "expected rank 1, got 2"),
         ("first_extra_mismatch", 2, 3, 1, 2, "expected rank 1, got 2"),

@@ -7,7 +7,7 @@ fn empty_tensor_eval_json_retains_all_checked_leaf_dtypes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.ch");
     for dtype in [
-        "f16", "bf16", "f32", "f64", "int8", "int16", "int32", "int64", "bool",
+        "f16", "bf16", "f32", "f64", "i8", "i16", "i32", "i64", "bool",
     ] {
         for (ty, input, shape) in [
             (format!("List[{dtype}]"), "[]", json!([0])),
@@ -160,10 +160,10 @@ fn generated_c_empty_tensor_metadata_matches_every_checked_dtype() {
         ("bf16", "CHELIS_DTYPE_BF16"),
         ("f32", "CHELIS_DTYPE_F32"),
         ("f64", "CHELIS_DTYPE_F64"),
-        ("int8", "CHELIS_DTYPE_I8"),
-        ("int16", "CHELIS_DTYPE_I16"),
-        ("int32", "CHELIS_DTYPE_I32"),
-        ("int64", "CHELIS_DTYPE_I64"),
+        ("i8", "CHELIS_DTYPE_I8"),
+        ("i16", "CHELIS_DTYPE_I16"),
+        ("i32", "CHELIS_DTYPE_I32"),
+        ("i64", "CHELIS_DTYPE_I64"),
         ("bool", "CHELIS_DTYPE_BOOL"),
     ] {
         for nested in [false, true] {

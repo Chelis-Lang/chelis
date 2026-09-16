@@ -48,47 +48,47 @@ fn assert_unsigned_rejection(src: &str, dtype_name: &str) {
 
 #[test]
 fn cast_scalar_to_u8_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, u8)", "u8");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, u8)", "u8");
 }
 
 #[test]
 fn cast_scalar_to_u16_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, u16)", "u16");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, u16)", "u16");
 }
 
 #[test]
 fn cast_scalar_to_u32_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, u32)", "u32");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, u32)", "u32");
 }
 
 #[test]
 fn cast_scalar_to_u64_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, u64)", "u64");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, u64)", "u64");
 }
 
 #[test]
 fn cast_scalar_to_uint8_alias_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, uint8)", "uint8");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, uint8)", "uint8");
 }
 
 #[test]
 fn cast_scalar_to_uint16_alias_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, uint16)", "uint16");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, uint16)", "uint16");
 }
 
 #[test]
 fn cast_scalar_to_uint32_alias_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, uint32)", "uint32");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, uint32)", "uint32");
 }
 
 #[test]
 fn cast_scalar_to_uint64_alias_rejected_with_spec_1_1_1_diagnostic() {
-    assert_unsigned_rejection("def main() -> int32 = cast(1, uint64)", "uint64");
+    assert_unsigned_rejection("def main() -> i32 = cast(1, uint64)", "uint64");
 }
 
 #[test]
 fn tensor_element_u8_rejected_with_spec_1_1_1_diagnostic() {
-    let src = "def main() -> tensor[3, int32] = cast(to_tensor([1, 2, 3]), int32)\n\
+    let src = "def main() -> tensor[3, i32] = cast(to_tensor([1, 2, 3]), i32)\n\
                def stash() -> tensor[3, u8] = to_tensor([1, 2, 3])";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -102,17 +102,17 @@ fn tensor_element_u8_rejected_with_spec_1_1_1_diagnostic() {
     );
 }
 
-/// Negative-parity twin: `int32` (a valid signed dtype) must NOT trip
+/// Negative-parity twin: `i32` (a valid signed dtype) must NOT trip
 /// the unsigned rejection path. Pinning this guards against an overly
-/// eager regex catching `int32` as if it were `uint32`.
+/// eager regex catching `i32` as if it were `uint32`.
 #[test]
 fn cast_scalar_to_int32_does_not_match_unsigned_family() {
-    let src = "def main() -> int32 = cast(1, int32)";
+    let src = "def main() -> i32 = cast(1, i32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
-        "int32 cast must NOT match the unsigned family; got: {:?}",
+        "i32 cast must NOT match the unsigned family; got: {:?}",
         res.err().map(|e| e.errors)
     );
 }

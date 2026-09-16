@@ -173,8 +173,8 @@ fn well_formed_record_update_checks_clean_on_both_ingresses() {
 #[test]
 fn duplicate_def_is_reported_on_both_ingresses() {
     assert_agree_and_reject(
-        "(def {} f (lit {type: (t-prim {} int32)} 1))\n\
-         (def {} f (lit {type: (t-prim {} int32)} 2))",
+        "(def {} f (lit {type: (t-prim {} i32)} 1))\n\
+         (def {} f (lit {type: (t-prim {} i32)} 2))",
         "duplicate definition: `f`",
         "duplicate def",
     );
@@ -183,9 +183,9 @@ fn duplicate_def_is_reported_on_both_ingresses() {
 #[test]
 fn duplicate_defsig_is_reported_on_both_ingresses() {
     assert_agree_and_reject(
-        "(defsig {} f (t-prim {} int32))\n\
-         (defsig {} f (t-prim {} int32))\n\
-         (def {} f (lit {type: (t-prim {} int32)} 1))",
+        "(defsig {} f (t-prim {} i32))\n\
+         (defsig {} f (t-prim {} i32))\n\
+         (def {} f (lit {type: (t-prim {} i32)} 1))",
         "duplicate signature: `f`",
         "duplicate defsig",
     );
@@ -202,9 +202,9 @@ fn builtin_shadowing_is_reported_on_both_ingresses() {
     // not run the def-body-vs-declared-signature unification at all, so the
     // typed ingress additionally reports a `TypeMismatch` against the builtin's
     // signature. That hole reproduces with no builtin in sight -- a `defsig`
-    // declaring `f32` over a `def` whose body is `int32` is `score: 1,
+    // declaring `f32` over a `def` whose body is `i32` is `score: 1,
     // errors: []` through `chelis check` -- and is tracked separately.
-    let source = "(def {} add (lit {type: (t-prim {} int32)} 1))";
+    let source = "(def {} add (lit {type: (t-prim {} i32)} 1))";
     let exprs = stamped(source);
     let needle = "shadows the builtin function `add`";
     for (label, diagnostics) in [("typed", typed_errors(&exprs)), ("ir", ir_errors(&exprs))] {
@@ -219,8 +219,8 @@ fn builtin_shadowing_is_reported_on_both_ingresses() {
 #[test]
 fn module_reopen_is_reported_on_both_ingresses() {
     assert_agree_and_reject(
-        "(module {} m (def {} f (lit {type: (t-prim {} int32)} 1)))\n\
-         (module {} m (def {} g (lit {type: (t-prim {} int32)} 2)))",
+        "(module {} m (def {} f (lit {type: (t-prim {} i32)} 1)))\n\
+         (module {} m (def {} g (lit {type: (t-prim {} i32)} 2)))",
         "is opened by more than one module wrapper",
         "module reopen",
     );
@@ -231,7 +231,7 @@ fn forged_linker_name_is_reported_on_both_ingresses() {
     // The reef module-identity forgery guard: a top-level declaration may not
     // spell a reserved `pkg__`/`Pkg__` internal name.
     assert_agree_and_reject(
-        "(def {} pkg__foo__bar (lit {type: (t-prim {} int32)} 1))",
+        "(def {} pkg__foo__bar (lit {type: (t-prim {} i32)} 1))",
         "reserved internal-name format",
         "forged linker name",
     );
@@ -242,10 +242,10 @@ fn ordinary_declarations_check_clean_on_both_ingresses() {
     // Over-rejection control for the four guards above: none of them may fire
     // on a program that merely has several distinct declarations.
     assert_agree_and_accept(
-        "(defsig {} f (t-prim {} int32))\n\
-         (def {} f (lit {type: (t-prim {} int32)} 1))\n\
-         (def {} g (lit {type: (t-prim {} int32)} 2))\n\
-         (module {} m (def {} h (lit {type: (t-prim {} int32)} 3)))",
+        "(defsig {} f (t-prim {} i32))\n\
+         (def {} f (lit {type: (t-prim {} i32)} 1))\n\
+         (def {} g (lit {type: (t-prim {} i32)} 2))\n\
+         (module {} m (def {} h (lit {type: (t-prim {} i32)} 3)))",
         "distinct declarations",
     );
 }
@@ -289,7 +289,7 @@ fn poly_mean_program(call_precision: &str) -> String {
         "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
-           (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} int32)}} 0))))\n\
+           (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 0))))\n\
          (defsig {{}} call (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {call_precision})) \
            (t-tensor {{}} (t-prim {{}} {call_precision}))))\n\
          (def {{}} call (fn {{}} (params {{}} y) (app {{}} (var {{}} my_mean) (var {{}} y))))"
@@ -302,9 +302,9 @@ fn polymorphic_integer_mean_is_rejected_on_both_ingresses() {
     // checked Float contract must now reject this instantiation on both
     // ingresses without looking up the callee body.
     assert_agree_and_reject(
-        &poly_mean_program("int64"),
-        "dtype family `Float` (the active float dtypes) cannot be instantiated at `int64`",
-        "polymorphic mean instantiated at int64",
+        &poly_mean_program("i64"),
+        "dtype family `Float` (the active float dtypes) cannot be instantiated at `i64`",
+        "polymorphic mean instantiated at i64",
     );
 }
 
@@ -329,7 +329,7 @@ fn literal_reduction_axis_is_accepted_on_both_ingresses() {
         "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)) \
            (t-tensor {} (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x) \
-           (app {} (var {} mean) (var {} x) (lit {type: (t-prim {} int32)} 0))))",
+           (app {} (var {} mean) (var {} x) (lit {type: (t-prim {} i32)} 0))))",
         "literal reduction axis",
     );
 }
@@ -349,8 +349,8 @@ fn literal_reduction_axis_is_accepted_on_both_ingresses() {
 // amendment replaced it with a static textual audit of the whole reader class.
 
 /// `[2, 3]` in its desugared `Cons(2, Cons(3, Nil))` form.
-const SHAPE_LIST_2_3: &str = "(app {} (var {} Cons) (lit {type: (t-prim {} int64)} 2) \
-   (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 3) (var {} Nil)))";
+const SHAPE_LIST_2_3: &str = "(app {} (var {} Cons) (lit {type: (t-prim {} i64)} 2) \
+   (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 3) (var {} Nil)))";
 
 #[test]
 fn reshape_to_concrete_dims_is_accepted_on_both_ingresses() {
@@ -388,7 +388,7 @@ fn reshape_shape_mismatch_is_rejected_on_both_ingresses() {
 /// `[2, 3]` in the host-lane `(list ...)` spelling, which is outside the
 /// 62-tag vocabulary.
 const SHAPE_LIST_TAGGED_2_3: &str =
-    "(list {} (lit {type: (t-prim {} int64)} 2) (lit {type: (t-prim {} int64)} 3))";
+    "(list {} (lit {type: (t-prim {} i64)} 2) (lit {type: (t-prim {} i64)} 3))";
 
 #[test]
 fn reshape_with_host_lane_list_spelling_is_rejected_on_both_ingresses() {
@@ -435,10 +435,10 @@ fn expand_with_sourceless_runtime_size_is_rejected_on_both_ingresses() {
     // accepted a §4.7.2 sourceless size that the IR ingress rejected -- the
     // silent-miscompile class chelis#469 exists to prevent.
     assert_agree_and_reject(
-        "(defsig {} f (t-fn {} (t-tensor {} (d-name {} seq) (t-prim {} f32)) (t-prim {} int32) \
+        "(defsig {} f (t-fn {} (t-tensor {} (d-name {} seq) (t-prim {} f32)) (t-prim {} i32) \
            (t-tensor {} (d-name {} seq) (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x k) \
-           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} int32)} 0) (var {} k))))",
+           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} i32)} 0) (var {} k))))",
         "no tensor in scope carries it",
         "expand sized by a runtime scalar with no tensor source",
     );
@@ -457,8 +457,8 @@ fn expand_sized_by_a_shape_read_is_accepted_on_both_ingresses() {
         "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) \
            (t-tensor {} (d-lit {} 1) (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x) (app {} (var {} expand) (var {} x) \
-           (lit {type: (t-prim {} int32)} 0) \
-           (app {} (var {} shape) (var {} x) (lit {type: (t-prim {} int32)} 0)))))",
+           (lit {type: (t-prim {} i32)} 0) \
+           (app {} (var {} shape) (var {} x) (lit {type: (t-prim {} i32)} 0)))))",
         "expand sized by a shape read of an in-scope tensor",
     );
 }
@@ -551,28 +551,28 @@ fn uniform_like_literal_bounds_are_accepted_on_both_ingresses() {
 /// PP7 row 1, REGRESSION TEST (red before the `infer/expr.rs` repair, green
 /// after): `infer_lit`'s `type:` metadata reader destructured the metadata
 /// VALUE as `Expr::List`. `Node::to_list` clones the metadata map verbatim,
-/// so on the stamped ingress the `(t-prim {} int8)` under `type:` is still an
+/// so on the stamped ingress the `(t-prim {} i8)` under `type:` is still an
 /// `Expr::Node` and the per-prim range check never selected a row. The §5.6
 /// out-of-range literal was accepted by `chelis prove` (exit 0) and rejected
 /// by `chelis check` (exit 2) -- the fail-open direction.
 #[test]
 fn out_of_range_int8_literal_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
-        "(def {} x (lit {type: (t-prim {} int8)} 200))",
-        "literal 200 out of range for context-inferred int8",
-        "int8 literal 200",
+        "(def {} x (lit {type: (t-prim {} i8)} 200))",
+        "literal 200 out of range for context-inferred i8",
+        "i8 literal 200",
     );
 }
 
 /// PP7 row 2, DISPOSITION LOCK (green before and after the repair). Its job
-/// is to keep the row above from being satisfied by rejecting every `int8`
+/// is to keep the row above from being satisfied by rejecting every `i8`
 /// literal: an in-range value must still check clean on both ingresses, so
 /// the repair reads the metadata rather than assuming the worst about it.
 #[test]
 fn in_range_int8_literal_is_accepted_on_both_ingresses() {
     assert_agree_and_accept(
-        "(def {} x (lit {type: (t-prim {} int8)} 100))",
-        "int8 literal 100",
+        "(def {} x (lit {type: (t-prim {} i8)} 100))",
+        "i8 literal 100",
     );
 }
 
@@ -677,7 +677,7 @@ fn active_tensor_precision_is_accepted_on_both_ingresses() {
 fn well_formed_tuple_get_is_accepted_on_both_ingresses() {
     assert_agree_and_accept(
         "(def {} x (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0) \
-           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} 0)))",
+           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} i32)} 0)))",
         "well-formed tuple-get with a literal index",
     );
 }
@@ -704,7 +704,7 @@ fn well_formed_tuple_get_is_accepted_on_both_ingresses() {
 fn negative_tuple_get_index_is_rejected_alike_on_both_ingresses() {
     assert_agree_and_reject(
         "(def {} x (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0) \
-           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} -1)))",
+           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} i32)} -1)))",
         "malformed `tuple-get`: expected a non-negative integer index as child 1, \
          found a `lit` form (integer literal -1)",
         "tuple-get with a negative literal index",
@@ -719,7 +719,7 @@ fn inline_param_poly_program(call_precision: &str) -> String {
         "(defsig {{dtype_bounds: {{p: float}}}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
            (t-tensor {{}} (t-var {{}} p))))\n\
          (def {{}} my_mean (fn {{}} (params {{}} x) \
-           (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} int32)}} 0))))\n\
+           (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} i32)}} 0))))\n\
          (def {{}} call (fn {{}} (params {{}} \
            (y {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {call_precision}))}})) \
            (app {{}} (var {{}} my_mean) (var {{}} y))))"
@@ -737,9 +737,9 @@ fn inline_param_poly_program(call_precision: &str) -> String {
 #[test]
 fn inline_param_polymorphic_integer_mean_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
-        &inline_param_poly_program("int64"),
-        "dtype family `Float` (the active float dtypes) cannot be instantiated at `int64`",
-        "inline-annotated int64 param through a polymorphic mean",
+        &inline_param_poly_program("i64"),
+        "dtype family `Float` (the active float dtypes) cannot be instantiated at `i64`",
+        "inline-annotated i64 param through a polymorphic mean",
     );
 }
 
@@ -756,7 +756,7 @@ fn inline_param_polymorphic_float_mean_is_accepted_on_both_ingresses() {
 
 /// The `with seed(...)` handler program, at a chosen seed-literal width. The
 /// §P10a rule is that an integer-literal seed must carry the `i64` suffix,
-/// which Deep spells as `type: (t-prim {} int64)` on the seed `lit`.
+/// which Deep spells as `type: (t-prim {} i64)` on the seed `lit`.
 fn seeded_handler_program(seed_prim: &str) -> String {
     format!(
         "(def {{}} f (handle-effect {{effect: random}} \
@@ -772,15 +772,15 @@ fn seeded_handler_program(seed_prim: &str) -> String {
 /// `Expr::List`-only match on the seed `lit` itself, and an `Expr::List`-only
 /// read of the `t-prim` under its `type:` metadata. On the stamped ingress
 /// the handler is an `Expr::Node`, so the outer match fell to `_ => None`, the
-/// seed classified as `NotIntLiteral`, and the §P10a int64-suffix rejection
+/// seed classified as `NotIntLiteral`, and the §P10a i64-suffix rejection
 /// never fired: `chelis check` exited 2 and `chelis prove` exited 0 for the
 /// same file. Fail-open.
 #[test]
 fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
     assert_agree_and_reject(
-        &seeded_handler_program("int32"),
-        "requires an int64-suffixed integer literal seed",
-        "with seed at an unsuffixed int32 literal",
+        &seeded_handler_program("i32"),
+        "requires an i64-suffixed integer literal seed",
+        "with seed at an unsuffixed i32 literal",
     );
 }
 
@@ -791,7 +791,7 @@ fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
 #[test]
 fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
     assert_agree_and_accept(
-        &seeded_handler_program("int64"),
-        "with seed at an int64-suffixed literal",
+        &seeded_handler_program("i64"),
+        "with seed at an i64-suffixed literal",
     );
 }

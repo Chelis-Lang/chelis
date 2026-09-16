@@ -18,12 +18,12 @@ fn each_bounded_tensor_call_keeps_its_dtype_shape_and_exact_values() {
     for (family, dtypes) in [
         ("Float", ["f32", "f64"]),
         ("Float", ["f16", "bf16"]),
-        ("Int", ["int16", "int64"]),
-        ("Int", ["int8", "int32"]),
-        ("Numeric", ["f32", "int64"]),
+        ("Int", ["i16", "i64"]),
+        ("Int", ["i8", "i32"]),
+        ("Numeric", ["f32", "i64"]),
     ] {
         let source = format!(
-            "def recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef convert[p: {family}](x: tensor[2, int32], witness: p) -> tensor[2, p] = cast(x, p)\ndef scalar[p: {family}](x: p) -> p = cast(x, p)\na = recast(cast(to_tensor([1, 2]), {}))\nb = recast(cast(to_tensor([3, 4]), {}))\nc = convert(to_tensor([5, 6]), cast(0, {}))\nd = convert(to_tensor([7, 8]), cast(0, {}))\ns = scalar(cast(9, {}))\n",
+            "def recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\ndef scalar[p: {family}](x: p) -> p = cast(x, p)\na = recast(cast(to_tensor([1, 2]), {}))\nb = recast(cast(to_tensor([3, 4]), {}))\nc = convert(to_tensor([5, 6]), cast(0, {}))\nd = convert(to_tensor([7, 8]), cast(0, {}))\ns = scalar(cast(9, {}))\n",
             dtypes[0], dtypes[1], dtypes[0], dtypes[1], dtypes[1]
         );
         let result = evaluate(&source);
@@ -61,7 +61,7 @@ fn each_bounded_tensor_call_keeps_its_dtype_shape_and_exact_values() {
 #[test]
 fn integer_tensor_cast_preserves_values_beyond_float_exactness_and_checks_range() {
     let definition =
-        "def convert[p: Int](x: tensor[2, int64], witness: p) -> tensor[2, p] = cast(x, p)\n";
+        "def convert[p: Int](x: tensor[2, i64], witness: p) -> tensor[2, p] = cast(x, p)\n";
     let result = evaluate(&format!(
         "{definition}out = convert(to_tensor([9007199254740993i64, -9007199254740993i64]), 0i64)\n"
     ));
@@ -100,7 +100,7 @@ fn checked_cast_does_not_become_a_truncating_cast() {
     let ExecutionValue::Tensor { value } = &result.roots[0].value else {
         panic!("{result:?}")
     };
-    assert_eq!(value.data.prim().name(), "int64");
+    assert_eq!(value.data.prim().name(), "i64");
     assert_eq!(value.shape, vec![2]);
     assert_eq!(value.data.to_f64_lossy_vec(), vec![1.0, -2.0]);
 }
@@ -108,7 +108,7 @@ fn checked_cast_does_not_become_a_truncating_cast() {
 #[test]
 fn result_only_constraints_keep_independent_precisions() {
     let result = evaluate(
-        "def convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\na: tensor[2, f32] = convert(to_tensor([16777217, -12]))\nb: tensor[2, f64] = convert(to_tensor([16777217, -12]))\n",
+        "def convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\na: tensor[2, f32] = convert(to_tensor([16777217, -12]))\nb: tensor[2, f64] = convert(to_tensor([16777217, -12]))\n",
     );
     for (name, dtype, expected) in [("a", "f32", 16777216.0), ("b", "f64", 16777217.0)] {
         let root = result

@@ -486,7 +486,7 @@ pub const MOVEMENT_MAX_DIM: usize = 8;
 /// runtime, never the primary check. Each output thread enumerates leaves in
 /// original row-major order and evaluates the canonical adjacent-pair tree
 /// with a fixed-depth explicit stack. Status codes match the host emitter:
-/// 1 is a non-boolean payload, 2 is checked-int64 overflow, 3 is the stack
+/// 1 is a non-boolean payload, 2 is checked-i64 overflow, 3 is the stack
 /// hardware limit, and 4 is an invalid storage index.
 pub fn count_kernel(
     kernel_name: &str,

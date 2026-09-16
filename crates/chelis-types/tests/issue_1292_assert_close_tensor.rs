@@ -7,7 +7,7 @@ use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOAT_DTYPES: &[&str] = &["f16", "bf16", "f32", "f64"];
-const REJECTED_DTYPES: &[&str] = &["int8", "int16", "int32", "int64", "bool"];
+const REJECTED_DTYPES: &[&str] = &["i8", "i16", "i32", "i64", "bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
@@ -355,7 +355,7 @@ def check(actual: &tensor[2, f64], expected: &tensor[2, f64], tol: f32) -> unit 
 
 #[test]
 fn non_float_tolerance_is_rejected_at_check_time() {
-    for dtype in ["int32", "bool"] {
+    for dtype in ["i32", "bool"] {
         let source = format!(
             r#"
 def check(actual: &tensor[2, f32], expected: &tensor[2, f32], tol: {dtype}) -> unit =

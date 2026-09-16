@@ -8,8 +8,8 @@ use tempfile::tempdir;
 const TWO_COUNT_HELPERS: &str = "\
 module Example.TwoCounts\n\
 mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-rows: tensor[2, int64] = count(&mask, 1)\n\
-columns: tensor[3, int64] = count(&mask, 0)\n";
+rows: tensor[2, i64] = count(&mask, 1)\n\
+columns: tensor[3, i64] = count(&mask, 0)\n";
 
 fn assert_device_target_emits_count_helper(target: &str) {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -147,7 +147,7 @@ fn metal_cli_gates_a_count_helper_with_the_full_device_policy() {
     std::fs::write(
         &source,
         "mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-         rows: tensor[2, int64] = sub(count(&mask, 1), count(&mask, 1))\n",
+         rows: tensor[2, i64] = sub(count(&mask, 1), count(&mask, 1))\n",
     )
     .expect("write Count-plus-sub fixture");
     let output_dir = temp.path().join("count-sub-metal");
@@ -181,7 +181,7 @@ fn metal_cli_gates_a_count_helper_with_the_full_device_policy() {
     );
 }
 
-/// The HIP lane runs the same gate call. Checked `int64` subtraction is an
+/// The HIP lane runs the same gate call. Checked `i64` subtraction is an
 /// unimplemented chelis#1306 cell on HIP, so the same program stops at the
 /// early capability gate with that typed receipt rather than reaching the
 /// HIP emitter.
@@ -192,7 +192,7 @@ fn hip_cli_gates_a_count_helper_with_the_full_device_policy() {
     std::fs::write(
         &source,
         "mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-         rows: tensor[2, int64] = sub(count(&mask, 1), count(&mask, 1))\n",
+         rows: tensor[2, i64] = sub(count(&mask, 1), count(&mask, 1))\n",
     )
     .expect("write Count-plus-sub fixture");
     let output_dir = temp.path().join("count-sub-hip");
@@ -211,7 +211,7 @@ fn hip_cli_gates_a_count_helper_with_the_full_device_policy() {
         .expect("chelis build runs");
     assert!(
         !result.status.success(),
-        "a Count helper carrying checked int64 `sub` must not build for HIP:\n{}",
+        "a Count helper carrying checked i64 `sub` must not build for HIP:\n{}",
         String::from_utf8_lossy(&result.stdout)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -234,7 +234,7 @@ fn build_deep_gates_a_count_helper_with_the_full_device_policy() {
     std::fs::write(
         &surf,
         "mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-         rows: tensor[2, int64] = sub(count(&mask, 1), count(&mask, 1))\n",
+         rows: tensor[2, i64] = sub(count(&mask, 1), count(&mask, 1))\n",
     )
     .expect("write Count-plus-sub fixture");
     let desugared = Command::cargo_bin("chelis")

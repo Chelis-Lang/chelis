@@ -42,8 +42,8 @@ fn skips_opaque_without_invariant() {
     let surf = "module M.Plain
 @opaque
 type Token =
-  | Token { id: int32 }
-def make(i: int32) -> Token = Token { id: i }
+  | Token { id: i32 }
+def make(i: i32) -> Token = Token { id: i }
 ";
     let exprs = deep_of(surf);
     assert!(collect_opaque_invariants(&exprs).is_empty());
@@ -144,8 +144,8 @@ fn u2_int_field_constant_in_precondition_lowers_int_not_real() {
 @opaque
 @invariant(c) c.n >= lo
 type Counter =
-  | Counter { n: int32 }
-def make(x: int32) -> Counter = Counter { n: x }
+  | Counter { n: i32 }
+def make(x: i32) -> Counter = Counter { n: x }
 ";
     let exprs = deep_of(surf);
     let inv = &collect_opaque_invariants(&exprs)[0];
@@ -247,15 +247,15 @@ def make(x: f32) -> Probability = Probability { value: x }
 }
 
 // Review-4 follow-up: the int-width sampling decision is single-source
-// (`int_sample_bounds`), and an int8/int16 field samples within its
+// (`int_sample_bounds`), and an i8/i16 field samples within its
 // representable range instead of an out-of-range value or a float that
 // would yield a spurious counterexample.
 #[test]
 fn int_sample_bounds_clamps_to_each_widths_representable_range() {
-    assert_eq!(super::int_sample_bounds("int8"), Some((-128, 127)));
-    assert_eq!(super::int_sample_bounds("int16"), Some((-1000, 1000)));
-    assert_eq!(super::int_sample_bounds("int32"), Some((-1000, 1000)));
-    assert_eq!(super::int_sample_bounds("int64"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i8"), Some((-128, 127)));
+    assert_eq!(super::int_sample_bounds("i16"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i32"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i64"), Some((-1000, 1000)));
     assert_eq!(super::int_sample_bounds("f32"), None);
     assert_eq!(super::int_sample_bounds("bool"), None);
 }
@@ -264,14 +264,14 @@ fn int_sample_bounds_clamps_to_each_widths_representable_range() {
 fn int8_field_samples_are_integers_within_int8_range() {
     use super::{FieldType, GenRng, sample_field_into};
     let mut rng = GenRng::new(0);
-    let fty = FieldType::Scalar("int8".to_string());
+    let fty = FieldType::Scalar("i8".to_string());
     for _ in 0..200 {
         let mut env = std::collections::BTreeMap::new();
         sample_field_into("x", &fty, &mut rng, &mut env);
-        let v = env["x"].as_i64_exact().expect("int8 sample stays integer");
+        let v = env["x"].as_i64_exact().expect("i8 sample stays integer");
         assert!(
             (-128..=127).contains(&v),
-            "int8 sample must be in [-128, 127], got {v}"
+            "i8 sample must be in [-128, 127], got {v}"
         );
     }
 }
@@ -279,7 +279,7 @@ fn int8_field_samples_are_integers_within_int8_range() {
 #[test]
 fn int64_wire_element_enters_the_prover_without_crossing_f64() {
     let elements = wire_values::storage_i64(vec![9_007_199_254_740_993]);
-    let value = tensor_element_scalar(&elements, 0).expect("int64 wire element");
+    let value = tensor_element_scalar(&elements, 0).expect("i64 wire element");
     assert_eq!(value.prim(), Prim::Int64);
     assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_993));
 }
@@ -289,7 +289,7 @@ fn typed_generated_env_renders_plain_exact_integer_json() {
     let mut env = BTreeMap::new();
     env.insert(
         "p.id".to_string(),
-        scalar_from_i64("prove-test", Prim::Int64, 9_007_199_254_740_993).expect("valid int64"),
+        scalar_from_i64("prove-test", Prim::Int64, 9_007_199_254_740_993).expect("valid i64"),
     );
     assert_eq!(
         generated_env_json(&env)["p.id"].as_i64(),

@@ -699,9 +699,9 @@ fn rt12b_non_bool_materialization_retains_generic_authority() {
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_i64"),
-        "int64 realize has no generic HIP arithmetic family",
+        "i64 realize has no generic HIP arithmetic family",
     );
-    assert_hip_dtype_rejection(error, "int64", 689);
+    assert_hip_dtype_rejection(error, "i64", 689);
 }
 
 /// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and

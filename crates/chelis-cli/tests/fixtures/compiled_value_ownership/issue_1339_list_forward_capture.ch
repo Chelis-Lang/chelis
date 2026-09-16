@@ -1,2 +1,2 @@
-def capture() -> List[int64] = later
-later: List[int64] = [1i64, 2i64]
+def capture() -> List[i64] = later
+later: List[i64] = [1i64, 2i64]

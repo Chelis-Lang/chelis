@@ -538,7 +538,7 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 // their declared dtype's value set. No finalize logic, no traps, no
 // formatting rules (formatting faithfulness is chelis#732's contract, not
 // this checker's; a value-preserving formatting lie like `750.0` for an
-// int64 is IN domain here).
+// i64 is IN domain here).
 //
 // FROZEN AT chelis#729 PHASE 0 EXIT: the API below
 // (`assert_elements_in_domain(prim, printed, context)` plus the pure
@@ -564,7 +564,7 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 0.0;
 
 /// Strip `List[...]` wrappers (the drivers pass return types like
-/// `List[int64]` for `to_list` rows) down to the element prim name.
+/// `List[i64]` for `to_list` rows) down to the element prim name.
 fn normalize_prim(prim: &str) -> &str {
     let mut p = prim.trim();
     while let Some(inner) = p.strip_prefix("List[").and_then(|s| s.strip_suffix(']')) {
@@ -653,10 +653,10 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
                 })
             },
         ),
-        "int64" => int_violation(t, "int64", i64::MIN as i128, i64::MAX as i128),
-        "int32" => int_violation(t, "int32", i32::MIN as i128, i32::MAX as i128),
-        "int16" => int_violation(t, "int16", i16::MIN as i128, i16::MAX as i128),
-        "int8" => int_violation(t, "int8", i8::MIN as i128, i8::MAX as i128),
+        "i64" => int_violation(t, "i64", i64::MIN as i128, i64::MAX as i128),
+        "i32" => int_violation(t, "i32", i32::MIN as i128, i32::MAX as i128),
+        "i16" => int_violation(t, "i16", i16::MIN as i128, i16::MAX as i128),
+        "i8" => int_violation(t, "i8", i8::MIN as i128, i8::MAX as i128),
         "f8e4m3" => Some(format!(
             "`{t}` claims dtype f8e4m3, which the checker rejects (spec/04 §1.1.1); \
              no runtime value may carry it"
@@ -737,7 +737,7 @@ fn int_violation(t: &str, prim: &str, min: i128, max: i128) -> Option<String> {
         return Some(format!("`{t}` is fractional; {prim} holds integers only"));
     }
     // Width bounds compared in f64. For widths below 64 bits both bounds
-    // are exactly representable. For int64 the exclusive upper bound 2^63
+    // are exactly representable. For i64 the exclusive upper bound 2^63
     // is exact in f64 while i64::MAX is not; every integral f64 strictly
     // below 2^63 is <= i64::MAX (the f64 grid near 2^63 steps by 1024),
     // so `d < 2^63` is the correct membership test.

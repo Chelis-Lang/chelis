@@ -162,7 +162,7 @@ fn invalid_movement_plan_metadata_fails_with_its_operation_identity() {
         assert!(
             String::from_utf8_lossy(&output.stderr)
                 .lines()
-                .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+                .any(|line| line == format!("numeric trap: domain in {op} at i64")),
             "{case}: {}",
             String::from_utf8_lossy(&output.stderr)
         );

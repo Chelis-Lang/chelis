@@ -127,17 +127,17 @@ fn wrong_dtype_runtime_and_nonstatic_seed_controls_reject_before_execution() {
         "\"seed\"",
         "runtime",
         "add(1i64, 2i64)",
-        "cast(1.5f64, int64)",
+        "cast(1.5f64, i64)",
         "neg(-9223372036854775808i64)",
         "neg(-1i64)",
-        "cast(-1i32, int64)",
-        "cast_trunc(-1.75f64, int64)",
+        "cast(-1i32, i64)",
+        "cast_trunc(-1.75f64, i64)",
     ] {
         let dir = tempdir().unwrap();
         let path = dir.path().join("rejected.ch");
         common::write_file(
             &path,
-            &format!("def sample(runtime: int64) -> f32 = with seed({seed}) {{ 1.0f32 }}\n"),
+            &format!("def sample(runtime: i64) -> f32 = with seed({seed}) {{ 1.0f32 }}\n"),
         );
         canonical(&path);
         for command in ["check", "eval", "build"] {
@@ -162,11 +162,11 @@ fn wrong_dtype_runtime_and_nonstatic_seed_controls_reject_before_execution() {
 fn shadowed_neg_cannot_substitute_a_constant_for_a_runtime_seed() {
     for (source, kind) in [
         (
-            "def sample(runtime: int64) -> f32 = {\n neg = fn (value: int64) -> add(value, runtime)\n with seed(neg(1i64)) { 1.0f32 }\n }",
+            "def sample(runtime: i64) -> f32 = {\n neg = fn (value: i64) -> add(value, runtime)\n with seed(neg(1i64)) { 1.0f32 }\n }",
             "TypeMismatch",
         ),
         (
-            "def neg(value: int64) -> int64 = add(value, 1i64)\n def sample() -> f32 = with seed(neg(1i64)) { 1.0f32 }",
+            "def neg(value: i64) -> i64 = add(value, 1i64)\n def sample() -> f32 = with seed(neg(1i64)) { 1.0f32 }",
             "BuiltinShadowing",
         ),
     ] {

@@ -264,7 +264,7 @@ pub struct Subst {
     /// Recording rather than tolerating is deliberate. The ~71 sibling gates
     /// return on an unresolved operand and forget it, which is sound for them
     /// but not here: measured, a tolerant `cast` lets
-    /// `def go[t](x: t) -> int32 = cast(x, int32)` check at 1.0 and BUILD,
+    /// `def go[t](x: t) -> i32 = cast(x, i32)` check at 1.0 and BUILD,
     /// with the backend choosing a dtype for the never-resolved `t`. A
     /// variable that is never bound is still rejected.
     ///
@@ -4096,7 +4096,7 @@ mod tests {
     /// tests that exercise narrowing through a program detect
     /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
     /// widens survives them; this one asserts the surviving family IS `Float`
-    /// and that `int32` is consequently rejected.
+    /// and that `i32` is consequently rejected.
     ///
     /// It does not isolate either mechanism, and measurement rather than
     /// reasoning says so. `bind_tvar`'s `merged_restriction` and
@@ -4141,7 +4141,7 @@ mod tests {
                  Numeric (numeric_first = {numeric_first})"
             );
 
-            // And the narrowing is observable: int32 is in Numeric but not in
+            // And the narrowing is observable: i32 is in Numeric but not in
             // Float, so it must now be rejected.
             let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
                 .expect_err("a narrowed variable must reject a non-float dtype");
@@ -4392,7 +4392,7 @@ mod tests {
 
         assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
-        assert!(error.message.contains("int32"));
+        assert!(error.message.contains("i32"));
         assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
         assert_eq!(
             subst.tvar_restriction(restricted),
@@ -4643,7 +4643,7 @@ mod tests {
         let t2 = Type::Tensor(vec![Dim::Name("a".into())], tprec(Prim::Int32));
         assert!(
             unify(&t1, &t2, &mut s).is_err(),
-            "f32 vs int32 precision must fail even with a rank var"
+            "f32 vs i32 precision must fail even with a rank var"
         );
     }
 

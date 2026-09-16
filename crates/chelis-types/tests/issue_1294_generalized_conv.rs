@@ -83,7 +83,7 @@ fn convolution_rejects_invalid_axis_metadata_and_operand_domains() {
         );
         assert!(check(&source).is_err(), "accepted {source}");
     }
-    for dtype in ["bool", "int8", "int16", "int32", "int64"] {
+    for dtype in ["bool", "i8", "i16", "i32", "i64"] {
         let source = format!(
             "def f(x: tensor[1,2,5,{dtype}], k: tensor[3,2,3,{dtype}]) = conv(x,k,[1i64],[(0i64,0i64)])\n"
         );

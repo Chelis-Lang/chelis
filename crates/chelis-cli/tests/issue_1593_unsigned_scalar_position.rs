@@ -159,12 +159,7 @@ fn a_genuine_lowercase_name_still_scores_one_at_both_ingresses() {
 fn the_short_signed_aliases_are_untouched() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
-    for (short, long) in [
-        ("i8", "int8"),
-        ("i16", "int16"),
-        ("i32", "int32"),
-        ("i64", "int64"),
-    ] {
+    for (short, long) in [("i8", "i8"), ("i16", "i16"), ("i32", "i32"), ("i64", "i64")] {
         fs::write(root.join("signed.ch"), source_for(short)).expect("write");
         let checked = text(&run(root, &["check", "signed.ch"]));
         assert!(

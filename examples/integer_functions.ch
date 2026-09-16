@@ -1,3 +1,3 @@
 module IntegerFunctions
-def anchor() -> int32 = 7
-def user() -> int32 = anchor()
+def anchor() -> i32 = 7
+def user() -> i32 = anchor()

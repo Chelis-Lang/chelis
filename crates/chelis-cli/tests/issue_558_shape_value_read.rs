@@ -132,8 +132,8 @@ fn matrix_literal(data: &[f64], cols: usize) -> String {
 // read is a scalar VALUE (the number of rows), cast to f32 and multiplied
 // into the scalar sum. `grad` w.r.t. every element is exactly `shape(x, 0)`.
 const SHAPE_MUL_BODY: &str = "\
-  n = cast(shape(x, cast(0, int32)), f32)\n\
-  s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  n = cast(shape(x, cast(0, i32)), f32)\n\
+  s = sum(sum(&x, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
   mul(s, n)";
 
 fn forward_source(sig: &str, literal: &str) -> String {
@@ -213,7 +213,7 @@ fn issue_558_shape_value_grad_symbolic_batch_is_extent() {
 fn issue_558_shape_only_loss_grad_is_zero() {
     let source = "module Repro.ShapeOnly\n\
 sig f: tensor[batch, 2, f32] -> f32\n\
-def f(x) = cast(shape(x, cast(0, int32)), f32)\n\
+def f(x) = cast(shape(x, cast(0, i32)), f32)\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
     let (shape, grad) = eval_grad(source);
     assert_eq!(shape, vec![2, 2], "shape-only grad shape");
@@ -376,14 +376,14 @@ fn issue_558_shape_value_forward_matches_c() {
 // ---------------------------------------------------------------------------
 
 // A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
-// (narrowed to int32: `shape` reads an int64 extent, the axis slot is int32)
+// (narrowed to i32: `shape` reads an i64 extent, the axis slot is i32)
 // is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
 // so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
 // has no representable axis. The `def`-body is shared by the two tests below.
 const RUNTIME_AXIS_BODY: &str = "\
-  ax = cast(sub(shape(&x, cast(0, int32)), cast(3, int64)), int32)\n\
+  ax = cast(sub(shape(&x, cast(0, i32)), cast(3, i64)), i32)\n\
   n = cast(shape(x, ax), f32)\n\
-  s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  s = sum(sum(&x, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
   mul(s, n)";
 
 const RUNTIME_AXIS_INPUT: &str = "to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)], \

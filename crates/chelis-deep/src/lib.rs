@@ -13,6 +13,7 @@ pub use extension_data::ExtensionData;
 pub mod lexer;
 pub mod literal_source;
 pub mod metadata;
+pub mod migration;
 pub mod node;
 pub mod parser;
 pub mod path;

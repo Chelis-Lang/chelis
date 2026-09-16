@@ -3093,19 +3093,19 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         }
         // Every signed integer width, recognized through the single-source
         // `is_int_width` and sampled within the width's representable range
-        // via the single-source `int_sample_bounds` (review 5): an int8
+        // via the single-source `int_sample_bounds` (review 5): an i8
         // samples in [-128, 127], never an unrepresentable value.
         TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
             let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
                 .expect("is_int_width implies int_sample_bounds");
             let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
-            if type_name == "int32" {
-                // int32 is the integer-literal default; no cast needed.
+            if type_name == "i32" {
+                // i32 is the integer-literal default; no cast needed.
                 Ok(scalar_sample(
                     name,
                     lit,
-                    deep_lit(deep_int(value), "int32"),
+                    deep_lit(deep_int(value), "i32"),
                     serde_json::json!(value),
                 ))
             } else {
@@ -3620,7 +3620,7 @@ fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
         crate::opaque::int_sample_bounds(type_name).expect("int shrink only uses int widths");
     let value = value.clamp(lo, hi);
     let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
-    let surf_expr = if type_name == "int32" {
+    let surf_expr = if type_name == "i32" {
         lit
     } else {
         cast_expr(lit, type_name)

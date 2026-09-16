@@ -252,7 +252,7 @@ its discrete fields remain present as `unit`.
 ### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
 
 Adjoint construction preserves symbolic identities where ordinary type
-reasoning proves them and otherwise carries exact runtime int64 extent nodes.
+reasoning proves them and otherwise carries exact runtime i64 extent nodes.
 `Sum`/`Expand` carry their selected extents, `Reshape`/`Permute` restore the
 recorded source shape, and `Pad`/`Shrink`/`Stride` use [05-MOV-1]'s runtime
 bounds and exact inverse graphs. Bound and axis scalars have zero cotangent.
@@ -267,10 +267,10 @@ runtime dimension, loop extent, step, window, or target shape is a structural
 execution mode evaluates the same generated runtime graph and guards.
 
 **Scalar `shape()` value reads.** A `shape(x, axis)` read used as a scalar
-value is the rank-zero int64 extent operation in
+value is the rank-zero i64 extent operation in
 `spec/05-risc-primitives.md` [05-OP-7]/[05-SHAPE-1]. It is AD-transparent:
 the operation reads only shape metadata, so its adjoint routes zero cotangent
-to the input and discrete int32 axis. A loss whose value depends on a runtime
+to the input and discrete i32 axis. A loss whose value depends on a runtime
 dimension (for example `loss = sum(x) * shape(x, axis)`) therefore
 differentiates with the actual selected runtime extent. Literal and computed
 axes have one semantic operation and remain representable through every DAG

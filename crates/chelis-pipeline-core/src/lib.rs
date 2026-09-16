@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn contextual_success_composes_its_bound_library() {
         let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} int32)} 1))"))
+            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
                 .expect("the library must pass all checks");
         let analysis =
             analyze_prepared_with_library(prepared("(def {} two (var {} one))"), &library)
@@ -161,10 +161,10 @@ mod tests {
     #[test]
     fn contextual_products_reject_a_replacement_library() {
         let first =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} int32)} 1))"))
+            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
                 .expect("the first library must pass all checks");
         let replacement =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} int32)} 2))"))
+            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 2))"))
                 .expect("the replacement library must pass all checks");
         let analysis = analyze_prepared_with_library(prepared(""), &first)
             .expect("the empty extension must type-check");
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn library_extension_composes_with_its_bound_context_and_environment() {
         let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} int32)} 1))"))
+            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
                 .expect("the library must pass all checks");
         let analysis =
             analyze_prepared_library_with_base(prepared("(def {} two (var {} one))"), &library)
@@ -220,12 +220,12 @@ mod tests {
     fn cached_library_parser_rejects_a_same_shape_foreign_context() {
         let exported = check_prepared_library(prepared(
             "(module {} m (export {} value) \
-             (def {} value (lit {type: (t-prim {} int32)} 1)))",
+             (def {} value (lit {type: (t-prim {} i32)} 1)))",
         ))
         .expect("the exported library must pass all checks");
         let private = check_prepared_library(prepared(
             "(module {} m \
-             (def {} value (lit {type: (t-prim {} int32)} 1)))",
+             (def {} value (lit {type: (t-prim {} i32)} 1)))",
         ))
         .expect("the private library must pass all checks");
         assert_eq!(private.program().type_env(), exported.program().type_env());
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn cached_library_parser_rejects_a_mismatched_type_environment() {
         let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} int32)} 1))"))
+            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
                 .expect("the library must pass all checks");
 
         let rejection =

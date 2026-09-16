@@ -49,7 +49,7 @@ fn safe_call_first_programs_reparse_and_preserve_execution() {
     for (name, program, expected) in [
         (
             "ordinary",
-            "def combine(x: int32, y: int32) -> int32 = x + y\nresult = 3 |> combine(4)\n",
+            "def combine(x: i32, y: i32) -> i32 = x + y\nresult = 3 |> combine(4)\n",
             "result = 7\n",
         ),
         (

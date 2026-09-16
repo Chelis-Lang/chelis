@@ -86,7 +86,7 @@ fn distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds
                     assert_eq!(
                         result.unwrap_err(),
                         format!(
-                            "extent `{required}`: claimed = {required}, {operation} axis 0 = 2\nnumeric trap: domain in {operation} at int64"
+                            "extent `{required}`: claimed = {required}, {operation} axis 0 = 2\nnumeric trap: domain in {operation} at i64"
                         )
                     );
                 } else {
@@ -216,7 +216,7 @@ fn administrative_copies_preserve_literal_producer_through_fusion() {
                 } else {
                     assert_eq!(
                         result.unwrap_err(),
-                        "extent `3`: claimed = 3, mul axis 0 = 2\nnumeric trap: domain in mul at int64",
+                        "extent `3`: claimed = 3, mul axis 0 = 2\nnumeric trap: domain in mul at i64",
                         "copied={copied}, {rebuilt:?}"
                     );
                 }

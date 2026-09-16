@@ -530,7 +530,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
 fn host_only_definitions_do_not_fabricate_graph_observations() {
     let source = r#"
 def filled(x: tensor[n, f32]) -> tensor[n, f32] =
-  expand(to_tensor([3.0f32]), 0, cast(shape(&x, 0), int64))
+  expand(to_tensor([3.0f32]), 0, cast(shape(&x, 0), i64))
 "#;
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     assert!(library.dag().nodes().is_empty());
@@ -573,7 +573,7 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
 #[test]
 fn host_structured_results_are_not_reported_as_observed_applications() {
     let source = r#"
-type Mixed = | Mixed { t: tensor[2, f32], n: int32 }
+type Mixed = | Mixed { t: tensor[2, f32], n: i32 }
 def loss(p: Mixed) -> f32 = match p with {
   | Mixed { t, n: _ } => tensor_to_scalar(sum(t, 0))
 }
@@ -689,7 +689,7 @@ fn completed_application_snapshots_do_not_alias_later_mutations() {
 
 #[test]
 fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
-    let source = "def values() -> tensor[2, int64] = [9007199254740993, -9007199254740993]\n";
+    let source = "def values() -> tensor[2, i64] = [9007199254740993, -9007199254740993]\n";
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
     for dag in [
         &trace.normalization.before_dce,

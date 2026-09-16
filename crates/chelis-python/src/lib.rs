@@ -3137,7 +3137,7 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
         let manifest = run_job_manifest(source, None);
@@ -3268,7 +3268,7 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
         let outputs = run_job_and_call(source, None, &[(vec![3.0], vec![1]), (vec![4.0], vec![1])]);
@@ -3398,7 +3398,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             &source_path,
             "module Repro.GradEntry\n\
              def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n  \
-             tensor_to_scalar(sum(mul(x, w), cast(0, int32)))\n\
+  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))\n\
              def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n",
         )
         .expect("write source");
@@ -3432,11 +3432,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
     fn compile_and_load_job_rejects_host_only_program_loudly() {
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "total = add(cast(1, int64), cast(2, int64))\n",
-        )
-        .expect("write source");
+        fs::write(&source_path, "total = add(cast(1, i64), cast(2, i64))\n").expect("write source");
         let result = run_compile_and_load_job(CompileAndLoadJob {
             source_path,
             source_kind: SourceKind::Surf,
@@ -3819,7 +3815,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -4103,7 +4099,7 @@ mod worker_stack_tests {
     /// which is exactly the loudness we want (chelis#914 review).
     #[test]
     fn eval_worker_survives_depth_that_overflowed_the_default_stack() {
-        let program = "def down(n: int64) -> int64 = \
+        let program = "def down(n: i64) -> i64 = \
                        if lte(n, 0i64) then 0i64 else add(1i64, down(sub(n, 1i64)))\n\
                        depth = down(200i64)\n";
         Python::with_gil(|py| {

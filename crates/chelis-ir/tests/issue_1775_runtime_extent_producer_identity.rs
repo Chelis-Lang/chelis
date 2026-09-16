@@ -34,12 +34,12 @@ fn parse_one(src: &str) -> Expr {
 fn row(extent: &str) -> String {
     format!(
         "(app {{}} (var {{}} reshape) (var {{}} x) \
-          (app {{}} (var {{}} Cons) (cast {{}} (lit {{}} 1) (t-prim {{}} int64)) \
+          (app {{}} (var {{}} Cons) (cast {{}} (lit {{}} 1) (t-prim {{}} i64)) \
             (app {{}} (var {{}} Cons) {extent} (var {{}} Nil))))"
     )
 }
 
-/// `let m = cast(shape(x, 0), int64) in let k = cast(shape(x, 0), int64) in
+/// `let m = cast(shape(x, 0), i64) in let k = cast(shape(x, 0), i64) in
 ///  concat([reshape(x, [1, a]), reshape(x, [1, b])], 0)`.
 ///
 /// `m` and `k` are separate bindings over separate `shape` reads, so naming
@@ -47,12 +47,12 @@ fn row(extent: &str) -> String {
 fn concat_src(first: &str, second: &str) -> String {
     format!(
         "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) (t-prim {{}} int64))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) (t-prim {{}} i64))) \
          (let {{}} (bind {{}} k (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) (t-prim {{}} int64))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) (t-prim {{}} i64))) \
          (app {{}} (var {{}} concat) \
            (app {{}} (var {{}} Cons) {r0} (app {{}} (var {{}} Cons) {r1} (var {{}} Nil))) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32)))))",
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32)))))",
         r0 = row(first),
         r1 = row(second)
     )
@@ -186,8 +186,8 @@ fn two_reshapes_from_distinct_producers_reject_forced_dag() {
 fn grad_over_a_shared_extent_window_stack_gives_every_axis_one_source() {
     let src = format!(
         "(app {{}} (var {{}} sum) (app {{}} (var {{}} sum) {stack} \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32)))",
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32)))",
         stack = concat_src("(var {} m)", "(var {} m)")
     );
     let dag = lower_over_symbolic_x(&parse_one(&src));

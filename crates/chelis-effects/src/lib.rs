@@ -937,9 +937,9 @@ fn validate_handler_kind(
         {
             errors.push(EffectError {
                 kind: EffectErrorKind::InvalidHandler,
-                message: "with seed(...) requires a signed int64 literal seed".to_string(),
+                message: "with seed(...) requires a signed i64 literal seed".to_string(),
                 suggestions: vec![
-                    "Use `with seed(42i64) { ... }` with an explicit int64-suffixed integer seed"
+                    "Use `with seed(42i64) { ... }` with an explicit i64-suffixed integer seed"
                         .to_string(),
                 ],
             });
@@ -1282,7 +1282,7 @@ mod tests {
         ];
         if flat {
             lines.push(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else {"
                     .to_string(),
             );
@@ -1301,7 +1301,7 @@ mod tests {
                 body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
             }
             lines.push(format!(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
             ));
         }
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
-        let decls = parse_surf("def add_one(x: int32) -> int32 = add(x, 1)").expect("surf parse");
+        let decls = parse_surf("def add_one(x: i32) -> i32 = add(x, 1)").expect("surf parse");
         let deep = desugar_program(&decls);
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
@@ -1453,12 +1453,12 @@ mod tests {
         for source in [
             r#"(def {} value
                    (handle-effect {effect: random}
-                     (lit {type: (t-prim {} int64)} 7)
-                     (lit {type: (t-prim {} int32)} 1)))"#,
+                     (lit {type: (t-prim {} i64)} 7)
+                     (lit {type: (t-prim {} i32)} 1)))"#,
             r#"(def {} value
                    (handle-effect {effect: resource}
                      (lit {type: (t-prim {} string)} "cpu")
-                     (lit {type: (t-prim {} int32)} 1)))"#,
+                     (lit {type: (t-prim {} i32)} 1)))"#,
         ] {
             let deep = parse_str(source).expect("Deep handler fixture parses");
             let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
@@ -1469,16 +1469,16 @@ mod tests {
     #[test]
     fn signed_seed_constants_cross_type_and_effect_boundaries() {
         for seed in [
-            "(lit {type: (t-prim {} int64)} -1)",
-            "(lit {type: (t-prim {} int64)} -9223372036854775808)",
-            "(lit {type: (t-prim {} int64)} 9223372036854775807)",
-            "(app {} (var {} neg) (lit {type: (t-prim {} int64)} 1))",
+            "(lit {type: (t-prim {} i64)} -1)",
+            "(lit {type: (t-prim {} i64)} -9223372036854775808)",
+            "(lit {type: (t-prim {} i64)} 9223372036854775807)",
+            "(app {} (var {} neg) (lit {type: (t-prim {} i64)} 1))",
         ] {
             let source = format!(
                 "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
             );
             let deep = parse_str(&source).unwrap();
-            let typed = chelis_types::check_ir_program(&deep).expect("signed int64 constant");
+            let typed = chelis_types::check_ir_program(&deep).expect("signed i64 constant");
             check_program(&typed).unwrap_or_else(|errors| panic!("{seed}: {errors:?}"));
         }
     }
@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     fn malformed_seed_constants_never_cross_the_effect_boundary() {
         let malformed = "(def {} value (handle-effect {effect: random} \
-            (lit {type: (t-prim {} int64)} 1 2) (lit {type: (t-prim {} f32)} 1.0)))";
+            (lit {type: (t-prim {} i64)} 1 2) (lit {type: (t-prim {} f32)} 1.0)))";
         assert!(
             parse_str(malformed)
                 .unwrap_err()
@@ -1494,17 +1494,17 @@ mod tests {
                 .contains("wrong child count for `lit`")
         );
         for seed in [
-            "(lit {type: (t-prim {} int64)} 1.0)",
+            "(lit {type: (t-prim {} i64)} 1.0)",
             "(lit {type: (t-prim {} bool)} true)",
             "(lit {type: (t-prim {} f64)} 1)",
             "(app {} (var {} neg) (lit {type: (t-prim {} bool)} 1))",
-            "(app {} (var {} neg) (lit {type: (t-prim {} int64)} -1))",
-            "(app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} int64)} 1)))",
-            "(app {type: (t-prim {} int64)} (var {} neg) (lit {type: (t-prim {} int32)} 1))",
-            "(cast {type: (t-prim {} int32)} (lit {type: (t-prim {} int64)} 1) (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} int64) trunc)",
-            "(cast {} (var {} runtime) (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} int32)} -1) (t-prim {} int64))",
+            "(app {} (var {} neg) (lit {type: (t-prim {} i64)} -1))",
+            "(app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} i64)} 1)))",
+            "(app {type: (t-prim {} i64)} (var {} neg) (lit {type: (t-prim {} i32)} 1))",
+            "(cast {type: (t-prim {} i32)} (lit {type: (t-prim {} i64)} 1) (t-prim {} i64))",
+            "(cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} i64) trunc)",
+            "(cast {} (var {} runtime) (t-prim {} i64))",
+            "(cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i64))",
         ] {
             let source = format!(
                 "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
@@ -1521,12 +1521,12 @@ mod tests {
     #[test]
     fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
         for (effect, expected) in [
-            ("random", "requires a signed int64 literal seed"),
+            ("random", "requires a signed i64 literal seed"),
             ("resource", "requires a string literal device"),
         ] {
             let source = format!(
                 "(def {{}} value (handle-effect {{effect: {effect}}} \
-                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} int32)}} 1)))"
+                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} i32)}} 1)))"
             );
             let deep = parse_str(&source).expect("Deep handler fixture parses");
             let typed = chelis_types::check_ir_program(&deep)
@@ -1563,7 +1563,7 @@ mod tests {
         let program = surf_checked(
             r#"
 def logged(msg: string) -> string = debug(msg)
-def pure_add(x: int64, y: int64) -> int64 = add(x, y)
+def pure_add(x: i64, y: i64) -> i64 = add(x, y)
 "#,
         );
         let rows = def_effect_rows(&program);
@@ -1600,7 +1600,7 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
             "(def {} x
                (handle-effect {effect: resource}
                  (lit {type: (t-prim {} string)} \"gpu:0\")
-                 (lit {type: (t-prim {} int32)} 1)))",
+                 (lit {type: (t-prim {} i32)} 1)))",
         );
         let errors = validate_build_target(&program, "c").unwrap_err();
         assert!(
@@ -1632,8 +1632,8 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
     fn map_propagates_io_effect_from_callback() {
         let program = surf_checked(
             r#"
-def emit(x: int64) -> int64 = debug(add(x, cast(1, int64)))
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
+def emit(x: i64) -> i64 = debug(add(x, cast(1, i64)))
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
 ys = map(emit, xs)
 "#,
         );
@@ -1651,8 +1651,8 @@ ys = map(emit, xs)
     fn fold_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+total = fold(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1669,8 +1669,8 @@ total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs
     fn scan_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1689,8 +1689,8 @@ totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), x
             r#"
 def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
 xs: List[tensor[f32]] = [
-  trace(pad_sequences_to([[1.0]], cast(1, int64), cast(0.0, f32)), 0, 1),
-  trace(pad_sequences_to([[2.0]], cast(1, int64), cast(0.0, f32)), 0, 1)
+  trace(pad_sequences_to([[1.0]], cast(1, i64), cast(0.0, f32)), 0, 1),
+  trace(pad_sequences_to([[2.0]], cast(1, i64), cast(0.0, f32)), 0, 1)
 ]
 buckets = partition(keep, xs)
 "#,
@@ -1713,8 +1713,8 @@ buckets = partition(keep, xs)
     fn flat_map_propagates_io_effect_from_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1758,7 +1758,7 @@ ys = map(step, xs)
         let program = surf_checked(
             r#"
 mapped = mmap_file("dataset.txt")
-prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
 width = mmap_len(mapped)
 contents = read_file("dataset.txt")
 "#,
@@ -1802,7 +1802,7 @@ contents = read_file("dataset.txt")
         let program = surf_checked(
             r#"
 result = process_run("echo", ["hi"])
-pure_value = add(cast(1, int64), cast(2, int64))
+pure_value = add(cast(1, i64), cast(2, i64))
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());

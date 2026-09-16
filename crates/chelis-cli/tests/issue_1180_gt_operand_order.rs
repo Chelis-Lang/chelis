@@ -132,8 +132,7 @@ fn effectful_comparison_program(operator: &str) -> String {
 
 /// Both operands trap with the same dtype but different trap kinds, so
 /// whichever operand evaluates first is visible in the branded message.
-const BOTH_OPERANDS_TRAP: &str =
-    "verdict = cast_trunc(300.9, int8) > cast_trunc(sqrt(-1.0), int8)\n";
+const BOTH_OPERANDS_TRAP: &str = "verdict = cast_trunc(300.9, i8) > cast_trunc(sqrt(-1.0), i8)\n";
 
 /// Value semantics around the fix: strict order, equal operands, and both
 /// NaN positions. Every root is a bool, so the assertions are exact.
@@ -200,7 +199,7 @@ fn eval_gt_value_semantics_are_unchanged_including_nan() {
 fn eval_gt_surfaces_the_left_operands_trap_first() {
     let stderr = eval_stdout(BOTH_OPERANDS_TRAP).expect_err("both operands trap");
     assert!(
-        stderr.contains("overflow in cast_trunc at int8"),
+        stderr.contains("overflow in cast_trunc at i8"),
         "the authored LEFT operand's overflow trap must surface: {stderr}"
     );
     assert!(
@@ -319,7 +318,7 @@ fn c_lane_gt_surfaces_the_left_operands_trap_first() {
         "both operands trap, so the binary must exit non-zero; stdout: {stdout}"
     );
     assert!(
-        stderr.contains("overflow in cast_trunc at int8"),
+        stderr.contains("overflow in cast_trunc at i8"),
         "the authored LEFT operand's overflow trap must surface: {stderr}"
     );
     assert!(

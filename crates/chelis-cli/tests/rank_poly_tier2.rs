@@ -273,7 +273,7 @@ fn permute_in_rank_poly_body_rejected() {
 #[test]
 fn positional_reduce_on_sole_spread_rejected() {
     let json =
-        check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
+        check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, i32))\n");
     assert_rejected_with(
         &json,
         "positional axes require a concrete-rank operand",
@@ -311,7 +311,7 @@ fn vmap_transform_in_rank_poly_body_rejected() {
 #[test]
 fn grad_transform_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def loss(x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, int32))\n\
+        "def loss(x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, i32))\n\
          def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = grad(loss)(x)\n",
     );
     assert_rank_rejected(&json, "grad transform in ..r body");
@@ -651,7 +651,7 @@ fn rank_poly_composed_identity_builds_and_runs() {
 #[test]
 fn grad_over_rank_poly_callee_builds_runs_and_matches_oracle() {
     let source = "def sq(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, x)\n\
-         def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, int32)))\n\
+         def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, i32)))\n\
          def dloss(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)\n\
          out = dloss(to_tensor([1.0, 2.0, 3.0]))\n";
 

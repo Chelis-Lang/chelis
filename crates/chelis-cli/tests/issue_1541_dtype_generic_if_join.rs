@@ -41,7 +41,7 @@ use common::{build_and_run, gcc_available, parse_tensor_data, write_file};
 /// The reproducer exactly as chelis#1541 reports it: an unbounded binder `p`
 /// in the precision slot, joined through `if`/`then`/`else`.
 const ISSUE_REPRODUCER: &str = "module DtypeGenericJoin
-def go[n, p](x: tensor[n, p], y: tensor[n, p]) -> int32 = {
+def go[n, p](x: tensor[n, p], y: tensor[n, p]) -> i32 = {
   w = if true then x else y
   1i32
 }
@@ -87,9 +87,9 @@ def pick_i[n, p: Int](flag: bool, x: tensor[n, p], y: tensor[n, p]) -> tensor[n,
   w = if flag then x else y
   add(w, w)
 }
-def doubled_then_i32() -> tensor[2, int32] = {
-  a = to_tensor([cast(1, int32), cast(2, int32)])
-  b = to_tensor([cast(10, int32), cast(20, int32)])
+def doubled_then_i32() -> tensor[2, i32] = {
+  a = to_tensor([cast(1, i32), cast(2, i32)])
+  b = to_tensor([cast(10, i32), cast(20, i32)])
   pick_i(true, a, b)
 }
 ";
@@ -99,7 +99,7 @@ def doubled_then_i32() -> tensor[2, int32] = {
 /// already took the predicate's `false` branch that the fix now shares.
 const CONCRETE_JOINS: &str = "module Issue1541Concrete
 export (int_join_result, float_join_result)
-def int_join(x: tensor[2, int32], y: tensor[2, int32]) -> tensor[2, int32] = {
+def int_join(x: tensor[2, i32], y: tensor[2, i32]) -> tensor[2, i32] = {
   w = if true then x else y
   add(w, w)
 }
@@ -107,7 +107,7 @@ def float_join(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = {
   w = if false then x else y
   add(w, w)
 }
-def int_join_result() -> tensor[2, int32] = int_join(to_tensor([cast(1, int32), cast(2, int32)]), to_tensor([cast(3, int32), cast(4, int32)]))
+def int_join_result() -> tensor[2, i32] = int_join(to_tensor([cast(1, i32), cast(2, i32)]), to_tensor([cast(3, i32), cast(4, i32)]))
 def float_join_result() -> tensor[2, f32] = float_join(to_tensor([cast(1.0, f32), cast(2.0, f32)]), to_tensor([cast(3.0, f32), cast(4.0, f32)]))
 ";
 
@@ -274,6 +274,6 @@ fn a_bounded_int_generic_if_join_computes_correctly() {
     assert_eq!(
         got,
         vec![2.0, 4.0],
-        "int32 instantiation took the wrong arm or lost the doubling; stdout:\n{stdout}"
+        "i32 instantiation took the wrong arm or lost the doubling; stdout:\n{stdout}"
     );
 }

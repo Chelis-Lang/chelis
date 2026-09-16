@@ -43,9 +43,9 @@ fn direct_uniform_recursion_is_accepted() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 = depth(Full { value: cast(7, int32) }, 3)
+def concrete() -> i32 = depth(Full { value: cast(7, i32) }, 3)
 ",
     );
     assert!(
@@ -61,9 +61,9 @@ fn direct_polymorphic_recursion_is_rejected_with_the_atom() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def f[a](x: a, n: int32) -> int32 =
+def f[a](x: a, n: i32) -> i32 =
   if n <= 0 then 0 else f(Full { value: x }, n - 1) + 1
-def main() -> int32 = f(1, 3)
+def main() -> i32 = f(1, 3)
 ",
     );
     let poly = polymorphic_recursion_errors(&errors);
@@ -101,11 +101,11 @@ fn mutual_uniform_recursion_is_accepted() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def ping[a](box: Box[a], n: int32) -> int32 =
+def ping[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else pong(box, n - 1) + 1
-def pong[a](box: Box[a], n: int32) -> int32 =
+def pong[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 100 else ping(box, n - 1) + 1
-def concrete() -> int32 = ping(Full { value: cast(1.0, f32) }, 4)
+def concrete() -> i32 = ping(Full { value: cast(1.0, f32) }, 4)
 ";
     let errors = surf_errors(source);
     assert!(
@@ -132,7 +132,7 @@ fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
                 (app {} (var {} left) (var {} x)
                   (lit {type: (t-prim {} bool)} true)))))
          (def {} int_use
-            (app {} (var {} left) (lit {type: (t-prim {} int32)} 1)
+            (app {} (var {} left) (lit {type: (t-prim {} i32)} 1)
               (lit {type: (t-prim {} bool)} false)))
          (def {} bool_use
             (app {} (var {} left) (lit {type: (t-prim {} bool)} true)
@@ -150,15 +150,15 @@ fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
 #[test]
 fn recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers() {
     let broken = "\
-def left(x: int32) -> int32 = right(x)
-def right(x: int32) -> int32 = left(x) + missing(x)
+def left(x: i32) -> i32 = right(x)
+def right(x: i32) -> i32 = left(x) + missing(x)
 ";
     assert!(!surf_errors(broken).is_empty());
     assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
     assert!(!surf_ir_errors(broken).is_empty());
     assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
 
-    let clean = "def clean(x: int32) -> int32 = x";
+    let clean = "def clean(x: i32) -> i32 = x";
     assert!(surf_errors(clean).is_empty());
     assert!(surf_ir_errors(clean).is_empty());
 }
@@ -173,11 +173,11 @@ fn mutual_polymorphic_recursion_growing_across_the_cycle_is_rejected() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def ping[a](x: a, n: int32) -> int32 =
+def ping[a](x: a, n: i32) -> i32 =
   if n <= 0 then 0 else pong(Full { value: x }, n - 1) + 1
-def pong[b](y: b, n: int32) -> int32 =
+def pong[b](y: b, n: i32) -> i32 =
   if n <= 0 then 100 else ping(y, n - 1) + 1
-def main() -> int32 = ping(1, 3)
+def main() -> i32 = ping(1, 3)
 ",
     );
     let poly = polymorphic_recursion_errors(&errors);
@@ -209,11 +209,11 @@ fn polymorphic_recursion_behind_a_let_alias_is_rejected() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def f[a](x: a, n: int32) -> int32 = {
+def f[a](x: a, n: i32) -> i32 = {
   g = f
   if n <= 0 then 0 else g(Full { value: x }, n - 1) + 1
 }
-def main() -> int32 = f(1, 3)
+def main() -> i32 = f(1, 3)
 ",
     );
     let poly = polymorphic_recursion_errors(&errors);
@@ -230,11 +230,11 @@ fn uniform_recursion_behind_a_let_alias_is_accepted() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def f[a](box: Box[a], n: int32) -> int32 = {
+def f[a](box: Box[a], n: i32) -> i32 = {
   g = f
   if n <= 0 then 0 else g(box, n - 1) + 1
 }
-def main() -> int32 = f(Full { value: cast(1, int32) }, 3)
+def main() -> i32 = f(Full { value: cast(1, i32) }, 3)
 ",
     );
     assert_no_polymorphic_recursion_error(&errors);
@@ -251,11 +251,11 @@ fn monomorphic_caller_in_group_names_the_missing_type_parameters() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def mono(n: int32) -> int32 =
+def mono(n: i32) -> i32 =
   if n <= 0 then 0 else gen(Full { value: true }, n)
-def gen[a](box: Box[a], n: int32) -> int32 =
+def gen[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 1 else mono(n - 1)
-def main() -> int32 = mono(3)
+def main() -> i32 = mono(3)
 ",
     );
     let poly = polymorphic_recursion_errors(&errors);
@@ -290,10 +290,10 @@ fn out_of_group_calls_at_fresh_instantiations_are_unrestricted() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 =
-  depth(Full { value: cast(7, int32) }, 2) + depth(Full { value: true }, 3)
+def concrete() -> i32 =
+  depth(Full { value: cast(7, i32) }, 2) + depth(Full { value: true }, 3)
 ",
     );
     assert!(

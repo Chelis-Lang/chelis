@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn mixed_tuple_declaration_keeps_each_canonical_position() {
         let source = "(def {} mixed (tuple {} \
-            (lit {type: (t-prim {} int32)} 1) \
+            (lit {type: (t-prim {} i32)} 1) \
             (lit {type: (t-tensor {} (d-name {} n) (t-prim {} f32))} 2.0)))";
         let expressions =
             chelis_deep::parser::parse_str(source).expect("mixed tuple Deep must parse");

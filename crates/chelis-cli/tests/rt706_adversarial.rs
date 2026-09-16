@@ -41,7 +41,7 @@ fn run(args: &[&str]) -> std::process::Output {
 /// #706 diagnostic pointing at the stray statement (was a silent collapse).
 #[test]
 fn nested_block_bare_statement_rejected() {
-    let src = "def f(x: int32) -> int32 = {\n  y = 1\n  {\n    a(x)\n    b(x)\n  }\n}\n";
+    let src = "def f(x: i32) -> i32 = {\n  y = 1\n  {\n    a(x)\n    b(x)\n  }\n}\n";
     let out = run(&[
         "check",
         write_tempfile("rt706-nested-", src)
@@ -83,8 +83,7 @@ fn with_seed_block_bare_statement_rejected() {
 /// the offset: it lands on the stray statement, not the comment.
 #[test]
 fn comment_between_statements_offset_on_stray_stmt() {
-    let src =
-        "def f(a: int32, b: int32) -> int32 = {\n  g(a)\n  -- explanatory comment\n  h(b)\n}\n";
+    let src = "def f(a: i32, b: i32) -> i32 = {\n  g(a)\n  -- explanatory comment\n  h(b)\n}\n";
     let out = run(&[
         "check",
         write_tempfile("rt706-comment-", src)

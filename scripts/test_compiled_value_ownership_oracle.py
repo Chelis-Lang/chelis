@@ -414,7 +414,7 @@ class ManifestContractTests(unittest.TestCase):
         tensor_source = (
             oracle.REPO_ROOT / fixtures["forward-captured-tensor"].source
         ).read_text()
-        self.assertIn("later: List[int64]", list_source)
+        self.assertIn("later: List[i64]", list_source)
         self.assertIn("later: tensor[2, f32]", tensor_source)
 
     def test_option_scalars_freeze_every_emitted_root(self) -> None:

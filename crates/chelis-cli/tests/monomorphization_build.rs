@@ -189,7 +189,7 @@ fn build_must_reject(src: &str, name: &str, expected_in_stderr: &str) {
 fn build_rejects_polymorphic_matmul_at_int_call_site() {
     let src = r#"sig my_linear[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def my_linear(x, w) = matmul(x, w)
-def use_int(x: &tensor[2, 3, int32], w: &tensor[3, 4, int32]) -> tensor[2, 4, int32] = my_linear(x, w)
+def use_int(x: &tensor[2, 3, i32], w: &tensor[3, 4, i32]) -> tensor[2, 4, i32] = my_linear(x, w)
 "#;
     build_must_reject(src, "poly_int_matmul", "dtype family `Float`");
 }
@@ -198,7 +198,7 @@ def use_int(x: &tensor[2, 3, int32], w: &tensor[3, 4, int32]) -> tensor[2, 4, in
 fn build_rejects_polymorphic_softmax_at_int_call_site() {
     let src = r#"sig wrap[p: Float]: &tensor[n, m, p] -> tensor[n, m, p]
 def wrap(x) = softmax(x, -1)
-def use_int(x: &tensor[3, 4, int32]) -> tensor[3, 4, int32] = wrap(x)
+def use_int(x: &tensor[3, 4, i32]) -> tensor[3, 4, i32] = wrap(x)
 "#;
     build_must_reject(src, "poly_int_softmax", "dtype family `Float`");
 }

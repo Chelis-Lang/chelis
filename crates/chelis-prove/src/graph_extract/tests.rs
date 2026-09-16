@@ -80,7 +80,7 @@ fn result_claim_dependencies_remain_outside_the_scalar_proof_envelope() {
     witness.inputs = vec![0];
     witness.output_type = WireTensorType {
         dims: vec![],
-        precision: "int64".into(),
+        precision: "i64".into(),
     };
     dag.nodes.push(witness.clone());
     witness.id = 2;
@@ -457,7 +457,7 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
                 inputs: vec![0],
                 output_type: WireTensorType {
                     dims: vec![],
-                    precision: "int64".to_string(),
+                    precision: "i64".to_string(),
                 },
             },
         ],

@@ -41,7 +41,7 @@ fn assert_extent_failure(source: String) {
     assert!(
         messages
             .lines()
-            .any(|line| line == "numeric trap: domain in load at int64"),
+            .any(|line| line == "numeric trap: domain in load at i64"),
         "{messages}"
     );
 }
@@ -187,7 +187,7 @@ fn independent_gradient_activations_reject_only_their_own_claims_in_source_order
                 assert!(
                     messages
                         .lines()
-                        .any(|line| line == "numeric trap: domain in load at int64"),
+                        .any(|line| line == "numeric trap: domain in load at i64"),
                     "{messages}"
                 );
             }
@@ -226,7 +226,7 @@ fn independent_gradient_activations_preserve_computed_only_claims() {
                     assert!(
                         messages
                             .lines()
-                            .any(|line| line == "numeric trap: domain in insert at int64"),
+                            .any(|line| line == "numeric trap: domain in insert at i64"),
                         "{messages}"
                     );
                 } else {
@@ -283,7 +283,7 @@ fn aggregate_gradient_preserves_the_named_claim_for_every_leaf_layout() {
             "Params { inner: Inner { w: to_tensor([1.0f32, 2.0f32]) } }",
         ),
         (
-            "type Params =\n | Params { w: tensor[2, f32], count: int32 }\n",
+            "type Params =\n | Params { w: tensor[2, f32], count: i32 }\n",
             "Params",
             "p.w",
             "Params { w: to_tensor([1.0f32, 2.0f32]), count: 4i32 }",
@@ -392,7 +392,7 @@ fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spell
         ))
     };
     let definition = parse(
-        "(fn {} (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}) (y {type: (t-tensor {} (d-var {} m) (t-prim {} f32))})) (app {} (var {} insert) (lit {type: (t-prim {} f32)} 7.0) (lit {type: (t-prim {} int32)} 0) (app {} (var {} shape) (var {} y) (lit {type: (t-prim {} int32)} 0))))",
+        "(fn {} (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}) (y {type: (t-tensor {} (d-var {} m) (t-prim {} f32))})) (app {} (var {} insert) (lit {type: (t-prim {} f32)} 7.0) (lit {type: (t-prim {} i32)} 0) (app {} (var {} shape) (var {} y) (lit {type: (t-prim {} i32)} 0))))",
     );
     let expression = parse("(app {} (var {} f) (var {} left) (var {} right))");
     let context = SubexprLoweringContext::new(
@@ -433,7 +433,7 @@ fn subexpression_context_does_not_replace_an_authored_binder_with_inferred_spell
             assert!(
                 error
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "{error}"
             );
         } else {

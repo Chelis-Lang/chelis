@@ -6,15 +6,18 @@
 
 (def {type: (t-fn {}
                (t-tensor {} (d-lit {} 4) (t-prim {} f32))
-               (t-tensor {} (d-lit {} 4) (t-prim {} f32)))}
+               (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+     }
   noisy
   (fn {type: (t-fn {}
                 (t-tensor {} (d-lit {} 4) (t-prim {} f32))
-                (t-tensor {} (d-lit {} 4) (t-prim {} f32)))}
+                (t-tensor {} (d-lit {} 4) (t-prim {} f32)))
+      }
     (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (handle-effect {effect: random,
-                    type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
-      (lit {type: (t-prim {} int64)} 42)
+                     type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))
+                   }
+      (lit {type: (t-prim {} i64)} 42)
       (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
         (var {} dropout)
         (var {} x)

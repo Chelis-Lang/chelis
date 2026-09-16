@@ -13,7 +13,7 @@
 //! The controls are what make the diagnosis sharp:
 //!   * the forward pass WITHOUT grad is correct in eval (prints 300.0);
 //!   * the same gradient WITHOUT `abs` is correct in both lanes
-//!     ([-100, 200, -300, 400]) - int64 weights, the cast, and the
+//!     ([-100, 200, -300, 400]) - i64 weights, the cast, and the
 //!     mul/sum adjoints are all fine. The trigger is exactly the
 //!     placeholder.
 
@@ -95,7 +95,7 @@ fn c_first_line(program: &str, name: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// The loss is sum(x * w) with w = OP(int64 weights) cast to f32; the
+/// The loss is sum(x * w) with w = OP(i64 weights) cast to f32; the
 /// analytic gradient w.r.t. x is w itself. `print_form` toggles the
 /// eval-shaped `print(...)` binding vs the compiled-shaped bare binding.
 fn grad_program(weight_op: &str, print_form: bool) -> String {
@@ -106,8 +106,8 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
     };
     format!(
         "def g(x: tensor[4, f32]) -> tensor[f32] = {{\n\
-           w = cast({weight_op}(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)])), f32)\n\
+           w = cast({weight_op}(to_tensor([cast(-100, i64), cast(200, i64), \
+         cast(-300, i64), cast(400, i64)])), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }}\n\
          def compute_grad(x: tensor[4, f32]) -> tensor[4, f32] = grad(g, wrt=x)(x)\n\
@@ -142,7 +142,7 @@ fn c_grad_through_int_abs_is_the_true_gradient() {
     );
 }
 
-/// `floor` on an already-integral int64 tensor is the identity, so the true
+/// `floor` on an already-integral i64 tensor is the identity, so the true
 /// gradient is the raw weights.
 #[test]
 fn eval_grad_through_int_floor_is_the_true_gradient() {
@@ -170,12 +170,12 @@ fn eval_grad_through_int_ceil_and_round_is_the_true_gradient() {
 /// has no positive representative and must retain the [04-NUM-9] trap.
 #[test]
 fn eval_int64_abs_min_traps_instead_of_rounding_or_wrapping() {
-    let program = "def int_abs(x: tensor[1, int64]) -> tensor[1, int64] = abs(x)\n\
-                   out = print(int_abs(to_tensor([add(neg(cast(9223372036854775807, int64)), \
-                   cast(-1, int64))])))\n";
-    let err = eval_first_line(program).expect_err("abs(int64::MIN) must trap");
+    let program = "def int_abs(x: tensor[1, i64]) -> tensor[1, i64] = abs(x)\n\
+                   out = print(int_abs(to_tensor([add(neg(cast(9223372036854775807, i64)), \
+                   cast(-1, i64))])))\n";
+    let err = eval_first_line(program).expect_err("abs(i64::MIN) must trap");
     assert!(
-        err.contains("numeric trap: overflow in abs at int64"),
+        err.contains("numeric trap: overflow in abs at i64"),
         "integer abs must preserve the exact overflow trap; got: {err}"
     );
 }
@@ -187,10 +187,10 @@ fn c_tensor_abs_is_exact_at_every_integer_width() {
         return;
     }
     for (prim, magnitude) in [
-        ("int8", 7),
-        ("int16", 300),
-        ("int32", 70000),
-        ("int64", 9007199254740993_i64),
+        ("i8", 7),
+        ("i16", 300),
+        ("i32", 70000),
+        ("i64", 9007199254740993_i64),
     ] {
         let program = format!(
             "def int_abs(x: tensor[2, {prim}]) -> tensor[2, {prim}] = abs(x)\n\
@@ -212,10 +212,10 @@ fn c_tensor_abs_min_traps_at_every_integer_width() {
         return;
     }
     for (prim, minimum) in [
-        ("int8", "-128.0"),
-        ("int16", "-32768.0"),
-        ("int32", "-2147483648.0"),
-        ("int64", "-9.223372036854776e18"),
+        ("i8", "-128.0"),
+        ("i16", "-32768.0"),
+        ("i32", "-2147483648.0"),
+        ("i64", "-9.223372036854776e18"),
     ] {
         let program = format!(
             "def int_abs(x: tensor[1, {prim}]) -> tensor[1, {prim}] = abs(x)\n\
@@ -253,15 +253,15 @@ fn c_tensor_abs_min_traps_at_every_integer_width() {
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
     let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
-                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), \
+                  cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), i64)), \
                   f32)), 0))\n";
     let line = eval_first_line(inline).expect("the host-runtime forward must evaluate");
     // chelis#732 P1 ([05-OBS-4]): the rank-0 result renders bare.
     assert_eq!(line, "300.0", "sum(x * abs(w)) must be 300.0; got: {line}");
 
     let def_rooted = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
-           w = cast(abs(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)])), f32)\n\
+           w = cast(abs(to_tensor([cast(-100, i64), cast(200, i64), \
+         cast(-300, i64), cast(400, i64)])), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
@@ -272,14 +272,14 @@ fn forward_pass_without_grad_is_correct_in_eval() {
     );
 }
 
-/// The same gradient WITHOUT abs is correct in BOTH lanes: int64 weights,
+/// The same gradient WITHOUT abs is correct in BOTH lanes: i64 weights,
 /// the cast, grad itself, and the mul/sum adjoints are all fine. Any fix
 /// for #722/#699 must keep this row green.
 #[test]
 fn grad_without_abs_is_correct_in_both_lanes() {
     let eval_program = "def g(x: tensor[4, f32]) -> tensor[f32] = {\n\
-           w = cast(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)]), f32)\n\
+           w = cast(to_tensor([cast(-100, i64), cast(200, i64), \
+         cast(-300, i64), cast(400, i64)]), f32)\n\
            sum(mul(copy(x), w), 0)\n\
          }\n\
          def compute_grad(x: tensor[4, f32]) -> tensor[4, f32] = grad(g, wrt=x)(x)\n\
@@ -323,9 +323,9 @@ fn grad_without_abs_is_correct_in_both_lanes() {
 #[test]
 fn issue_856_grad_through_fail_guarded_branch_lowers() {
     let program = "def loss(x: tensor[4, f32]) -> f32 = \
-         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         if gt(cast(2, i64), cast(shape(x, cast(0, i32)), i64)) \
          then fail(\"kernel exceeds input length\") \
-         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         else tensor_to_scalar(sum(x, cast(0, i32)))\n\
          out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), \
          cast(3.0, f32), cast(4.0, f32)]))\n";
     let line =
@@ -342,9 +342,9 @@ fn issue_856_grad_through_fail_guarded_branch_lowers() {
 #[test]
 fn issue_856_fail_message_survives_when_the_guard_is_taken() {
     let program = "def loss(x: tensor[1, f32]) -> f32 = \
-         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         if gt(cast(2, i64), cast(shape(x, cast(0, i32)), i64)) \
          then fail(\"kernel exceeds input length\") \
-         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         else tensor_to_scalar(sum(x, cast(0, i32)))\n\
          out = loss(to_tensor([cast(1.0, f32)]))\n";
     let err = eval_first_line(program).expect_err("the taken `fail` branch must abort");
     assert!(

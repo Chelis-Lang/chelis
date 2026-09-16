@@ -2580,7 +2580,7 @@ mod top_level_reference_graph_tests {
             "module IndirectLater\n\n\
              u = ping(1)\n\n\
              v1 = 5\n\n\
-             def ping(n: int32) -> int32 = add(n, v1)\n",
+             def ping(n: i32) -> i32 = add(n, v1)\n",
         );
         let findings = graph
             .acyclic_later_eager_value_dependencies()
@@ -2608,7 +2608,7 @@ mod top_level_reference_graph_tests {
             "module DirectWins\n\n\
              u = add(v1, ping(1))\n\n\
              v1 = 5\n\n\
-             def ping(n: int32) -> int32 = add(n, v1)\n",
+             def ping(n: i32) -> i32 = add(n, v1)\n",
         );
         let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
         let matching = report
@@ -2633,8 +2633,8 @@ mod top_level_reference_graph_tests {
     fn pure_direct_forward_reference_remains_one_diagnostic() {
         let exprs = surf_program(
             "module PureDirect\n\n\
-             root = add(later, (1 : int32))\n\n\
-             later = (5 : int32)\n",
+             root = add(later, (1 : i32))\n\n\
+             later = (5 : i32)\n",
         );
         let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
         let matching = report
@@ -2656,14 +2656,14 @@ mod top_level_reference_graph_tests {
     /// The direct graph edge must not hide the distinct indirect dependency.
     #[test]
     fn prior_context_direct_binding_does_not_hide_current_unit_indirect_dependency() {
-        let library = surf_program("module Prior\n\nlater = (1 : int32)\n");
+        let library = surf_program("module Prior\n\nlater = (1 : i32)\n");
         let context = crate::build_type_env_from_library(&library)
-            .expect("the prior int32 binding builds a reusable context");
+            .expect("the prior i32 binding builds a reusable context");
         let current = surf_program(
             "module Current\n\n\
              root = add(later, read_current(0))\n\n\
-             later = (5 : int32)\n\n\
-             def read_current(n: int32) -> int32 = add(n, later)\n",
+             later = (5 : i32)\n\n\
+             def read_current(n: i32) -> i32 = add(n, later)\n",
         );
         let report = crate::check_ir_with_context(&context, &current)
             .expect_err("the indirect dependency on current-unit later must reject");
@@ -2689,8 +2689,8 @@ mod top_level_reference_graph_tests {
             "module UnrelatedDirect\n\n\
              unrelated = later\n\n\
              root = read_current(0)\n\n\
-             later = (5 : int32)\n\n\
-             def read_current(n: int32) -> int32 = add(n, later)\n",
+             later = (5 : i32)\n\n\
+             def read_current(n: i32) -> i32 = add(n, later)\n",
         );
         let report = crate::check_ir_program(&exprs)
             .expect_err("both roots' distinct initialization errors must reject");
@@ -2726,10 +2726,10 @@ mod top_level_reference_graph_tests {
         let exprs = surf_program(
             "module SeparateCycle\n\n\
              root = add(read_later(0), enter_cycle())\n\n\
-             later = (5 : int32)\n\n\
+             later = (5 : i32)\n\n\
              cycle_value = enter_cycle()\n\n\
-             def read_later(n: int32) -> int32 = add(n, later)\n\n\
-             def enter_cycle() -> int32 = cycle_value\n",
+             def read_later(n: i32) -> i32 = add(n, later)\n\n\
+             def enter_cycle() -> i32 = cycle_value\n",
         );
         let report = crate::check_ir_program(&exprs)
             .expect_err("both the eager cycle and indirect later dependency must reject");
@@ -2760,8 +2760,8 @@ mod top_level_reference_graph_tests {
     #[test]
     fn backward_and_independent_values_stay_out_of_the_later_set() {
         for source in [
-            "module Backward\n\nv1 = 5\n\nu = ping(1)\n\ndef ping(n: int32) -> int32 = add(n, v1)\n",
-            "module Independent\n\nu = ping(1)\n\nv1 = 5\n\ndef ping(n: int32) -> int32 = n\n",
+            "module Backward\n\nv1 = 5\n\nu = ping(1)\n\ndef ping(n: i32) -> i32 = add(n, v1)\n",
+            "module Independent\n\nu = ping(1)\n\nv1 = 5\n\ndef ping(n: i32) -> i32 = n\n",
         ] {
             let graph = graph(source);
             assert!(
@@ -2780,8 +2780,8 @@ mod top_level_reference_graph_tests {
     fn eager_lambda_cycle_is_one_component() {
         let graph = graph(
             "module LambdaCycle\n\n\
-             carried = map(fn (x: int32) -> f(x), [1, 2])\n\n\
-             def f(n: int32) -> int32 = add(n, carried)\n",
+             carried = map(fn (x: i32) -> f(x), [1, 2])\n\n\
+             def f(n: i32) -> i32 = add(n, carried)\n",
         );
         let carried = graph.vertex_by_name["carried"];
         let f = graph.vertex_by_name["f"];
@@ -2814,7 +2814,7 @@ mod top_level_reference_graph_tests {
         let source = "module IndirectLaterDiagnostic\n\n\
                       u = ping(1)\n\n\
                       v1 = 5\n\n\
-                      def ping(n: int32) -> int32 = add(n, v1)\n";
+                      def ping(n: i32) -> i32 = add(n, v1)\n";
         let exprs = surf_program(source);
         let report = crate::check_ir_program(&exprs).expect_err("[04-INF-8] must reject");
         let matching = report
@@ -2837,8 +2837,8 @@ mod top_level_reference_graph_tests {
         let exprs = surf_program(
             "module CancelLaterDependency\n\n\
              root = read_current(0)\n\n\
-             later = (5 : int32)\n\n\
-             def read_current(n: int32) -> int32 = add(n, later)\n",
+             later = (5 : i32)\n\n\
+             def read_current(n: i32) -> i32 = add(n, later)\n",
         );
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
@@ -2862,8 +2862,8 @@ mod top_level_reference_graph_tests {
             "module CancelAfterError\n\n\
              broken = missing\n\n\
              root = read_current(0)\n\n\
-             later = (5 : int32)\n\n\
-             def read_current(n: int32) -> int32 = add(n, later)\n",
+             later = (5 : i32)\n\n\
+             def read_current(n: i32) -> i32 = add(n, later)\n",
         );
         let token = CancelToken::new();
         let _cancel_guard = crate::cancel::install_cancel_token(token.clone());

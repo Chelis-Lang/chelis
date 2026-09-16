@@ -173,7 +173,7 @@ mod rejected_signature_resolution_tests {
     #[test]
     fn ordinary_resolution_never_returns_partial_structure_as_success() {
         let (result, errors) = resolve(
-            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} int32) (t-prim {} f8e5m2))",
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
             |resolver, ty| resolver.resolve(ty),
         );
         assert!(result.is_err());
@@ -185,7 +185,7 @@ mod rejected_signature_resolution_tests {
     #[test]
     fn only_a_rejected_outcome_carries_partial_signature_structure() {
         let (result, errors) = resolve(
-            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} int32) (t-prim {} f8e5m2))",
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
             |resolver, ty| resolver.resolve_signature(ty),
         );
         let rejected = result.expect_err("an invalid signature cannot resolve");
@@ -202,7 +202,7 @@ mod rejected_signature_resolution_tests {
     #[test]
     fn valid_structure_resolves_without_an_error_witness() {
         let (result, errors) = resolve(
-            "(t-fn {} (t-prim {} int32) (t-prim {} bool))",
+            "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
             |resolver, ty| resolver.resolve_signature(ty),
         );
         assert_eq!(
@@ -403,10 +403,10 @@ mod unresolved_operand_reconcile_tests {
     #[test]
     fn replay_preserves_the_consumers_dtype_family_contract() {
         let (produced, _, errors) = run(ReconcileMutationCase::FamilyDisagrees);
-        assert_eq!(produced, "tensor[3, int32]");
+        assert_eq!(produced, "tensor[3, i32]");
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(matches!(errors[0].kind, CheckErrorKind::PrecisionMismatch));
-        assert!(errors[0].message.contains("Float") && errors[0].message.contains("int32"));
+        assert!(errors[0].message.contains("Float") && errors[0].message.contains("i32"));
         let (produced, bound, errors) = run(ReconcileMutationCase::FamilyAgrees);
         assert_eq!(produced, "tensor[3, f32]");
         assert!(bound);

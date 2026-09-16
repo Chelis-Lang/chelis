@@ -498,7 +498,7 @@ fn type_ingress_accepts_the_complete_authored_type_grammar() {
         "(t-tensor {} (d-name {} *) (t-prim {} f32))",
         "(t-tensor {} (d-name {} batch) (d-var {} width) (d-lit {} 3) (d-rank {} tail) (t-var {} t0))",
         "(t-adt {} List (t-var {} t0))",
-        "(t-adt {} Map (t-prim {} string) (t-tuple {} (t-prim {} int64) (t-unit {})))",
+        "(t-adt {} Map (t-prim {} string) (t-tuple {} (t-prim {} i64) (t-unit {})))",
         "(t-tuple {} (t-prim {} bool) (t-ref {} (t-adt {} List (t-var {} t0))))",
         "(t-fn {eff: (effects {} random (resource {} \"gpu:0\"))} (t-ref {} (t-tensor {} (d-rank {} r0) (t-var {} t0))) (t-tuple {} (t-var {} t0) (t-unit {})))",
     ];

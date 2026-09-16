@@ -134,16 +134,16 @@ fn finite_difference(forward_body: &str, base: &[f64]) -> Vec<f64> {
 }
 
 // Linear loss: sum(reshape(x, [shape(x,0), 1i64])) = sum(x). grad == 1 everywhere.
-const LINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
-  r = reshape(&x, [k, cast(1, int64)])\n\
-  sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+const LINEAR_BODY: &str = "  k = cast(shape(x, cast(0, i32)), i64)\n\
+  r = reshape(&x, [k, cast(1, i64)])\n\
+  sum(sum(r, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar";
 
 // Nonlinear loss: sum(square(reshape(x, [shape(x,0), 1i64]))) = sum(x^2).
 // grad == 2 x.
-const NONLINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
-  r = reshape(&x, [k, cast(1, int64)])\n\
+const NONLINEAR_BODY: &str = "  k = cast(shape(x, cast(0, i32)), i64)\n\
+  r = reshape(&x, [k, cast(1, i64)])\n\
   sq = mul(r, r)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar";
 
 /// FD oracle: the runtime-`shape()`-derived reshape target grad must match the
 /// central-difference gradient of the same forward loss. Pre-fix this ICE'd in
@@ -262,10 +262,10 @@ fn issue_513_reshape_shape_derived_grad_c_backend_agrees() {
     let source = "module Repro.ReshapeBuild\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
-  k = cast(shape(x, cast(0, int32)), int64)\n\
-  r = reshape(&x, [k, cast(1, int64)])\n\
+  k = cast(shape(x, cast(0, i32)), i64)\n\
+  r = reshape(&x, [k, cast(1, i64)])\n\
   sq = mul(r, r)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)\n";
     let (_dir, build_dir) = build_c(source, "reshape513");

@@ -116,8 +116,8 @@ const LINEAR_GRAD: &str = "module Repro.Sym551Linear\n\
 def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  c = concat([a, b], cast(1, int32))\n\
-  sum(sum(c, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  c = concat([a, b], cast(1, i32))\n\
+  sum(sum(c, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(loss)\n";
 
@@ -165,9 +165,9 @@ const NONLINEAR_GRAD: &str = "module Repro.Sym551Nonlinear\n\
 def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
   a = sub(add(&x, &x), &x)\n\
   b = add(&x, &x)\n\
-  c = concat([a, b], cast(1, int32))\n\
+  c = concat([a, b], cast(1, i32))\n\
   sq = mul(c, c)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(loss)\n";
 
@@ -246,8 +246,8 @@ const HOST_LANE_CONCAT_REDUCE: &str = "module Repro.Sym551HostLane\n\
 def f(x: tensor[batch, 2, f32]) -> tensor[four, f32] = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  c = concat([a, b], cast(1, int32))\n\
-  sum(c, cast(0, int32))\n\
+  c = concat([a, b], cast(1, i32))\n\
+  sum(c, cast(0, i32))\n\
 }\n\
 out = f\n";
 
@@ -304,8 +304,8 @@ const RT2_REDUCE_LEADING_CONCAT: &str = "module Repro.RT2Reduce\n\
 def loss(x: tensor[2, batch, f32]) -> tensor[batch, f32] = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  c = concat([a, b], cast(0, int32))\n\
-  sum(c, cast(0, int32))\n\
+  c = concat([a, b], cast(0, i32))\n\
+  sum(c, cast(0, i32))\n\
 }\n\
 out = loss\n";
 
@@ -354,7 +354,7 @@ const BARE_LEADING_CONCAT: &str = "module Repro.BareLeading\n\
 def f(x: tensor[2, batch, f32]) -> tensor[four, batch, f32] = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  concat([a, b], cast(0, int32))\n\
+  concat([a, b], cast(0, i32))\n\
 }\n\
 out = f\n";
 
@@ -405,8 +405,8 @@ const CONCRETE_LEADING_CONCAT: &str = "module Repro.ConcreteLeading\n\
 def f(x: tensor[2, 3, f32]) -> tensor[3, f32] = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  c = concat([a, b], cast(0, int32))\n\
-  sum(c, cast(0, int32))\n\
+  c = concat([a, b], cast(0, i32))\n\
+  sum(c, cast(0, i32))\n\
 }\n\
 out = f\n";
 

@@ -35,38 +35,35 @@
             (var {span: "surf:177..178"} h))))))
   (defsig {}
     first_or
-    (t-fn {}
-      (t-adt {} List (t-prim {} int32))
-      (t-prim {} int32)
-      (t-prim {} int32)))
+    (t-fn {} (t-adt {} List (t-prim {} i32)) (t-prim {} i32) (t-prim {} i32)))
   (def {type: (t-fn {}
-                 (t-adt {} List (t-prim {} int32))
-                 (t-prim {} int32)
-                 (t-prim {} int32))
+                 (t-adt {} List (t-prim {} i32))
+                 (t-prim {} i32)
+                 (t-prim {} i32))
        }
     first_or
     (fn {type: (t-fn {}
-                  (t-adt {} List (t-prim {} int32))
-                  (t-prim {} int32)
-                  (t-prim {} int32))
+                  (t-adt {} List (t-prim {} i32))
+                  (t-prim {} i32)
+                  (t-prim {} i32))
         }
       (params {}
-        (xs {type: (t-adt {} List (t-prim {} int32))})
-        (fallback {type: (t-prim {} int32)}))
-      (match {span: "surf:240..306", type: (t-prim {} int32)}
-        (var {span: "surf:246..248"} xs)
+        (xs {type: (t-adt {} List (t-prim {} i32))})
+        (fallback {type: (t-prim {} i32)}))
+      (match {span: "surf:234..300", type: (t-prim {} i32)}
+        (var {span: "surf:240..242"} xs)
         (arm {}
           (pat-ctor {}
             Cons
-            (pat-var {type: (t-prim {} int32)} head)
-            (pat-var {type: (t-adt {} List (t-prim {} int32))} tail))
+            (pat-var {type: (t-prim {} i32)} head)
+            (pat-var {type: (t-adt {} List (t-prim {} i32))} tail))
           ()
-          (var {span: "surf:280..284"} head))
-        (arm {} (pat-ctor {} Nil) () (var {span: "surf:296..304"} fallback))))))
+          (var {span: "surf:274..278"} head))
+        (arm {} (pat-ctor {} Nil) () (var {span: "surf:290..298"} fallback))))))
 
 == type env ==
 area : (t-fn {} (t-adt {} Shape) (t-prim {} f32))
-first_or : (t-fn {} (t-adt {} List (t-prim {} int32)) (t-prim {} int32) (t-prim {} int32))
+first_or : (t-fn {} (t-adt {} List (t-prim {} i32)) (t-prim {} i32) (t-prim {} i32))
 
 == signature inference ==
 binding = area

@@ -198,7 +198,11 @@ inherit source-location or input-reference semantics through an outer tag.
 ### 3.2 Exact Numeric Value Codec
 
 The scalar wire carrier is exactly one of these shapes, with `dtype` drawn
-from the closed primitive vocabulary of spec/04 §1.1:
+from the closed interchange vocabulary below. Chelis source and canonical
+Deep use the language spelling `i8`/`i16`/`i32`/`i64`, while this existing
+versioned codec retains the interchange spelling
+`int8`/`int16`/`int32`/`int64`. Encoders and decoders must perform that explicit
+mapping; neither vocabulary is accepted as an alias at the other's ingress.
 
 | dtype family | scalar object | storage object |
 |---|---|---|

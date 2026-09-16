@@ -36,7 +36,7 @@ fn eval_renders_rank_zero_tensors_bare() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "scalar_to_tensor(cast(3, int64))"])
+        .args(["eval", "scalar_to_tensor(cast(3, i64))"])
         .assert()
         .success()
         .stdout(predicate::str::contains("3"))
@@ -47,7 +47,7 @@ fn eval_renders_rank_zero_tensors_bare() {
 fn check_rejects_negative_shape_axis_when_rank_is_known() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("negative_shape_axis.ch");
-    write_file(&path, "bad = shape(scalar_to_tensor(cast(3, int64)), -1)\n");
+    write_file(&path, "bad = shape(scalar_to_tensor(cast(3, i64)), -1)\n");
 
     let json = run_json_check(&path);
     assert!(

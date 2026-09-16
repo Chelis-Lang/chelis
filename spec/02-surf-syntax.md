@@ -18,6 +18,10 @@ call argument list, and trailing separators in delimited forms.
 output; `chelis fmt --check` enforces that output form in a repository. The
 versioned `chelis migrate surf --from 0.18` path remains for genuinely legacy,
 semantically incompatible, or otherwise non-normal syntax.
+That migration rewrites the retired integer type spellings `int8`, `int16`,
+`int32`, and `int64` to `i8`, `i16`, `i32`, and `i64` only in type positions
+and cast targets. Normal parsing does not accept the retired spellings as
+primitive types.
 
 With `--inplace`, migration is a batch transaction over ordinary source files.
 Before replacing any input, the command MUST preflight every path and reject a
@@ -213,7 +217,7 @@ consumer that imports two modules exporting the same type name can annotate
 against one:
 
 ```
-def relay(m: Demo.Dropout.Mode) -> int64 = Demo.Dropout.use(m)
+def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
 ```
 
 This is the disambiguation escape hatch when two imported modules export the
@@ -337,7 +341,7 @@ quantifier needed). A spread name may not repeat within one tensor shape (a
 (`sum(x, seq)`). Multiple named axes use the variadic form
 (`sum(x, head, seq)` or `count(mask, head, seq)`). Value reductions
 lower to the canonical single-axis composition in spec/04 §4.5.3; `count`
-lowers once with its complete named-axis vector because its result is `int64`,
+lowers once with its complete named-axis vector because its result is `i64`,
 not `bool`. The reduced axis must be a **named** anchor present
 exactly once in the operand — a fully-literal or differently-named operand is
 rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
@@ -408,6 +412,9 @@ Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
 `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
 or def quantifier scope (e.g., in a let-typed binding), no
 quantifier exists, so the existing rule applies.
+The retired v0.18 integer spellings `int8`, `int16`, `int32`, and `int64`
+never become implicit or explicit type variables. They are rejected with the
+versioned-migration diagnostic even though they are not future primitive names.
 
 Quantifiers in a sig are **implicit**: any lowercase identifier that
 appears in the sig's type expression and is not a primitive name is
@@ -482,14 +489,14 @@ Examples:
 sig poly_id: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
-def use_int32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
+def use_int32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
 ```
 
 The sig has implicit quantifiers `d` (a `DimVar`) and `p` (a precision
 `TypeVar`). Each call site instantiates `p` with a fresh precision
 variable that unifies with the call's actual precision; calling
 `poly_id` with mismatched precisions across a single call (e.g.,
-input `tensor[3, int32]` declared output `tensor[3, f32]`) is a type
+input `tensor[3, i32]` declared output `tensor[3, f32]`) is a type
 error.
 
 Def-level explicit quantifier:
@@ -511,7 +518,7 @@ A binder in a `[..]` clause may declare a **dtype-family bound**,
 written after the binder name:
 
 ```text
-sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) = ...
 
 def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
@@ -639,7 +646,7 @@ brace-delimited block body.
 The handler argument rules are:
 
 - `with seed(...)` requires an explicit signed integer literal seed carrying the `i64`
-  suffix (`with seed(42i64) { ... }` or `with seed(-1i64) { ... }`); the seed is semantically int64 and an
+  suffix (`with seed(42i64) { ... }` or `with seed(-1i64) { ... }`); the seed is semantically i64 and an
   unsuffixed literal is a type error naming the suffix (§P10a)
 - `with device(...)` requires an explicit string literal device name
 - only `seed` and `device` are valid handler names
@@ -760,7 +767,7 @@ b = pair.1
 **⟹**
 ```
 (a, b)   ⟹  (tuple {} a' b')
-pair.0   ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))
+pair.0   ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} i32)} 0))
 ()       ⟹  (lit {type: (t-unit {})} ())
 ```
 
@@ -780,9 +787,9 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `grad(f, wrt=(w, b))` | `(grad {wrt: ...} f' (tuple {} idx₁ idx₂))` | Multi-parameter `wrt` preserves the written order |
 | `jit(f)` | `(jit {} f')` | |
 | `vmap(f, axis=n)` | `(vmap {} f' n')` | Named nonzero axis |
-| `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} int32)} 0))` | |
+| `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} i32)} 0))` | |
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
-| `cast_trunc(e, int32)` | `(cast {} e' (t-prim {} int32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
+| `cast_trunc(e, i32)` | `(cast {} e' (t-prim {} i32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
@@ -808,7 +815,7 @@ The second argument to `cast` is a precision type literal (`f32`, `bf16`, etc.) 
 
 ### P10: Numeric Literals
 
-Default float precision: **f32**. Default integer type: **int32**.
+Default float precision: **f32**. Default integer type: **i32**.
 
 Canonical Surf output uses the exact spelling emitted by the literal printer.
 Integers are decimal with no separators or redundant leading zeroes. Floats
@@ -835,10 +842,10 @@ meaning, or a token whose decoded value is non-finite.
 Surf has no infinity or NaN literal.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
-at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
+at type `i32`; an unsuffixed float literal binds at type `f32`. The lexer
 parses unsuffixed literals at i64/f64 precision so that out-of-range literals
 can be diagnosed before defaulting; the desugarer/type-checker then narrows
-the value to `int32` (for integer tokens) or `f32` (for float tokens) before
+the value to `i32` (for integer tokens) or `f32` (for float tokens) before
 Deep is materialized. The narrowing is the **user-facing contract** and is
 non-overridable except by:
 
@@ -848,7 +855,7 @@ non-overridable except by:
 3. an explicit `cast(literal, p)` around the literal expression
 
 There is no implicit precision promotion. A bare `42` in any unannotated
-position binds at `int32`, not `int64`. A bare `1.0` binds at `f32`, not
+position binds at `i32`, not `i64`. A bare `1.0` binds at `f32`, not
 `f64`. See `spec/04-type-system.md` §5.3 for the type-system statement of
 this rule.
 
@@ -856,7 +863,7 @@ this rule.
 not as a signed literal token. A negative argument is written `f(-42)`.
 Literal patterns are the exception because patterns contain no unary
 expression node: `-42`, `-1.5`, and `-0.0` decode directly to a negative
-`pat-lit`, including the full `int64` minimum.
+`pat-lit`, including the full `i64` minimum.
 
 ### P10a: Literal Suffixes
 
@@ -870,10 +877,10 @@ narrowing. The closed suffix set is:
 | `f64` | `f64` | `1.0f64` | Float-typed |
 | `bf16` | `bf16` | `1.0bf16` | Float-typed |
 | `f16` | `f16` | `1.0f16` | Float-typed |
-| `i8` | `int8` | `42i8` | Integer-typed |
-| `i16` | `int16` | `42i16` | Integer-typed |
-| `i32` | `int32` | `42i32` | Integer-typed |
-| `i64` | `int64` | `42i64` | Integer-typed |
+| `i8` | `i8` | `42i8` | Integer-typed |
+| `i16` | `i16` | `42i16` | Integer-typed |
+| `i32` | `i32` | `42i32` | Integer-typed |
+| `i64` | `i64` | `42i64` | Integer-typed |
 
 Default-type suffixes are semantic commitments, not syntax-safe aliases. In
 particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
@@ -936,14 +943,13 @@ Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
 value and has no precision slot, so Surf literal patterns are unsuffixed and a
 suffixed literal pattern is rejected.
 
-The four short integer names `i8`, `i16`, `i32` and `i64` are also accepted in
-a TYPE position, where they name the same primitives as `int8`, `int16`,
-`int32` and `int64`. They are input spellings only: the canonical formatter
-rewrites each to its long name, canonical Deep carries the long name, and a
-Deep `(t-prim {} i64)` written by hand is not a primitive. This is the P10-P12
-pattern, a wider accepted input set than the canonical output set, and it is
-what keeps a short name from being read as an implicitly quantified type
-variable under `spec/04-type-system.md` §5.8.1.
+The four integer names `i8`, `i16`, `i32`, and `i64` are the only integer
+primitive spellings in type positions and canonical output. Canonical Deep
+uses the same names. The v0.18 spellings `int8`, `int16`, `int32`, and `int64`
+are migration input only: `chelis migrate surf --from 0.18` rewrites them
+without making them valid at normal compiler ingress. Neither the canonical
+names nor the retired names may be read as implicitly quantified type
+variables under `spec/04-type-system.md` §5.8.1.
 
 ### P10b: Contextual Tensor-Literal Inference
 
@@ -973,9 +979,9 @@ while a fractional value traps `domain`. See `spec/04-type-system.md` §5.2
 and [04-NUM-14] for the full statement.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
-§P10 literal defaults: integer literals to `int32`, float literals to `f32`.
+§P10 literal defaults: integer literals to `i32`, float literals to `f32`.
 A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
-`tensor[3, int32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
+`tensor[3, i32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
 
 **Mixed suffixes inside a contextual literal.** A suffixed entry inside a
 contextual tensor literal is well-formed only if its suffix matches the
@@ -1277,7 +1283,7 @@ TypeArg       <- TypeExpr / IntLit
 TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
-               / 'int8' / 'int16' / 'int32' / 'int64'
+               / 'i8' / 'i16' / 'i32' / 'i64'
                / 'bool' / 'string'
                # The reserved names of spec/04-type-system.md §1.1.1 are
                # rejected at check time:
@@ -1554,7 +1560,7 @@ type Weights = tensor[h, h, f32]
 ```
 -- Variables, literals
 x                                 ⟹  (var {} x)
-42                                ⟹  (lit {type: (t-prim {} int32)} 42)
+42                                ⟹  (lit {type: (t-prim {} i32)} 42)
 3.14                              ⟹  (lit {type: (t-prim {} f32)} 3.14)
 true                              ⟹  (lit {type: (t-prim {} bool)} true)
 "hello"                           ⟹  (lit {type: (t-prim {} string)} "hello")
@@ -1607,7 +1613,7 @@ match e with {                    ⟹  (match {} e'
 -- Tuples
 (a, b, c)                         ⟹  (tuple {} a' b' c')
 (a,)                              ⟹  (tuple {} a')
-pair.0                            ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))
+pair.0                            ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} i32)} 0))
 
 -- Records
 Foo { x: e1, y: e2 }             ⟹  (record {} Foo (kv {} x e1') (kv {} y e2'))
@@ -1619,7 +1625,7 @@ e.field                           ⟹  (access {} e' field)
 grad(f)                           ⟹  (grad {} f')
 jit(f)                            ⟹  (jit {} f')
 vmap(f, axis=n)                   ⟹  (vmap {} f' n')
-vmap(f)                           ⟹  (vmap {} f' (lit {type: (t-prim {} int32)} 0))
+vmap(f)                           ⟹  (vmap {} f' (lit {type: (t-prim {} i32)} 0))
 cast(e, bf16)                     ⟹  (cast {} e' (t-prim {} bf16))
 realize(e)                        ⟹  (realize {} e')
 copy(e)                           ⟹  (copy {} e')

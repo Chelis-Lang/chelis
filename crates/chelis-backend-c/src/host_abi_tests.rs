@@ -20,11 +20,11 @@ fn abi_conversion_accepts_only_resolved_logical_types() {
 #[test]
 fn supported_concrete_types_map_to_exact_c_host_abis() {
     let i8_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int8))
-        .expect("int8 has an exact C-host representation");
+        .expect("i8 has an exact C-host representation");
     assert_eq!(i8_abi.c_type_name(), Some("int8_t"));
 
     let i16_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int16))
-        .expect("int16 has an exact C-host representation");
+        .expect("i16 has an exact C-host representation");
     assert_eq!(i16_abi.c_type_name(), Some("int16_t"));
 
     let f32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::F32))
@@ -38,7 +38,7 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
     }
 
     let i32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int32))
-        .expect("int32 has a C-host representation");
+        .expect("i32 has a C-host representation");
     assert_eq!(i32_abi.c_type_name(), Some("int32_t"));
 
     let tensor_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Tensor(TensorType {
@@ -481,7 +481,7 @@ fn user_call_pre_actions_require_one_structural_direct_call_authority() {
 #[test]
 fn selected_if_edges_emit_one_path_local_release_each() {
     let verified = verified_host_from_source(
-        "def choose(flag: bool) -> int64 = {\n\
+        "def choose(flag: bool) -> i64 = {\n\
            dead = \"owned\"\n\
            if flag then 1i64 else string_len(dead)\n\
          }\n\
@@ -534,7 +534,7 @@ fn manifest_root_clone_terminal_and_consume_emit_in_verified_order_once() {
 fn loop_source_release_is_emitted_after_the_loop_not_on_each_back_edge() {
     let verified = verified_host_from_source(
         "xs = [1i64, 2i64]\n\
-         ys = map(fn (v: int64) -> v, xs)\n",
+         ys = map(fn (v: i64) -> v, xs)\n",
     );
     let emitted = crate::codegen_host_program(&verified, "loop_exit_release")
         .unwrap()

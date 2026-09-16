@@ -105,7 +105,7 @@ fn valid_primitives_self_and_forward_nominals_are_accepted() {
         "(deftype {} Scalars ()
            (variant {} Scalars
              (field {} a (t-prim {} f32))
-             (field {} b (t-prim {} int64))
+             (field {} b (t-prim {} i64))
              (field {} c (t-prim {} bool))))
          (deftype {} Node ()
            (variant {} Node (field {} next (t-adt {} Node))))

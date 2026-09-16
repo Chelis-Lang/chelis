@@ -757,7 +757,7 @@ mod tests {
         let mut hidden = fixture_shell();
         hidden.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
             operand: "(t-var {} t0)".into(),
-            result: "(t-prim {} int64)".into(),
+            result: "(t-prim {} i64)".into(),
         }];
         assert!(
             validate_shell(&hidden)
@@ -769,7 +769,7 @@ mod tests {
         let mut malformed = fixture_shell();
         malformed.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
             operand: "List[t0]".into(),
-            result: "(t-prim {} int64)".into(),
+            result: "(t-prim {} i64)".into(),
         }];
         assert!(
             validate_shell(&malformed)
@@ -791,12 +791,12 @@ mod tests {
             let mut hidden_shape = fixture_shell();
             let symbol = &mut hidden_shape.modules[0].exports[0];
             symbol.type_repr = Some(
-                "(t-fn {} (t-tensor {} (d-var {} d0) (d-rank {} r0) (t-prim {} f32)) (t-prim {} int64))"
+                "(t-fn {} (t-tensor {} (d-var {} d0) (d-rank {} r0) (t-prim {} f32)) (t-prim {} i64))"
                     .into(),
             );
             symbol.collection_obligations = vec![CollectionObligation::Len {
                 operand: operand.into(),
-                result: "(t-prim {} int64)".into(),
+                result: "(t-prim {} i64)".into(),
             }];
             let error = validate_shell(&hidden_shape).unwrap_err();
             assert!(

@@ -19,7 +19,7 @@ fn signed_int64_host_boundaries_compile_without_literal_overflow() {
         (i64::MAX, "INT64_MAX", "0.0f,-2.0f,0.0f,0.0f"),
     ] {
         let source = format!(
-            "def boundary() -> int64 = {seed}i64\n\
+            "def boundary() -> i64 = {seed}i64\n\
              def sample(x: tensor[4,f32]) -> tensor[4,f32] = with seed({seed}i64) {{ dropout(x,0.5f32) }}"
         );
         let generated = ownership_support::emit(&source, "signed-host-boundary");
@@ -170,8 +170,8 @@ fn concrete_wrappers_do_not_admit_runtime_controls_or_gpu_dropout() {
         ),
         (
             CompileTarget::C,
-            "def keep(x: tensor[4,f32], seed: int64) -> tensor[4,f32] = with seed(seed) { dropout(x, 0.5f32) }\n\
-             def run(x: tensor[4,f32], seed: int64) -> tensor[4,f32] = keep(x, seed)",
+            "def keep(x: tensor[4,f32], seed: i64) -> tensor[4,f32] = with seed(seed) { dropout(x, 0.5f32) }\n\
+             def run(x: tensor[4,f32], seed: i64) -> tensor[4,f32] = keep(x, seed)",
         ),
         (
             CompileTarget::Hip,
@@ -192,7 +192,7 @@ fn concrete_wrappers_do_not_admit_runtime_controls_or_gpu_dropout() {
             message.contains("dropout")
                 || message.contains("Dropout")
                 || message.contains("fixed-control")
-                || message.contains("requires a signed int64 literal seed"),
+                || message.contains("requires a signed i64 literal seed"),
             "{message}"
         );
     }

@@ -89,7 +89,7 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
         }
         error => FormatError::Lex(error),
     })?;
-    let decls =
+    let mut decls =
         parser::parse_legacy_v018_source_tokens(source, &tokens).map_err(|error| match &error {
             ParseError::Expected { found, offset, .. }
                 if matches!(found.as_str(), "Do" | "Quote" | "Unquote" | "Splice") =>
@@ -101,10 +101,188 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
             }
             _ => FormatError::Parse(error),
         })?;
+    migrate_v018_integer_names(&mut decls);
     if let Some(offset) = first_ambiguous_comment_offset(&decls, &comments) {
         return Err(FormatError::AmbiguousComment { offset });
     }
     Ok(format_decls_with_comments(&decls, &comments))
+}
+
+fn migrate_v018_integer_names(decls: &mut [Decl]) {
+    for decl in decls {
+        match decl {
+            Decl::Module { decls, .. } => migrate_v018_integer_names(decls),
+            Decl::Sig { ty, .. } | Decl::TypeAlias { ty, .. } => migrate_type(ty),
+            Decl::TypeDef {
+                variants,
+                invariant,
+                ..
+            } => {
+                for variant in variants {
+                    match &mut variant.fields {
+                        VariantFields::Positional(fields) => {
+                            fields.iter_mut().for_each(migrate_type);
+                        }
+                        VariantFields::Record(fields) => {
+                            fields.iter_mut().for_each(|(_, ty)| migrate_type(ty));
+                        }
+                    }
+                }
+                if let Some(invariant) = invariant {
+                    migrate_expr(&mut invariant.body);
+                }
+            }
+            Decl::FunDef {
+                params,
+                ret_ty,
+                body,
+                ..
+            } => {
+                params.iter_mut().for_each(migrate_param);
+                if let Some(ty) = ret_ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(body);
+            }
+            Decl::Property {
+                params,
+                preconditions,
+                body,
+                options,
+                ..
+            } => {
+                params.iter_mut().for_each(migrate_param);
+                preconditions.iter_mut().for_each(migrate_expr);
+                migrate_expr(body);
+                for option in options {
+                    match option {
+                        PropertyOption::Tolerance(expr, _)
+                        | PropertyOption::Seed(expr, _)
+                        | PropertyOption::Samples(expr, _) => migrate_expr(expr),
+                        PropertyOption::Contract(..) => {}
+                    }
+                }
+            }
+            Decl::LetDef { ty, value, .. } => {
+                if let Some(ty) = ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(value);
+            }
+            Decl::MacroDef { body, .. } => migrate_expr(body),
+            Decl::Import { .. } | Decl::Dim { .. } | Decl::Export { .. } => {}
+        }
+    }
+}
+
+fn migrate_param(param: &mut Param) {
+    if let Some(ty) = &mut param.ty {
+        migrate_type(ty);
+    }
+}
+
+fn migrate_type(ty: &mut TypeExpr) {
+    match ty {
+        TypeExpr::Named(name, _) => {
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name) {
+                *name = canonical.to_string();
+            }
+        }
+        TypeExpr::Tensor(dims, precision, _) => {
+            dims.iter_mut().for_each(migrate_type);
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(precision.as_str())
+            {
+                *precision = TensorPrecision::new(canonical, precision.span());
+            }
+        }
+        TypeExpr::Arrow(args, ret, _) => {
+            args.iter_mut().for_each(migrate_type);
+            migrate_type(ret);
+        }
+        TypeExpr::Ref(inner, _) => migrate_type(inner),
+        TypeExpr::App(_, args, _) | TypeExpr::Tuple(args, _) => {
+            args.iter_mut().for_each(migrate_type);
+        }
+        TypeExpr::DimensionLiteral(..) | TypeExpr::Infer(..) | TypeExpr::RankSpread(..) => {}
+    }
+}
+
+fn migrate_expr(expr: &mut Expr) {
+    match expr {
+        Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => {}
+        Expr::Apply(function, args, _) => {
+            migrate_expr(function);
+            args.iter_mut().for_each(migrate_expr);
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
+            items.iter_mut().for_each(migrate_expr)
+        }
+        Expr::Record(_, fields, _) => {
+            fields.iter_mut().for_each(|(_, value)| migrate_expr(value));
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            migrate_expr(base);
+            fields.iter_mut().for_each(|(_, value)| migrate_expr(value));
+        }
+        Expr::Access(value, _, _)
+        | Expr::TupleGet(value, _, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Jit(value, _)
+        | Expr::Realize(value, _)
+        | Expr::Copy(value, _)
+        | Expr::Borrow(value, _)
+        | Expr::Quote(value, _)
+        | Expr::Unquote(value, _)
+        | Expr::Splice(value, _) => migrate_expr(value),
+        Expr::Binary(_, left, right, _)
+        | Expr::WithSeed(left, right, _)
+        | Expr::WithDevice(left, right, _) => {
+            migrate_expr(left);
+            migrate_expr(right);
+        }
+        Expr::Pipe(seed, stages, _) => {
+            migrate_expr(seed);
+            stages.iter_mut().for_each(migrate_expr);
+        }
+        Expr::If(condition, then_expr, else_expr, _) => {
+            migrate_expr(condition);
+            migrate_expr(then_expr);
+            migrate_expr(else_expr);
+        }
+        Expr::Match(scrutinee, arms, _) => {
+            migrate_expr(scrutinee);
+            for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    migrate_expr(guard);
+                }
+                migrate_expr(&mut arm.body);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            params.iter_mut().for_each(migrate_param);
+            migrate_expr(body);
+        }
+        Expr::Cast(value, precision, _, _) => {
+            migrate_expr(value);
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(precision) {
+                *precision = canonical.to_string();
+            }
+        }
+        Expr::Grad(value, _, _) | Expr::Vmap(value, _, _) => migrate_expr(value),
+        Expr::Annotate(value, ty, _) => {
+            migrate_expr(value);
+            migrate_type(ty);
+        }
+        Expr::Block(bindings, body, _) => {
+            for binding in bindings {
+                if let Some(ty) = &mut binding.ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(&mut binding.value);
+            }
+            migrate_expr(body);
+        }
+    }
 }
 
 fn first_ambiguous_comment_offset(decls: &[Decl], comments: &[Comment]) -> Option<usize> {
@@ -661,7 +839,7 @@ fn format_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) if name == "unit" => "unit".to_string(),
         // chelis#1587: `i8`..`i64` are accepted INPUT spellings for
-        // `int8`..`int64`. §P10-P12's model is that the parser accepts a wider
+        // `i8`..`i64`. §P10-P12's model is that the parser accepts a wider
         // set than the formatter emits, so the canonical formatter must rewrite
         // them; without this the alias would be a second canonical Surf
         // spelling and the §0.1 laws would admit two printings of one type.

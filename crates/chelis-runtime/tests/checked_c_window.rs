@@ -156,7 +156,7 @@ fn invalid_window_metadata_retains_selected_canonical_diagnostics() {
         assert!(
             String::from_utf8_lossy(&result.stderr)
                 .lines()
-                .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+                .any(|line| line == format!("numeric trap: domain in {op} at i64")),
             "{case}: {result:?}"
         );
     }

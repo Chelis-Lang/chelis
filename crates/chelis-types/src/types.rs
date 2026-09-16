@@ -26,8 +26,8 @@ pub enum TypeVarRestriction {
     /// `spec/04-type-system.md` §5.9 `Float`: the variable may instantiate
     /// only at an active float primitive (`f16`, `bf16`, `f32`, `f64`).
     ActiveFloat,
-    /// §5.9 `Int`: only at an active signed integer primitive (`int8`,
-    /// `int16`, `int32`, `int64`).
+    /// §5.9 `Int`: only at an active signed integer primitive (`i8`,
+    /// `i16`, `i32`, `i64`).
     ActiveInt,
     /// §5.9 `Numeric`: the union of [`TypeVarRestriction::ActiveFloat`] and
     /// [`TypeVarRestriction::ActiveInt`]. `bool` and `string` are excluded,
@@ -143,7 +143,7 @@ pub struct RankVar(pub u32);
 /// Numeric precision types.
 ///
 /// The active numeric primitive set is pinned by `spec/04-type-system.md` §1.1:
-/// `f32`, `f64`, `bf16`, `f16`, `int8`, `int16`, `int32`, `int64`, plus `bool`
+/// `f32`, `f64`, `bf16`, `f16`, `i8`, `i16`, `i32`, `i64`, plus `bool`
 /// and `string`. The `f8e4m3` variant is reserved per §1.1.1 but is **not
 /// active** in this dtype build-out cycle: parse paths still produce
 /// `Prim::F8e4m3` so producers can be diagnosed precisely, but every
@@ -188,10 +188,10 @@ impl Prim {
             "f16" => Some(Prim::F16),
             "bf16" => Some(Prim::Bf16),
             "f8e4m3" => Some(Prim::F8e4m3),
-            "int8" => Some(Prim::Int8),
-            "int16" => Some(Prim::Int16),
-            "int32" => Some(Prim::Int32),
-            "int64" => Some(Prim::Int64),
+            "i8" => Some(Prim::Int8),
+            "i16" => Some(Prim::Int16),
+            "i32" => Some(Prim::Int32),
+            "i64" => Some(Prim::Int64),
             "bool" => Some(Prim::Bool),
             "string" => Some(Prim::String),
             _ => None,
@@ -205,12 +205,38 @@ impl Prim {
             Prim::F16 => "f16",
             Prim::Bf16 => "bf16",
             Prim::F8e4m3 => "f8e4m3",
+            Prim::Int8 => "i8",
+            Prim::Int16 => "i16",
+            Prim::Int32 => "i32",
+            Prim::Int64 => "i64",
+            Prim::Bool => "bool",
+            Prim::String => "string",
+        }
+    }
+
+    /// Stable ecosystem spelling used by versioned JSON and ABI-facing
+    /// interchange surfaces. This is deliberately separate from [`Self::name`]:
+    /// Chelis source and Deep use `i*`, while existing external payloads keep
+    /// their `int*` identities.
+    pub fn interchange_name(&self) -> &'static str {
+        match self {
             Prim::Int8 => "int8",
             Prim::Int16 => "int16",
             Prim::Int32 => "int32",
             Prim::Int64 => "int64",
-            Prim::Bool => "bool",
-            Prim::String => "string",
+            _ => self.name(),
+        }
+    }
+
+    /// Parse the stable ecosystem spelling used by versioned interchange
+    /// formats. Language and Deep ingress must use [`Self::parse_name`].
+    pub fn parse_interchange_name(s: &str) -> Option<Prim> {
+        match s {
+            "int8" => Some(Prim::Int8),
+            "int16" => Some(Prim::Int16),
+            "int32" => Some(Prim::Int32),
+            "int64" => Some(Prim::Int64),
+            _ => Self::parse_name(s),
         }
     }
 
@@ -269,7 +295,7 @@ impl Prim {
     /// for a non-integer primitive. The SINGLE source every prove-path
     /// integer sampler (the obligation engine, the property runner, the
     /// injection path, and the CLI fuzz sampler) shares, so a narrow width
-    /// (e.g. int8) samples in `[-128, 127]` everywhere -- never an
+    /// (e.g. i8) samples in `[-128, 127]` everywhere -- never an
     /// unrepresentable value that would yield a spurious counterexample.
     pub fn integer_fuzz_bounds(&self) -> Option<(i64, i64)> {
         let (lo, hi) = self.integer_range()?;
@@ -287,7 +313,7 @@ impl Prim {
 
     /// Whether this precision is valid as the element type of a tensor.
     /// Per spec §1.1 the active tensor element set is f32, f64, bf16, f16,
-    /// int8, int16, int32, int64, and bool. The deferred `f8e4m3` (§1.1.1)
+    /// i8, i16, i32, i64, and bool. The deferred `f8e4m3` (§1.1.1)
     /// is rejected.
     ///
     /// Note: backend support for the reduced floats (`f16`, `bf16`) is
@@ -338,9 +364,9 @@ impl Prim {
     /// - bf16 / f16  → f32
     /// - f32         → f32 (operand-matching)
     /// - f64         → f64 (operand-matching)
-    /// - int8 / int16 → int32
-    /// - int32       → int32 (operand-matching)
-    /// - int64       → int64 (operand-matching)
+    /// - i8 / i16 → i32
+    /// - i32       → i32 (operand-matching)
+    /// - i64       → i64 (operand-matching)
     ///
     /// Returns `Err` for non-numeric operands and for the deferred
     /// `f8e4m3` (§1.1.1).
@@ -354,7 +380,7 @@ impl Prim {
             Prim::Int64 => Prim::Int64,
             Prim::Bool => {
                 return Err(
-                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
+                    "reduce_sum is not defined on bool tensors; cast to i32 first".to_string(),
                 );
             }
             Prim::F8e4m3 => {
@@ -377,9 +403,9 @@ impl Prim {
     ///   inside the op and downcast on output)
     /// - f32         → f32
     /// - f64         → f64
-    /// - int8 / int16 → int32 (accumulator precision)
-    /// - int32       → int32
-    /// - int64       → int64
+    /// - i8 / i16 → i32 (accumulator precision)
+    /// - i32       → i32
+    /// - i64       → i64
     ///
     /// This is the user-visible result precision. The IR-level Sum
     /// node's `output_type.precision` is the accumulator precision;
@@ -434,7 +460,7 @@ pub enum Dim {
 ///
 /// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`, the
 /// precision slot of a tensor type may be either a concrete primitive
-/// (e.g. `f32`, `int32`) or a sig-bound type variable (precision
+/// (e.g. `f32`, `i32`) or a sig-bound type variable (precision
 /// polymorphism, WS-A5). After monomorphization every reachable
 /// tensor must carry `TensorPrec::Concrete(_)`; backends assert this
 /// invariant at lowering time.
@@ -574,7 +600,7 @@ impl fmt::Display for NominalArg {
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    /// Primitive type (f32, int32, bool, etc.).
+    /// Primitive type (f32, i32, bool, etc.).
     Prim(Prim),
     /// Function type: args → return.
     Fn(Vec<Type>, Box<Type>),
@@ -702,10 +728,10 @@ impl fmt::Display for EffectSet {
 /// exactly as it rewrites the scheme body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CollectionConstraint {
-    /// `len(operand) -> int64`: the operand is a `List` or a `Dict`.
+    /// `len(operand) -> i64`: the operand is a `List` or a `Dict`.
     Len { operand: Type, result: Type },
     /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is
-    /// exactly `int64`, and `result` is `e`.
+    /// exactly `i64`, and `result` is `e`.
     Index {
         list: Type,
         index: Type,
@@ -719,7 +745,7 @@ pub enum CollectionConstraint {
         result: Type,
     },
     /// `concat(lhs, rhs) -> result`, both spec/04 §4.5.4 overloads: two
-    /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `int32`
+    /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `i32`
     /// axis giving a tensor.
     Concat { lhs: Type, rhs: Type, result: Type },
 }
@@ -1051,8 +1077,8 @@ mod prim_classification_tests {
         assert!(Prim::Int16.is_valid_tensor_precision());
         assert!(Prim::Int16.is_valid_scalar_cast_target());
         assert!(!Prim::Int16.is_float());
-        assert_eq!(Prim::Int16.name(), "int16");
-        assert_eq!(Prim::parse_name("int16"), Some(Prim::Int16));
+        assert_eq!(Prim::Int16.name(), "i16");
+        assert_eq!(Prim::parse_name("i16"), Some(Prim::Int16));
     }
 
     #[test]
@@ -1134,7 +1160,7 @@ impl VarGen {
 pub enum Target {
     /// The Rust tensor evaluator (stores f64, supports all prims).
     Eval,
-    /// The C backend (f32/bool/bf16/f16/int32/int64; rejects f64).
+    /// The C backend (f32/bool/bf16/f16/i32/i64; rejects f64).
     C,
     /// The HIP/ROCm backend.
     Hip,

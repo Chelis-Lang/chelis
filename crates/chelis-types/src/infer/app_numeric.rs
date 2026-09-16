@@ -178,7 +178,7 @@ impl PrecisionSubject {
 /// ONE implementation, reached from both paths: the concrete arms of
 /// [`operand_dtype_rejection`] hand it the operand's dtype, and the
 /// precision-variable path hands it the binder. A message therefore cannot
-/// drift between the diagnostic a settled `int32` gets and the one its `[p]`
+/// drift between the diagnostic a settled `i32` gets and the one its `[p]`
 /// binder gets, which is the property the two paths exist to share.
 ///
 /// Every callee [`operand_family_policy`] names has an arm here. A deferred
@@ -686,7 +686,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
             let resolved = subst.apply(axis_arg);
             match &resolved {
                 Type::Prim(Prim::Int32) => {}
-                // chelis#1512: the axis is not an `int32` YET.
+                // chelis#1512: the axis is not an `i32` YET.
                 Type::Var(_) => {
                     if let Some(site) = suspension {
                         site.register(arg_tys, result_ty, subst, product);
@@ -700,7 +700,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
-                                format!("{} expects int32 axis, got {}", fname, resolved),
+                                format!("{} expects i32 axis, got {}", fname, resolved),
                             ),
                             vec![],
                         ),
@@ -714,7 +714,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         // axis range is validated here. Negative axes index from
         // the end via `normalize_static_axis`, consistent with
         // the reductions and gather/scatter.
-        // Issue #216: cast-aware so `softmax(x, cast(N, int32))`
+        // Issue #216: cast-aware so `softmax(x, cast(N, i32))`
         // surfaces the bounds-check diagnostic at infer.
         if fname == "softmax"
             && let Some(first_arg) = arg_tys.first()
@@ -779,8 +779,8 @@ pub(super) fn integer_binop_result_type(
             }
             // chelis#1512: the operands are not known to MATCH yet. Each of
             // these three arms published the left operand without ever
-            // comparing the two, so `mod(t, 3i32)` with `t` binding to `int64`
-            // was accepted while the same call on a resolved `int64` is
+            // comparing the two, so `mod(t, 3i32)` with `t` binding to `i64`
+            // was accepted while the same call on a resolved `i64` is
             // rejected. Suspending re-runs this rule against both bound types,
             // and the arm above is the one that then decides.
             (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {

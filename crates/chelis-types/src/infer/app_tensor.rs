@@ -378,7 +378,7 @@ pub(super) fn check_matmul_signature(
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
     // matmul signature does not admit integer operand precisions
-    // (int8, int16, int32, int64). Reject upfront at the call site
+    // (i8, i16, i32, i64). Reject upfront at the call site
     // with a §5.7.2-citing diagnostic so users see the spec rule
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
@@ -514,7 +514,7 @@ pub(super) fn check_reduction_signature(
     // Resolve which axis (or axes) the reduction removes. Two modes:
     //
     //  * Positional (legacy): a single compile-time-constant integer axis on a
-    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, int32))`).
+    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, i32))`).
     //    `normalize_static_axis` handles negative indexing and bounds (issue
     //    #216), consistent with gather/scatter and IR lowering's
     //    `normalize_axis`.
@@ -583,7 +583,7 @@ pub(super) fn check_reduction_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    "count on a concrete-rank operand requires one or more positional int32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    "count on a concrete-rank operand requires one or more positional i32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
                     vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
                 ),
             );
@@ -607,7 +607,7 @@ pub(super) fn check_reduction_signature(
                     ),
                 );
             }
-            // Issue #259: a non-literal, non-name axis (a runtime `int32`
+            // Issue #259: a non-literal, non-name axis (a runtime `i32`
             // binding) cannot determine which dimension is removed; emit the
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
@@ -670,7 +670,7 @@ pub(super) fn check_reduction_signature(
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
                     // named axis of the operand. Two causes share this arm — a
-                    // runtime `int32` binding (issue #259) and a mistyped/absent
+                    // runtime `i32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
                     return report(
@@ -680,10 +680,10 @@ pub(super) fn check_reduction_signature(
                             format!(
                                 "{name} axis `{axis_name}` is neither a compile-time constant nor a \
                              named axis of the operand: a reduction axis must be a literal or \
-                             `cast(N, int32)` constant, or the name of an existing axis"
+                             `cast(N, i32)` constant, or the name of an existing axis"
                             ),
                             vec![format!(
-                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, i32)`, or \
                              name an existing axis of the operand (e.g. `{name}(x, seq)`)."
                             )],
                         ),
@@ -717,8 +717,8 @@ pub(super) fn check_reduction_signature(
     }
 
     // RT-2 fixup B1: per spec/04-type-system.md §5.7.1, the result
-    // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
-    // operand → int32 result, int32/int64/f32/f64 → operand precision,
+    // precision of `reduce_sum` follows the §5.7.1 table — i8/i16
+    // operand → i32 result, i32/i64/f32/f64 → operand precision,
     // bf16/f16 → operand precision (the f32 accumulator is consumed
     // inside the op and downcast on output). For `max_reduce`,
     // `min_reduce`, `prod_reduce`, and `mean` the result precision is
@@ -726,13 +726,13 @@ pub(super) fn check_reduction_signature(
     //
     // Issue #230: `argmax_reduce` and `argmin_reduce` are index-returning
     // reductions — they produce element indices, not reduced operand
-    // values. Their result precision is canonically `int64`, regardless
+    // values. Their result precision is canonically `i64`, regardless
     // of the input dtype. The std-package signatures in
     // `packages/chelis-std/src/tensor/reduce.ch` pin this (`tensor[b,
-    // int64]`); the type checker was returning the input precision and
+    // i64]`); the type checker was returning the input precision and
     // diverging from std. (The host-runtime/backend still stores
     // integer-valued floats internally per the Phase 3j-pre Batch 1
-    // caveat documented on `RiscOp::Argmax`; the int64 label is the
+    // caveat documented on `RiscOp::Argmax`; the i64 label is the
     // declarative output type.)
     //
     // WS-A5: the §5.7.1 widening rule is defined over a known operand
@@ -766,7 +766,7 @@ pub(super) fn check_reduction_signature(
     };
     // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
     // before falling back to the generic unify error, so users binding
-    // `sum(int8 tensor)` to `tensor[int8]` see the spec-row hint
+    // `sum(i8 tensor)` to `tensor[i8]` see the spec-row hint
     // instead of the opaque "doesn't match declared signature" trail.
     if name == "sum" && result_prec != prec {
         let resolved_result = subst.apply(result_ty);
@@ -780,7 +780,7 @@ pub(super) fn check_reduction_signature(
                     format!(
                         "sum on operand precision `{}` produces result precision `{}` per \
                      spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
-                     widens narrow integer operands to int32 to prevent silent overflow); \
+                     widens narrow integer operands to i32 to prevent silent overflow); \
                      declared result precision `{}` is incompatible. Use `tensor[{}]` or \
                      omit the result type to accept the spec default.",
                         prec.render(),
@@ -904,10 +904,10 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} takes a positional int32 axis, not the dimension \
+                        "{builtin} takes a positional i32 axis, not the dimension \
                          name `{new_name}`: the named-axis form adds an axis and \
                          belongs to `insert`. Write `insert(x, {new_name}, size)` to \
-                         add a named axis, or `{builtin}(x, <int32 axis>, size)` to \
+                         add a named axis, or `{builtin}(x, <i32 axis>, size)` to \
                          broadcast an existing size-1 axis \
                          (spec/05-risc-primitives.md \u{00a7}2.4)"
                     ),
@@ -989,9 +989,9 @@ pub(super) fn check_expand_signature(
         );
     }
 
-    // Uses `extract_int_for_dim` so a `cast(N, int32)`-wrapped literal axis
+    // Uses `extract_int_for_dim` so a `cast(N, i32)`-wrapped literal axis
     // reaches the non-negative-axis check. Extent folding has its own exact
-    // int64 path below.
+    // i64 path below.
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
@@ -1019,13 +1019,13 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} axis must be a compile-time constant of type int32 for the output \
+                        "{builtin} axis must be a compile-time constant of type i32 for the output \
                      shape to be inferable, got {}",
                         describe_axis_arg(arg_exprs.get(1)),
                     ),
                     vec![format!(
                         "Pass a literal axis (e.g. `{builtin}(x, 0, n)`) or a \
-                             `cast(N, int32)` literal. The axis selects where the new \
+                             `cast(N, i32)` literal. The axis selects where the new \
                              dimension is inserted, so it must be known at compile time."
                     )],
                 ),
@@ -1092,7 +1092,7 @@ pub(super) fn check_expand_signature(
         // surface spelling. A size whose value provably folds to a constant
         // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
         // read / dimension name (`ShapeSourced`) is materializable; a truly
-        // sourceless runtime scalar (`Sourceless` — a bare `int32`/`int64`
+        // sourceless runtime scalar (`Sourceless` — a bare `i32`/`i64`
         // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
         // has no backend representation and is rejected here so check, build,
         // and eval all agree (a check-clean program must build). The walk
@@ -1267,8 +1267,8 @@ pub(super) fn check_named_expand_signature(
     }
 
     // The named-insert size must be a non-negative compile-time literal (an
-    // `Ni64` literal or `cast(N, int64)`; extent-domain under [05-DIM-1]).
-    // A symbolic-dim or runtime int64 size cannot
+    // `Ni64` literal or `cast(N, i64)`; extent-domain under [05-DIM-1]).
+    // A symbolic-dim or runtime i64 size cannot
     // be stamped onto the inserted named dim at lowering: the eval lane has
     // no extent to stage and the C backend would emit an undeclared dim
     // symbol (silent shape-0 output) — both verified failure modes, so the
@@ -1284,7 +1284,7 @@ pub(super) fn check_named_expand_signature(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "{builtin}: the named-axis insert form requires a compile-time literal size \
-                 (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
+                 (an Ni64 literal or `cast(N, i64)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
                     describe_axis_arg(arg_exprs.get(2)),
@@ -1438,13 +1438,13 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
 /// Extract an int literal from a Deep expr, recognizing the canonical
 /// literal forms (`Atom::Int`, `(lit {type: ...} N)`) and the `neg` app
 /// wrapper. Float-in-cast intentionally is not recognized: the spec
-/// says integer literals default to `int32` and require explicit
+/// says integer literals default to `i32` and require explicit
 /// notation for other widths, so a float wrapped in a cast to an int
 /// dtype is a precision-narrowing operation that the runtime should
 /// validate -- not a literal int (round 3 LOW-2 design note).
 ///
 /// The `neg` arm recurses through `extract_int_for_dim` so that
-/// `neg(cast(N, int32))` peels both wrappers and resolves to `-N` at
+/// `neg(cast(N, i32))` peels both wrappers and resolves to `-N` at
 /// infer time (red team round 3 finding R3-MED1). Mutual recursion
 /// with `extract_int_for_dim` is bounded: each call strictly reduces
 /// the expression depth (peels one wrapper layer).

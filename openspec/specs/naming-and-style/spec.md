@@ -232,7 +232,7 @@ denote a container or dispatch form.
 
 #### Scenario: Element-type suffix on the principal argument
 
-- **WHEN** a function is named `parse_int(s: string) -> Option[int64]`
+- **WHEN** a function is named `parse_int(s: string) -> Option[i64]`
 - **THEN** the naming lint accepts the `_int` suffix under the parser/converter idiom
 
 #### Scenario: Dispatch-form suffix is flagged

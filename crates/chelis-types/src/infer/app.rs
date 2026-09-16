@@ -185,7 +185,7 @@ fn infer_app_inner(
 
     // chelis#339: the anchored named-axis expand form `expand(x, new, size,
     // anchor)` carries four arguments, but the builtin HM scheme is arity-3
-    // (`(&tensor, int32, int32) -> out`), so it would hit the generic arity
+    // (`(&tensor, i32, i32) -> out`), so it would hit the generic arity
     // check before the procedural arm. Dispatch it here (the
     // `infer_permute_app` pattern). The ordinary 3-arg expand keeps the generic
     // path, which reaches `check_expand_signature` with the scheme intact.
@@ -341,7 +341,7 @@ fn infer_app_inner(
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
-    // an axis (`int32`) rather than inferred as a value — otherwise the
+    // an axis (`i32`) rather than inferred as a value — otherwise the
     // name-resolution pass would report a spurious `unbound variable`. The
     // actual name is read back from the arg expr in `check_reduction_signature`.
     let is_named_reduction = matches!(
@@ -366,7 +366,7 @@ fn infer_app_inner(
             // named-axis expand — the inserted-axis name (index 1). The
             // inserted-axis slot is scope-discriminated: a name bound in the
             // value environment is a *runtime value* (the issue #259 class,
-            // `expand(&x, ax, 4)` with `ax: int32`), not a dim name, and must
+            // `expand(&x, ax, 4)` with `ax: i32`), not a dim name, and must
             // keep flowing through ordinary inference into the
             // compile-time-constant rejection. The 4-arg anchored form routes
             // through `infer_expand_app` instead and never reaches this loop.
@@ -380,8 +380,8 @@ fn infer_app_inner(
                 && symbolic_dim_ref_name(arg).is_some()
             {
                 // [05-DIM-1]: a dim name in the size slot is an extent
-                // (int64); the inserted-axis name and reduction axes are
-                // axis-domain (int32).
+                // (i64); the inserted-axis name and reduction axes are
+                // axis-domain (i32).
                 if is_expand_size {
                     Type::Prim(Prim::Int64)
                 } else {
@@ -575,7 +575,7 @@ fn infer_app_inner(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "{callee} expects an int64 size (write Ni64 or cast(N, int64)), \
+                        "{callee} expects an i64 size (write Ni64 or cast(N, i64)), \
                          got {}",
                         Type::Prim(p)
                     ),

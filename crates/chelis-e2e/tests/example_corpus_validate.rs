@@ -196,7 +196,7 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
 
     deep_inputs.push((
         "spec-deep-fixture".to_string(),
-        "(module {} hello_tensor (def {} main (fn {} (params {}) (lit {type: (t-prim {} int32)} 1))))\n"
+        "(module {} hello_tensor (def {} main (fn {} (params {}) (lit {type: (t-prim {} i32)} 1))))\n"
             .to_string(),
     ));
     for (label, source) in deep_inputs {

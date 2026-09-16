@@ -16,7 +16,7 @@
 //! same Phase 2 helper used by shipped roots. The byte-equal-or-table-
 //! bounded decision then comes only from `chelis_types::agreement`.
 //!
-//! This file deliberately gains no int64-above-2^53 row: at this DAG level
+//! This file deliberately gains no i64-above-2^53 row: at this DAG level
 //! `RiscOp::Const { value: f64 }` cannot express it (chelis#684), so that
 //! row would test the wrong layer. The exact-integer cross-lane oracle is:
 //! `crates/chelis-cli/tests/precision_matrix.rs` (`eval_lane_str` /

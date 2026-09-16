@@ -228,7 +228,7 @@ fn untagged_list_in_expression_position_is_rejected_loudly() {
 #[test]
 fn block_types_as_its_last_child() {
     let exprs = parse_str(
-        "(def {} f (block {} (lit {type: (t-prim {} int32)} 1) \
+        "(def {} f (block {} (lit {type: (t-prim {} i32)} 1) \
          (lit {type: (t-prim {} f32)} 2.0)))",
     )
     .expect("lenient Deep parse");
@@ -246,7 +246,7 @@ fn block_checks_every_child_not_only_the_last() {
     // exempt discarded children from checking.
     let exprs = parse_str(
         "(def {} f (block {} (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) \
-         (lit {type: (t-prim {} int64)} 2)) (lit {type: (t-prim {} f32)} 3.0)))",
+         (lit {type: (t-prim {} i64)} 2)) (lit {type: (t-prim {} f32)} 3.0)))",
     )
     .expect("lenient Deep parse");
     let result = infer_program(&exprs);

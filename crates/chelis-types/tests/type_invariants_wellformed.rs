@@ -396,7 +396,7 @@ fn integer_element_tensor_field_is_outside_the_value_class() {
     // not in the value class (it would otherwise be silently dropped).
     let deep = deep_of_surf(
         "module M\n@opaque\n@invariant(p) p.ok >= 0.0\n\
-         type T = | T { ok: f32, bad: tensor[4, int32] }",
+         type T = | T { ok: f32, bad: tensor[4, i32] }",
     );
     assert_has_violation(&errors(&deep), "value class");
 }

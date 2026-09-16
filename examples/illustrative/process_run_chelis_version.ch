@@ -12,4 +12,4 @@
 -- This example is illustrative, not part of the executable corpus: it
 -- shells out to the chelis binary, so its result depends on the host
 -- environment having that binary on PATH.
-def chelis_version() -> (int64, string, string) = process_run("chelis", ["--version"])
+def chelis_version() -> (i64, string, string) = process_run("chelis", ["--version"])

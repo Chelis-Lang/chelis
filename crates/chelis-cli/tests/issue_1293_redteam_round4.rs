@@ -99,27 +99,27 @@ fn runtime_list_selection_does_not_mix_unselected_non_finite_values() {
 
 import Std.Index (drop_list, list_index, take_list)
 
-def square_selected(xs: List[f32], index: int64) -> f32 = {
+def square_selected(xs: List[f32], index: i64) -> f32 = {
   selected = list_index(xs, index)
   mul(selected, selected)
 }
 
 def tensor_square_sum(value: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(&value, &value), cast(0, int32)))
+  tensor_to_scalar(sum(mul(&value, &value), cast(0, i32)))
 
-def square_selected_tensor(xs: List[tensor[2, f32]], index: int64) -> f32 =
+def square_selected_tensor(xs: List[tensor[2, f32]], index: i64) -> f32 =
   tensor_square_sum(list_index(xs, index))
 
 def nested_selected(
   xs: List[List[f32]],
-  outer: int64,
-  inner: int64
+  outer: i64,
+  inner: i64
 ) -> f32 = {
   selected = list_index(list_index(xs, outer), inner)
   mul(selected, selected)
 }
 
-def composed_selected(xs: List[f32], count: int64) -> f32 = {
+def composed_selected(xs: List[f32], count: i64) -> f32 = {
   window = drop_list(take_list(xs, add(count, count)), count)
   selected = list_index(window, sub(count, count))
   add(mul(selected, selected), mul(selected, selected))
@@ -132,9 +132,9 @@ pos_inf: f32 = div(one, zero)
 neg_inf: f32 = neg(pos_inf)
 finite: f32 = cast(3.0, f32)
 mask: tensor[2, bool] = [true, false]
-runtime_one: int64 = tensor_to_scalar(count(&mask, 0))
-runtime_zero: int64 = sub(runtime_one, runtime_one)
-runtime_two: int64 = add(runtime_one, runtime_one)
+runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
+runtime_zero: i64 = sub(runtime_one, runtime_one)
+runtime_two: i64 = add(runtime_one, runtime_one)
 
 unselected = grad(square_selected, wrt=xs)(
   [nan, finite, pos_inf, neg_inf],
@@ -212,13 +212,13 @@ fn composed_runtime_list_bounds_are_guarded_before_internal_selection() {
 
 import Std.Index (drop_list, list_index)
 
-def loss(xs: List[f32], drop_count: int64, index: int64) -> f32 =
+def loss(xs: List[f32], drop_count: i64, index: i64) -> f32 =
   list_index(drop_list(xs, drop_count), index)
 
 mask: tensor[2, bool] = [true, false]
-runtime_one: int64 = tensor_to_scalar(count(&mask, 0))
-runtime_max: int64 = tensor_to_scalar(
-  sum(to_tensor([9223372036854775807i64]), cast(0, int32))
+runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
+runtime_max: i64 = tensor_to_scalar(
+  sum(to_tensor([9223372036854775807i64]), cast(0, i32))
 )
 
 out = grad(loss, wrt=xs)(
@@ -245,17 +245,17 @@ fn composed_runtime_list_negative_extreme_is_guarded_before_internal_selection()
 
 import Std.Index (drop_list, list_index, take_list)
 
-def loss(xs: List[f32], drop_count: int64, take_count: int64) -> f32 =
-  list_index(take_list(drop_list(xs, drop_count), take_count), cast(0, int64))
+def loss(xs: List[f32], drop_count: i64, take_count: i64) -> f32 =
+  list_index(take_list(drop_list(xs, drop_count), take_count), cast(0, i64))
 
-runtime_min: int64 = tensor_to_scalar(
-  sum(to_tensor([-9223372036854775808i64]), cast(0, int32))
+runtime_min: i64 = tensor_to_scalar(
+  sum(to_tensor([-9223372036854775808i64]), cast(0, i32))
 )
 
 out = grad(loss, wrt=xs)(
   [cast(2.0, f32), cast(3.0, f32), cast(5.0, f32)],
   runtime_min,
-  cast(9223372036854775807, int64)
+  cast(9223372036854775807, i64)
 )
 "#,
     );
@@ -281,7 +281,7 @@ type Wrapper[a] =
   | Wrapper { value: a }
 
 type TensorBox =
-  | TensorBox { value: tensor[2, f32], code: int32 }
+  | TensorBox { value: tensor[2, f32], code: i32 }
 
 type PairBox =
   | PairBox { pair: PairAlias, enabled: bool }
@@ -292,64 +292,64 @@ type Pick =
 
 type Conditional =
   | Live { value: f32 }
-  | Frozen { tag: int64 }
+  | Frozen { tag: i64 }
   | Empty
 
 type Tagged =
-  | Tagged { value: f32, tag: int64 }
+  | Tagged { value: f32, tag: i64 }
 
-def tuple_loss(xs: List[PairAlias], index: int64) -> f32 = {
+def tuple_loss(xs: List[PairAlias], index: i64) -> f32 = {
   selected = list_index(xs, index)
   add(mul(selected.0, selected.0), mul(selected.1, selected.1))
 }
 
 def nested_tuple_loss(
   xs: List[List[PairAlias]],
-  outer: int64,
-  inner: int64
+  outer: i64,
+  inner: i64
 ) -> f32 = {
   selected = list_index(list_index(xs, outer), inner)
   add(selected.0, selected.1)
 }
 
-def boxed_loss(xs: List[Boxed], index: int64) -> f32 =
+def boxed_loss(xs: List[Boxed], index: i64) -> f32 =
   match list_index(xs, index) with {
     | Boxed { value } => mul(value, value)
   }
 
-def wrapper_loss(xs: List[Wrapper[f32]], index: int64) -> f32 =
+def wrapper_loss(xs: List[Wrapper[f32]], index: i64) -> f32 =
   match list_index(xs, index) with {
     | Wrapper { value } => mul(value, value)
   }
 
 def keep_wrapped(xs: List[Wrapper[f32]]) -> List[Wrapper[f32]] = xs
 
-def tensor_box_loss(xs: List[TensorBox], index: int64) -> f32 =
+def tensor_box_loss(xs: List[TensorBox], index: i64) -> f32 =
   match list_index(xs, index) with {
     | TensorBox { value, code: _ } =>
-      tensor_to_scalar(sum(mul(&value, &value), cast(0, int32)))
+      tensor_to_scalar(sum(mul(&value, &value), cast(0, i32)))
   }
 
-def pair_box_loss(xs: List[PairBox], index: int64) -> f32 =
+def pair_box_loss(xs: List[PairBox], index: i64) -> f32 =
   match list_index(xs, index) with {
     | PairBox { pair, enabled: _ } =>
       add(mul(pair.0, pair.0), mul(pair.1, pair.1))
   }
 
-def pick_loss(xs: List[Pick], index: int64) -> f32 =
+def pick_loss(xs: List[Pick], index: i64) -> f32 =
   match list_index(xs, index) with {
     | First { value } => mul(value, value)
     | Second { value, scale } => mul(mul(value, value), scale)
   }
 
-def conditional_loss(xs: List[Conditional], index: int64) -> f32 =
+def conditional_loss(xs: List[Conditional], index: i64) -> f32 =
   match list_index(xs, index) with {
     | Live { value } => mul(value, value)
     | Frozen { tag: _ } => cast(0.0, f32)
     | Empty => cast(0.0, f32)
   }
 
-def tagged_loss(xs: List[Tagged], index: int64) -> f32 =
+def tagged_loss(xs: List[Tagged], index: i64) -> f32 =
   match list_index(xs, index) with {
     | Tagged { value, tag: _ } => mul(value, value)
   }
@@ -362,16 +362,16 @@ def tagged_value_loss(value: Tagged) -> f32 =
 def second_target_loss(
   ignored: tensor[2, f32],
   xs: List[PairAlias],
-  index: int64
+  index: i64
 ) -> f32 = {
   selected = list_index(xs, index)
   add(selected.0, selected.1)
 }
 
 def default_target_loss(
-  metadata: (int64, bool),
+  metadata: (i64, bool),
   xs: List[PairAlias],
-  index: int64
+  index: i64
 ) -> f32 = {
   selected = list_index(xs, index)
   add(selected.0, selected.1)
@@ -382,13 +382,13 @@ def constant_pair_loss(xs: List[PairAlias]) -> f32 = cast(1.0, f32)
 def collision_loss(
   xs: List[f32],
   __chelis_grad_arg_0_leaf_0_0: f32,
-  index: int64
+  index: i64
 ) -> f32 =
   mul(list_index(xs, index), __chelis_grad_arg_0_leaf_0_0)
 
 mask: tensor[2, bool] = [true, false]
-runtime_one: int64 = tensor_to_scalar(count(&mask, 0))
-runtime_zero: int64 = sub(runtime_one, runtime_one)
+runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
+runtime_zero: i64 = sub(runtime_one, runtime_one)
 pairs: List[PairAlias] = [
   (cast(2.0, f32), cast(3.0, f32)),
   (cast(5.0, f32), cast(7.0, f32))
@@ -420,11 +420,11 @@ tensor_box_grad = grad(tensor_box_loss, wrt=xs)(
   [
     TensorBox {
       value: to_tensor([cast(2.0, f32), cast(3.0, f32)]),
-      code: cast(31, int32)
+      code: cast(31, i32)
     },
     TensorBox {
       value: to_tensor([cast(5.0, f32), cast(7.0, f32)]),
-      code: cast(37, int32)
+      code: cast(37, i32)
     }
   ],
   runtime_one
@@ -448,7 +448,7 @@ second_grad = grad(pick_loss, wrt=xs)(
   runtime_one
 )
 frozen_only_grad = grad(conditional_loss, wrt=xs)(
-  [Frozen { tag: cast(41, int64) }],
+  [Frozen { tag: cast(41, i64) }],
   runtime_zero
 )
 empty_variant_grad = grad(conditional_loss, wrt=xs)(
@@ -457,13 +457,13 @@ empty_variant_grad = grad(conditional_loss, wrt=xs)(
 )
 tagged_grad = grad(tagged_loss, wrt=xs)(
   [
-    Tagged { value: cast(2.0, f32), tag: cast(17, int64) },
-    Tagged { value: cast(5.0, f32), tag: cast(19, int64) }
+    Tagged { value: cast(2.0, f32), tag: cast(17, i64) },
+    Tagged { value: cast(5.0, f32), tag: cast(19, i64) }
   ],
   runtime_one
 )
 top_level_tagged_grad = grad(tagged_value_loss, wrt=value)(
-  Tagged { value: cast(5.0, f32), tag: cast(23, int64) }
+  Tagged { value: cast(5.0, f32), tag: cast(23, i64) }
 )
 second_target = grad(second_target_loss, wrt=xs)(
   to_tensor([cast(100.0, f32), cast(200.0, f32)]),
@@ -471,7 +471,7 @@ second_target = grad(second_target_loss, wrt=xs)(
   runtime_one
 )
 default_target = grad(default_target_loss)(
-  (cast(29, int64), true),
+  (cast(29, i64), true),
   pairs,
   runtime_one
 )
@@ -548,8 +548,8 @@ fn recursively_all_discrete_list_shapes_are_rejected_at_the_checker() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def loss(xs: List[(int64, bool)]) -> f32 = cast(1.0, f32)
-bad = grad(loss, wrt=xs)([(cast(1, int64), true)])
+def loss(xs: List[(i64, bool)]) -> f32 = cast(1.0, f32)
+bad = grad(loss, wrt=xs)([(cast(1, i64), true)])
 "#,
     );
     Command::cargo_bin("chelis")

@@ -38,13 +38,13 @@ use tempfile::tempdir;
 const REJECTED_FORMS: &[(&str, &str, &str, &str)] = &[
     (
         "Param",
-        "def recast[p](value: p) -> p = cast(value, p)\nout = recast(cast(7, int32))\n",
+        "def recast[p](value: p) -> p = cast(value, p)\nout = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),
     (
         "LetBound",
-        "def recast[p](value: p) -> p = {\n  v = value\n  cast(v, p)\n}\nout = recast(cast(7, int32))\n",
+        "def recast[p](value: p) -> p = {\n  v = value\n  cast(v, p)\n}\nout = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),
@@ -52,14 +52,14 @@ const REJECTED_FORMS: &[(&str, &str, &str, &str)] = &[
         "CallResult",
         "def ident[p](value: p) -> p = value\n\
          def recast[p](value: p) -> p = cast(ident(value), p)\n\
-         out = recast(cast(7, int32))\n",
+         out = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),
     (
         "InLambda",
         "def recast[p](value: p) -> p = (fn (v) -> cast(v, p))(value)\n\
-         out = recast(cast(7, int32))\n",
+         out = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),
@@ -67,13 +67,13 @@ const REJECTED_FORMS: &[(&str, &str, &str, &str)] = &[
         "HelperGeneric",
         "def helper[q](value: q) -> q = cast(value, q)\n\
          def outer[p](value: p) -> p = helper(value)\n\
-         out = outer(cast(7, int32))\n",
+         out = outer(cast(7, i32))\n",
         "q",
         "helper",
     ),
     (
         "SigBinder",
-        "sig recast: p -> p\ndef recast(value) = cast(value, p)\nout = recast(cast(7, int32))\n",
+        "sig recast: p -> p\ndef recast(value) = cast(value, p)\nout = recast(cast(7, i32))\n",
         "p",
         "recast",
     ),
@@ -84,11 +84,11 @@ const REJECTED_FORMS: &[(&str, &str, &str, &str)] = &[
 const ACCEPTED_FORMS: &[(&str, &str)] = &[
     (
         "Concrete",
-        "def recast(value: int32) -> f64 = cast(value, f64)\nout = recast(cast(7, int32))\n",
+        "def recast(value: i32) -> f64 = cast(value, f64)\nout = recast(cast(7, i32))\n",
     ),
     (
         "BoundedInt",
-        "def recast[p: Int](value: p) -> p = cast(value, p)\nout = recast(cast(7, int32))\n",
+        "def recast[p: Int](value: p) -> p = cast(value, p)\nout = recast(cast(7, i32))\n",
     ),
     (
         "BoundedFloat",
@@ -96,12 +96,12 @@ const ACCEPTED_FORMS: &[(&str, &str)] = &[
     ),
     (
         "BoundedNumeric",
-        "def recast[p: Numeric](value: p) -> p = cast(value, p)\nout = recast(cast(7, int32))\n",
+        "def recast[p: Numeric](value: p) -> p = cast(value, p)\nout = recast(cast(7, i32))\n",
     ),
     (
         "BoundedLetBound",
         "def recast[p: Int](value: p) -> p = {\n  v = value\n  cast(v, p)\n}\n\
-         out = recast(cast(7, int32))\n",
+         out = recast(cast(7, i32))\n",
     ),
 ];
 
@@ -273,7 +273,7 @@ fn a_tensor_source_carries_both_the_scalar_rule_and_the_dtype_rule() {
         dir.path(),
         "Issue1558TensorSource",
         "def recast[p](value: tensor[2, p]) -> tensor[2, p] = cast(value, p)\n\
-         out = recast(to_tensor([cast(1, int32), cast(2, int32)]))\n",
+         out = recast(to_tensor([cast(1, i32), cast(2, i32)]))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         let messages = error_messages(json);

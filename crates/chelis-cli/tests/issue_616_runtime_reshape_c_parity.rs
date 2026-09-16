@@ -21,9 +21,9 @@ use tempfile::{TempDir, tempdir};
 /// at 0, reshaped to `[1, m]`. For `x = [1, 2, ..., n]` the window keeps
 /// `[1, 3, 5, ...]` (`m` odd values).
 const WINDOW_BODY: &str = "\
-  m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
-  reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])";
+  m = add(floor_div(sub(cast(shape(x, cast(0, i32)), i64), cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+  extent = cast(add(mul(sub(m, cast(1, i64)), cast(2, i64)), cast(1, i64)), i64)\n\
+  reshape(stride(shrink(x, [[cast(0, i64), extent]]), cast(2, i64)), [cast(1, i64), m])";
 
 fn window_source(out_line: &str) -> String {
     format!(
@@ -253,10 +253,10 @@ int main(void) {{
 #[test]
 fn issue_616_runtime_window_grad_eval_matches_c() {
     let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
-  m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
-  w = reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])\n\
-  sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  m = add(floor_div(sub(cast(shape(x, cast(0, i32)), i64), cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+  extent = cast(add(mul(sub(m, cast(1, i64)), cast(2, i64)), cast(1, i64)), i64)\n\
+  w = reshape(stride(shrink(x, [[cast(0, i64), extent]]), cast(2, i64)), [cast(1, i64), m])\n\
+  sum(sum(w, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 
     let eval_out = run_eval(source, "rtwindowgrad");
@@ -289,8 +289,8 @@ fn issue_616_runtime_window_grad_eval_matches_c() {
 fn issue_616_runtime_reshape_negative_extent_errs_in_both_lanes() {
     // m = n - 10 < 0 for the 4-element input.
     let body = "\
-  m = sub(cast(shape(x, cast(0, int32)), int64), cast(10, int64))\n\
-  reshape(x, [cast(1, int64), m])";
+  m = sub(cast(shape(x, cast(0, i32)), i64), cast(10, i64))\n\
+  reshape(x, [cast(1, i64), m])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
         "module Repro.RtNegDim\nsig f: tensor[n, f32] -> tensor[1, m, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"

@@ -91,7 +91,7 @@ pub(super) fn infer_tuple_get(
     let resolved = subst.apply(&tuple_ty);
 
     // The Surf `.N` desugar emits the projection index as a `lit` node
-    // `(lit {type: int32} <Int>)` (`desugar.rs`, `Expr::TupleGet`),
+    // `(lit {type: i32} <Int>)` (`desugar.rs`, `Expr::TupleGet`),
     // while hand-written Deep may carry it as a bare `Int` atom. Read
     // the index from either shape. Matching only the bare atom made
     // every Surf-level `.N` projection fall through to `Type::Error`,
@@ -908,8 +908,9 @@ pub(super) fn infer_cast(
             // the unsigned family and the other reserved-but-deferred
             // dtype names are rejected with the owning precision
             // diagnostic after syntax has validated.
-            if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false)
-                .or_else(|| deferred_family_diagnostic(&name, /* tensor = */ false))
+            if let Some(diag) = crate::deep_type::retired_integer_diagnostic(&name, "deep", false)
+                .or_else(|| unsigned_family_diagnostic(&name, false))
+                .or_else(|| deferred_family_diagnostic(&name, false))
             {
                 let diag = target_location
                     .as_ref()
@@ -1021,7 +1022,7 @@ pub(super) fn infer_cast(
                     ),
                     vec![
                         "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
-                     int8, int16, int32, int64"
+                     i8, i16, i32, i64"
                             .to_string(),
                     ],
                 ),
@@ -1194,7 +1195,7 @@ pub(super) fn report_unknown_cast_target(
         format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
         vec![
             "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
-             int8, int16, int32, int64"
+             i8, i16, i32, i64"
                 .to_string(),
         ],
     );
@@ -1216,7 +1217,7 @@ pub(super) fn report_unknown_cast_target(
 /// (chelis#1489). chelis#731 Phase 2 (§C3) owns the witness-carrying return.
 pub(super) fn unsupported_precision_error(new_prec: Prim, tensor: bool) -> CheckError {
     let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
     if matches!(new_prec, Prim::F8e4m3) {
         CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,

@@ -472,12 +472,12 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
     (0..rank).contains(&axis).then_some(axis as usize)
 }
 
-/// Reject an axis argument whose resolved type is not `int32`.
+/// Reject an axis argument whose resolved type is not `i32`.
 ///
-/// An axis names a rank position and is int32 in every enforced surface
+/// An axis names a rank position and is i32 in every enforced surface
 /// (`sum`, `permute`, `shape`). chelis#1113 owns the numbered-atom
 /// classification; until it lands this keeps the acceptance closed so
-/// no axis-taking builtin silently admits an int64 axis while `sum`
+/// no axis-taking builtin silently admits an i64 axis while `sum`
 /// rejects one. `Var` and `Error` pass through: an axis that is still
 /// unresolved carries no dtype to judge, and one that already failed
 /// must not produce a second diagnostic for the same cause.
@@ -499,7 +499,7 @@ pub(super) fn reject_non_int32_axis(
                 CheckErrorKind::TypeMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{op} expects int32 axis, got {other}"),
+                    format!("{op} expects i32 axis, got {other}"),
                 ),
                 vec![],
             ),
@@ -562,7 +562,7 @@ pub(super) fn resolve_axis_pair_member(
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
     reject_non_int32_axis(op, axis_ty, list, errors)?;
-    // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
+    // Issue #216: use the cast-aware extractor so `cast(N, i32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
     // chelis#731 §C3: the out-of-bounds `Err` now carries the
@@ -611,7 +611,7 @@ pub(super) fn resolve_axis_pair_member(
 ///
 /// `axis_ty` is the axis argument's resolved (subst-applied) type,
 /// screened by [`reject_non_int32_axis`] before extraction so no caller
-/// silently admits an int64 axis the way `cumsum`/`concat` once did
+/// silently admits an i64 axis the way `cumsum`/`concat` once did
 /// while `sum` rejected one.
 pub(super) fn resolve_builtin_axis(
     op: &str,

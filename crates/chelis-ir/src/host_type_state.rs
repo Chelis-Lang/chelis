@@ -185,7 +185,7 @@ impl std::error::Error for HostTypeDecodeError {}
 impl HostTypeTerm {
     // Compatibility spellings for the scalar variants while the host lowerer
     // migrates from its former coarse enum.  They are exact logical
-    // precisions, not defaults: int32 and int64 no longer collapse at the
+    // precisions, not defaults: i32 and i64 no longer collapse at the
     // syntax boundary, and the narrow widths remain representable terms.
     #[allow(non_upper_case_globals)]
     pub const Int64: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::Int64));

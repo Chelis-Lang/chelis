@@ -58,7 +58,7 @@ mylib = {{ path = "./mylib" }}
     );
     write_file(
         &root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     );
 
     write_file(
@@ -76,9 +76,9 @@ module_prefix = "Mylib"
     write_file(
         &root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add, double, square)\n\n\
-         def add(x: int32, y: int32) -> int32 = x + y\n\
-         def double(x: int32) -> int32 = x + x\n\
-         def square(x: int32) -> int32 = x * x\n",
+         def add(x: i32, y: i32) -> i32 = x + y\n\
+         def double(x: i32) -> i32 = x + x\n\
+         def square(x: i32) -> i32 = x * x\n",
     );
 
     write_file(
@@ -113,7 +113,7 @@ fn cmd_eval_reef_failure_preserves_transcript_channels() {
     let entry_path = root.join("failure.ch");
     write_file(
         &entry_path,
-        "def run() -> int64 ! { IO } = {\n_ = print(\"before\")\nvalue = floor_div(1i64, 0i64)\n_ = print(\"after\")\nvalue\n}\nout = run()\n",
+        "def run() -> i64 ! { IO } = {\n_ = print(\"before\")\nvalue = floor_div(1i64, 0i64)\n_ = print(\"after\")\nvalue\n}\nout = run()\n",
     );
     for json in [false, true] {
         let mut command = Command::cargo_bin("chelis").expect("binary");
@@ -207,7 +207,7 @@ fn root_display(root: &chelis_compiler_api::schema::EvaluatedRoot) -> String {
 fn cmd_eval_reef_package_simple_def_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalsimple.ch");
-    let snippet = "module App.EvalSimple\n\ndef simple_value() -> int32 = 42\n";
+    let snippet = "module App.EvalSimple\n\ndef simple_value() -> i32 = 42\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -240,7 +240,7 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
 fn cmd_eval_json_reef_package_simple_def_emits_json() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evaljson.ch");
-    let snippet = "module App.EvalJson\n\ndef simple_value() -> int32 = 42\n";
+    let snippet = "module App.EvalJson\n\ndef simple_value() -> i32 = 42\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -278,7 +278,7 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalpathdep.ch");
     let snippet = "module App.EvalPathDep\nimport Mylib.Math (add)\n\n\
-                   def imported_sum() -> int32 = add(20, 22)\n";
+                   def imported_sum() -> i32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -316,7 +316,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
     let snippet_dir = tempdir().expect("snippet tempdir");
     let entry_path = snippet_dir.path().join("snippet.ch");
     let snippet = "import Mylib.Math (square)\n\n\
-                   bench_value: int32 = square(7)\n";
+                   bench_value: i32 = square(7)\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -340,14 +340,14 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
 /// must still work. Without this, the refactor could silently route
 /// raw files through a code path that requires reef state and produce
 /// a confusing error instead of the file's actual eval output. Use a
-/// bare `name: int32 = ...` value binding (not a `def` — 0-arg fns
+/// bare `name: i32 = ...` value binding (not a `def` — 0-arg fns
 /// are not eagerly evaluated) so the host-program evaluator emits a
 /// non-empty transcript.
 #[test]
 fn cmd_eval_raw_file_outside_reef_package_uses_legacy_path() {
     let dir = tempdir().expect("tempdir");
     let entry_path = dir.path().join("raw.ch");
-    write_file(&entry_path, "raw_value: int32 = 13\n");
+    write_file(&entry_path, "raw_value: i32 = 13\n");
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -389,8 +389,8 @@ fn cmd_eval_value_binding_calling_imported_fn_is_not_dropped() {
     let entry_path = root.join("src/imported.ch");
     let snippet = "module App.Imported\n\
                    import Mylib.Math (add)\n\n\
-                   local_sum: int32 = 1 + 2\n\
-                   imported_sum: int32 = add(20, 22)\n";
+                   local_sum: i32 = 1 + 2\n\
+                   imported_sum: i32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -507,7 +507,7 @@ module_prefix = "Mylib"
 
 /// Host-arrow-root surfacing, case (a) — POSITIVE.
 ///
-/// The arrow form `def n() -> int32 = <host expr>` desugars to a nullary
+/// The arrow form `def n() -> i32 = <host expr>` desugars to a nullary
 /// thunk `(def n (fn () body))`. The host runtime's eager value-binding
 /// order skips it (it looks like a function), so before the surfacing
 /// pass a host-lane arrow root was dropped entirely: `--json` reported
@@ -523,7 +523,7 @@ fn cmd_eval_host_arrow_pure_root_surfaces_applied_value() {
     let entry_path = root.join("src/arrowpure.ch");
     let snippet = "module App.ArrowPure\n\
                    import Mylib.Math (add)\n\n\
-                   def priced() -> int32 = add(20, 22)\n";
+                   def priced() -> i32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -624,8 +624,8 @@ fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
     let entry_path = root.join("src/arrowconsumed.ch");
     let snippet = "module App.ArrowConsumed\n\
                    import Mylib.Math (add)\n\n\
-                   def base() -> int32 = add(20, 22)\n\
-                   consumer: int32 = base() + cast(100, int32)\n";
+                   def base() -> i32 = add(20, 22)\n\
+                   consumer: i32 = base() + cast(100, i32)\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")

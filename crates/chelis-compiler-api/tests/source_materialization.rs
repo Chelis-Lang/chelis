@@ -87,7 +87,7 @@ fn dto_suffixes_do_not_authorize_source_or_contradictory_literal_origins() {
         ),
         (
             "check-deep",
-            "(def {} value (lit {type: (t-prim {} int64), literal_source: integer} 1))",
+            "(def {} value (lit {type: (t-prim {} i64), literal_source: integer} 1))",
         ),
         (
             "check-deep",
@@ -108,7 +108,7 @@ fn preserved_history_is_readmitted_before_becoming_a_live_annotation() {
     for payload in [
         "bare_name",
         "(lit {type: false} 1)",
-        "(lit {type: (t-prim {} int32), type: (t-prim {} int32)} 1)",
+        "(lit {type: (t-prim {} i32), type: (t-prim {} i32)} 1)",
         "(var {surf_path: \"X\"} x)",
     ] {
         let source = format!("(def {{source: (macro_name {payload})}} value (lit {{}} 1))");

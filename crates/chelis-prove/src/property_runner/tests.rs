@@ -14,10 +14,10 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
 
 #[cfg(feature = "smt")]
 const GENERAL_BOND_INDUCTION: &str = "module M
-def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+def bond_value(n: i32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * bond_value(n - 1, coupon, discount)
-@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+@property bond_value_nonnegative forall(n: i32, coupon: f64, discount: f64)
 where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";
@@ -139,12 +139,12 @@ fn induction_never_dispatches_an_unchecked_parser_ast() {
 #[test]
 fn induction_accepts_compiler_inlined_alias_recursion_soundly() {
     let source = "module M
-def recur_alias(n: int32, coupon: f64, discount: f64) -> f64 =
+def recur_alias(n: i32, coupon: f64, discount: f64) -> f64 =
   bond_value(n, coupon, discount)
-def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+def bond_value(n: i32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * recur_alias(n - 1, coupon, discount)
-@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+@property bond_value_nonnegative forall(n: i32, coupon: f64, discount: f64)
 where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";

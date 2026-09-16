@@ -154,7 +154,7 @@ fn host_admission_preserves_shared_runtime_row_guard() {
     // relationship and refuses the disagreeing call.
     assert_eq!(
         error.errors[0].message,
-        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at int64"
+        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at i64"
     );
 }
 

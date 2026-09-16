@@ -96,7 +96,7 @@ fn assert_type_or_dimension_rejected(source: &str) {
 fn declaration_boundary_rejects_implicit_collection_contracts() {
     for (operation, source) in [
         ("len", "def size(x) = len(x)\n"),
-        ("len", "def size[a](x: a) -> int64 = len(x)\n"),
+        ("len", "def size[a](x: a) -> i64 = len(x)\n"),
         ("len", "measure = fn (x) -> len(x)\n"),
         ("len", "measure = len\ndef size(x) = measure(x)\n"),
         (
@@ -138,12 +138,12 @@ fn checked_builtin_values_reject_invalid_indirect_calls() {
 #[test]
 fn explicit_and_transported_valid_collection_contracts_score_one() {
     for source in [
-        "def size[a](xs: List[a]) -> int64 = len(xs)\nout = size([1i64])\n",
+        "def size[a](xs: List[a]) -> i64 = len(xs)\nout = size([1i64])\n",
         "measure = len\nout = measure([1i64])\n",
-        "measure = len\nout: int64 = measure([1i64])\n",
-        "op = index\nout: int64 = op([1i64], 0i64)\n",
-        "op = append\nout: List[int64] = op([1i64], 2i64)\n",
-        "op = concat\nout: List[int64] = op([1i64], [2i64])\n",
+        "measure = len\nout: i64 = measure([1i64])\n",
+        "op = index\nout: i64 = op([1i64], 0i64)\n",
+        "op = append\nout: List[i64] = op([1i64], 2i64)\n",
+        "op = concat\nout: List[i64] = op([1i64], [2i64])\n",
     ] {
         assert_accepted(source);
     }
@@ -166,13 +166,13 @@ fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
     );
     assert_type_or_dimension_rejected(
         "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          op([a, b], 1i32)\n\
          }\n",
     );
     assert_rejected(
         "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          op([a, b], 9i32)\n\
          }\n",
         "concat",
@@ -191,18 +191,18 @@ fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
          op([a, b], 0i32)\n\
          }\n",
         "def good(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          op([a, b], 1i32)\n\
          }\n",
         "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          rows: tensor[4, 3, f32] = op([a, b], 0i32)\n\
          cols: tensor[2, 6, f32] = op([a, b], 1i32)\n\
          cols\n\
          }\n",
-        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: i32) \
          -> tensor[*, *, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          op([a, b], axis)\n\
          }\n",
     ] {
@@ -214,7 +214,7 @@ fn transported_tensor_concat_keeps_axis_and_exact_shape_checks() {
 fn tensor_concat_call_evidence_does_not_leak_between_cli_calls() {
     assert_rejected(
         "def mixed(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          bad = op([a, b], 9i32)\n\
          good: tensor[2, 6, f32] = op([a, b], 1i32)\n\
          good\n\
@@ -223,8 +223,8 @@ fn tensor_concat_call_evidence_does_not_leak_between_cli_calls() {
     );
     assert_accepted(
         "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         rows_op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, 3, f32] = concat\n\
-         cols_op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         rows_op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, 3, f32] = concat\n\
+         cols_op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          rows: tensor[4, 3, f32] = rows_op([a, b], 0i32)\n\
          cols: tensor[2, 6, f32] = cols_op([a, b], 1i32)\n\
          cols\n\
@@ -328,7 +328,7 @@ fn imported_checked_values_keep_their_collection_contract() {
 
     fs::write(
         &main,
-        "module Demo.Main\nimport Contract.Measure (measure)\nout: int64 = measure([1i64])\n",
+        "module Demo.Main\nimport Contract.Measure (measure)\nout: i64 = measure([1i64])\n",
     )
     .expect("valid application source");
     let CheckResult {

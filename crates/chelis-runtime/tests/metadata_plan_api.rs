@@ -199,7 +199,7 @@ fn malformed_plan_inputs_trap_before_payload_allocation_or_projection() {
         assert!(!output.status.success(), "{case} returned success");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains(&format!("numeric trap: {class} in metadata_plan at int64")),
+            stderr.contains(&format!("numeric trap: {class} in metadata_plan at i64")),
             "{case}: {stderr}"
         );
         assert!(!stderr.contains("panicked at"), "{case}: {stderr}");

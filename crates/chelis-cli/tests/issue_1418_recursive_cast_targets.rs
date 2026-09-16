@@ -73,8 +73,8 @@ fn recursive_casts_use_each_selected_integer_and_float_dtype() {
 fn mutually_recursive_casts_keep_target_dtype_across_instantiations() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("probe.ch"), r#"module MutualCasts
-def ping[p: Float](x: p, n: int64) -> p = if eq(n, 0i64) then x else pong(add(x, cast(n, p)), sub(n, 1i64))
-def pong[p: Float](x: p, n: int64) -> p = if eq(n, 0i64) then x else ping(add(x, cast(n, p)), sub(n, 1i64))
+def ping[p: Float](x: p, n: i64) -> p = if eq(n, 0i64) then x else pong(add(x, cast(n, p)), sub(n, 1i64))
+def pong[p: Float](x: p, n: i64) -> p = if eq(n, 0i64) then x else ping(add(x, cast(n, p)), sub(n, 1i64))
 f32 = ping(0.5f32, 2i64)
 f64 = ping(0.5f64, 2i64)
 "#).unwrap();
@@ -88,9 +88,9 @@ fn published_arange_and_linspace_match_eval_at_each_requested_width() {
         app.join("src/main.ch"),
         r#"module Demo.Main
 import Std.Tensor.Construct (arange, linspace)
-integer32 = arange(cast(1, int32), cast(4, int32))
+integer32 = arange(cast(1, i32), cast(4, i32))
 integer64 = arange(9007199254740993i64, 9007199254740996i64)
-float32 = linspace(cast(0.0, f32), cast(1.0, f32), cast(3, int64))
+float32 = linspace(cast(0.0, f32), cast(1.0, f32), cast(3, i64))
 float64 = linspace(0.0f64, 1.0f64, 3i64)
 "#,
     )
@@ -112,7 +112,7 @@ fn invalid_cast_targets_and_polymorphic_recursion_fail_for_the_right_reason() {
             "not a recognized primitive type",
         ),
         (
-            "(def {} out (cast {} 1 (t-tuple {} (t-prim {} int32) (t-prim {} int32))))",
+            "(def {} out (cast {} 1 (t-tuple {} (t-prim {} i32) (t-prim {} i32))))",
             "dp",
             "not a recognized primitive type",
         ),
@@ -122,7 +122,7 @@ fn invalid_cast_targets_and_polymorphic_recursion_fail_for_the_right_reason() {
             "bounded by dtype family `Float`",
         ),
         (
-            "type Box[a] =\n  | Full {value: a}\ndef f[a](x: a, n: int32) -> int32 = if n <= 0 then 0 else f(Full {value: x}, n - 1)\nout = f(1i32, 2i32)",
+            "type Box[a] =\n  | Full {value: a}\ndef f[a](x: a, n: i32) -> i32 = if n <= 0 then 0 else f(Full {value: x}, n - 1)\nout = f(1i32, 2i32)",
             "ch",
             "[04-INF-3]",
         ),

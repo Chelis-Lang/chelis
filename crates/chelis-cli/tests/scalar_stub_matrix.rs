@@ -473,8 +473,8 @@ fn f64_scalar_floor_agrees_across_lanes() {
 #[test]
 fn i64_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
-        "max_elem(cast(7, int64), cast(3, int64))",
-        "int64",
+        "max_elem(cast(7, i64), cast(3, i64))",
+        "i64",
         "7",
         "7",
         "i64_max_elem",
@@ -482,14 +482,14 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
 }
 
 /// The bonus three-lane row (#712 shape): the checker accepts
-/// `floor(cast(5, int64))` (score 1), eval REJECTS it at runtime (`float op
+/// `floor(cast(5, i64))` (score 1), eval REJECTS it at runtime (`float op
 /// expects float arg`), and the compiled binary prints 0. floor is
 /// well-defined on integers and the checker's own op list agrees (it is
 /// absent from TRANSCENDENTAL_FLOAT_ONLY_OPS, per chelis#699), so the
 /// correct behavior is identity.
 #[test]
 fn integer_scalar_floor_ceil_round_are_identity_in_all_lanes() {
-    for dtype in ["int8", "int16", "int32", "int64"] {
+    for dtype in ["i8", "i16", "i32", "i64"] {
         for (op, input) in [("floor", "5"), ("ceil", "-5"), ("round", "5")] {
             let name = format!("{dtype}_{op}_identity");
             let expected = input;
@@ -536,7 +536,7 @@ fn scalar_transcendental_and_rounding_families_cover_reduced_float_widths() {
 
 #[test]
 fn scalar_max_min_cover_all_admitted_widths() {
-    for dtype in ["int8", "int16", "int32", "int64"] {
+    for dtype in ["i8", "i16", "i32", "i64"] {
         for (op, expected) in [("max_elem", "7"), ("min_elem", "-3")] {
             let name = format!("{dtype}_{op}");
             assert_scalar_parity(
@@ -568,11 +568,9 @@ fn float_only_scalar_families_reject_integer_and_bool_at_check_time() {
         "relu", "sigmoid", "tanh", "silu", "gelu", "tan", "atan", "recip",
     ] {
         assert_check_rejects(
-            &format!(
-                "module M.Main\ndef run() -> int64 = {op}(cast(1, int64))\nout = print(run())\n"
-            ),
+            &format!("module M.Main\ndef run() -> i64 = {op}(cast(1, i64))\nout = print(run())\n"),
             op,
-            "int64",
+            "i64",
         );
         assert_check_rejects(
             &format!("module M.Main\ndef run() -> bool = {op}(true)\nout = print(run())\n"),
@@ -840,7 +838,7 @@ fn working_f32_scalar_ops_agree_across_lanes() {
     }
 }
 
-/// int64 scalar `mod` / `floor_div` / `trunc_div` / `abs` / `neg` are correct
+/// i64 scalar `mod` / `floor_div` / `trunc_div` / `abs` / `neg` are correct
 /// in both lanes: the #387 `checked_int_binop` family holds up in C. Bounds
 /// the stub to the eight ops and keeps the int lane's working core locked.
 #[test]
@@ -850,23 +848,19 @@ fn working_i64_scalar_ops_agree_across_lanes() {
         return;
     }
     for (op_expr, expected, name) in [
-        ("mod(cast(7, int64), cast(3, int64))", "1", "ctl_i64_mod"),
+        ("mod(cast(7, i64), cast(3, i64))", "1", "ctl_i64_mod"),
+        ("floor_div(cast(7, i64), cast(2, i64))", "3", "ctl_i64_fdiv"),
         (
-            "floor_div(cast(7, int64), cast(2, int64))",
-            "3",
-            "ctl_i64_fdiv",
-        ),
-        (
-            "trunc_div(cast(-7, int64), cast(2, int64))",
+            "trunc_div(cast(-7, i64), cast(2, i64))",
             "-3",
             "ctl_i64_tdiv",
         ),
-        ("abs(cast(-5, int64))", "5", "ctl_i64_abs"),
-        ("neg(cast(5, int64))", "-5", "ctl_i64_neg"),
+        ("abs(cast(-5, i64))", "5", "ctl_i64_abs"),
+        ("neg(cast(5, i64))", "-5", "ctl_i64_neg"),
     ] {
         // Integer scalar digits are grammar-stable: one expected string
         // serves both lanes.
-        assert_scalar_parity(op_expr, "int64", expected, expected, name);
+        assert_scalar_parity(op_expr, "i64", expected, expected, name);
     }
 }
 
@@ -904,16 +898,13 @@ fn tensor_forms_of_stubbed_ops_are_correct() {
 /// Negative parity so a #715 fix does not over-accept.
 #[test]
 fn int_div_and_recip_stay_rejected_by_the_checker() {
-    let err = eval_first_line(&scalar_program(
-        "div(cast(7, int64), cast(2, int64))",
-        "int64",
-    ))
-    .expect_err("int div must be rejected");
+    let err = eval_first_line(&scalar_program("div(cast(7, i64), cast(2, i64))", "i64"))
+        .expect_err("int div must be rejected");
     assert!(
         err.contains("PrecisionMismatch") || err.contains("div on integer"),
         "got: {err}"
     );
-    let err = eval_first_line(&scalar_program("recip(cast(4, int64))", "int64"))
+    let err = eval_first_line(&scalar_program("recip(cast(4, i64))", "i64"))
         .expect_err("int recip must be rejected");
     assert!(
         err.contains("TypeMismatch") || err.contains("recip"),

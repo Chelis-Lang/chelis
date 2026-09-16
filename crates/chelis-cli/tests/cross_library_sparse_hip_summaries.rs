@@ -88,9 +88,9 @@ fn hip_gather_single_user_def_wrapper_emits_kernel_gather_i64() {
     // codegen inlines `my_g`'s body into the entry DAG before
     // emitting, so the resulting HIP source MUST contain the same
     // `kernel_gather_i64` dispatch name a direct call would emit.
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let hip = build_to_hip(source, "hip_gather_single_wrapper");
     assert!(
@@ -99,11 +99,11 @@ fn hip_gather_single_user_def_wrapper_emits_kernel_gather_i64() {
          wrapper-inlining-via-lower_named_tensor_entry_dag invariant). \
          HIP source:\n{hip}",
     );
-    // Negative companion: must NOT emit the int32 variant or the
+    // Negative companion: must NOT emit the i32 variant or the
     // invalid-precision fallback.
     assert!(
         !hip.contains("kernel_gather_i32"),
-        "single-wrapper gather (int64 indices) must NOT emit `kernel_gather_i32`",
+        "single-wrapper gather (i64 indices) must NOT emit `kernel_gather_i32`",
     );
     assert!(
         !hip.contains("kernel_gather_invalid"),
@@ -113,22 +113,22 @@ fn hip_gather_single_user_def_wrapper_emits_kernel_gather_i64() {
 
 #[test]
 fn hip_gather_single_user_def_wrapper_int32_indices_emits_kernel_gather_i32() {
-    // Sibling sweep: int32 indices through a user-`def` wrapper must
+    // Sibling sweep: i32 indices through a user-`def` wrapper must
     // dispatch to `kernel_gather_i32`. Locks the precision-aware
     // kernel-name dispatch through the inlining path.
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int32]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i32]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int32]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i32]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let hip = build_to_hip(source, "hip_gather_int32_wrapper");
     assert!(
         hip.contains("kernel_gather_i32"),
-        "single-wrapper gather with int32 indices MUST emit `kernel_gather_i32`. \
+        "single-wrapper gather with i32 indices MUST emit `kernel_gather_i32`. \
          HIP source:\n{hip}",
     );
     assert!(
         !hip.contains("kernel_gather_i64"),
-        "single-wrapper gather (int32 indices) must NOT emit `kernel_gather_i64`",
+        "single-wrapper gather (i32 indices) must NOT emit `kernel_gather_i64`",
     );
 }
 
@@ -138,11 +138,11 @@ fn hip_gather_nested_user_def_wrapper_emits_kernel_gather_i64() {
     // def wrap_g(...) = my_g(...); def f(...) = wrap_g(...)`. The
     // recursive inlining in `lower_plain_callable_app` should
     // produce the same in-line `RiscOp::Gather` in the entry DAG.
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = wrap_g(table, indices)\n";
     let hip = build_to_hip(source, "hip_gather_nested_wrapper");
     assert!(
@@ -161,11 +161,11 @@ fn hip_scatter_replace_single_user_def_wrapper_emits_kernel_scatter_replace_i32(
     // Direct `scatter_replace` builtin inside a user-`def`. The
     // wrapper inline should produce `RiscOp::Scatter` in the entry
     // DAG and HIP emits `kernel_scatter_replace_i32` (per
-    // `emit.rs:714-721`: int32 indices route).
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    // `emit.rs:714-721`: i32 indices route).
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
     let hip = build_to_hip(source, "hip_scatter_replace_single_wrapper");
@@ -176,7 +176,7 @@ fn hip_scatter_replace_single_user_def_wrapper_emits_kernel_scatter_replace_i32(
     );
     assert!(
         !hip.contains("kernel_scatter_replace_i64"),
-        "single-wrapper scatter_replace (int32 indices) must NOT emit \
+        "single-wrapper scatter_replace (i32 indices) must NOT emit \
          `kernel_scatter_replace_i64`",
     );
     assert!(
@@ -198,22 +198,22 @@ fn hip_scatter_replace_single_user_def_wrapper_emits_kernel_scatter_replace_i32(
 
 #[test]
 fn hip_scatter_replace_single_user_def_wrapper_int64_indices_emits_kernel_scatter_replace_i64() {
-    // Sibling sweep: int64 indices through a user-`def` wrapper.
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int64], \
+    // Sibling sweep: i64 indices through a user-`def` wrapper.
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i64], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int64], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i64], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
     let hip = build_to_hip(source, "hip_scatter_replace_int64_wrapper");
     assert!(
         hip.contains("kernel_scatter_replace_i64"),
-        "single-wrapper scatter_replace with int64 indices MUST emit \
+        "single-wrapper scatter_replace with i64 indices MUST emit \
          `kernel_scatter_replace_i64`. HIP source:\n{hip}",
     );
     assert!(
         !hip.contains("kernel_scatter_replace_i32"),
-        "single-wrapper scatter_replace (int64 indices) must NOT emit \
+        "single-wrapper scatter_replace (i64 indices) must NOT emit \
          `kernel_scatter_replace_i32`",
     );
 }
@@ -221,13 +221,13 @@ fn hip_scatter_replace_single_user_def_wrapper_int64_indices_emits_kernel_scatte
 #[test]
 fn hip_scatter_replace_nested_user_def_wrapper_emits_kernel_scatter_replace_i32() {
     // Two-level nested wrapper for scatter_replace.
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def wrap_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def wrap_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   wrap_sr(table, indices, updates)\n";
     let hip = build_to_hip(source, "hip_scatter_replace_nested_wrapper");
@@ -264,10 +264,10 @@ fn hip_pentaop_scatter_add_wrapper_does_not_emit_kernel_scatter_add() {
     // because the program is host-heavy). The build still succeeds;
     // the produced source is C, not HIP. Either way, no
     // `kernel_scatter_add_*` should be present.
-    let source = "def my_sa(base: tensor[10, 4, f32], bin_ids: tensor[64, int64], \
+    let source = "def my_sa(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], \
                   updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = \
                   scatter(base, bin_ids, updates, 0, \"add\")\n\
-                  def f(base: tensor[10, 4, f32], bin_ids: tensor[64, int64], \
+                  def f(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], \
                   updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = \
                   my_sa(base, bin_ids, updates)\n";
     let dir = tempdir().expect("tempdir");
@@ -329,7 +329,7 @@ fn hip_pentaop_scatter_add_wrapper_does_not_emit_kernel_scatter_add() {
 
 #[test]
 fn hip_gather_direct_call_baseline_emits_kernel_gather_i64() {
-    let source = "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n";
     let hip = build_to_hip(source, "hip_gather_direct_baseline");
     assert!(
@@ -340,7 +340,7 @@ fn hip_gather_direct_call_baseline_emits_kernel_gather_i64() {
 
 #[test]
 fn hip_scatter_replace_direct_call_baseline_emits_kernel_scatter_replace_i32() {
-    let source = "def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n";
     let hip = build_to_hip(source, "hip_scatter_replace_direct_baseline");

@@ -345,15 +345,15 @@ fn authored_deep_type_metadata_cannot_override_the_inferred_rank() {
     (let {}
       (bind {}
         s
-        (app {} (var {} stride) (var {} x) (lit {type: (t-prim {} int64)} 2)))
+        (app {} (var {} stride) (var {} x) (lit {type: (t-prim {} i64)} 2)))
       (let {}
         (bind {}
           e
           (app {}
             (var {} insert)
             (var {} x)
-            (lit {type: (t-prim {} int32)} 0)
-            (lit {type: (t-prim {} int64)} 2)))
+            (lit {type: (t-prim {} i32)} 0)
+            (lit {type: (t-prim {} i64)} 2)))
         (app {} (var {} add) (var {} s) (var {} e))))))
 ";
     let forged = control.replace(
@@ -534,7 +534,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
         String::from_utf8_lossy(&bad_eval.stdout)
     );
     assert!(
-        bad_stderr.contains("numeric trap: domain in load at int64"),
+        bad_stderr.contains("numeric trap: domain in load at i64"),
         "the [04-NUM-9] rendering, at the extent's own dtype, with the \
          section 4.7 slot for an all-interface guard: {bad_stderr}"
     );
@@ -559,7 +559,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
         "a refuted unit-extent claim must abort on C: {bad_output}"
     );
     assert!(
-        bad_output.contains("numeric trap: domain in load at int64")
+        bad_output.contains("numeric trap: domain in load at i64")
             && bad_output.contains("claimed = 1")
             && bad_output.contains("axis 0 = 2"),
         "the C lane renders the same guard: {bad_output}"

@@ -214,14 +214,14 @@ fn integer_fused_chain_is_a_diagnostic_not_a_panic() {
 
     let err = codegen(&fused, "int32_fused_reject_probe")
         .map(|_| ())
-        .expect_err("an int32 fused chain must be rejected, not emitted");
+        .expect_err("an i32 fused chain must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(
         rendered.starts_with("unsupported:"),
         "the rejection must come through the branded diagnostic channel; got: {rendered}"
     );
     assert!(
-        rendered.contains("int32"),
+        rendered.contains("i32"),
         "the rejection must name the offending dtype; got: {rendered}"
     );
 }

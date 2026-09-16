@@ -74,7 +74,7 @@ fn check_both_ingresses(source: &str, accepted: bool) {
 
 #[test]
 fn a_deferred_cast_preserves_its_consumers_family_rejection() {
-    for dtype in ["int32", "f32"] {
+    for dtype in ["i32", "f32"] {
         check(
             &format!("out = 2.0f32 |> recip |> fn (v) -> cast(floor(v), {dtype}) |> recip\n"),
             dtype == "f32",
@@ -154,7 +154,7 @@ fn a_wrapper_cannot_silently_narrow_its_authored_contract() {
 #[test]
 fn bounded_function_values_keep_their_restriction() {
     let helper = "def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
-    for dtype in ["int32", "f32"] {
+    for dtype in ["i32", "f32"] {
         check(
             &format!(
                 "{helper}def apply_it(f: tensor[3, {dtype}] -> tensor[{dtype}], x: tensor[3, {dtype}]) -> tensor[{dtype}] = f(x)\ndef use_it(x: tensor[3, {dtype}]) -> tensor[{dtype}] = apply_it(g, x)\n"
@@ -174,7 +174,7 @@ fn local_lambda_and_aggregate_projection_check_the_declared_precision() {
             bound == "p: Float",
         );
     }
-    for dtype in ["int32", "f32"] {
+    for dtype in ["i32", "f32"] {
         check(
             &format!(
                 "type Box =\n | Box {{ t: tensor[3, {dtype}] }}\ndef g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\ndef pick(b: Box) -> tensor[{dtype}] = g(b.t)\n"
@@ -191,7 +191,7 @@ fn inferred_local_operands_still_bind_before_the_declaration_boundary() {
         true,
     );
     check(
-        "def f(x: tensor[3, int32]) -> tensor[int32] = {\n h = fn (t) -> mean(t, 0i32)\n h(x)\n}\n",
+        "def f(x: tensor[3, i32]) -> tensor[i32] = {\n h = fn (t) -> mean(t, 0i32)\n h(x)\n}\n",
         false,
     );
 }
@@ -215,7 +215,7 @@ fn numeric_and_integer_operation_contracts_cover_each_spec_family() {
             "x, 0i32",
             "tensor[p]",
         ),
-        ("argmax_reduce argmin_reduce", "x, 0i32", "tensor[int64]"),
+        ("argmax_reduce argmin_reduce", "x, 0i32", "tensor[i64]"),
     ] {
         for operation in operations.split_whitespace() {
             for binder in ["p", "p: Numeric"] {
@@ -274,26 +274,26 @@ fn window_reduction_contracts_cover_each_spec_family_on_both_ingresses() {
         (
             "reduce_window_mean",
             &[("p", false), ("p: Numeric", false), ("p: Float", true)][..],
-            "int32",
+            "i32",
             "f32",
         ),
         (
             "reduce_window_sum",
             &[("p", false), ("p: Numeric", true)][..],
             "bool",
-            "int32",
+            "i32",
         ),
         (
             "reduce_window_max",
             &[("p", false), ("p: Numeric", true)][..],
             "bool",
-            "int32",
+            "i32",
         ),
         (
             "reduce_window_min",
             &[("p", false), ("p: Numeric", true)][..],
             "bool",
-            "int32",
+            "i32",
         ),
     ] {
         for &(binder, accepted) in binders {
@@ -379,7 +379,7 @@ fn deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingre
         )
     };
 
-    for dtype in ["bool", "int32"] {
+    for dtype in ["bool", "i32"] {
         let invalid_rank = source(dtype, "[1i64, 1i64]");
         let diagnostics = both_ingress_diagnostics(&invalid_rank);
         assert!(
@@ -413,7 +413,7 @@ fn deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingre
 fn a_lexically_shadowed_window_builtin_keeps_its_function_contract() {
     check_both_ingresses(
         "def apply(\
-           reduce_window_sum: &tensor[3, bool] -> List[int64] -> List[int64] -> tensor[2, bool], \
+           reduce_window_sum: &tensor[3, bool] -> List[i64] -> List[i64] -> tensor[2, bool], \
            x: tensor[3, bool]) -> tensor[2, bool] = \
            reduce_window_sum(x, [2i64], [1i64])\n",
         true,
@@ -441,8 +441,8 @@ fn omitted_signatures_do_not_publish_inferred_dtype_contracts() {
     check("def g() = sin(to_tensor([]))\n", false);
     for (expression, concrete) in [
         ("sin(x)", "f32"),
-        ("add(x, x)", "int32"),
-        ("trunc_div(x, x)", "int32"),
+        ("add(x, x)", "i32"),
+        ("trunc_div(x, x)", "i32"),
     ] {
         check(
             &format!("def g(x: {concrete}) -> {concrete} = {expression}\n"),
@@ -490,7 +490,7 @@ fn inferred_family_lambdas_bind_monomorphically_within_the_declaration() {
         true,
     );
     check(
-        "def use() -> int32 = {\n h = fn (x) -> sin(x)\n h(1i32)\n}\n",
+        "def use() -> i32 = {\n h = fn (x) -> sin(x)\n h(1i32)\n}\n",
         false,
     );
     check(
@@ -518,7 +518,7 @@ fn contract_transport_and_unconstrained_inference_remain_polymorphic() {
         "def use() -> f64 = {\n op = sin\n _ = op(1.0f32)\n op(1.0f64)\n}\n",
         true,
     );
-    check("def use() -> int32 = {\n op = sin\n op(1i32)\n}\n", false);
+    check("def use() -> i32 = {\n op = sin\n op(1i32)\n}\n", false);
 }
 
 #[test]
@@ -545,10 +545,10 @@ fn arithmetic_and_matmul_require_their_operand_families() {
 
 #[test]
 fn a_primitive_function_value_carries_its_admission_requirement() {
-    for dtype in ["int32", "f32"] {
+    for dtype in ["i32", "f32"] {
         check(
             &format!(
-                "def apply_it(f: &tensor[3, {dtype}] -> int32 -> tensor[{dtype}], x: tensor[3, {dtype}]) -> tensor[{dtype}] = f(x, 0i32)\ndef g(x: tensor[3, {dtype}]) -> tensor[{dtype}] = apply_it(mean, x)\n"
+                "def apply_it(f: &tensor[3, {dtype}] -> i32 -> tensor[{dtype}], x: tensor[3, {dtype}]) -> tensor[{dtype}] = f(x, 0i32)\ndef g(x: tensor[3, {dtype}]) -> tensor[{dtype}] = apply_it(mean, x)\n"
             ),
             dtype == "f32",
         );
@@ -564,7 +564,7 @@ fn a_primitive_function_value_carries_its_admission_requirement() {
 #[test]
 fn empty_literal_precision_cannot_evade_the_operation_contract() {
     let program = desugar_program(
-        &parse_str("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n").unwrap(),
+        &parse_str("def f() -> tensor[i32] = mean(to_tensor([]), 0i32)\n").unwrap(),
     );
     let Err(report) = check_typed_program(&program) else {
         panic!("an empty reduction operand must not escape admission checking");
@@ -576,7 +576,7 @@ fn empty_literal_precision_cannot_evade_the_operation_contract() {
             .any(|error| error.message.contains("unresolved `mean` shape obligation"))
     );
     check(
-        "def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n",
+        "def f() -> tensor[3, i32] = softmax(to_tensor([]), 0i32)\n",
         false,
     );
 }
@@ -623,7 +623,7 @@ fn every_family_primitive_alias_preserves_its_requirement() {
 
 #[test]
 fn a_failed_family_application_does_not_also_claim_its_operand_was_never_bound() {
-    let source = "def f() -> int32 = {\n a = fn(t) -> mean(t, 0i32)\n b = fn(u) -> matmul(u, u)\n _ = a(to_tensor([1i32, 2i32, 4i32]))\n 1i32\n}\n";
+    let source = "def f() -> i32 = {\n a = fn(t) -> mean(t, 0i32)\n b = fn(u) -> matmul(u, u)\n _ = a(to_tensor([1i32, 2i32, 4i32]))\n 1i32\n}\n";
     let program = desugar_program(&parse_str(source).unwrap());
     let Err(report) = check_typed_program(&program) else {
         panic!("invalid family");
@@ -651,7 +651,7 @@ fn a_failed_family_application_does_not_also_claim_its_operand_was_never_bound()
 #[test]
 fn inferred_family_requirements_intersect_without_narrowing_authored_contracts() {
     let helper = "def id_dt[p](x: tensor[3, p]) -> tensor[3, p] = x\n";
-    for (dtype, accepts) in [("f32", true), ("int32", false)] {
+    for (dtype, accepts) in [("f32", true), ("i32", false)] {
         check(
             &format!(
                 "{helper}def f(x: tensor[3, {dtype}]) -> tensor[{dtype}] = {{\n h = fn(t) -> mean(add(id_dt(t), id_dt(t)), 0i32)\n h(x)\n}}\n"

@@ -206,9 +206,9 @@ fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
 
 #[test]
 fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let c = build_to_c(source, "sparse_gather_user_def");
 
@@ -267,10 +267,10 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
     // `specialization_dispatch.rs::scatter`), not `RiscOp::ScatterAdd`.
     // We confirm that pentaop path remains generic and that no false
     // summary is registered.
-    let source = "def my_sa(base: tensor[10, 4, f32], bin_ids: tensor[64, int64], \
+    let source = "def my_sa(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], \
                   updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = \
                   scatter(base, bin_ids, updates, 0, \"add\")\n\
-                  def f(base: tensor[10, 4, f32], bin_ids: tensor[64, int64], \
+                  def f(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], \
                   updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = \
                   my_sa(base, bin_ids, updates)\n";
     let c = build_to_c(source, "sparse_scatter_add_pentaop");
@@ -293,10 +293,10 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
 
 #[test]
 fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
     let c = build_to_c(source, "sparse_scatter_replace_user_def");
@@ -335,11 +335,11 @@ fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
 
 #[test]
 fn nested_user_def_gather_wrapper_chain_emits_inline_sparse_gather_loop() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = wrap_g(table, indices)\n";
     let c = build_to_c(source, "sparse_gather_nested_user_def");
 
@@ -368,13 +368,13 @@ fn nested_user_def_gather_wrapper_chain_emits_inline_sparse_gather_loop() {
 
 #[test]
 fn nested_user_def_scatter_replace_wrapper_chain_emits_inline_loop() {
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def wrap_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def wrap_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   wrap_sr(table, indices, updates)\n";
     let c = build_to_c(source, "sparse_scatter_replace_nested_user_def");
@@ -400,10 +400,10 @@ fn rejected_helper_with_extra_op_after_sparse_falls_back_to_host_call() {
     // Helper post-processes the gather result with an elementwise
     // add. The helper DAG root is `add`, not `gather`, so the
     // summarizer rejects (root op is not Gather/ScatterAdd/Scatter).
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let c = build_to_c(source, "sparse_reject_extra_op");
@@ -431,10 +431,10 @@ fn rejected_helper_with_intermediate_op_on_operand_falls_back() {
     // not a direct `Load`, so the summarizer rejects (operand is
     // not a direct Load).
     let source = "def bad(table: tensor[1000, 128, f32], zero: tensor[1000, 128, f32], \
-                  indices: tensor[64, int64]) -> tensor[64, 128, f32] = \
+                  indices: tensor[64, i64]) -> tensor[64, 128, f32] = \
                   gather(add(table, zero), indices, 0)\n\
                   def f(table: tensor[1000, 128, f32], zero: tensor[1000, 128, f32], \
-                  indices: tensor[64, int64]) -> tensor[64, 128, f32] = \
+                  indices: tensor[64, i64]) -> tensor[64, 128, f32] = \
                   bad(table, zero, indices)\n";
     let c = build_to_c(source, "sparse_reject_non_load_operand");
     let f_body = function_body(&c, "f");
@@ -459,12 +459,12 @@ fn rejected_helper_with_two_branches_falls_back() {
     // body is registered and the function specialization is `None`.
     // The caller then falls back to a host function call.
     let source = "def bad(flag: bool, table: tensor[1000, 128, f32], \
-                  ind_a: tensor[64, int64], ind_b: tensor[64, int64]) \
+                  ind_a: tensor[64, i64], ind_b: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = \
                   if flag then gather(table, ind_a, 0) \
                   else gather(table, ind_b, 0)\n\
                   def f(flag: bool, table: tensor[1000, 128, f32], \
-                  ind_a: tensor[64, int64], ind_b: tensor[64, int64]) \
+                  ind_a: tensor[64, i64], ind_b: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = bad(flag, table, ind_a, ind_b)\n";
     let c = build_to_c(source, "sparse_reject_multiple_return_paths");
     let f_body = function_body(&c, "f");
@@ -506,7 +506,7 @@ fn rejected_top_level_gather_with_wildcard_dim_falls_back() {
     // `cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`
     // during W3-B development and is permanently pinned here.
     let source = "lhs = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)\n\
-                  ids_list: List[int64] = [cast(0, int64), cast(1, int64)]\n\
+                  ids_list: List[i64] = [cast(0, i64), cast(1, i64)]\n\
                   token_ids = to_tensor(ids_list)\n\
                   result = gather(lhs, token_ids, 0)\n";
     let c = build_to_c(source, "sparse_reject_wildcard_dim");
@@ -545,11 +545,11 @@ fn rejected_top_level_gather_with_wildcard_dim_falls_back() {
 
 #[test]
 fn rejected_scatter_replace_with_extra_op_falls_back() {
-    let source = "def bad(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def bad(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32], zero: tensor[3, 2, f32]) \
                   -> tensor[3, 2, f32] = \
                   add(scatter_replace(table, indices, updates, 0), zero)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32], zero: tensor[3, 2, f32]) \
                   -> tensor[3, 2, f32] = bad(table, indices, updates, zero)\n";
     let c = build_to_c(source, "sparse_reject_sr_extra_op");
@@ -595,7 +595,7 @@ fn checked_sparse_host_helpers_execute_nontrailing_exact_integer_domains() {
         ),
     ] {
         let source = format!(
-            "def inner(base: tensor[2,3,int64], indices: tensor[2,int64], updates: tensor[2,2,int64]) -> tensor[{result_shape},int64] = {op}\ndef outer(base: tensor[2,3,int64], indices: tensor[2,int64], updates: tensor[2,2,int64]) -> tensor[{result_shape},int64] = inner(base,indices,updates)\nbase: tensor[2,3,int64] = reshape(to_tensor([9007199254740993i64,9007199254740994i64,9007199254740995i64,9007199254740996i64,9007199254740997i64,9007199254740998i64]),[2i64,3i64])\nindices: tensor[2,int64] = to_tensor([2i64,2i64])\nupdates: tensor[2,2,int64] = reshape(to_tensor([9007199254741001i64,9007199254741002i64,9007199254741003i64,9007199254741004i64]),[2i64,2i64])\nresult = outer(base,indices,updates)\n"
+            "def inner(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = {op}\ndef outer(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = inner(base,indices,updates)\nbase: tensor[2,3,i64] = reshape(to_tensor([9007199254740993i64,9007199254740994i64,9007199254740995i64,9007199254740996i64,9007199254740997i64,9007199254740998i64]),[2i64,3i64])\nindices: tensor[2,i64] = to_tensor([2i64,2i64])\nupdates: tensor[2,2,i64] = reshape(to_tensor([9007199254741001i64,9007199254741002i64,9007199254741003i64,9007199254741004i64]),[2i64,2i64])\nresult = outer(base,indices,updates)\n"
         );
         let source = chelis_surf::format::format_source(&source).unwrap();
         let c = build_to_c(&source, "checked_sparse_host_source");

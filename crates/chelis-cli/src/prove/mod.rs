@@ -967,8 +967,8 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         }
         // Every signed integer width, recognized through the type system and
         // sampled within the width's representable range via the single
-        // workspace source `Prim::integer_fuzz_bounds` (review 5). int32 is
-        // the literal default; the other widths cast an int32 literal to the
+        // workspace source `Prim::integer_fuzz_bounds` (review 5). i32 is
+        // the literal default; the other widths cast an i32 literal to the
         // target width so the value is well-typed.
         TypeExpr::Named(type_name, _) if is_int_width(type_name) => {
             let (lo, hi) = chelis_types::types::Prim::parse_name(type_name)
@@ -976,11 +976,11 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
                 .expect("is_int_width implies integer_fuzz_bounds");
             let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
-            if type_name == "int32" {
+            if type_name == "i32" {
                 Ok(scalar_sample(
                     name,
                     lit,
-                    deep_lit(deep_int(value), "int32"),
+                    deep_lit(deep_int(value), "i32"),
                     json!(value),
                 ))
             } else {
@@ -1599,7 +1599,7 @@ fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
         .expect("int shrink only uses int widths");
     let value = value.clamp(lo, hi);
     let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
-    let surf_expr = if type_name == "int32" {
+    let surf_expr = if type_name == "i32" {
         lit
     } else {
         cast_expr(lit, type_name)

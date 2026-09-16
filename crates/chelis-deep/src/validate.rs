@@ -756,7 +756,7 @@ mod tests {
     /// a stale `Atom::Name` tag match can never half-work again.
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
-        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))))";
+        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x)))))";
         let exprs = crate::parser::parse_str(source).expect("deep parses");
         assert_eq!(
             find_raw_vocabulary_tag(&exprs),
@@ -801,7 +801,7 @@ mod tests {
             .expect("an empty sequential binding list is valid");
 
         let odd_bind = crate::parser::parse_str_strict(
-            "(let {} (bind {} x (lit {type: (t-prim {} int64)} 1) y) (var {} x))",
+            "(let {} (bind {} x (lit {type: (t-prim {} i64)} 1) y) (var {} x))",
         )
         .expect_err("an odd binding list must be rejected");
         assert!(
@@ -810,7 +810,7 @@ mod tests {
         );
 
         let invalid_param = crate::parser::parse_str_strict(
-            "(fn {} (params {} 1) (lit {type: (t-prim {} int64)} 1))",
+            "(fn {} (params {} 1) (lit {type: (t-prim {} i64)} 1))",
         )
         .expect_err("a parameter must be a bare name or typed helper");
         assert!(
@@ -1000,7 +1000,7 @@ mod tests {
                                 crate::annotations::TypeSyntax::try_new(make_list(vec![
                                     sym("t-prim"),
                                     empty_map(),
-                                    sym("int64"),
+                                    sym("i64"),
                                 ]))
                                 .unwrap(),
                             )),

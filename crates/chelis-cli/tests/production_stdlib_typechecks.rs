@@ -80,7 +80,7 @@ fn production_stdlib_init_xavierext_typechecks() {
 }
 
 // chelis#333: src/tensor/reduce.ch (Std.Tensor.Reduce.{min,prod,argmax,
-// argmin}) was removed — the four bodyless sigs took a runtime int32 axis
+// argmin}) was removed — the four bodyless sigs took a runtime i32 axis
 // but the *_reduce builtins they would forward to require a compile-time
 // constant axis, so the module was unimplementable as declared and never
 // had a runtime function. Consumers call the `*_reduce` builtins with a

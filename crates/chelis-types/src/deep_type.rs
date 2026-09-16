@@ -555,7 +555,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 // replace (round 1, P3). The validator's own reserved-name
                 // branches are gone, so this is the single voice for both.
                 let tensor = self.resolving_tensor_precision;
-                if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+                if let Some(diagnostic) = retired_integer_diagnostic(name, "deep", tensor)
+                    .or_else(|| unsigned_family_diagnostic(name, tensor))
                     .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
                     let diagnostic = self
@@ -636,7 +637,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         // which the same build rejects: one program, two verdicts, depending on
         // which spelling it arrived in. `_` is checked first and stays a hole.
         let tensor = self.resolving_tensor_precision;
-        if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+        if let Some(diagnostic) = retired_integer_diagnostic(name, "deep", tensor)
+            .or_else(|| unsigned_family_diagnostic(name, tensor))
             .or_else(|| deferred_family_diagnostic(name, tensor))
         {
             let diagnostic = self
@@ -897,7 +899,7 @@ pub(crate) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<Che
         return None;
     }
     let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
     Some(CheckError::new(
         CheckErrorKind::UnsupportedTensorPrecision,
         format!(
@@ -933,6 +935,40 @@ pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
     )
 }
 
+pub(crate) fn is_retired_integer_dtype_name(name: &str) -> bool {
+    matches!(name, "int8" | "int16" | "int32" | "int64")
+}
+
+pub(crate) fn retired_integer_diagnostic(
+    name: &str,
+    _carrier: &str,
+    tensor: bool,
+) -> Option<CheckError> {
+    if !is_retired_integer_dtype_name(name) {
+        return None;
+    }
+    let canonical = match name {
+        "int8" => "i8",
+        "int16" => "i16",
+        "int32" => "i32",
+        "int64" => "i64",
+        _ => unreachable!("retired spelling checked above"),
+    };
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use retired spelling `{name}` as a {surface} dtype; the canonical \
+             spelling is `{canonical}`; run `chelis migrate surf --from 0.18 <path>` \
+             for `.ch` or `chelis migrate deep --from 0.18 <path>` for `.dp`"
+        ),
+        vec![format!(
+            "the versioned migration rewrites `{name}` to `{canonical}` without \
+             admitting the retired spelling at normal compiler ingress"
+        )],
+    ))
+}
+
 /// Build a §1.1.1 diagnostic for a reserved-but-deferred dtype name
 /// appearing as a cast target or a tensor element type. Returns `None`
 /// for other names so call sites can short-circuit.
@@ -944,7 +980,7 @@ pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<Che
         return None;
     }
     let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
     Some(CheckError::new(
         CheckErrorKind::UnsupportedTensorPrecision,
         format!(
@@ -963,7 +999,7 @@ pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<Che
 /// Preserve the existing FP8 diagnostic phrase at the shared type boundary.
 fn f8e4m3_diagnostic(tensor: bool) -> CheckError {
     let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
     CheckError::new(
         CheckErrorKind::UnsupportedTensorPrecision,
         format!(

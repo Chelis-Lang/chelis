@@ -82,10 +82,10 @@ fn assert_frozen_callable_rejection(stderr: &str, emitted: &[(String, String)]) 
 #[test]
 fn used_returned_named_function_gets_the_frozen_callable_diagnostic() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def choose() -> int8 -> int8 = increment\n\
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def choose() -> i8 -> i8 = increment\n\
          chosen = choose()\n\
-         out = print(chosen(cast(6, int8)))\n",
+         out = print(chosen(cast(6, i8)))\n",
         "returned_named_used",
     );
     assert!(!ok, "a used returned function value must not build for C");
@@ -98,10 +98,10 @@ fn used_returned_named_function_gets_the_frozen_callable_diagnostic() {
 #[test]
 fn dynamically_selected_named_callback_gets_the_frozen_callable_diagnostic() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def decrement(x: int8) -> int8 = sub(x, cast(1, int8))\n\
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def decrement(x: i8) -> i8 = sub(x, cast(1, i8))\n\
          selected = if true then increment else decrement\n\
-         out = print(selected(cast(6, int8)))\n",
+         out = print(selected(cast(6, i8)))\n",
         "selected_callback",
     );
     assert!(!ok, "a dynamically selected callback must not build for C");
@@ -114,7 +114,7 @@ fn dynamically_selected_named_callback_gets_the_frozen_callable_diagnostic() {
 #[test]
 fn a_def_named_call_is_an_ordinary_supported_program() {
     let (ok, stderr, _emitted) = c_build(
-        "def call(x: int32) -> int32 = add(x, 1)\n\
+        "def call(x: i32) -> i32 = add(x, 1)\n\
          out = print(call(5))\n",
         "def_named_call",
     );
@@ -248,9 +248,9 @@ fn tensor_bodied_primitive_scalar_grad_still_builds() {
 #[test]
 fn declared_callback_parameter_with_named_callback_still_builds() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def apply8(callback: int8 -> int8, value: int8) -> int8 = callback(value)\n\
-         out = print(apply8(increment, cast(6, int8)))\n",
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def apply8(callback: i8 -> i8, value: i8) -> i8 = callback(value)\n\
+         out = print(apply8(increment, cast(6, i8)))\n",
         "declared_callback_positive",
     );
     assert!(

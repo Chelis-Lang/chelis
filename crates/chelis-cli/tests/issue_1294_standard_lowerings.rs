@@ -51,7 +51,7 @@ fn epsilon_adjoint_reverses_the_supplied_parameter() {
 
 #[test]
 fn batch_label_selection_uses_the_matching_diagonal() {
-    let source = "def paired_select(x: tensor[2,3,f32], labels: tensor[2,int32]) -> tensor[2,f32] = diagonal(gather(x,labels,1),0,1)\nx: tensor[2,3,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[2i64,3i64])\nlabels: tensor[2,int32] = to_tensor([0,2])\nresult = paired_select(x,labels)\n";
+    let source = "def paired_select(x: tensor[2,3,f32], labels: tensor[2,i32]) -> tensor[2,f32] = diagonal(gather(x,labels,1),0,1)\nx: tensor[2,3,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[2i64,3i64])\nlabels: tensor[2,i32] = to_tensor([0,2])\nresult = paired_select(x,labels)\n";
     assert_eq!(parse_tensor_data(&evaluate(source), "result"), vec![1., 6.]);
     assert_eq!(
         parse_tensor_data(&build_and_run(source, "paired_labels"), "result"),
@@ -61,7 +61,7 @@ fn batch_label_selection_uses_the_matching_diagonal() {
 
 #[test]
 fn embedding_and_masking_do_not_compute_with_unselected_nonfinite_values() {
-    let source = "def embed(t: tensor[2,1,f32], i: tensor[1,int32]) -> tensor[1,1,f32] = gather(t,i,0)\ndef masked(m: tensor[1,bool], x: tensor[1,f32], fill: tensor[1,f32]) -> tensor[1,f32] = where(m,x,fill)\nt: tensor[2,1,f32] = reshape(to_tensor([3.0f32,div(0.0f32,0.0f32)]),[2i64,1i64])\ni: tensor[1,int32] = to_tensor([0])\nm: tensor[1,bool] = to_tensor([true])\nx: tensor[1,f32] = to_tensor([1.0f32])\nfill: tensor[1,f32] = to_tensor([div(-1.0f32,0.0f32)])\nselected = embed(t,i)\nresult = masked(m,x,fill)\n";
+    let source = "def embed(t: tensor[2,1,f32], i: tensor[1,i32]) -> tensor[1,1,f32] = gather(t,i,0)\ndef masked(m: tensor[1,bool], x: tensor[1,f32], fill: tensor[1,f32]) -> tensor[1,f32] = where(m,x,fill)\nt: tensor[2,1,f32] = reshape(to_tensor([3.0f32,div(0.0f32,0.0f32)]),[2i64,1i64])\ni: tensor[1,i32] = to_tensor([0])\nm: tensor[1,bool] = to_tensor([true])\nx: tensor[1,f32] = to_tensor([1.0f32])\nfill: tensor[1,f32] = to_tensor([div(-1.0f32,0.0f32)])\nselected = embed(t,i)\nresult = masked(m,x,fill)\n";
     for actual in [
         evaluate(source),
         build_and_run(source, "selection_nonfinite"),
@@ -121,10 +121,10 @@ fn softmax_nontrailing_axis_values_and_explicit_backend_limits() {
 #[test]
 fn scalar_kernel_inputs_keep_exact_integer_storage() {
     for (dtype, suffix, value) in [
-        ("int8", "i8", "101"),
-        ("int16", "i16", "30001"),
-        ("int32", "i32", "16777217"),
-        ("int64", "i64", "9007199254740993"),
+        ("i8", "i8", "101"),
+        ("i16", "i16", "30001"),
+        ("i32", "i32", "16777217"),
+        ("i64", "i64", "9007199254740993"),
     ] {
         let source = format!(
             "def f(x: tensor[1,{dtype}], s: {dtype}) -> tensor[1,{dtype}] = add(x,insert(scalar_to_tensor(s),0,1i64))\nx: tensor[1,{dtype}] = to_tensor([0{suffix}])\nresult = f(x,{value}{suffix})\n"
@@ -354,10 +354,7 @@ fn bool_scalar_kernel_inputs_keep_exact_bool_storage() {
 
 #[test]
 fn canonical_sum_preserves_integer_trap_occurrence_in_eval_and_c() {
-    for (dtype, suffix, max) in [
-        ("int32", "", i64::from(i32::MAX)),
-        ("int64", "i64", i64::MAX),
-    ] {
+    for (dtype, suffix, max) in [("i32", "", i64::from(i32::MAX)), ("i64", "i64", i64::MAX)] {
         for trapping in [false, true] {
             let values = if trapping {
                 vec![max, 1, 0, 0, -max, -1, 0, 0]

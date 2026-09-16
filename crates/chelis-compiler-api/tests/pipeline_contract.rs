@@ -33,7 +33,7 @@ fn root_name_text<'a>(names: impl Iterator<Item = &'a IrName>) -> Vec<&'a str> {
 #[test]
 fn type_analysis_goal_returns_fitness_and_one_checked_product() {
     let outcome = run_source(request(
-        "def answer() -> int32 = 42\n",
+        "def answer() -> i32 = 42\n",
         PipelineGoal::TypeAnalysis,
     ))
     .expect("valid source must prepare");
@@ -135,7 +135,7 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
     let _guard = chelis_types::install_cancel_token(token);
 
     let rejection = run_source(request(
-        "def answer() -> int32 = 42\n",
+        "def answer() -> i32 = 42\n",
         PipelineGoal::FullCheck,
     ))
     .expect_err("a pre-cancelled pipeline must not start parsing");
@@ -154,7 +154,7 @@ fn direct_lower_functions_keep_the_lower_cancellation_stage() {
     )
     .expect("the fixture must pass semantic checks");
     let library = check_prepared_library(
-        prepare_source(SourceKind::Surf, "def library_value() -> int32 = 1\n", None)
+        prepare_source(SourceKind::Surf, "def library_value() -> i32 = 1\n", None)
             .expect("the library source must prepare"),
     )
     .expect("the library fixture must pass semantic checks");
@@ -188,7 +188,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
     .map(|goal| {
         (
             goal,
-            prepare_source(SourceKind::Surf, "def answer() -> int32 = 42\n", None)
+            prepare_source(SourceKind::Surf, "def answer() -> i32 = 42\n", None)
                 .expect("the fixture source must prepare"),
         )
     });
@@ -209,7 +209,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
 #[test]
 fn type_rejection_has_no_checked_or_lowered_product() {
     let rejection = run_source(request(
-        "def broken() -> int32 = missing\n",
+        "def broken() -> i32 = missing\n",
         PipelineGoal::Lower(LoweringMode::Strict),
     ))
     .expect_err("an unbound name must reject type analysis");

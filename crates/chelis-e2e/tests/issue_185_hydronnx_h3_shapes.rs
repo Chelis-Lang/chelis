@@ -221,8 +221,8 @@ fn hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval() {
     let input_literal = nested_list_literal(&[1, 4, 8, 8], &input);
 
     // Note: `stride(_, step_0, step_1, ..., step_n_minus_1)` takes one
-    // positive int64 stride per axis (rank-4 input -> 4 strides).
-    // `shrink(_, bounds)` takes (tensor, List[List[int64]]). The chain
+    // positive i64 stride per axis (rank-4 input -> 4 strides).
+    // `shrink(_, bounds)` takes (tensor, List[List[i64]]). The chain
     // below builds (top-left, top-right, bottom-left, bottom-right)
     // sub-views from the same 4D input, each `[1, 4, 4, 4]`, then
     // concats them on a new last axis and `max_reduce`s along that
@@ -237,10 +237,10 @@ tl = stride(&x, 1i64, 1i64, 2i64, 2i64)
 tr = stride(&shifted_col, 1i64, 1i64, 2i64, 2i64)
 bl = stride(&shifted_row, 1i64, 1i64, 2i64, 2i64)
 br = stride(&shifted_both, 1i64, 1i64, 2i64, 2i64)
-tl5 = reshape(&tl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-tr5 = reshape(&tr, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-bl5 = reshape(&bl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-br5 = reshape(&br, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
+tl5 = reshape(&tl, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+tr5 = reshape(&tr, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+bl5 = reshape(&bl, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+br5 = reshape(&br, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
 stacked = concat([tl5, tr5, bl5, br5], 4)
 out = max_reduce(&stacked, 4)
 "#,

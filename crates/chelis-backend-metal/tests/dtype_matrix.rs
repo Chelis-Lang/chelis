@@ -14,10 +14,10 @@
 //! | f32   |  X  |  X  | f32 → f32                  | MPS           |
 //! | f16   |  X  |  X  | f16 → f32                  | MPS           |
 //! | bf16  |  X  |  X  | bf16 → f32                 | tiled MSL     |
-//! | int8  |  X  |  X  | int8 → int32               | rejected (F1) |
-//! | int16 |  X  |  X  | int16 → int32              | rejected (F1) |
-//! | int32 |  X  |  X  | int32 → int32              | rejected (F1) |
-//! | int64 |  X  |  X  | int64 → int64              | rejected (F1) |
+//! | i8  |  X  |  X  | i8 → i32               | rejected (F1) |
+//! | i16 |  X  |  X  | i16 → i32              | rejected (F1) |
+//! | i32 |  X  |  X  | i32 → i32              | rejected (F1) |
+//! | i64 |  X  |  X  | i64 → i64              | rejected (F1) |
 //! | bool  |  -  |  -  | bool → bool                | rejected      |
 //!
 //! Negative coverage:

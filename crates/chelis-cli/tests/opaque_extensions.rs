@@ -23,7 +23,7 @@ fn succeeds(output: &Output) {
 fn opaque_data_survives_tools_and_keeps_the_same_execution_result() {
     let dir = tempfile::tempdir().unwrap();
     let payload = r#"{type: "ablation", span: 1, surf_future: true, expr: (undefined_macro unbound), expr: (var {}), number: 1e-3f32}"#;
-    let clean = "(def {} main (lit {type: (t-prim {} int32)} 7))";
+    let clean = "(def {} main (lit {type: (t-prim {} i32)} 7))";
     fs::write(dir.path().join("clean.dp"), clean).unwrap();
     fs::write(
         dir.path().join("data.dp"),
@@ -59,7 +59,7 @@ fn opaque_data_survives_tools_and_keeps_the_same_execution_result() {
     succeeds(&run(dir.path(), &["surf", "clean.dp"]));
     fs::write(
         dir.path().join("bad.dp"),
-        clean.replace("(t-prim {} int32)", "false"),
+        clean.replace("(t-prim {} i32)", "false"),
     )
     .unwrap();
     for args in [

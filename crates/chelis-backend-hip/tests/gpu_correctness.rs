@@ -109,7 +109,7 @@ impl TestInput {
         }
     }
 
-    /// WS-A4: i16 input. Same packing convention as `int8`.
+    /// WS-A4: i16 input. Same packing convention as `i8`.
     #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i16 tests")]
     fn int16(name: &str, shape: &[usize], data: &[i16]) -> Self {
         Self {
@@ -3399,7 +3399,7 @@ fn ws_a2_hip_f1_still_rejects_i8_matmul() {
         "expected F1 HIP rejection for i8 matmul, got: {msg}"
     );
     assert!(
-        msg.contains("int8"),
+        msg.contains("i8"),
         "F1 message should name the rejected precision; got: {msg}"
     );
 }

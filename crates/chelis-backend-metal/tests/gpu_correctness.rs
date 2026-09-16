@@ -1133,7 +1133,7 @@ fn count_mask(len: usize) -> Vec<bool> {
     (0..len).map(|i| (i * 7 + 3) % 5 < 2).collect()
 }
 
-/// Driver for one `Bool8` input and one int64 output. `bytes` are written
+/// Driver for one `Bool8` input and one i64 output. `bytes` are written
 /// verbatim into the `CHELIS_DTYPE_BOOL` allocation (one byte per element),
 /// so a test can also plant a byte outside {0, 1}.
 fn build_count_driver_mm(func_name: &str, shape: &[usize], bytes: &[u8]) -> String {
@@ -1203,7 +1203,7 @@ int main(void) {{
 }
 
 /// Build, link, and run a Count DAG over raw `Bool8` bytes. `Ok` carries
-/// the int64 output; `Err` carries the failed binary's stderr so a test
+/// the i64 output; `Err` carries the failed binary's stderr so a test
 /// can assert on the typed trap text.
 fn compile_and_run_count(
     dag: &Dag,

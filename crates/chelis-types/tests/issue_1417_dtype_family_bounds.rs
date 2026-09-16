@@ -11,7 +11,7 @@ use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOATS: &[&str] = &["f16", "bf16", "f32", "f64"];
-const INTS: &[&str] = &["int8", "int16", "int32", "int64"];
+const INTS: &[&str] = &["i8", "i16", "i32", "i64"];
 const NON_NUMERIC: &[&str] = &["bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
@@ -67,9 +67,9 @@ def probe(a: {dtype}, b: {dtype}) -> {dtype} = arange_like(a, b)
 fn linspace_shaped(dtype: &str) -> String {
     format!(
         r#"
-sig linspace_like[p: Float]: p -> p -> int64 -> p
+sig linspace_like[p: Float]: p -> p -> i64 -> p
 def linspace_like(start, stop, count) = start
-def probe(a: {dtype}, b: {dtype}) -> {dtype} = linspace_like(a, b, cast(3, int64))
+def probe(a: {dtype}, b: {dtype}) -> {dtype} = linspace_like(a, b, cast(3, i64))
 "#
     )
 }
@@ -203,11 +203,11 @@ fn a_bound_survives_a_higher_order_call() {
 sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 def apply_to[q](f: q -> q, x: q) -> q = f(x)
-def probe(x: int32) -> int32 = apply_to(only_floats, x)
+def probe(x: i32) -> i32 = apply_to(only_floats, x)
 "#,
         "an `Float`-bounded function passed as a value",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
@@ -234,7 +234,7 @@ fn a_wrapper_of_a_bounded_function_still_accepts_its_own_family() {
 sig only_ints[p: Int]: p -> p
 def only_ints(x) = x
 def wrap[q: Int](x: q) -> q = only_ints(x)
-def probe(x: int16) -> int16 = wrap(x)
+def probe(x: i16) -> i16 = wrap(x)
 "#,
         "a generic wrapper at an admitted dtype",
     );
@@ -250,11 +250,11 @@ sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 sig any_numeric[q: Numeric]: q -> q
 def any_numeric(x) = only_floats(x)
-def probe(x: int32) -> int32 = any_numeric(x)
+def probe(x: i32) -> i32 = any_numeric(x)
 "#,
         "a `Numeric` binder identified with a `Float` one",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
@@ -316,11 +316,11 @@ fn a_bound_reaches_a_tensor_precision_slot() {
         r#"
 sig scale[p: Float]: tensor[n, p] -> tensor[n, p]
 def scale(x) = x
-def probe(x: tensor[4, int32]) -> tensor[4, int32] = scale(x)
+def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
 "#,
         "a `Float` bound occupying a tensor precision slot",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
@@ -364,7 +364,7 @@ fn a_bounded_binder_cannot_name_a_rank_spread() {
 
 #[test]
 fn a_bound_must_name_a_binder_the_signature_uses() {
-    let errors = diagnostics("sig f[q: Float]: int32 -> int32");
+    let errors = diagnostics("sig f[q: Float]: i32 -> i32");
     assert!(
         errors
             .iter()
@@ -419,9 +419,9 @@ fn a_def_declared_bound_accepts_its_own_family() {
     assert_accepted(
         r#"
 def only_ints[p: Int](x: p) -> p = x
-def probe(x: int64) -> int64 = only_ints(x)
+def probe(x: i64) -> i64 = only_ints(x)
 "#,
-        "a `def`-declared `Int` bound at int64",
+        "a `def`-declared `Int` bound at i64",
     );
 }
 
@@ -432,7 +432,7 @@ fn an_unbounded_binder_still_admits_a_non_dtype_type() {
     assert_accepted(
         r#"
 def pick[a](x: a, y: a) -> a = x
-def probe(x: List[int32], y: List[int32]) -> List[int32] = pick(x, y)
+def probe(x: List[i32], y: List[i32]) -> List[i32] = pick(x, y)
 "#,
         "an unbounded binder at a non-dtype type",
     );

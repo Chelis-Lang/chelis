@@ -234,7 +234,7 @@ impl HipEmitter {
             chelis_types::deliberate_rejection!(
                 "[05-OP-29]",
                 "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
-                 list, and produces the complementary shape at int64"
+                 list, and produces the complementary shape at i64"
             ),
         )
     }
@@ -274,7 +274,7 @@ impl HipEmitter {
                 return Err(Self::invalid_count(
                     node,
                     format!(
-                        "expected int64 output, found {}",
+                        "expected i64 output, found {}",
                         node.output_type.precision.name()
                     ),
                 ));
@@ -668,10 +668,10 @@ impl HipEmitter {
         self.line("}");
         self.line("");
 
-        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         self.line("int current_device = 0;");
         self.line("CHELIS_HIP_CHECK(hipGetDevice(&current_device));");
-        self.line("for (chelis_device_rank slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at int64\");");
+        self.line("for (chelis_device_rank slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at i64\");");
         self.emit_input_shape_preamble_device(dag, input_slots, func_name);
         self.emit_reshape_count_preflight(dag);
         self.line("");
@@ -881,7 +881,7 @@ impl HipEmitter {
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
-        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into format-string context;
@@ -902,7 +902,7 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
-            self.line(&format!("if (chelis_tensor_read_view(inputs[{slot}]).dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
+            self.line(&format!("if (chelis_tensor_read_view(inputs[{slot}]).dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at i64\");", Self::dtype_macro(ty)));
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
@@ -987,7 +987,7 @@ impl HipEmitter {
             self.line(&format!(
                 "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
             ));
-            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
             self.indent -= 1;
             self.line("}");
         }
@@ -1060,7 +1060,7 @@ impl HipEmitter {
                     "fprintf(stderr, \"extent `{label}`: {first_text}, {second_text}\\n\", {first_value}, {second_value});"
                 ));
                 self.line(&format!(
-                    "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                    "chelis_numeric_trap(\"numeric trap: domain in {operation} at i64\");"
                 ));
                 self.indent -= 1;
                 self.line("}");
@@ -1107,7 +1107,7 @@ impl HipEmitter {
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
-        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Format-string-context sanitization for producer-supplied
@@ -1126,7 +1126,7 @@ impl HipEmitter {
             self.indent -= 1;
             self.line("}");
             self.line(&format!("const chelis_gpu_tensor *input_view_{slot} = chelis_device_tensor_view(inputs[{slot}]);"));
-            self.line(&format!("if (input_view_{slot}->dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
+            self.line(&format!("if (input_view_{slot}->dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at i64\");", Self::dtype_macro(ty)));
             self.line(&format!(
                 "if (input_view_{slot}->rank != {}) {{",
                 Self::ndim(ty)
@@ -1275,7 +1275,7 @@ impl HipEmitter {
         // an i64 result tensor; Min/Prod emit an in-precision result.
         // For all four, kernel naming + body are driven by the OPERAND
         // precision, which lives on the input tensor (Argmax/Argmin's
-        // output_type is `int64` and would otherwise tip elem_kind into
+        // output_type is `i64` and would otherwise tip elem_kind into
         // its panic arm).
         let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
         let elem = Self::elem_kind(input_ty)?;
@@ -1907,7 +1907,7 @@ impl HipEmitter {
                     Prim::Int32 => kernels::gather(self.kernel_rank, name, "int", elem),
                     Prim::Int64 => kernels::gather(self.kernel_rank, name, "long long", elem),
                     other => panic!(
-                        "HIP backend sparse gather requires int32/int64 indices, got {}",
+                        "HIP backend sparse gather requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1919,7 +1919,7 @@ impl HipEmitter {
                     Prim::Int32 => kernels::scatter_add(self.kernel_rank, name, "int", elem),
                     Prim::Int64 => kernels::scatter_add(self.kernel_rank, name, "long long", elem),
                     other => panic!(
-                        "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_add requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1930,7 +1930,7 @@ impl HipEmitter {
                     Prim::Int32 => kernels::scatter_replace(self.kernel_rank, name, "int"),
                     Prim::Int64 => kernels::scatter_replace(self.kernel_rank, name, "long long"),
                     other => panic!(
-                        "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_replace requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1941,7 +1941,7 @@ impl HipEmitter {
                     Prim::Int32 => kernels::scatter_elements(self.kernel_rank, name, "int"),
                     Prim::Int64 => kernels::scatter_elements(self.kernel_rank, name, "long long"),
                     other => panic!(
-                        "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_elements requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -2438,7 +2438,7 @@ impl HipEmitter {
                 "0",
             );
             self.emit_metadata_plan(&format!("reshape_output{id}"), &node.output_type, None, "0");
-            self.line(&format!("if (chelis_metadata_plan_count(reshape_input{id}) != chelis_metadata_plan_count(reshape_output{id})) chelis_numeric_trap(\"numeric trap: domain in reshape at int64\");"));
+            self.line(&format!("if (chelis_metadata_plan_count(reshape_input{id}) != chelis_metadata_plan_count(reshape_output{id})) chelis_numeric_trap(\"numeric trap: domain in reshape at i64\");"));
             self.line(&format!(
                 "chelis_metadata_plan_release(reshape_output{id});"
             ));
@@ -2955,7 +2955,7 @@ impl HipEmitter {
     }
 
     fn emit_materialize_into_slot(&mut self, id: usize, source: usize) {
-        self.line(&format!("if (d_t{id}->count != d_t{source}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at int64\");"));
+        self.line(&format!("if (d_t{id}->count != d_t{source}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at i64\");"));
         self.line("{");
         self.indent += 1;
         self.emit_stride_vars(id, "copy", source);
@@ -3019,7 +3019,7 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse gather requires int32/int64 indices, got {}",
+                "HIP backend sparse gather requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
@@ -3085,7 +3085,7 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_add requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
@@ -3158,7 +3158,7 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_replace requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
@@ -3217,7 +3217,7 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_elements requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
@@ -3610,7 +3610,7 @@ impl HipEmitter {
         .to_string();
         let kernel_name = format!("kernel_count_{id}");
         // The status word is device scratch outside the storage plan: one
-        // int32 per Count node, live until the launch is checked. Count it in
+        // i32 per Count node, live until the launch is checked. Count it in
         // the static peak estimate through the memory plan's width authority,
         // once per node: the device-tensor entrypoint is a second emission of
         // the same nodes, and the peak is per call, not summed across entries.
@@ -3920,7 +3920,7 @@ impl HipEmitter {
     ) {
         let a = inputs[0].0;
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("if (d_t{id}->count != d_t{a}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at int64\");"));
+        self.line(&format!("if (d_t{id}->count != d_t{a}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at i64\");"));
         self.line("{");
         self.indent += 1;
         self.emit_stride_vars(id, "a", a);
@@ -3990,7 +3990,7 @@ impl HipEmitter {
         let a = inputs[0].0;
         assert_eq!(stride_factors.len(), ty.dims.len());
         let strides = stride_factors.iter().enumerate().map(|(axis, factor)| {
-            format!("chelis_int_checked_mul(d_t{a}->strides[{axis}], INT64_C({factor}), 64, \"numeric trap: overflow in stride at int64\")")
+            format!("chelis_int_checked_mul(d_t{a}->strides[{axis}], INT64_C({factor}), 64, \"numeric trap: overflow in stride at i64\")")
         }).collect::<Vec<_>>();
         self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
@@ -4627,7 +4627,7 @@ impl HipEmitter {
             Prim::Int64 => "_i64",
             other => panic!(
                 "HIP kernel suffix not defined for `{}` (active dtype set per \
-                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/int8/int16/int32/int64).",
+                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/i8/i16/i32/i64).",
                 other.name()
             ),
         }
@@ -4732,7 +4732,7 @@ impl HipEmitter {
     ///
     /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
     /// ElemKind::F32` wildcard silently dispatched f32 kernels over
-    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
+    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (i64
     /// `neg` read 8-byte lanes as 4-byte floats and left half the output
     /// buffer unwritten). The ops with typed WS-A4 templates
     /// (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum) never call

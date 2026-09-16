@@ -20,7 +20,7 @@ fn build_ctx(library_src: &str) -> TypeEnv {
 
 #[test]
 fn type_environment_matches_its_checked_library_program() {
-    let library = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
+    let library = parse("(def {} one (lit {type: (t-prim {} i32)} 1))");
     let (type_env, checked) =
         build_compiled_library_context(&library).expect("the library must type-check");
 
@@ -29,8 +29,8 @@ fn type_environment_matches_its_checked_library_program() {
 
 #[test]
 fn type_environment_rejects_another_checked_library_program() {
-    let first = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
-    let second = parse("(def {} two (lit {type: (t-prim {} int32)} 2))");
+    let first = parse("(def {} one (lit {type: (t-prim {} i32)} 1))");
+    let second = parse("(def {} two (lit {type: (t-prim {} i32)} 2))");
     let (type_env, _) =
         build_compiled_library_context(&first).expect("the first library must type-check");
     let (_, checked) =
@@ -49,7 +49,7 @@ fn serialized_context_resumes_through_library_and_signature_layers() {
 
     let layer = parse(
         "(def {} int_use
-            (app {} (var {} library_id) (lit {type: (t-prim {} int32)} 1)))
+            (app {} (var {} library_id) (lit {type: (t-prim {} i32)} 1)))
          (def {} bool_use
             (app {} (var {} library_id) (lit {type: (t-prim {} bool)} true)))
          (def {} layer_id (fn {} (params {} value) (var {} value)))",
@@ -59,7 +59,7 @@ fn serialized_context_resumes_through_library_and_signature_layers() {
 
     let new_code = parse(
         "(def {} layer_int
-            (app {} (var {} layer_id) (lit {type: (t-prim {} int32)} 2)))
+            (app {} (var {} layer_id) (lit {type: (t-prim {} i32)} 2)))
          (def {} layer_bool
             (app {} (var {} layer_id) (lit {type: (t-prim {} bool)} false)))",
     );
@@ -74,14 +74,14 @@ fn adt_probe_library_option_exhaustive_match_in_new_code() {
     // Library defines Option[a]; new code matches an Option with both arms.
     let ctx = build_ctx(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
-         (def {} library_some (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 1)))",
+         (def {} library_some (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 1)))",
     );
 
     let new_exprs = parse(
         "(def {} result
            (match {} (var {} library_some)
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))
-             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
+             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} i32)} 0))))",
     );
 
     check_ir_with_context(&ctx, &new_exprs)
@@ -94,7 +94,7 @@ fn adt_probe_library_option_non_exhaustive_match_is_rejected() {
     // Must reject as non-exhaustive citing missing None — NOT silently accept.
     let ctx = build_ctx(
         "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
-         (def {} library_some (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 1)))",
+         (def {} library_some (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 1)))",
     );
 
     let new_exprs = parse(
@@ -131,8 +131,8 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
          (def {} v (var {} Circle))
          (def {} result
            (match {} (var {} v)
-             (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} int32)} 1))
-             (arm {} (pat-ctor {} Square) () (lit {type: (t-prim {} int32)} 2))))",
+             (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} i32)} 1))
+             (arm {} (pat-ctor {} Square) () (lit {type: (t-prim {} i32)} 2))))",
     );
     check_ir_with_context(&ctx, &new_ok)
         .expect("new ADT exhaustively matched must pass without library variants leaking in");
@@ -144,7 +144,7 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
          (def {} v (var {} Circle))
          (def {} result
            (match {} (var {} v)
-             (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} int32)} 1))))",
+             (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} i32)} 1))))",
     );
     let err = check_ir_with_context(&ctx, &new_bad)
         .expect_err("non-exhaustive new ADT match must be rejected");
@@ -167,20 +167,20 @@ fn with_context_equals_monolithic_for_five_snippets() {
     // tail of the monolithic check on (library + snippet).
     let library_src = "(deftype {} MyOpt (a) (variant {} MySome (t-var {} a)) (variant {} MyNone))
         (def {} double (fn {} (params {} x)
-            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))
+            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} i32)} 2))))
         (def {} library_id (fn {} (params {} y) (var {} y)))";
 
     let library = parse(library_src);
     let ctx = build_type_env_from_library(&library).expect("library OK");
 
     let snippets = [
-        "(def {} a (app {} (var {} double) (lit {type: (t-prim {} int32)} 7)))",
-        "(def {} b (app {} (var {} library_id) (lit {type: (t-prim {} int32)} 3)))",
-        "(def {} c (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 9)))",
+        "(def {} a (app {} (var {} double) (lit {type: (t-prim {} i32)} 7)))",
+        "(def {} b (app {} (var {} library_id) (lit {type: (t-prim {} i32)} 3)))",
+        "(def {} c (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 9)))",
         "(def {} d
-           (match {} (app {} (var {} MySome) (lit {type: (t-prim {} int32)} 1))
+           (match {} (app {} (var {} MySome) (lit {type: (t-prim {} i32)} 1))
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))
-             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} int32)} 0))))",
+             (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} i32)} 0))))",
         "(def {} e (lit {type: (t-prim {} f32)} 2.5))",
     ];
 
@@ -221,7 +221,7 @@ fn no_leak_between_snippets_against_same_context() {
     let ctx = build_ctx("(def {} library_id (fn {} (params {} y) (var {} y)))");
 
     // Snippet A defines `secret_a`.
-    let snippet_a = parse("(def {} secret_a (lit {type: (t-prim {} int32)} 42))");
+    let snippet_a = parse("(def {} secret_a (lit {type: (t-prim {} i32)} 42))");
     check_ir_with_context(&ctx, &snippet_a).expect("snippet A clean");
 
     // Snippet B references `secret_a`. If A leaked into ctx, this would pass.
@@ -249,8 +249,8 @@ fn empty_context_matches_check_ir_program() {
          (def {} pick (var {} A))
          (def {} use
            (match {} (var {} pick)
-             (arm {} (pat-ctor {} A) () (lit {type: (t-prim {} int32)} 1))
-             (arm {} (pat-ctor {} B) () (lit {type: (t-prim {} int32)} 2))))",
+             (arm {} (pat-ctor {} A) () (lit {type: (t-prim {} i32)} 1))
+             (arm {} (pat-ctor {} B) () (lit {type: (t-prim {} i32)} 2))))",
     );
 
     let empty_ctx = TypeEnv::empty();
@@ -274,12 +274,12 @@ fn type_env_surfaces_library_declared_types() {
     // Fix: union library `ir_types` into the returned type_env (new-code
     // wins on conflict). This regression test locks the union in.
     let ctx = build_ctx(
-        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
-            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))",
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} i32)}))
+            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} i32)} 2))))",
     );
     let checked = check_ir_with_context(
         &ctx,
-        &parse("(def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))"),
+        &parse("(def {} call (app {} (var {} double) (lit {type: (t-prim {} i32)} 5)))"),
     )
     .expect("check OK");
 
@@ -295,9 +295,9 @@ fn type_env_surfaces_library_declared_types() {
 
     // Cross-check: monolithic on the union has the same key.
     let mono = chelis_types::check_ir_program(&parse(
-        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
-            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))
-         (def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))",
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} i32)}))
+            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} i32)} 2))))
+         (def {} call (app {} (var {} double) (lit {type: (t-prim {} i32)} 5)))",
     ))
     .expect("mono OK");
     assert!(mono.type_env().contains_key("double"));
@@ -309,12 +309,11 @@ fn type_env_new_code_shadows_library_on_name_conflict() {
     // hold the NEW-code's declared type, not the library's. (Independent of
     // whether the checker accepts the redef body — this test only inspects
     // the returned type_env shape on a successful check.)
-    let ctx =
-        build_ctx("(def {} foo (fn {} (params {} (x {type: (t-prim {} int32)})) (var {} x)))");
+    let ctx = build_ctx("(def {} foo (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))");
     // New code re-declares `foo` with the same signature. Should check OK
     // and `foo` should resolve to a type_env entry (not panic / not absent).
     let new_exprs =
-        parse("(def {} foo (fn {} (params {} (x {type: (t-prim {} int32)})) (var {} x)))");
+        parse("(def {} foo (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))");
     let res = check_ir_with_context(&ctx, &new_exprs);
     if let Ok(checked) = res {
         assert!(

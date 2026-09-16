@@ -1,4 +1,4 @@
-//! Regression tests for native int32 element access.
+//! Regression tests for native i32 element access.
 //!
 //! Each fixture stores `CHELIS_DTYPE_I32` values through `i32` pointers. The tested
 //! operations must not reinterpret those bytes as IEEE binary32 values.

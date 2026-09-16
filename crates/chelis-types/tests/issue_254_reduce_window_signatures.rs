@@ -5,7 +5,7 @@
 //! - Output rank equals input rank.
 //! - Trailing windowed-axis extent is
 //!   `floor((input - window) / stride) + 1` under Valid padding.
-//! - `window_shape` and `strides` must be int64 lists of equal
+//! - `window_shape` and `strides` must be i64 lists of equal
 //!   non-empty length; entries must be positive.
 //! - Window arity may not exceed input rank.
 //! - `window > input_dim` is rejected as a `DimensionMismatch`.

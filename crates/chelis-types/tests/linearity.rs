@@ -215,12 +215,12 @@ def bad[n](p: Params[n]) -> bool =
 fn match_consumes_tuple_scrutinee() {
     let errors = check_surf(
         r#"
-def bad(pair: (tensor[4, f32], int32)) -> int32 =
+def bad(pair: (tensor[4, f32], i32)) -> i32 =
   {
-    n: int32 = match pair with {
+    n: i32 = match pair with {
       | (x, _) => 1
     }
-    again: (tensor[4, f32], int32) = pair
+    again: (tensor[4, f32], i32) = pair
     n
   }
 "#,
@@ -238,11 +238,11 @@ def bad(pair: (tensor[4, f32], int32)) -> int32 =
 fn tensor_shape_queries_do_not_consume_tensor_inputs() {
     check_surf(
         r#"
-def ok(x: tensor[2, 3, f32]) -> int64 =
+def ok(x: tensor[2, 3, f32]) -> i64 =
   {
-    r: int32 = rank(x)
-    c: int64 = shape(x, 1)
-    n: int64 = numel(x)
+    r: i32 = rank(x)
+    c: i64 = shape(x, 1)
+    n: i64 = numel(x)
     _ = drop(x)
     c
   }
@@ -337,7 +337,7 @@ fn len_does_not_consume_list_argument() {
         r#"
 def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
-    n: int64 = len(params)
+    n: i64 = len(params)
     params
   }
 "#,
@@ -373,7 +373,7 @@ fn list_len_then_index_then_reuse_compiles() {
         r#"
 def step(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
-    n: int64 = len(params)
+    n: i64 = len(params)
     first: tensor[k, f32] = index(params, 0)
     _ = drop(first)
     params
@@ -390,10 +390,10 @@ fn len_still_flags_use_after_genuine_consume() {
     // the later `len(params)` borrow-read is a use-after-consume.
     let errors = check_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> int64 =
+def bad(params: List[tensor[k, f32]]) -> i64 =
   {
     _ = drop(params)
-    n: int64 = len(params)
+    n: i64 = len(params)
     n
   }
 "#,
@@ -440,9 +440,9 @@ fn len_explicit_container_borrow_is_a_type_error() {
     // `len(&xs)`.
     let errors = typecheck_surf(
         r#"
-def bad(params: List[tensor[k, f32]]) -> int64 =
+def bad(params: List[tensor[k, f32]]) -> i64 =
   {
-    n: int64 = len(&params)
+    n: i64 = len(&params)
     n
   }
 "#,
@@ -496,9 +496,9 @@ fn len_of_non_container_does_not_mention_auto_borrow() {
     // an argument that is not even a container.
     let errors = typecheck_surf(
         r#"
-def bad(x: f32) -> int64 =
+def bad(x: f32) -> i64 =
   {
-    n: int64 = len(x)
+    n: i64 = len(x)
     n
   }
 "#,

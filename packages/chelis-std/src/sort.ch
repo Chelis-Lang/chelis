@@ -1,3 +1,3 @@
 module Std.Sort
 export (sort)
-def sort[p: Numeric](values: &tensor[..r, p], axis: int32) -> (tensor[..r, p], tensor[..r, int64]) = sort(values, axis)
+def sort[p: Numeric](values: &tensor[..r, p], axis: i32) -> (tensor[..r, p], tensor[..r, i64]) = sort(values, axis)

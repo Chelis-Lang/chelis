@@ -316,7 +316,7 @@ fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
         chelis_types::deliberate_rejection!(
             "[05-OP-29]",
             "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
-             list, and produces the complementary shape at int64"
+             list, and produces the complementary shape at i64"
         ),
     )
 }
@@ -334,7 +334,7 @@ fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
         chelis_types::unimplemented_rejection!(
             1844,
             "the Metal Count kernel indexes its device tensors in uint under a fixed rank \
-             cap; chelis#1844 moves Metal device tensors onto the dynamic-rank int64 carrier"
+             cap; chelis#1844 moves Metal device tensors onto the dynamic-rank i64 carrier"
         ),
     )
 }
@@ -380,7 +380,7 @@ fn validate_count_nodes(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
             return Err(invalid_count(
                 node,
                 format!(
-                    "expected int64 output, found {}",
+                    "expected i64 output, found {}",
                     node.output_type.precision.name()
                 ),
             ));
@@ -2039,7 +2039,7 @@ impl<'plan> Emitter<'plan> {
                 value.as_i64_exact().expect("integer pad fill").to_string()
             }
             Prim::Int64 => {
-                let value = value.as_i64_exact().expect("int64 pad fill");
+                let value = value.as_i64_exact().expect("i64 pad fill");
                 if value == i64::MIN {
                     "(-9223372036854775807LL - 1LL)".to_string()
                 } else {

@@ -3,7 +3,7 @@ import Std.Io.Csv (read_csv)
 import Std.Io.Json (load_json, json_bool, json_float, json_get, json_int)
 import Std.Tokenizer (batch_encode, decode, encode, load_tokenizer)
 rows: List[Dict[string, string]] = read_csv("train.csv")
-first_row = index(rows, cast(0, int64))
+first_row = index(rows, cast(0, i64))
 text = match dict_get(first_row, "text") with {
   | Some(value) => value
   | None => ""
@@ -11,11 +11,11 @@ text = match dict_get(first_row, "text") with {
 cfg = load_json("config.json")
 max_length = match json_int(json_get(cfg, "max_length")) with {
   | Some(n) => n
-  | None => cast(8, int64)
+  | None => cast(8, i64)
 }
 pad_value = match json_int(json_get(cfg, "pad_value")) with {
   | Some(n) => n
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 enabled = match json_bool(json_get(cfg, "enabled")) with {
   | Some(flag) => flag
