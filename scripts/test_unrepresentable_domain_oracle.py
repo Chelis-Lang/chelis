@@ -380,6 +380,46 @@ class TestScoreOneControl(unittest.TestCase):
         with self.assertRaises(oracle.OracleFailure):
             oracle.check_score_one_controls()
 
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_unbounded_generic_arithmetic_is_a_rejection_control(
+        self, mock_check: MagicMock
+    ) -> None:
+        source = oracle.UNBOUNDED_GENERIC_ARITHMETIC_NEGATIVE_FIXTURE
+        self.assertNotIn(
+            source,
+            [fixture for _, fixture in oracle.SCORE_ONE_CONTROL_FIXTURES],
+        )
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "unbounded.dp"],
+            returncode=2,
+            stdout=json.dumps(
+                {
+                    "score": 0.88,
+                    "errors": [
+                        {
+                            "kind": "PrecisionMismatch",
+                            "message": "parameter `a` requires `Numeric` admission",
+                        }
+                    ],
+                }
+            ),
+            stderr="",
+        )
+        oracle.check_unbounded_generic_arithmetic_rejected()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_unbounded_generic_arithmetic_cannot_score_one(
+        self, mock_check: MagicMock
+    ) -> None:
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "unbounded.dp"],
+            returncode=0,
+            stdout=json.dumps({"score": 1, "errors": []}),
+            stderr="",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_unbounded_generic_arithmetic_rejected()
+
 
 class TestStampPassObligation(unittest.TestCase):
     """Test obligation 3 logic with mocked subprocess."""
@@ -626,6 +666,7 @@ class TestObligationRoster(unittest.TestCase):
             [
                 oracle.check_keyword_in_expr_rejected,
                 oracle.check_score_one_controls,
+                oracle.check_unbounded_generic_arithmetic_rejected,
                 oracle.check_top_level_form_rule,
                 oracle.check_validate_agrees_with_check,
                 oracle.check_stamp_pass_integration_tests,

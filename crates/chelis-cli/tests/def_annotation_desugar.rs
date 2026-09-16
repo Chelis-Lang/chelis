@@ -15,8 +15,10 @@
 //! 2. Two independent precision tvars in one def's quantifier list
 //!    can be instantiated independently at call sites.
 //! 3. A precision name in a def parameter annotation that is NOT in
-//!    the def's quantifier list still errors.
-//! 4. Sig-only WS-A5 generalization still works (regression guard).
+//!    an explicit def quantifier list still errors.
+//! 4. A def without an explicit quantifier list synthesizes one shared
+//!    precision binder across its signature and checked metadata.
+//! 5. Sig-only WS-A5 generalization still works (regression guard).
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -30,9 +32,8 @@ fn write_file(path: &Path, contents: &str) {
 
 // Issue #207: `chelis check` now exits non-zero when the JSON
 // `errors` array is non-empty. The negative cases below
-// (`def_precision_name_not_in_quantifier_list_errors`,
-// `def_with_no_quantifier_list_unbound_precision_errors`) expect
-// errors, so this helper captures stdout regardless of exit code.
+// (`def_precision_name_not_in_quantifier_list_errors`) expect errors,
+// so this helper captures stdout regardless of exit code.
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -41,6 +42,21 @@ fn run_json_check(path: &Path) -> Value {
         .output()
         .expect("run chelis check");
     serde_json::from_slice(&output.stdout).expect("check output should be json")
+}
+
+fn run_annotated_deep(path: &Path) -> String {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["deep", "--annotate", path.to_str().unwrap()])
+        .output()
+        .expect("run chelis deep --annotate");
+    assert!(
+        output.status.success(),
+        "annotated desugaring should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("annotated Deep should be UTF-8")
 }
 
 /// The WS-C v2 reproducer. Before WS-A6, the def's parameter annotation
@@ -122,12 +138,13 @@ fn def_precision_name_not_in_quantifier_list_errors() {
     );
 }
 
-/// Negative case: a def with no quantifier list at all and an unbound
-/// precision name still errors. The pre-WS-A6 behavior is preserved
-/// because there is no explicit quantifier list to participate in the
-/// contextual rule.
+/// Surf P4b applies implicit binder collection to the synthesized
+/// signature when a def has no explicit quantifier list. The parameter
+/// and result annotations share one `weirdname` binder, and the checked
+/// parameter metadata retains that binder rather than degrading it to an
+/// unsupported primitive.
 #[test]
-fn def_with_no_quantifier_list_unbound_precision_errors() {
+fn def_with_no_quantifier_list_synthesizes_shared_precision_binder() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("no_quantifier.ch");
     write_file(
@@ -137,15 +154,29 @@ fn def_with_no_quantifier_list_unbound_precision_errors() {
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unsupported_prec = errors.iter().any(|e| {
-        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        kind == "UnsupportedTensorPrecision" && msg.contains("`weirdname`")
-    });
     assert!(
-        has_unsupported_prec,
-        "def with no quantifier list and unbound precision name must \
-         still be rejected. Got {errors:?}"
+        errors.is_empty(),
+        "implicit synthesized precision binder should type-check, got {errors:?}"
+    );
+    assert_eq!(json["score"].as_f64(), Some(1.0), "{json:#?}");
+
+    let deep = run_annotated_deep(&path);
+    assert_eq!(
+        deep.matches("(t-var {} weirdname)").count(),
+        3,
+        "the synthesized defsig input/result and parameter metadata must share \
+         the authored precision binder:\n{deep}"
+    );
+    assert!(
+        deep.contains(
+            "(x {type: (t-ref {} (t-tensor {} (d-lit {} 3) \
+             (t-var {} weirdname)))})"
+        ),
+        "checked parameter metadata must retain the synthesized precision binder:\n{deep}"
+    );
+    assert!(
+        !deep.contains("(t-prim {} weirdname)"),
+        "the synthesized binder must never become an unsupported primitive:\n{deep}"
     );
 }
 

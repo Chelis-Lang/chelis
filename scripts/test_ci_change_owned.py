@@ -385,6 +385,76 @@ class SchemaTests(unittest.TestCase):
                     ("ci.yml", "script-unit"),
                 )
 
+    def test_stale_nightly_fixture_paths_have_exact_automated_owners(self) -> None:
+        config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        expected = {
+            "scripts/runtime_representation_phase1.py": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "scripts/test_runtime_representation_phase1.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#893",
+            ),
+            "scripts/test_unrepresentable_domain_oracle.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#908",
+            ),
+            "scripts/unrepresentable_domain_oracle.py": (
+                "heavy-e2e.yml",
+                "integration-support",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#908",
+            ),
+            "spec/design/runtime_representation_phase1_tests.json": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+        }
+        by_path = {rule.prefix: rule for rule in config.path_rules}
+        exact_rules = []
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+                exact_rules.append(rule)
+
+        self.assertNotIn("scripts/", by_path)
+        self.assertNotIn("spec/design/", by_path)
+        for neighbor in (
+            "scripts/runtime_representation_phase1_extra.py",
+            "scripts/test_runtime_representation_phase1_extra.py",
+            "scripts/test_unrepresentable_domain_oracle_extra.py",
+            "scripts/unrepresentable_domain_oracle_extra.py",
+            "spec/design/runtime_representation_phase1_tests_extra.json",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in exact_rules),
+                    f"{neighbor} inherited authority from an exact fixture rule",
+                )
+
     def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
         from scripts import bump_compiler_pins as bump
 
