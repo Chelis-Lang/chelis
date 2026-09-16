@@ -457,7 +457,7 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
                 inputs: vec![0],
                 output_type: WireTensorType {
                     dims: vec![],
-                    precision: "i64".to_string(),
+                    precision: "int64".to_string(),
                 },
             },
         ],
@@ -473,6 +473,11 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
     assert!(
         matches!(err, GraphExtractError::WireContractRejected(_)),
         "expected a typed wire-contract rejection, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("input dtype must be bool, found f32"),
+        "the interchange dtype must validate before the intended Count rejection: {err}"
     );
 }
 
@@ -560,7 +565,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
         dims: vec![WireDimInfo::Lit {
             size: NonnegativeExtent::new(size).unwrap(),
         }],
-        precision: precision.name().into(),
+        precision: precision.interchange_name().into(),
     };
     let mut nodes = Vec::new();
     let inputs = if matches!(
