@@ -1127,15 +1127,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
             }
         }
+        if let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id) {
+            errors.push(reason);
+        }
         if !node.result_claim_deps.is_empty() {
             if !crate::axis_sources::is_same_shape_result_op(&node.op) {
                 errors.push(format!(
                     "producer result claims at node {} require a same-shape operation",
                     node.id.0
                 ));
-            }
-            if let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id) {
-                errors.push(reason);
             }
             for dependency in &node.result_claim_deps {
                 if !matches!(
@@ -2652,6 +2652,45 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("shape read") && error.contains("int64")),
             "int32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn same_shape_rank_relation_is_verified_without_a_result_claim() {
+        let mut dag = Dag::new();
+        let vector = dag.add_node(
+            RiscOp::Load {
+                name: "vector".into(),
+            },
+            vec![],
+            tensor_ty(&[8], Prim::F32),
+            None,
+        );
+        let matrix = dag.add_node(
+            RiscOp::Load {
+                name: "matrix".into(),
+            },
+            vec![],
+            tensor_ty(&[2, 4], Prim::F32),
+            None,
+        );
+        let result = dag.add_node(
+            RiscOp::Add,
+            vec![vector, matrix],
+            tensor_ty(&[2, 4], Prim::F32),
+            None,
+        );
+        dag.add_root(result);
+
+        let errors = verify(&dag);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("same-shape result")
+                    && error.contains("positive-rank operand")
+                    && error.contains("rank 1")
+                    && error.contains("expected rank 2")
+            }),
+            "mixed-positive-rank same-shape operation must fail without relying on a result claim: {errors:?}"
         );
     }
 

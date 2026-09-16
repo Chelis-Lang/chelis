@@ -282,8 +282,9 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     assert_reuse_rejected(&c, fused, a);
 }
 
-/// Negative: equal total capacity does not satisfy the per-axis exact-shape
-/// requirement when source and consumer ranks differ.
+/// Negative: equal total capacity does not make a mixed-positive-rank
+/// same-shape producer valid. The malformed relation must be rejected before
+/// storage planning can consider an in-place alias.
 #[test]
 fn fan_in_different_rank_does_not_alias() {
     let ty_r1 = TensorType {
@@ -294,7 +295,17 @@ fn fan_in_different_rank_does_not_alias() {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
         precision: Prim::F32,
     };
-    let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let c = emit_dag(&dag, "test_fan_in_different_rank").unwrap();
-    assert_reuse_rejected(&c, fused, a);
+    let (dag, _, _) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
+    let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+        Ok(_) => panic!("mixed-positive-rank same-shape producer must be rejected"),
+        Err(error) => error,
+    };
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("same-shape result at node 6")
+            && rendered.contains("positive-rank operand")
+            && rendered.contains("rank 1")
+            && rendered.contains("expected rank 2"),
+        "unexpected malformed-agreement rejection: {error}"
+    );
 }
