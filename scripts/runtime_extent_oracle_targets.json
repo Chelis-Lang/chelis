@@ -639,6 +639,7 @@
       },
       "expected": [
         "a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        "a_cross_let_alias_traps_at_the_producer_before_intervening_effects",
         "a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
         "a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
         "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
@@ -649,6 +650,7 @@
         "a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
         "a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
         "a_value_dead_except_for_the_obligation_still_traps",
+        "a_wildcard_host_alias_creates_no_guard_or_internal_error",
         "a_wildcard_local_ascription_creates_no_extent_obligation",
         "agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
         "agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
@@ -669,6 +671,7 @@
         "direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
         "direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
         "hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        "hand_authored_deep_cross_let_alias_traps_before_the_intervening_effect",
         "hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
         "hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
         "inferred_metadata_does_not_create_a_local_runtime_claim",
@@ -701,6 +704,7 @@
       },
       "expected": [
         "composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
+        "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
         "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
       ],
       "note": "Stdlib and dependency cache payloads retain the checked obligation, cached-library plus entry composition lowers it to an explicit site, and independently checked same-offset bindings select their activation-local identities."

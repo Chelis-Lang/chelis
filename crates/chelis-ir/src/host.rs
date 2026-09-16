@@ -7615,7 +7615,7 @@ fn sequential_host_let_chain(
         if !bind_kids.len().is_multiple_of(2) {
             return None;
         }
-        for pair in bind_kids.chunks_exact(2) {
+        for pair in bind_kids.as_chunks::<2>().0 {
             bindings.push(SequentialHostLetBinding {
                 binding: pair[0].clone(),
                 initializer: pair[1].clone(),
@@ -7934,15 +7934,14 @@ fn lower_host_expr_kind(
             let mut bindings = Vec::new();
             let checked_lowering = cached_subexpr_lowering_context(program);
             let flattened = sequential_host_let_chain(expr, program, scope);
-            let flattened_regions = flattened
-                .as_ref()
-                .map(|chain| {
-                    checked_lowering.local_ascription_binding_regions(
-                        &chain.bind_expr,
-                        tensor_helpers.declaration_name.as_deref(),
-                    )
-                })
-                .unwrap_or_default();
+            let flattened_regions = if let Some(chain) = flattened.as_ref() {
+                checked_lowering.local_ascription_binding_regions(
+                    &chain.bind_expr,
+                    tensor_helpers.declaration_name.as_deref(),
+                )
+            } else {
+                Vec::new()
+            };
             let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
                 flattened_regions.iter().any(|region| {
                     let producer_layer = chain.bindings[region.producer_binding_index() / 2].layer;
@@ -7976,7 +7975,9 @@ fn lower_host_expr_kind(
                 }
                 let bind_span = bind_first.span_id().map(str::to_owned);
                 let current = children(bind_list)
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| SequentialHostLetBinding {
                         binding: pair[0].clone(),
                         initializer: pair[1].clone(),

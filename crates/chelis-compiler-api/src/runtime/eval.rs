@@ -1859,7 +1859,7 @@ impl<'a> EvalContext<'a> {
                 let name = symbol_name(&bind_kids[index])
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
                 let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-                let local_claims = (guarded == Some(index)).then_some(claims).unwrap_or(&[]);
+                let local_claims = if guarded == Some(index) { claims } else { &[] };
                 let value = if let Some(region) = local_regions.get(&index) {
                     self.eval_checked_local_ascription_region(
                         lowering

@@ -9172,7 +9172,7 @@ impl<'program> LowerCtx<'program> {
                     return false;
                 }
                 if tag == DeepTag::Bind {
-                    for pair in children.chunks_exact(2) {
+                    for pair in children.as_chunks::<2>().0 {
                         let Some(name) = symbol_name(&pair[0]) else {
                             continue;
                         };
