@@ -42,6 +42,29 @@ pub(super) struct PreparedRecursiveExpected<'a> {
     published: Option<SchemeInstantiation>,
 }
 
+pub(super) struct DeclaredMemberRequest<'a> {
+    name: &'a str,
+    binder_names: Option<&'a UnordSet<String>>,
+    declared_scheme: Option<&'a Scheme>,
+    use_published_as_declared: bool,
+}
+
+impl<'a> DeclaredMemberRequest<'a> {
+    pub(super) fn new(
+        name: &'a str,
+        binder_names: Option<&'a UnordSet<String>>,
+        declared_scheme: Option<&'a Scheme>,
+        use_published_as_declared: bool,
+    ) -> Self {
+        Self {
+            name,
+            binder_names,
+            declared_scheme,
+            use_published_as_declared,
+        }
+    }
+}
+
 impl<'a> PreparedRecursiveExpected<'a> {
     pub(super) fn prepare(
         expected: Option<RecursiveExpected<'a>>,
@@ -95,24 +118,21 @@ impl<'a> PreparedRecursiveExpected<'a> {
     /// only when the caller confirms the member already owns a defsig.
     pub(super) fn prepare_declared_member(
         &self,
-        name: &str,
-        binder_names: Option<&UnordSet<String>>,
-        declared_scheme: Option<&Scheme>,
-        use_published_as_declared: bool,
+        request: DeclaredMemberRequest<'_>,
         env: &Env,
         var_gen: &mut VarGen,
         subst: &mut Subst,
     ) -> DeclaredMemberSetup {
-        let instantiation = if let Some(scheme) = declared_scheme {
+        let instantiation = if let Some(scheme) = request.declared_scheme {
             Some(env.instantiate_scheme(scheme, var_gen, subst))
-        } else if use_published_as_declared {
+        } else if request.use_published_as_declared {
             self.published.clone()
         } else {
             None
         };
         let Some((ty, mapping, dvar_mapping)) = instantiation else {
-            let caller_guard = if group_member(name) {
-                self.begin_caller(name, None)
+            let caller_guard = if group_member(request.name) {
+                self.begin_caller(request.name, None)
             } else {
                 CallerGuard::inactive()
             };
@@ -123,15 +143,15 @@ impl<'a> PreparedRecursiveExpected<'a> {
                 caller_guard,
             };
         };
-        let caller_guard = if group_member(name) {
-            begin_caller(name, binder_names, &mapping)
+        let caller_guard = if group_member(request.name) {
+            begin_caller(request.name, request.binder_names, &mapping)
         } else {
             CallerGuard::inactive()
         };
         DeclaredMemberSetup {
             ty: Some(ty),
-            dim_names: env.declared_dim_names_for(name, &dvar_mapping),
-            type_names: env.declared_type_names_for(name, &mapping),
+            dim_names: env.declared_dim_names_for(request.name, &dvar_mapping),
+            type_names: env.declared_type_names_for(request.name, &mapping),
             caller_guard,
         }
     }

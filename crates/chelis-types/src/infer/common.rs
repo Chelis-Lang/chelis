@@ -2592,10 +2592,12 @@ pub(super) fn infer_top_level(
             type_names: declared_type_names,
             caller_guard: _recursion_caller_guard,
         } = recursive_expected.prepare_declared_member(
-            &name,
-            binder_names,
-            declared_scheme,
-            replaying_authored_signature,
+            recursion::DeclaredMemberRequest::new(
+                &name,
+                binder_names,
+                declared_scheme,
+                replaying_authored_signature,
+            ),
             env,
             vg,
             subst,
