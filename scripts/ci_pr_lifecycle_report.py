@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Report cumulative and latest-candidate CI work for a pull-request cohort.
+"""Report full GitHub Actions and candidate-lifecycle work for a PR cohort.
 
-The report deliberately separates raw summed hosted job execution, workflow
-wall time, and agent waiting. GitHub supplies the first two. Agent waiting and
-semantic causes that cannot be derived safely come from an attribution ledger.
+The report separates per-job-rounded list-price estimates, raw execution,
+workflow wall time, and agent waiting. GitHub supplies workflow/job evidence;
+agent waiting and semantic causes that cannot be derived safely come from an
+attribution ledger.
 """
 
 from __future__ import annotations
@@ -11,12 +12,18 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import io
 import json
+import math
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import urlencode
+import zipfile
 
 
 GITHUB_SCHEMA = "chelis-ci-pr-lifecycle-github-v1"
@@ -28,6 +35,25 @@ CI_WORKFLOWS = {
     ".github/workflows/conformance.yml": "Hull",
 }
 EXPANSION_WORKFLOW = ".github/workflows/pr-package-expansion.yml"
+EVENT_SIBLING_WINDOW_SECONDS = 120
+WORKFLOW_RUN_PARENT_WINDOW_SECONDS = 15
+WORKFLOW_RUN_PARENTS = {
+    ".github/workflows/pr-candidate-receipt.yml": {
+        "CI",
+        "Hull Conformance",
+        "Changelog",
+        "PR Contract Acknowledgements",
+        "PR Base Retarget Validation",
+    },
+    ".github/workflows/openspec-autoland-controller.yml": {
+        "OpenSpec autoland signal",
+    },
+}
+DEFAULT_LINUX_X64_RATE_USD = 0.006
+PRICING_AS_OF = "2026-09-16"
+PRICING_SOURCE = (
+    "https://docs.github.com/en/billing/reference/actions-minute-multipliers"
+)
 CAUSES = (
     "initial-candidate",
     "review-repair",
@@ -36,6 +62,7 @@ CAUSES = (
     "trivial-or-hand-resolved-conflict-rebase",
     "base-retarget-stack-collapse",
     "ci-policy-ci-repair",
+    "pull-request-metadata-edit",
     "package-expansion-rerun",
     "unknown",
 )
@@ -46,6 +73,7 @@ class ReportError(ValueError):
 
 
 Api = Callable[[str], object]
+LogApi = Callable[[int], str | None]
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -132,7 +160,7 @@ def _candidate_id(run: Mapping[str, Any]) -> str:
 
 
 def _run_time(run: Mapping[str, Any]) -> datetime:
-    for key in ("run_started_at", "created_at", "updated_at"):
+    for key in ("created_at", "run_started_at", "updated_at"):
         if run.get(key) is not None:
             return _timestamp(run[key], f"workflow run {key}")
     raise ReportError("workflow run requires a stable timestamp")
@@ -146,6 +174,7 @@ def _job_seconds(run: Mapping[str, Any]) -> float:
         job = _mapping(raw_job, f"workflow run job {index}")
         if (
             job.get("conclusion") == "skipped"
+            or _is_non_vm_synthetic(job)
             or job.get("started_at") is None
             or job.get("completed_at") is None
         ):
@@ -163,7 +192,7 @@ def _untimed_job_count(run: Mapping[str, Any]) -> int:
         _sequence(run.get("jobs", []), "workflow run jobs")
     ):
         job = _mapping(raw_job, f"workflow run job {index}")
-        if job.get("conclusion") == "skipped":
+        if job.get("conclusion") == "skipped" or _is_non_vm_synthetic(job):
             continue
         if job.get("started_at") is None or job.get("completed_at") is None:
             count += 1
@@ -178,6 +207,7 @@ def _timing_anomaly_count(run: Mapping[str, Any]) -> int:
         job = _mapping(raw_job, f"workflow run job {index}")
         if (
             job.get("conclusion") == "skipped"
+            or _is_non_vm_synthetic(job)
             or job.get("started_at") is None
             or job.get("completed_at") is None
         ):
@@ -191,12 +221,12 @@ def _timing_anomaly_count(run: Mapping[str, Any]) -> int:
 
 def _attempt_windows(run: Mapping[str, Any]) -> dict[int, tuple[datetime, datetime]]:
     windows: dict[int, tuple[datetime, datetime]] = {}
-    for index, raw_job in enumerate(
-        _sequence(run.get("jobs", []), "workflow run jobs")
-    ):
+    jobs = _sequence(run.get("jobs", []), "workflow run jobs")
+    for index, raw_job in enumerate(jobs):
         job = _mapping(raw_job, f"workflow run job {index}")
         if (
             job.get("conclusion") == "skipped"
+            or _is_non_vm_synthetic(job)
             or job.get("started_at") is None
             or job.get("completed_at") is None
         ):
@@ -212,7 +242,7 @@ def _attempt_windows(run: Mapping[str, Any]) -> dict[int, tuple[datetime, dateti
             windows[attempt] = (started, completed)
         else:
             windows[attempt] = (min(prior[0], started), max(prior[1], completed))
-    if windows:
+    if windows or jobs:
         return windows
     if run.get("run_started_at") is not None and run.get("updated_at") is not None:
         attempt = _positive_int(
@@ -234,10 +264,133 @@ def _workflow_wall_seconds(run: Mapping[str, Any]) -> float:
 
 
 def _attempt_count(run: Mapping[str, Any]) -> int:
-    windows = _attempt_windows(run)
-    if windows:
-        return len(windows)
-    return 1
+    attempts = {
+        _positive_int(run.get("run_attempt", 1), "workflow run_attempt")
+    }
+    for index, raw_job in enumerate(
+        _sequence(run.get("jobs", []), "workflow run jobs")
+    ):
+        job = _mapping(raw_job, f"workflow run job {index}")
+        attempts.add(
+            _positive_int(
+                job.get("run_attempt", run.get("run_attempt", 1)),
+                "workflow job run_attempt",
+            )
+        )
+    return max(attempts)
+
+
+def _job_labels(job: Mapping[str, Any]) -> set[str]:
+    labels = job.get("labels", [])
+    if not isinstance(labels, Sequence) or isinstance(
+        labels, (str, bytes, bytearray)
+    ):
+        raise ReportError("workflow job labels must be an array")
+    return {
+        label.strip().lower()
+        for label in labels
+        if isinstance(label, str) and label.strip()
+    }
+
+
+def _is_non_vm_synthetic(job: Mapping[str, Any]) -> bool:
+    return (
+        job.get("started_at") is not None
+        and not _job_labels(job)
+        and job.get("runner_id") is None
+        and job.get("runner_name") is None
+        and not job.get("steps")
+    )
+
+
+def _runner_kind(job: Mapping[str, Any]) -> str:
+    labels = _job_labels(job)
+    if "self-hosted" in labels:
+        return "self-hosted"
+    ubuntu = [label for label in labels if label.startswith("ubuntu-")]
+    if ubuntu and not any("arm" in label for label in ubuntu):
+        return "linux-x64-standard"
+    return "unpriced"
+
+
+def _job_accounting(
+    run: Mapping[str, Any], *, linux_x64_rate_usd: float
+) -> dict[str, int | float]:
+    if linux_x64_rate_usd < 0:
+        raise ReportError("Linux x64 minute rate must not be negative")
+    result: dict[str, int | float] = {
+        "started_job_count": 0,
+        "skipped_job_count": 0,
+        "never_started_job_count": 0,
+        "non_vm_synthetic_check_count": 0,
+        "canceled_started_job_count": 0,
+        "failed_started_job_count": 0,
+        "linux_x64_started_job_count": 0,
+        "self_hosted_started_job_count": 0,
+        "unpriced_started_job_count": 0,
+        "estimated_billable_linux_x64_minutes": 0,
+        "estimated_list_price_usd": 0.0,
+    }
+    observed_attempts: set[int] = set()
+    for index, raw_job in enumerate(
+        _sequence(run.get("jobs", []), "workflow run jobs")
+    ):
+        job = _mapping(raw_job, f"workflow run job {index}")
+        observed_attempts.add(
+            _positive_int(
+                job.get("run_attempt", run.get("run_attempt", 1)),
+                "workflow job run_attempt",
+            )
+        )
+        conclusion = str(job.get("conclusion") or "").lower()
+        if conclusion == "skipped":
+            result["skipped_job_count"] += 1
+            continue
+        if job.get("started_at") is None:
+            result["never_started_job_count"] += 1
+            continue
+        if _is_non_vm_synthetic(job):
+            result["non_vm_synthetic_check_count"] += 1
+            continue
+
+        result["started_job_count"] += 1
+        if conclusion in {"cancelled", "canceled"}:
+            result["canceled_started_job_count"] += 1
+        if conclusion in {"failure", "timed_out", "startup_failure"}:
+            result["failed_started_job_count"] += 1
+
+        kind = _runner_kind(job)
+        if kind == "self-hosted":
+            result["self_hosted_started_job_count"] += 1
+            continue
+        if kind != "linux-x64-standard":
+            result["unpriced_started_job_count"] += 1
+            continue
+
+        result["linux_x64_started_job_count"] += 1
+        billed_minutes = 1
+        if job.get("completed_at") is not None:
+            started = _timestamp(job["started_at"], "workflow job started_at")
+            completed = _timestamp(
+                job["completed_at"], "workflow job completed_at"
+            )
+            if completed >= started:
+                billed_minutes = max(
+                    1,
+                    math.ceil((completed - started).total_seconds() / 60.0),
+                )
+        result["estimated_billable_linux_x64_minutes"] += billed_minutes
+
+    result["never_started_job_count"] += max(
+        0, _attempt_count(run) - len(observed_attempts)
+    )
+
+    result["estimated_list_price_usd"] = round(
+        int(result["estimated_billable_linux_x64_minutes"])
+        * linux_x64_rate_usd,
+        6,
+    )
+    return result
 
 
 def parse_prs(specification: str) -> list[int]:
@@ -395,9 +548,16 @@ def validate_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
             raise ReportError(
                 f"agent wait {wait_id!r} contains duplicate run IDs"
             )
+        if not run_ids_value:
+            raise ReportError(
+                f"agent wait {wait_id!r} requires at least one workflow run ID"
+            )
         agent_waits.append(
             {
                 "wait_id": wait_id,
+                "agent_id": _text(
+                    row.get("agent_id"), "agent wait agent_id"
+                ),
                 "pr_number": _positive_int(
                     row.get("pr_number"), "agent wait PR number"
                 ),
@@ -411,6 +571,20 @@ def validate_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "note": _optional_text(row.get("note"), "agent wait note"),
             }
         )
+
+    waits_by_agent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in agent_waits:
+        waits_by_agent[row["agent_id"]].append(row)
+    for agent_id, rows in waits_by_agent.items():
+        rows.sort(key=lambda row: _timestamp(row["started_at"], "agent wait start"))
+        for previous, current in zip(rows, rows[1:]):
+            previous_end = _timestamp(previous["ended_at"], "agent wait end")
+            current_start = _timestamp(current["started_at"], "agent wait start")
+            if current_start < previous_end:
+                raise ReportError(
+                    f"agent {agent_id!r} has overlapping waits "
+                    f"{previous['wait_id']!r} and {current['wait_id']!r}"
+                )
 
     return {
         "schema": LEDGER_SCHEMA,
@@ -428,10 +602,11 @@ def _candidate_attribution(
     head_sha: str,
     candidate_sha: str,
     ledger: Mapping[str, Any],
+    used_rows: set[int],
 ) -> dict[str, str | None]:
     matches = [
-        row
-        for row in ledger["candidate_attributions"]
+        (index, row)
+        for index, row in enumerate(ledger["candidate_attributions"])
         if row["pr_number"] == pr_number
         and row["head_sha"] == head_sha
         and (
@@ -444,7 +619,8 @@ def _candidate_attribution(
             f"multiple ledger rows match PR #{pr_number} candidate {candidate_sha}"
         )
     if matches:
-        row = matches[0]
+        index, row = matches[0]
+        used_rows.add(index)
         return {
             "cause": row["cause"],
             "attribution": "ledger",
@@ -465,6 +641,7 @@ def _run_attribution(
     candidate: Mapping[str, Any] | None,
     expansion_ordinal: int | None,
     ledger: Mapping[str, Any],
+    source_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, str | None]:
     run_id = _positive_int(run.get("id"), "workflow run id")
     matches = [
@@ -478,19 +655,39 @@ def _run_attribution(
             "evidence": row["evidence"],
             "note": row["note"],
         }
+    if source_rows:
+        causes = {row["cause"] for row in source_rows}
+        if len(causes) == 1:
+            cause = causes.pop()
+            return {
+                "cause": cause,
+                "attribution": "inferred-workflow-run-parent",
+                "evidence": (
+                    "workflow_run child of run IDs "
+                    + ", ".join(str(row["run_id"]) for row in source_rows)
+                ),
+                "note": None,
+            }
+    if expansion_ordinal is not None:
+        if expansion_ordinal > 1:
+            return {
+                "cause": "package-expansion-rerun",
+                "attribution": "inferred",
+                "evidence": "later package-expansion run observed for the same PR",
+                "note": None,
+            }
+        return {
+            "cause": "unknown",
+            "attribution": "unknown",
+            "evidence": "no supplied ledger row establishes this expansion's cause",
+            "note": None,
+        }
     if candidate is not None:
         return {
             "cause": candidate["cause"],
             "attribution": candidate["attribution"],
             "evidence": candidate["evidence"],
             "note": candidate["note"],
-        }
-    if expansion_ordinal is not None and expansion_ordinal > 1:
-        return {
-            "cause": "package-expansion-rerun",
-            "attribution": "inferred",
-            "evidence": "later package-expansion run observed for the same PR",
-            "note": None,
         }
     return {
         "cause": "unknown",
@@ -522,6 +719,7 @@ def _normalized_run(
     attribution = run_attributions.get(run_id)
     supplied_pr_number = run.get("pr_number")
     supplied_head_sha = run.get("head_sha")
+    supplied_candidate_sha = run.get("candidate_sha")
     if (
         attribution is not None
         and type(supplied_pr_number) is int
@@ -532,19 +730,32 @@ def _normalized_run(
         )
     if (
         attribution is not None
-        and run.get("event") == "pull_request"
+        and run.get("event") in {"pull_request", "pull_request_target"}
         and isinstance(supplied_head_sha, str)
         and supplied_head_sha != attribution["head_sha"]
     ):
         raise ReportError(
             f"run {run_id} head attribution disagrees with supplied GitHub data"
         )
+    if (
+        attribution is not None
+        and run.get("event") in {"pull_request", "pull_request_target"}
+        and isinstance(supplied_candidate_sha, str)
+        and attribution["candidate_sha"] is not None
+        and supplied_candidate_sha != attribution["candidate_sha"]
+    ):
+        raise ReportError(
+            f"run {run_id} candidate attribution disagrees with supplied GitHub data"
+        )
     pr_number = _run_pr_number(run, run_attributions)
     if pr_number is not None:
         run["pr_number"] = pr_number
     if attribution is not None:
         run["head_sha"] = attribution["head_sha"]
-        if attribution["candidate_sha"] is not None:
+        if (
+            attribution["candidate_sha"] is not None
+            and not isinstance(supplied_candidate_sha, str)
+        ):
             run["candidate_sha"] = attribution["candidate_sha"]
     _workflow_path(run)
     _run_time(run)
@@ -600,6 +811,7 @@ def build_report(
     prs: Sequence[int],
     attribution_payload: Mapping[str, Any] | None = None,
     generated_at: str | None = None,
+    linux_x64_rate_usd: float = DEFAULT_LINUX_X64_RATE_USD,
 ) -> dict[str, Any]:
     if github_payload.get("schema") != GITHUB_SCHEMA:
         raise ReportError(f"GitHub input schema must be {GITHUB_SCHEMA}")
@@ -614,22 +826,33 @@ def build_report(
     run_attributions = {
         row["run_id"]: row for row in ledger["run_attributions"]
     }
-    runs = [
-        _normalized_run(
+    runs: list[dict[str, Any]] = []
+    seen_run_ids: set[int] = set()
+    for index, raw in enumerate(
+        _sequence(github_payload.get("workflow_runs"), "workflow_runs")
+    ):
+        normalized = _normalized_run(
             _mapping(raw, f"workflow run {index}"), run_attributions
         )
-        for index, raw in enumerate(
-            _sequence(github_payload.get("workflow_runs"), "workflow_runs")
+        run_id = _positive_int(normalized.get("id"), "workflow run id")
+        if run_id in seen_run_ids:
+            raise ReportError(f"duplicate workflow run ID {run_id}")
+        seen_run_ids.add(run_id)
+        runs.append(normalized)
+    missing_attributed_runs = sorted(
+        row["run_id"]
+        for row in ledger["run_attributions"]
+        if row["pr_number"] in cohort and row["run_id"] not in seen_run_ids
+    )
+    if missing_attributed_runs:
+        raise ReportError(
+            "attribution ledger references workflow runs missing from the "
+            f"snapshot: {missing_attributed_runs}"
         )
-    ]
     runs = [
         run
         for run in runs
         if run.get("pr_number") in cohort
-        and (
-            _workflow_path(run) in CI_WORKFLOWS
-            or _workflow_path(run) == EXPANSION_WORKFLOW
-        )
     ]
 
     implementation_runs = [
@@ -646,7 +869,9 @@ def build_report(
 
     candidate_rows: list[dict[str, Any]] = []
     candidate_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    candidate_by_head: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     candidate_seconds: dict[tuple[int, str], tuple[float, float]] = {}
+    used_candidate_rows: set[int] = set()
     for pr_number in cohort:
         keys = [
             key for key in candidate_groups if key[0] == pr_number
@@ -667,6 +892,7 @@ def build_report(
                 head_sha=head_sha,
                 candidate_sha=key[1],
                 ledger=ledger,
+                used_rows=used_candidate_rows,
             )
             job_seconds = sum(_job_seconds(run) for run in grouped_runs)
             wall_seconds = sum(
@@ -697,7 +923,26 @@ def build_report(
             }
             candidate_rows.append(row)
             candidate_by_key[key] = row
+            candidate_by_head[(pr_number, head_sha)].append(row)
             candidate_seconds[key] = (job_seconds, wall_seconds)
+
+    unused_candidate_rows = [
+        row
+        for index, row in enumerate(ledger["candidate_attributions"])
+        if row["pr_number"] in cohort and index not in used_candidate_rows
+    ]
+    if unused_candidate_rows:
+        identities = [
+            (
+                row["pr_number"],
+                row["head_sha"],
+                row["candidate_sha"],
+            )
+            for row in unused_candidate_rows
+        ]
+        raise ReportError(
+            f"unused candidate attribution rows for cohort: {identities}"
+        )
 
     expansion_by_pr: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for run in expansion_runs:
@@ -707,35 +952,89 @@ def build_report(
         grouped.sort(key=_run_time)
 
     run_rows: list[dict[str, Any]] = []
+    built_run_rows_by_id: dict[int, dict[str, Any]] = {}
     run_seconds: dict[int, tuple[float, float]] = {}
+    run_accounting: dict[int, dict[str, int | float]] = {}
     for run in sorted(runs, key=_run_time):
         run_id = _positive_int(run.get("id"), "workflow run id")
         pr_number = _positive_int(run.get("pr_number"), "workflow run PR number")
         path = _workflow_path(run)
-        candidate = (
-            candidate_by_key.get((pr_number, _candidate_id(run)))
-            if path in CI_WORKFLOWS
-            else None
-        )
+        if path in CI_WORKFLOWS:
+            candidate = candidate_by_key.get((pr_number, _candidate_id(run)))
+        else:
+            run_created = _run_time(run)
+            head_candidates = [
+                row
+                for row in candidate_by_head.get(
+                    (pr_number, _head_sha(run)), []
+                )
+                if abs(
+                    (
+                        run_created
+                        - _timestamp(
+                            row["first_observed_at"],
+                            "candidate first_observed_at",
+                        )
+                    ).total_seconds()
+                )
+                <= EVENT_SIBLING_WINDOW_SECONDS
+            ]
+            candidate = head_candidates[0] if len(head_candidates) == 1 else None
         expansion_ordinal = None
         if path == EXPANSION_WORKFLOW:
             expansion_ordinal = (
                 expansion_by_pr[pr_number].index(run) + 1
             )
+        source_run_ids = [
+            _positive_int(value, "workflow source run id")
+            for value in _sequence(
+                run.get("source_run_ids", []), "workflow source_run_ids"
+            )
+        ]
+        if len(source_run_ids) != len(set(source_run_ids)):
+            raise ReportError(
+                f"run {run_id} contains duplicate source workflow run IDs"
+            )
+        source_rows: list[Mapping[str, Any]] = []
+        for source_run_id in source_run_ids:
+            source = built_run_rows_by_id.get(source_run_id)
+            if source is None:
+                raise ReportError(
+                    f"run {run_id} references unavailable source workflow "
+                    f"run {source_run_id}"
+                )
+            if source["pr_number"] != pr_number:
+                raise ReportError(
+                    f"run {run_id} source run {source_run_id} belongs to a "
+                    "different pull request"
+                )
+            if source["head_sha"] != _head_sha(run):
+                raise ReportError(
+                    f"run {run_id} source run {source_run_id} has a different "
+                    "pull-request head"
+                )
+            source_rows.append(source)
         attribution = _run_attribution(
             run,
             candidate=candidate,
             expansion_ordinal=expansion_ordinal,
             ledger=ledger,
+            source_rows=source_rows,
         )
         pr_attribution = _optional_text(
             run.get("pr_attribution"), "workflow run PR attribution"
         )
         job_seconds = _job_seconds(run)
         wall_seconds = _workflow_wall_seconds(run)
+        accounting = _job_accounting(
+            run, linux_x64_rate_usd=linux_x64_rate_usd
+        )
         run_seconds[run_id] = (job_seconds, wall_seconds)
-        run_rows.append(
-            {
+        run_accounting[run_id] = accounting
+        workflow_name = _optional_text(
+            run.get("workflow_name"), "workflow run name"
+        )
+        run_row = {
                 "run_id": run_id,
                 "pr_number": pr_number,
                 "pr_attribution": (
@@ -745,16 +1044,36 @@ def build_report(
                 ),
                 "head_sha": _head_sha(run),
                 "candidate_sha": (
-                    _candidate_id(run) if path in CI_WORKFLOWS else None
+                    _candidate_id(run)
+                    if path in CI_WORKFLOWS
+                    else (
+                        candidate["candidate_sha"]
+                        if candidate is not None
+                        else None
+                    )
                 ),
                 "workflow": (
                     CI_WORKFLOWS[path]
                     if path in CI_WORKFLOWS
-                    else "Package Expansion"
+                    else (
+                        "Package Expansion"
+                        if path == EXPANSION_WORKFLOW
+                        else (workflow_name or Path(path).stem)
+                    )
                 ),
                 "workflow_path": path,
                 "event": _optional_text(run.get("event"), "workflow run event"),
-                "started_at": _timestamp_text(_run_time(run)),
+                "created_at": _timestamp_text(_run_time(run)),
+                "started_at": (
+                    _timestamp_text(
+                        _timestamp(
+                            run["run_started_at"],
+                            "workflow run run_started_at",
+                        )
+                    )
+                    if run.get("run_started_at") is not None
+                    else None
+                ),
                 "cause": attribution["cause"],
                 "attribution": attribution["attribution"],
                 "evidence": attribution["evidence"],
@@ -764,8 +1083,10 @@ def build_report(
                 "workflow_wall_minutes": _minutes(wall_seconds),
                 "untimed_job_count": _untimed_job_count(run),
                 "timing_anomaly_count": _timing_anomaly_count(run),
+                **accounting,
             }
-        )
+        run_rows.append(run_row)
+        built_run_rows_by_id[run_id] = run_row
 
     wait_rows: list[dict[str, Any]] = []
     wait_seconds_by_id: dict[str, float] = {}
@@ -838,6 +1159,14 @@ def build_report(
         agent_wait_seconds = sum(
             wait_seconds_by_id[row["wait_id"]] for row in cause_waits
         )
+        estimated_billable_minutes = sum(
+            int(
+                run_accounting[row["run_id"]][
+                    "estimated_billable_linux_x64_minutes"
+                ]
+            )
+            for row in cause_runs
+        )
         cause_rows.append(
             {
                 "cause": cause,
@@ -856,6 +1185,50 @@ def build_report(
                 ),
                 "agent_wait_count": len(cause_waits),
                 "agent_wait_minutes": _minutes(agent_wait_seconds),
+                "started_job_count": sum(
+                    int(run_accounting[row["run_id"]]["started_job_count"])
+                    for row in cause_runs
+                ),
+                "skipped_job_count": sum(
+                    int(run_accounting[row["run_id"]]["skipped_job_count"])
+                    for row in cause_runs
+                ),
+                "never_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "never_started_job_count"
+                        ]
+                    )
+                    for row in cause_runs
+                ),
+                "non_vm_synthetic_check_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "non_vm_synthetic_check_count"
+                        ]
+                    )
+                    for row in cause_runs
+                ),
+                "canceled_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "canceled_started_job_count"
+                        ]
+                    )
+                    for row in cause_runs
+                ),
+                "failed_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "failed_started_job_count"
+                        ]
+                    )
+                    for row in cause_runs
+                ),
+                "estimated_billable_linux_x64_minutes": estimated_billable_minutes,
+                "estimated_list_price_usd": round(
+                    estimated_billable_minutes * linux_x64_rate_usd, 6
+                ),
             }
         )
 
@@ -883,11 +1256,22 @@ def build_report(
             and row["workflow_path"] == EXPANSION_WORKFLOW
         ]
         pr_waits = [row for row in wait_rows if row["pr_number"] == pr_number]
+        pr_runs = [
+            row for row in run_rows if row["pr_number"] == pr_number
+        ]
         expansion_seconds = sum(
             run_seconds[row["run_id"]][0] for row in pr_expansions
         )
         agent_wait_seconds = sum(
             wait_seconds_by_id[row["wait_id"]] for row in pr_waits
+        )
+        estimated_billable_minutes = sum(
+            int(
+                run_accounting[row["run_id"]][
+                    "estimated_billable_linux_x64_minutes"
+                ]
+            )
+            for row in pr_runs
         )
         pr_rows.append(
             {
@@ -912,6 +1296,51 @@ def build_report(
                     expansion_seconds
                 ),
                 "agent_wait_minutes": _minutes(agent_wait_seconds),
+                "actions_workflow_run_count": len(pr_runs),
+                "started_job_count": sum(
+                    int(run_accounting[row["run_id"]]["started_job_count"])
+                    for row in pr_runs
+                ),
+                "failed_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "failed_started_job_count"
+                        ]
+                    )
+                    for row in pr_runs
+                ),
+                "canceled_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "canceled_started_job_count"
+                        ]
+                    )
+                    for row in pr_runs
+                ),
+                "skipped_job_count": sum(
+                    int(run_accounting[row["run_id"]]["skipped_job_count"])
+                    for row in pr_runs
+                ),
+                "never_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "never_started_job_count"
+                        ]
+                    )
+                    for row in pr_runs
+                ),
+                "non_vm_synthetic_check_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "non_vm_synthetic_check_count"
+                        ]
+                    )
+                    for row in pr_runs
+                ),
+                "estimated_billable_linux_x64_minutes": estimated_billable_minutes,
+                "estimated_list_price_usd": round(
+                    estimated_billable_minutes * linux_x64_rate_usd, 6
+                ),
                 "latest_head_sha": latest["head_sha"] if latest else None,
                 "latest_candidate_sha": (
                     latest["candidate_sha"] if latest else None
@@ -941,12 +1370,92 @@ def build_report(
         seconds[1] for seconds in run_seconds.values()
     )
     all_agent_wait_seconds = sum(wait_seconds_by_id.values())
+    all_estimated_billable_minutes = sum(
+        int(
+            accounting["estimated_billable_linux_x64_minutes"]
+        )
+        for accounting in run_accounting.values()
+    )
+    workflow_rows: list[dict[str, Any]] = []
+    workflow_paths = sorted({row["workflow_path"] for row in run_rows})
+    for workflow_path in workflow_paths:
+        workflow_runs = [
+            row for row in run_rows if row["workflow_path"] == workflow_path
+        ]
+        billable_minutes = sum(
+            int(
+                run_accounting[row["run_id"]][
+                    "estimated_billable_linux_x64_minutes"
+                ]
+            )
+            for row in workflow_runs
+        )
+        workflow_rows.append(
+            {
+                "workflow": workflow_runs[0]["workflow"],
+                "workflow_path": workflow_path,
+                "workflow_run_count": len(workflow_runs),
+                "workflow_attempt_count": sum(
+                    row["attempt_count"] for row in workflow_runs
+                ),
+                "started_job_count": sum(
+                    int(run_accounting[row["run_id"]]["started_job_count"])
+                    for row in workflow_runs
+                ),
+                "failed_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "failed_started_job_count"
+                        ]
+                    )
+                    for row in workflow_runs
+                ),
+                "canceled_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "canceled_started_job_count"
+                        ]
+                    )
+                    for row in workflow_runs
+                ),
+                "skipped_job_count": sum(
+                    int(run_accounting[row["run_id"]]["skipped_job_count"])
+                    for row in workflow_runs
+                ),
+                "never_started_job_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "never_started_job_count"
+                        ]
+                    )
+                    for row in workflow_runs
+                ),
+                "non_vm_synthetic_check_count": sum(
+                    int(
+                        run_accounting[row["run_id"]][
+                            "non_vm_synthetic_check_count"
+                        ]
+                    )
+                    for row in workflow_runs
+                ),
+                "raw_job_minutes": _minutes(
+                    sum(
+                        run_seconds[row["run_id"]][0]
+                        for row in workflow_runs
+                    )
+                ),
+                "estimated_billable_linux_x64_minutes": billable_minutes,
+                "estimated_list_price_usd": round(
+                    billable_minutes * linux_x64_rate_usd, 6
+                ),
+            }
+        )
     warnings: list[str] = []
     if not ledger["manual_run_scope_complete"]:
         warnings.append(
-            "Manual workflow attribution is not declared complete; retarget "
-            "and package-expansion counts are lower bounds until every cohort "
-            "dispatch has a run_attributions row."
+            "Association-less workflow attribution is not declared complete; "
+            "manual dispatch and other unassociated run counts are lower bounds "
+            "until every cohort run has a run_attributions row."
         )
     collected_since = github_payload.get("collected_since")
     if collected_since is not None:
@@ -975,6 +1484,11 @@ def build_report(
             "Some package-expansion causes are unknown; supply run_attributions "
             "for semantic classification."
         )
+    if any(row["attribution"] == "unknown" for row in run_rows):
+        warnings.append(
+            "Some workflow-run causes are unknown; supply run_attributions or "
+            "candidate_attributions for semantic classification."
+        )
     if not wait_rows:
         warnings.append(
             "No agent wait intervals were supplied; agent waiting is reported "
@@ -984,13 +1498,26 @@ def build_report(
     if untimed_jobs:
         warnings.append(
             f"{untimed_jobs} non-skipped jobs lacked complete timestamps and "
-            "were excluded from raw job-minute totals."
+            "were excluded from raw job-minute totals; started standard Linux "
+            "jobs contribute a one-minute minimum to the billing estimate."
         )
     timing_anomalies = sum(row["timing_anomaly_count"] for row in run_rows)
     if timing_anomalies:
         warnings.append(
             f"{timing_anomalies} non-skipped jobs had inverted timestamps and "
-            "were excluded from raw job-minute and workflow-wall totals."
+            "were excluded from raw job-minute and workflow-wall totals; "
+            "started standard Linux jobs contribute a one-minute minimum to "
+            "the billing estimate."
+        )
+    unpriced_started_jobs = sum(
+        int(accounting["unpriced_started_job_count"])
+        for accounting in run_accounting.values()
+    )
+    if unpriced_started_jobs:
+        warnings.append(
+            f"{unpriced_started_jobs} started jobs did not have a recognized "
+            "standard Linux x64 label and are not included in the list-price "
+            "estimate."
         )
 
     generated = (
@@ -1007,14 +1534,26 @@ def build_report(
             "manual_run_scope_complete": ledger["manual_run_scope_complete"],
             "manual_run_scope_evidence": ledger["manual_run_scope_evidence"],
         },
+        "pricing": {
+            "currency": "USD",
+            "pricing_as_of": PRICING_AS_OF,
+            "source": PRICING_SOURCE,
+            "linux_x64_minute_rate_usd": linux_x64_rate_usd,
+            "method": (
+                "Each started standard Linux x64 job is rounded up separately "
+                "to a whole minute. Skipped and never-started jobs cost zero. "
+                "Started jobs with missing or inverted completion timestamps "
+                "are estimated at one minute."
+            ),
+        },
         "definitions": {
             "candidate_count": (
                 "Distinct implementation candidate identities observed across "
                 "CI and Hull runs; candidate_sha is preferred over head_sha."
             ),
             "raw_job_minutes": (
-                "Sum of completed_at-started_at for hosted jobs. This is not "
-                "billing-rounded runner time or dollar cost."
+                "Sum of completed_at-started_at for started jobs with valid "
+                "timestamps. This is separate from billing-rounded time."
             ),
             "workflow_wall_minutes": (
                 "Sum of each workflow attempt's earliest-job to latest-job "
@@ -1030,6 +1569,10 @@ def build_report(
                 "Cumulative CI/Hull raw job-minutes divided by the sum of each "
                 "PR's latest-candidate CI/Hull raw job-minutes."
             ),
+            "estimated_list_price_usd": (
+                "Estimated standard Linux x64 list price before included "
+                "minutes, discounts, taxes, or other account adjustments."
+            ),
         },
         "summary": {
             "candidate_count": len(candidate_rows),
@@ -1040,6 +1583,10 @@ def build_report(
             "package_expansion_count": len(expansion_run_rows),
             "package_expansion_attempt_count": sum(
                 row["attempt_count"] for row in expansion_run_rows
+            ),
+            "all_actions_workflow_run_count": len(run_rows),
+            "all_actions_workflow_attempt_count": sum(
+                row["attempt_count"] for row in run_rows
             ),
             "cumulative_ci_hull_raw_job_minutes": _minutes(
                 cumulative_seconds
@@ -1063,8 +1610,55 @@ def build_report(
             "agent_wait_minutes": _minutes(all_agent_wait_seconds),
             "untimed_job_count": untimed_jobs,
             "timing_anomaly_count": timing_anomalies,
+            "started_job_count": sum(
+                int(accounting["started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "accounted_job_slot_count": sum(
+                int(accounting["started_job_count"])
+                + int(accounting["skipped_job_count"])
+                + int(accounting["never_started_job_count"])
+                + int(accounting["non_vm_synthetic_check_count"])
+                for accounting in run_accounting.values()
+            ),
+            "canceled_started_job_count": sum(
+                int(accounting["canceled_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "failed_started_job_count": sum(
+                int(accounting["failed_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "skipped_job_count": sum(
+                int(accounting["skipped_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "never_started_job_count": sum(
+                int(accounting["never_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "non_vm_synthetic_check_count": sum(
+                int(accounting["non_vm_synthetic_check_count"])
+                for accounting in run_accounting.values()
+            ),
+            "linux_x64_started_job_count": sum(
+                int(accounting["linux_x64_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "self_hosted_started_job_count": sum(
+                int(accounting["self_hosted_started_job_count"])
+                for accounting in run_accounting.values()
+            ),
+            "unpriced_started_job_count": unpriced_started_jobs,
+            "estimated_billable_linux_x64_minutes": (
+                all_estimated_billable_minutes
+            ),
+            "estimated_list_price_usd": round(
+                all_estimated_billable_minutes * linux_x64_rate_usd, 6
+            ),
         },
         "pull_requests": pr_rows,
+        "workflows": workflow_rows,
         "causes": cause_rows,
         "candidate_ledger": candidate_rows,
         "run_ledger": run_rows,
@@ -1081,8 +1675,22 @@ def _format_number(value: float | int | None) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def _md_cell(value: object) -> str:
+    if value is None:
+        return "n/a"
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "<br>")
+        .replace("\n", "<br>")
+        .replace("\r", "<br>")
+    )
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     summary = _mapping(report.get("summary"), "report summary")
+    pricing = _mapping(report.get("pricing"), "report pricing")
     lines = [
         "# CI candidate lifecycle report",
         "",
@@ -1095,6 +1703,29 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "| Measure | Value |",
         "| --- | ---: |",
         f"| Candidates | {summary['candidate_count']} |",
+        (
+            "| All attributable Actions workflow runs | "
+            f"{summary['all_actions_workflow_run_count']} |"
+        ),
+        f"| Accounted job slots | {summary['accounted_job_slot_count']} |",
+        f"| Jobs that started | {summary['started_job_count']} |",
+        (
+            "| Started jobs canceled | "
+            f"{summary['canceled_started_job_count']} |"
+        ),
+        (
+            "| Started jobs failed or timed out | "
+            f"{summary['failed_started_job_count']} |"
+        ),
+        f"| Skipped jobs | {summary['skipped_job_count']} |",
+        (
+            "| Jobs that never started | "
+            f"{summary['never_started_job_count']} |"
+        ),
+        (
+            "| Non-VM synthetic checks | "
+            f"{summary['non_vm_synthetic_check_count']} |"
+        ),
         (
             "| Package expansions | "
             f"{summary['package_expansion_count']} |"
@@ -1127,20 +1758,36 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "| Ledger-supplied agent wait minutes | "
             f"{_format_number(summary['agent_wait_minutes'])} |"
         ),
+        (
+            "| Estimated billable standard-Linux minutes | "
+            f"{summary['estimated_billable_linux_x64_minutes']} |"
+        ),
+        (
+            "| Estimated standard-Linux list price | $"
+            f"{_format_number(summary['estimated_list_price_usd'])} |"
+        ),
         "",
         "Raw job-minutes sum job execution and are not billing-rounded runner "
         "minutes. Workflow wall time can overlap across workflows. Agent waiting "
         "comes only from supplied intervals and is neither of those measures. "
-        "No dollar cost is calculated because runner rates are not part of this "
-        "evidence.",
+        f"The list-price estimate uses ${pricing['linux_x64_minute_rate_usd']}"
+        " per standard Linux x64 minute and rounds every started job separately. "
+        "Skipped and never-started jobs are reported but not priced; canceled "
+        "and failed jobs that started are priced. Included minutes and account "
+        "discounts are not deducted.",
         "",
         "## Pull requests",
         "",
         (
-            "| PR | Candidates | Expansions | Cumulative CI/Hull job-min | "
-            "Latest job-min | Amplification | Agent wait min |"
+            "| PR | Candidates | Actions runs | Started jobs | Canceled | "
+            "Failed | Never started | Non-VM checks | Expansions | "
+            "Cumulative CI/Hull job-min | Latest job-min | Amplification | "
+            "Agent wait min | Est. billable min | Est. list price |"
         ),
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+            "---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        ),
     ]
     for row in report["pull_requests"]:
         lines.append(
@@ -1149,6 +1796,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 [
                     f"#{row['pr_number']}",
                     str(row["candidate_count"]),
+                    str(row["actions_workflow_run_count"]),
+                    str(row["started_job_count"]),
+                    str(row["canceled_started_job_count"]),
+                    str(row["failed_started_job_count"]),
+                    str(row["never_started_job_count"]),
+                    str(row["non_vm_synthetic_check_count"]),
                     str(row["package_expansion_count"]),
                     _format_number(
                         row["cumulative_ci_hull_raw_job_minutes"]
@@ -1162,6 +1815,46 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                         else "n/a"
                     ),
                     _format_number(row["agent_wait_minutes"]),
+                    str(row["estimated_billable_linux_x64_minutes"]),
+                    f"${_format_number(row['estimated_list_price_usd'])}",
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Workflow totals",
+            "",
+            (
+                "| Workflow | Runs | Attempts | Started | Canceled | Failed | "
+                "Skipped | Never started | Non-VM checks | Raw job-min | "
+                "Est. billable min | Est. list price |"
+            ),
+            (
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+                "---: | ---: | ---: | ---: |"
+            ),
+        ]
+    )
+    for row in report["workflows"]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row["workflow"]),
+                    str(row["workflow_run_count"]),
+                    str(row["workflow_attempt_count"]),
+                    str(row["started_job_count"]),
+                    str(row["canceled_started_job_count"]),
+                    str(row["failed_started_job_count"]),
+                    str(row["skipped_job_count"]),
+                    str(row["never_started_job_count"]),
+                    str(row["non_vm_synthetic_check_count"]),
+                    _format_number(row["raw_job_minutes"]),
+                    str(row["estimated_billable_linux_x64_minutes"]),
+                    f"${_format_number(row['estimated_list_price_usd'])}",
                 ]
             )
             + " |"
@@ -1175,9 +1868,15 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             (
                 "| Cause | Candidates | Runs | Attempts | CI/Hull job-min | "
                 "Expansion job-min | All hosted job-min | Workflow wall min | "
-                "Agent waits | Agent wait min |"
+                "Agent waits | Agent wait min | Started jobs | Canceled jobs | "
+                "Failed jobs | Never started | Non-VM checks | "
+                "Est. billable min | Est. list price |"
             ),
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            (
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+                "---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+                "---: |"
+            ),
         ]
     )
     for row in report["causes"]:
@@ -1197,6 +1896,13 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                     _format_number(row["summed_workflow_wall_minutes"]),
                     str(row["agent_wait_count"]),
                     _format_number(row["agent_wait_minutes"]),
+                    str(row["started_job_count"]),
+                    str(row["canceled_started_job_count"]),
+                    str(row["failed_started_job_count"]),
+                    str(row["never_started_job_count"]),
+                    str(row["non_vm_synthetic_check_count"]),
+                    str(row["estimated_billable_linux_x64_minutes"]),
+                    f"${_format_number(row['estimated_list_price_usd'])}",
                 ]
             )
             + " |"
@@ -1209,9 +1915,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             (
                 "| PR | Ordinal | Head | Candidate | First observed | Cause | "
-                "Basis | Runs | Raw job-min |"
+                "Basis | Runs | Raw job-min | Evidence | Note |"
             ),
-            "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: |",
+            (
+                "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | "
+                "--- | --- |"
+            ),
         ]
     )
     for row in report["candidate_ledger"]:
@@ -1228,6 +1937,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                     row["attribution"],
                     ", ".join(str(value) for value in row["workflow_run_ids"]),
                     _format_number(row["raw_job_minutes"]),
+                    _md_cell(row["evidence"]),
+                    _md_cell(row["note"]),
                 ]
             )
             + " |"
@@ -1239,12 +1950,14 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "## Workflow run attribution",
             "",
             (
-                "| Run | PR | PR basis | Head | Workflow | Started | Cause | "
-                "Cause basis | Attempts | Raw job-min | Wall min |"
+                "| Run | PR | PR basis | Head | Workflow | Created | Cause | "
+                "Cause basis | Attempts | Started jobs | Canceled jobs | "
+                "Raw job-min | Wall min | Est. billable min | Est. list price | "
+                "Evidence | Note |"
             ),
             (
                 "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | "
-                "---: | ---: |"
+                "---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
             ),
         ]
     )
@@ -1255,15 +1968,21 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 [
                     str(row["run_id"]),
                     f"#{row['pr_number']}",
-                    row["pr_attribution"],
+                    _md_cell(row["pr_attribution"]),
                     f"`{row['head_sha'][:12]}`",
-                    row["workflow"],
-                    row["started_at"],
+                    _md_cell(row["workflow"]),
+                    row["created_at"],
                     row["cause"],
                     row["attribution"],
                     str(row["attempt_count"]),
+                    str(row["started_job_count"]),
+                    str(row["canceled_started_job_count"]),
                     _format_number(row["raw_job_minutes"]),
                     _format_number(row["workflow_wall_minutes"]),
+                    str(row["estimated_billable_linux_x64_minutes"]),
+                    f"${_format_number(row['estimated_list_price_usd'])}",
+                    _md_cell(row["evidence"]),
+                    _md_cell(row["note"]),
                 ]
             )
             + " |"
@@ -1285,12 +2004,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 (
-                    "| Wait ID | PR | Head | Candidate | Start | End | Cause | "
-                    "Run IDs | Wait min | Evidence |"
+                    "| Wait ID | Agent | PR | Head | Candidate | Start | End | "
+                    "Cause | Run IDs | Wait min | Evidence | Note |"
                 ),
                 (
-                    "| --- | ---: | --- | --- | --- | --- | --- | --- | "
-                    "---: | --- |"
+                    "| --- | --- | ---: | --- | --- | --- | --- | --- | --- | "
+                    "---: | --- | --- |"
                 ),
             ]
         )
@@ -1309,7 +2028,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 "| "
                 + " | ".join(
                     [
-                        row["wait_id"],
+                        _md_cell(row["wait_id"]),
+                        _md_cell(row["agent_id"]),
                         f"#{row['pr_number']}",
                         head,
                         candidate,
@@ -1319,7 +2039,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                         ", ".join(str(value) for value in row["run_ids"])
                         or "n/a",
                         _format_number(row["wait_minutes"]),
-                        row["evidence"].replace("|", "\\|"),
+                        _md_cell(row["evidence"]),
+                        _md_cell(row["note"]),
                     ]
                 )
                 + " |"
@@ -1348,43 +2069,151 @@ def _gh_api(endpoint: str) -> object:
         ) from error
 
 
+def _gh_run_log_text(repository: str, run_id: int) -> str | None:
+    completed = subprocess.run(
+        ["gh", "api", f"repos/{repository}/actions/runs/{run_id}/logs"],
+        capture_output=True,
+    )
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(completed.stdout)) as archive:
+            parts = []
+            for name in sorted(archive.namelist()):
+                if name.endswith("/"):
+                    continue
+                parts.append(
+                    archive.read(name).decode("utf-8", errors="replace")
+                )
+            return "\n".join(parts)
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def _logged_parent_run_id(
+    workflow_path: str, log_text: str | None
+) -> int | None:
+    if not log_text:
+        return None
+    patterns = []
+    if workflow_path == ".github/workflows/pr-candidate-receipt.yml":
+        patterns.append(r"--trigger-run-id\s+[\"']?(\d+)")
+    elif workflow_path == ".github/workflows/openspec-autoland-controller.yml":
+        patterns.extend(
+            [
+                r"--run-id\s+[\"']?(\d+)",
+                r"\bRUN_ID:\s*[\"']?(\d+)",
+            ]
+        )
+    matches = {
+        int(match)
+        for pattern in patterns
+        for match in re.findall(pattern, log_text)
+    }
+    if len(matches) == 1:
+        return matches.pop()
+    return None
+
+
 def _workflow_runs(
     api: Api,
     *,
     repository: str,
-    workflow: str,
     since: datetime,
+    until: datetime,
 ) -> list[Mapping[str, Any]]:
+    if until < since:
+        raise ReportError("Actions collection end precedes its start")
+
+    def collect_interval(
+        start: datetime, end: datetime
+    ) -> dict[int, Mapping[str, Any]]:
+        created_filter = f"{_timestamp_text(start)}..{_timestamp_text(end)}"
+        first_query = urlencode(
+            {
+                "created": created_filter,
+                "per_page": 100,
+                "page": 1,
+            }
+        )
+        first = _mapping(
+            api(f"repos/{repository}/actions/runs?{first_query}"),
+            "Actions workflow response",
+        )
+        total_count = first.get("total_count")
+        if type(total_count) is int and total_count > 1000:
+            if end - start <= timedelta(seconds=1):
+                raise ReportError(
+                    "Actions workflow listing exceeds 1,000 runs inside one second"
+                )
+            midpoint = start + (end - start) / 2
+            combined = collect_interval(start, midpoint)
+            combined.update(collect_interval(midpoint, end))
+            return combined
+
+        collected: dict[int, Mapping[str, Any]] = {}
+        for page in range(1, 101):
+            if page == 1:
+                payload = first
+            else:
+                query = urlencode(
+                    {
+                        "created": created_filter,
+                        "per_page": 100,
+                        "page": page,
+                    }
+                )
+                payload = _mapping(
+                    api(f"repos/{repository}/actions/runs?{query}"),
+                    "Actions workflow response",
+                )
+            rows = [
+                _mapping(row, "Actions workflow run")
+                for row in _sequence(
+                    payload.get("workflow_runs"), "Actions workflow_runs"
+                )
+            ]
+            for row in rows:
+                run_id = _positive_int(row.get("id"), "workflow run id")
+                collected[run_id] = row
+            if len(rows) < 100:
+                return collected
+        raise ReportError("Actions workflow listing exceeded 100 pages")
+
+    return list(collect_interval(since, until).values())
+
+
+def _pulls_for_head(
+    api: Api,
+    *,
+    repository: str,
+    head_repository: str,
+    head_ref: str,
+) -> list[Mapping[str, Any]]:
+    owner = head_repository.split("/", 1)[0]
+    query = urlencode(
+        {
+            "state": "all",
+            "head": f"{owner}:{head_ref}",
+            "per_page": 100,
+        }
+    )
     collected: list[Mapping[str, Any]] = []
     for page in range(1, 101):
-        payload = _mapping(
-            api(
-                f"repos/{repository}/actions/workflows/{workflow}/runs"
-                f"?per_page=100&page={page}"
-            ),
-            f"{workflow} workflow response",
+        payload = _sequence(
+            api(f"repos/{repository}/pulls?{query}&page={page}"),
+            "pull requests for head",
         )
         rows = [
-            _mapping(row, f"{workflow} workflow run")
-            for row in _sequence(
-                payload.get("workflow_runs"), f"{workflow} workflow_runs"
-            )
+            _mapping(row, "pull request for head")
+            for row in payload
         ]
-        if not rows:
+        collected.extend(rows)
+        if len(rows) < 100:
             return collected
-        for row in rows:
-            created = _timestamp(
-                row.get("created_at"), f"{workflow} run created_at"
-            )
-            if created >= since:
-                collected.append(row)
-        oldest = min(
-            _timestamp(row.get("created_at"), "workflow run created_at")
-            for row in rows
-        )
-        if oldest < since or len(rows) < 100:
-            return collected
-    raise ReportError(f"{workflow} workflow listing exceeded 100 pages")
+    raise ReportError(
+        f"pull request listing exceeded 100 pages for {head_repository}:{head_ref}"
+    )
 
 
 def _jobs(api: Api, *, repository: str, run_id: int) -> list[Mapping[str, Any]]:
@@ -1458,7 +2287,11 @@ def _branch_pull_number(
         tuple[str, str], Sequence[tuple[int, datetime, datetime]]
     ],
 ) -> int | None:
-    if run.get("event") != "pull_request":
+    if run.get("event") not in {
+        "pull_request",
+        "pull_request_target",
+        "push",
+    }:
         return None
     key = _run_head_key(run)
     if key is None:
@@ -1466,12 +2299,47 @@ def _branch_pull_number(
     created_at = _timestamp(run.get("created_at"), "workflow run created_at")
     matches = [
         number
-        for number, opened_at, updated_at in pull_windows.get(key, [])
-        if opened_at <= created_at <= updated_at
+        for number, opened_at, closed_at in pull_windows.get(key, [])
+        if opened_at <= created_at <= closed_at
     ]
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _workflow_run_parent_ids(
+    child: Mapping[str, Any],
+    *,
+    listed_runs: Mapping[int, Mapping[str, Any]],
+    run_pr_numbers: Mapping[int, int],
+    run_heads: Mapping[int, str],
+) -> list[int]:
+    parent_names = WORKFLOW_RUN_PARENTS.get(_workflow_path(child))
+    if child.get("event") != "workflow_run" or parent_names is None:
+        return []
+    child_created = _timestamp(
+        child.get("created_at"), "workflow_run child created_at"
+    )
+    candidates: list[tuple[float, int]] = []
+    for run_id, run in listed_runs.items():
+        if run_id not in run_pr_numbers or run_id not in run_heads:
+            continue
+        if run.get("name") not in parent_names or run.get("updated_at") is None:
+            continue
+        parent_completed = _timestamp(
+            run.get("updated_at"), f"workflow_run parent {run_id} updated_at"
+        )
+        delta = (child_created - parent_completed).total_seconds()
+        if 0 <= delta <= WORKFLOW_RUN_PARENT_WINDOW_SECONDS:
+            candidates.append((delta, run_id))
+    if not candidates:
+        return []
+    cluster = [run_id for _, run_id in candidates]
+    pr_numbers = {run_pr_numbers[run_id] for run_id in cluster}
+    heads = {run_heads[run_id] for run_id in cluster}
+    if len(pr_numbers) != 1 or len(heads) != 1:
+        return []
+    return sorted(cluster)
 
 
 def collect_github_data(
@@ -1481,8 +2349,10 @@ def collect_github_data(
     attribution_payload: Mapping[str, Any] | None,
     since: datetime,
     api: Api = _gh_api,
+    log_api: LogApi | None = None,
 ) -> dict[str, Any]:
     cohort = set(prs)
+    collected_at = datetime.now(timezone.utc)
     ledger = validate_ledger(
         attribution_payload if attribution_payload is not None else _empty_ledger()
     )
@@ -1490,6 +2360,8 @@ def collect_github_data(
         row["run_id"]: row for row in ledger["run_attributions"]
     }
     pulls: list[dict[str, Any]] = []
+    pull_heads: dict[int, str] = {}
+    cohort_head_keys: set[tuple[str, str]] = set()
     pull_windows: dict[
         tuple[str, str], list[tuple[int, datetime, datetime]]
     ] = defaultdict(list)
@@ -1510,15 +2382,13 @@ def collect_github_data(
             f"pull request #{pr_number} head repository name",
         )
         head_ref = _text(head.get("ref"), f"pull request #{pr_number} head ref")
+        head_sha = _text(head.get("sha"), f"pull request #{pr_number} head SHA")
+        pull_heads[pr_number] = head_sha
         opened_at = _timestamp(
             raw_pull.get("created_at"), f"pull request #{pr_number} created_at"
         )
-        updated_at = _timestamp(
-            raw_pull.get("updated_at"), f"pull request #{pr_number} updated_at"
-        )
-        pull_windows[(head_repository_name, head_ref)].append(
-            (pr_number, opened_at, updated_at)
-        )
+        head_key = (head_repository_name, head_ref)
+        cohort_head_keys.add(head_key)
         pulls.append(
             {
                 "number": pr_number,
@@ -1526,45 +2396,183 @@ def collect_github_data(
                 "state": raw_pull.get("state"),
                 "created_at": raw_pull.get("created_at"),
                 "updated_at": raw_pull.get("updated_at"),
-                "head_sha": head.get("sha"),
+                "closed_at": raw_pull.get("closed_at"),
+                "head_sha": head_sha,
                 "head_ref": head_ref,
                 "head_repository": head_repository_name,
                 "base_ref": base.get("ref"),
             }
         )
+
+    for head_repository_name, head_ref in sorted(cohort_head_keys):
+        for raw_pull in _pulls_for_head(
+            api,
+            repository=repository,
+            head_repository=head_repository_name,
+            head_ref=head_ref,
+        ):
+            number = _positive_int(
+                raw_pull.get("number"), "branch pull request number"
+            )
+            head = _mapping(
+                raw_pull.get("head"), f"branch pull request #{number} head"
+            )
+            head_repository = _mapping(
+                head.get("repo"),
+                f"branch pull request #{number} head repository",
+            )
+            key = (
+                _text(
+                    head_repository.get("full_name"),
+                    f"branch pull request #{number} head repository name",
+                ),
+                _text(
+                    head.get("ref"),
+                    f"branch pull request #{number} head ref",
+                ),
+            )
+            if key != (head_repository_name, head_ref):
+                continue
+            opened_at = _timestamp(
+                raw_pull.get("created_at"),
+                f"branch pull request #{number} created_at",
+            )
+            closed_at = (
+                _timestamp(
+                    raw_pull.get("closed_at"),
+                    f"branch pull request #{number} closed_at",
+                )
+                if raw_pull.get("closed_at") is not None
+                else collected_at
+            )
+            pull_windows[key].append((number, opened_at, closed_at))
+
     all_runs: dict[int, Mapping[str, Any]] = {}
     run_pr_numbers: dict[int, int] = {}
     run_pr_bases: dict[int, str] = {}
-    for workflow in (*CI_WORKFLOWS, EXPANSION_WORKFLOW):
+    run_heads: dict[int, str] = {}
+    if log_api is None and api is _gh_api:
+        def live_log_api(run_id: int) -> str | None:
+            return _gh_run_log_text(repository, run_id)
+
+        log_api = live_log_api
+    listed_runs = {
+        _positive_int(run.get("id"), "workflow run id"): run
         for run in _workflow_runs(
-            api, repository=repository, workflow=Path(workflow).name, since=since
+            api,
+            repository=repository,
+            since=since,
+            until=collected_at,
+        )
+    }
+    for run_id, run in listed_runs.items():
+        direct_pr_number = _pull_number(run)
+        pr_number = direct_pr_number
+        pr_basis = "workflow pull_requests"
+        if pr_number is None:
+            pr_number = _branch_pull_number(run, pull_windows)
+            pr_basis = (
+                "exact head repository/ref and non-overlapping PR lifetime"
+            )
+        attribution = run_attributions.get(run_id)
+        if (
+            pr_number is not None
+            and attribution is not None
+            and pr_number != attribution["pr_number"]
         ):
-            run_id = _positive_int(run.get("id"), "workflow run id")
-            pr_number = _pull_number(run)
-            pr_basis = "workflow pull_requests"
-            if pr_number is None:
-                pr_number = _branch_pull_number(run, pull_windows)
-                pr_basis = "exact head repository/ref and PR activity window"
-            attribution = run_attributions.get(run_id)
-            if (
-                pr_number is not None
-                and attribution is not None
-                and pr_number != attribution["pr_number"]
+            raise ReportError(
+                f"run {run_id} ledger PR disagrees with GitHub identity"
+            )
+        if direct_pr_number is not None and direct_pr_number not in cohort:
+            continue
+        if pr_number not in cohort and (
+            attribution is None or attribution["pr_number"] not in cohort
+        ):
+            continue
+        if pr_number in cohort:
+            run_pr_numbers[run_id] = pr_number
+            run_pr_bases[run_id] = pr_basis
+        elif attribution is not None:
+            run_pr_numbers[run_id] = attribution["pr_number"]
+            run_pr_bases[run_id] = "attribution ledger"
+        head_sha = _pull_head(run)
+        if (
+            run.get("event") == "pull_request_target"
+            and run_pr_bases[run_id]
+            == "exact head repository/ref and non-overlapping PR lifetime"
+        ):
+            head_sha = pull_heads.get(run_pr_numbers[run_id])
+        if (
+            head_sha is None
+            and run_pr_bases[run_id] != "attribution ledger"
+            and isinstance(run.get("head_sha"), str)
+        ):
+            head_sha = run["head_sha"]
+        if attribution is not None:
+            head_sha = attribution["head_sha"]
+        if head_sha is not None:
+            run_heads[run_id] = head_sha
+        all_runs[run_id] = run
+
+    pending_children = [
+        run_id
+        for run_id, run in listed_runs.items()
+        if run_id not in all_runs
+        and run.get("event") == "workflow_run"
+        and _workflow_path(run) in WORKFLOW_RUN_PARENTS
+    ]
+    logged_parents: dict[int, int] = {}
+    if log_api is not None and pending_children:
+        def fetch_logged_parent(run_id: int) -> tuple[int, int | None]:
+            path = _workflow_path(listed_runs[run_id])
+            return run_id, _logged_parent_run_id(path, log_api(run_id))
+
+        with ThreadPoolExecutor(
+            max_workers=min(16, len(pending_children))
+        ) as executor:
+            for run_id, parent_id in executor.map(
+                fetch_logged_parent, sorted(pending_children)
             ):
-                raise ReportError(
-                    f"run {run_id} ledger PR disagrees with GitHub identity"
-                )
-            if pr_number not in cohort and (
-                attribution is None or attribution["pr_number"] not in cohort
-            ):
-                continue
-            if pr_number in cohort:
-                run_pr_numbers[run_id] = pr_number
-                run_pr_bases[run_id] = pr_basis
-            elif attribution is not None:
-                run_pr_numbers[run_id] = attribution["pr_number"]
-                run_pr_bases[run_id] = "attribution ledger"
-            all_runs[run_id] = run
+                if parent_id is not None:
+                    logged_parents[run_id] = parent_id
+
+    for run_id, run in listed_runs.items():
+        if run_id in all_runs:
+            continue
+        logged_parent = logged_parents.get(run_id)
+        if (
+            logged_parent is not None
+            and logged_parent in run_pr_numbers
+            and logged_parent in run_heads
+            and listed_runs.get(logged_parent, {}).get("name")
+            in WORKFLOW_RUN_PARENTS.get(_workflow_path(run), set())
+        ):
+            parent_ids = [logged_parent]
+            parent_basis = f"exact logged workflow_run parent {logged_parent}"
+        else:
+            parent_ids = _workflow_run_parent_ids(
+                run,
+                listed_runs=listed_runs,
+                run_pr_numbers=run_pr_numbers,
+                run_heads=run_heads,
+            )
+            parent_basis = (
+                "workflow_run same-PR/head completion cluster "
+                + ",".join(map(str, parent_ids))
+            )
+        if not parent_ids:
+            continue
+        parent_prs = {run_pr_numbers[parent_id] for parent_id in parent_ids}
+        parent_heads = {run_heads[parent_id] for parent_id in parent_ids}
+        if len(parent_prs) != 1 or len(parent_heads) != 1:
+            continue
+        pr_number = parent_prs.pop()
+        if pr_number not in cohort:
+            continue
+        run_pr_numbers[run_id] = pr_number
+        run_heads[run_id] = parent_heads.pop()
+        run_pr_bases[run_id] = parent_basis
+        all_runs[run_id] = dict(run, source_run_ids=parent_ids)
 
     for run_id, attribution in run_attributions.items():
         if attribution["pr_number"] not in cohort or run_id in all_runs:
@@ -1575,6 +2583,16 @@ def collect_github_data(
         )
         run_pr_numbers[run_id] = attribution["pr_number"]
         run_pr_bases[run_id] = "attribution ledger"
+        run_heads[run_id] = attribution["head_sha"]
+
+    def fetch_jobs(run_id: int) -> tuple[int, list[Mapping[str, Any]]]:
+        return run_id, _jobs(api, repository=repository, run_id=run_id)
+
+    jobs_by_run: dict[int, list[Mapping[str, Any]]] = {}
+    if all_runs:
+        with ThreadPoolExecutor(max_workers=min(16, len(all_runs))) as executor:
+            for run_id, jobs in executor.map(fetch_jobs, sorted(all_runs)):
+                jobs_by_run[run_id] = jobs
 
     normalized: list[dict[str, Any]] = []
     for run_id, raw in sorted(
@@ -1584,18 +2602,14 @@ def collect_github_data(
         ),
     ):
         path = _workflow_path(raw)
-        if path not in CI_WORKFLOWS and path != EXPANSION_WORKFLOW:
-            raise ReportError(
-                f"attributed run {run_id} uses unsupported workflow {path}"
-            )
         attribution = run_attributions.get(run_id)
         pr_number = run_pr_numbers.get(run_id)
         if pr_number not in cohort:
             continue
-        head_sha = _pull_head(raw)
+        head_sha = run_heads.get(run_id) or _pull_head(raw)
         if (
             head_sha is None
-            and raw.get("event") == "pull_request"
+            and run_pr_bases[run_id] != "attribution ledger"
             and isinstance(raw.get("head_sha"), str)
         ):
             head_sha = raw["head_sha"]
@@ -1604,7 +2618,7 @@ def collect_github_data(
         if (
             head_sha is not None
             and attribution is not None
-            and raw.get("event") == "pull_request"
+            and raw.get("event") in {"pull_request", "pull_request_target"}
             and head_sha != attribution["head_sha"]
         ):
             raise ReportError(
@@ -1634,13 +2648,14 @@ def collect_github_data(
                 "updated_at": raw.get("updated_at"),
                 "status": raw.get("status"),
                 "conclusion": raw.get("conclusion"),
-                "jobs": _jobs(api, repository=repository, run_id=run_id),
+                "source_run_ids": raw.get("source_run_ids", []),
+                "jobs": jobs_by_run[run_id],
             }
         )
     return {
         "schema": GITHUB_SCHEMA,
         "repository": repository,
-        "collected_at": _timestamp_text(datetime.now(timezone.utc)),
+        "collected_at": _timestamp_text(collected_at),
         "collected_since": _timestamp_text(since),
         "pull_requests": pulls,
         "workflow_runs": normalized,
@@ -1691,6 +2706,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="write the normalized live GitHub response for repeatable reruns",
     )
+    parser.add_argument(
+        "--linux-x64-minute-rate-usd",
+        type=float,
+        default=DEFAULT_LINUX_X64_RATE_USD,
+        help=(
+            "standard Linux x64 list price per rounded job-minute "
+            f"(default: {DEFAULT_LINUX_X64_RATE_USD})"
+        ),
+    )
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, required=True)
     arguments = parser.parse_args(argv)
@@ -1739,6 +2763,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             github_payload,
             prs=prs,
             attribution_payload=attribution,
+            linux_x64_rate_usd=arguments.linux_x64_minute_rate_usd,
         )
         _write_text(
             arguments.json_output,
@@ -1755,7 +2780,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{summary['candidate_count']} candidates, "
         f"{summary['package_expansion_count']} expansions, "
         f"{summary['cumulative_ci_hull_raw_job_minutes']} cumulative "
-        "CI/Hull raw job-minutes"
+        "CI/Hull raw job-minutes, "
+        f"${summary['estimated_list_price_usd']:.2f} estimated standard-Linux "
+        "list price"
     )
     return 0
 

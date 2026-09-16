@@ -15,26 +15,43 @@ lifecycle did not. In the fully post-change cohort #2105, #2106, and
 | --- | ---: |
 | CI candidates | 38 |
 | package-expansion dispatches | 10 |
+| all attributable Actions workflow runs | 629 |
+| observable workflow attempts | 631 |
+| accounted job slots | 1,543 |
+| started GitHub-hosted Linux jobs | 1,315 |
+| skipped jobs | 219 |
+| cancelled attempts that never reached a runner | 7 |
+| non-VM synthetic check records | 2 |
 | cumulative CI/Hull raw job-minutes | 3,207.033 |
 | sum of each PR's latest-candidate CI/Hull raw job-minutes | 645.267 |
 | lifecycle amplification | 4.97x |
 | package-expansion raw job-minutes | 282.033 |
-| all measured hosted raw job-minutes | 3,489.067 |
+| all attributable started-job raw minutes | 3,630.267 |
+| per-job-rounded standard-Linux minutes | 4,462 |
+| estimated standard-Linux list price | $26.772 |
 | explicit agent-wait minutes | 129.413 |
 
-These are raw summed job-minutes: for every hosted job, its finish time minus
-its start time, then summed. They are not workflow elapsed time, billing-rounded
-runner minutes, agent waiting, or dollar cost. Concurrent jobs make raw
-job-minutes larger than workflow wall time. Runner rates and billing rounding
-were not part of the evidence, so this assessment does not convert the result
-to an exact cost.
+Raw summed job-minutes remain finish time minus start time for every started
+runner job with valid timestamps. They are not workflow elapsed time or agent
+waiting, and concurrent jobs make them larger than workflow wall time.
+
+The cost estimate uses GitHub's standard Linux x64 rate of $0.006 per minute as
+of 2026-09-16 and rounds every started job up independently to a whole minute.
+Started cancelled and failed jobs count. Skipped jobs, attempts that never
+reached a runner, and synthetic check records with no VM count as zero.
+Included plan minutes, discounts, taxes, spending caps, and other account
+adjustments are not deducted, so this is a list-price estimate rather than an
+invoice reconstruction. Pricing source:
+<https://docs.github.com/en/billing/reference/actions-minute-multipliers>.
 
 The 4.97x ratio means the final candidate's validation burden was not the main
 problem. Repeated candidates and repeated package expansions accumulated nearly
 five times the CI/Hull work represented by the cohort's latest candidates.
 
-The trace-backed cause ledger attributed all 38 candidates and all 90 hosted
-runs:
+The trace-backed ledger attributed all 38 implementation candidates. The full
+Actions inventory attributed all 629 workflow runs to a PR; 184 short
+workflow-run or metadata records retained an `unknown` semantic cause rather
+than borrowing a nearby cause without enough evidence.
 
 | Cause | Candidates | CI/Hull raw job-minutes | expansion raw job-minutes | explicit agent-wait minutes |
 | --- | ---: | ---: | ---: | ---: |
@@ -52,6 +69,27 @@ The largest cost was CI-policy and CI-repair churn, followed by review repairs.
 No non-conflicting rebase occurred in the cohort. Conflict rebases were costly
 because the targeted selector failed closed, but they were not the dominant
 cause of the observed amplification.
+
+The all-Actions billing estimate by semantic cause is:
+
+| Cause | Workflow runs | Started jobs | Skipped | Never started | Rounded minutes | List price |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| initial candidate | 79 | 197 | 26 | 0 | 594 | $3.564 |
+| review repair | 123 | 340 | 29 | 0 | 1,264 | $7.584 |
+| ordinary content push | 20 | 54 | 5 | 0 | 129 | $0.774 |
+| non-conflicting rebase/base update | 0 | 0 | 0 | 0 | 0 | $0 |
+| trivial or hand-resolved conflict rebase | 37 | 106 | 16 | 1 | 405 | $2.430 |
+| base retarget/stack collapse | 19 | 48 | 26 | 0 | 145 | $0.870 |
+| CI-policy or CI repair | 162 | 419 | 31 | 0 | 1,637 | $9.822 |
+| pull-request metadata edit | 0 | 0 | 0 | 0 | 0 | $0 |
+| package-expansion rerun | 5 | 30 | 0 | 0 | 167 | $1.002 |
+| unknown | 184 | 121 | 86 | 6 | 121 | $0.726 |
+
+The prior CI/Hull/package-expansion-only estimate was $23.892. The 539 newly
+inventoried acknowledgement, changelog, candidate-receipt, retarget, and
+OpenSpec runs added 480 rounded minutes, or $2.88. They matter for complete
+accounting, but they are not the dominant spend: CI and Hull still account for
+most of the billable minutes.
 
 ## Why #2099 did not reduce rebase work
 
@@ -132,9 +170,10 @@ The known roughly 35-minute #2114 reviewer-retry interval is excluded because
 the agent was trying to obtain a valid review, not waiting for hosted CI. No
 creator traces existed for #2105 or #2106, so their hosted causes use public
 GitHub evidence and their agent-wait totals remain zero rather than inferred.
-Three jobs had inverted start and completion timestamps and were excluded from
-minute totals; the affected workflow runs were 35019801558, 35027127544, and
-35070318237.
+Three jobs had inverted start and completion timestamps. They were excluded
+from raw-minute totals but retained as one-minute lower bounds in the
+billing-rounded estimate; the affected workflow runs were 35019801558,
+35027127544, and 35070318237.
 
 Per-cause totals require each candidate or run to be linked to a cause with
 evidence. The report tool accepts those facts in an attribution ledger and
@@ -149,20 +188,25 @@ The fixed cause vocabulary is:
 - `trivial-or-hand-resolved-conflict-rebase`
 - `base-retarget-stack-collapse`
 - `ci-policy-ci-repair`
+- `pull-request-metadata-edit`
 - `package-expansion-rerun`
 - `unknown`
 
 For each cause the report separately totals candidate count, workflow-run and
 attempt counts, CI/Hull raw job-minutes, package-expansion raw job-minutes,
-summed workflow wall-minutes, and ledger-supplied agent-wait minutes.
+summed workflow wall-minutes, started/cancelled/skipped/never-started jobs,
+per-job-rounded standard-Linux minutes, estimated list price, and
+ledger-supplied agent-wait minutes.
 
 ## Repeatable report
 
 ### Live collection
 
-Live collection queries the PR records and the three owning workflows, fetches
-every job and rerun attempt, writes a normalized snapshot, and emits JSON plus
-Markdown:
+Live collection queries the PR records and the repository-wide Actions stream,
+fetches every job and rerun attempt for safely attributable runs, writes a
+normalized snapshot, and emits JSON plus Markdown. It recursively splits a
+time interval when GitHub reports more than 1,000 runs, avoiding the list
+endpoint's result cap, and deduplicates inclusive interval boundaries:
 
 ```console
 python3 scripts/ci_pr_lifecycle_report.py \
@@ -176,15 +220,22 @@ python3 scripts/ci_pr_lifecycle_report.py \
 ```
 
 The `--since` boundary is mandatory for live collection so the workflow scan is
-bounded. Pull-request workflow runs carry their PR association. Manual
-package-expansion and retarget dispatches do not carry enough safe PR/head
-identity in the workflow-run listing; give those run IDs explicit
-`run_attributions` rows. Without a ledger assertion that the manual-run scope
-is complete, the report labels retarget and package-expansion counts as lower
-bounds rather than silently assigning dispatches to a PR. Completed
-pull-request runs can also lose their `pull_requests[]` association; for those,
-the collector requires an exact head repository/ref match inside the PR's
-activity window.
+bounded. Manual package-expansion and retarget dispatches do not carry enough
+safe PR/head identity in the workflow-run listing; give those run IDs explicit
+`run_attributions` rows. Without a ledger assertion that association-less run
+scope is complete, the report labels those counts as lower bounds rather than
+silently assigning dispatches by time proximity.
+
+Completed pull-request runs can lose their `pull_requests[]` association. For
+those, the collector queries every PR that has used the exact head
+repository/ref and accepts the run only inside one non-overlapping
+created-to-closed lifetime; mutable `updated_at` is not a closure boundary.
+Known `workflow_run` children such as candidate receipts and the OpenSpec
+controller first use an exact parent run ID from their own logs. When that ID is
+unavailable, they inherit PR identity only from configured possible parents
+that completed during the preceding 15 seconds and all agree on the exact PR
+and head. Unknown children and future manual dispatches require explicit
+ledger evidence.
 
 ### Offline rerun
 
@@ -231,6 +282,7 @@ minimal example is:
   "agent_waits": [
     {
       "wait_id": "session-id:turn-42",
+      "agent_id": "session-id",
       "pr_number": 2112,
       "candidate_sha": "89abcdef0123456789abcdef0123456789abcdef",
       "cause": "trivial-or-hand-resolved-conflict-rebase",
@@ -244,16 +296,18 @@ minimal example is:
 ```
 
 Candidate and run attribution rows require an evidence string. Agent waits
-require a stable wait ID, timestamps, cause, evidence, and either `head_sha` or
-`candidate_sha`; use the synthetic candidate identity when a stacked pull
-request keeps the same Git head across different tested merges. Related run IDs
-are recorded when available and are checked against the PR and supplied
-identity. Set `manual_run_scope_complete` only after every retarget and
-package-expansion dispatch for the cohort has a run row, and name that audit in
+require a stable wait ID, an agent/session identity, timestamps, cause,
+evidence, at least one exact run ID, and either `head_sha` or `candidate_sha`;
+use the synthetic candidate identity when a stacked pull request keeps the same
+Git head across different tested merges. Run IDs are checked against the PR and
+supplied identity, and intervals for the same agent may not overlap.
+
+Set `manual_run_scope_complete` only after every association-less dispatch for
+the cohort has a run row, and name that audit in
 `manual_run_scope_evidence`; otherwise the report labels those counts as lower
-bounds. The tool rejects unsupported completeness claims, unknown cause
-spellings, duplicate identities, unknown or mismatched wait-run links, and
-negative intervals.
+bounds. The tool also rejects unsupported completeness claims, stale or unused
+ledger rows, duplicate snapshot run IDs, identity rewrites, unknown or
+mismatched wait-run links, and negative intervals.
 
 ## Interpretation
 
@@ -269,3 +323,6 @@ Future rollout checks should publish both latest-candidate and
 cumulative-lifecycle figures and retain the attribution ledger needed to
 explain their difference. They should also report explicit trace-backed
 agent-wait intervals separately from hosted execution and reviewer overhead.
+The all-Actions total should accompany those figures: this cohort's absolute
+$26.772 list-price estimate, or about $3.82 per PR, is not alarming by itself,
+but its distribution still identifies avoidable CI-policy and review churn.

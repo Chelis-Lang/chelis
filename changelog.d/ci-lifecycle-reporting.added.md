@@ -1,3 +1,4 @@
-Add a repeatable CI lifecycle report that separates latest-candidate validation,
-cumulative hosted job execution, workflow wall time, and trace-attributed agent
-waiting, with an auditable per-cause ledger.
+Add a repeatable PR lifecycle report that inventories every attributable
+GitHub Actions run and attempt, estimates per-job-rounded Linux list price, and
+separates latest-candidate validation, cumulative execution, semantic causes,
+and trace-attributed agent waiting.
