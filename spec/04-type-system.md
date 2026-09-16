@@ -2647,6 +2647,9 @@ the same diagnostics.
 > be projected is a failure reported as such, never a debug rendering in
 > its place.
 
+(The effect and linearity renderings and `chelis reef build` do not yet
+satisfy [04-FIT-26]; chelis#2130 owns that gap.)
+
 ---
 
 ## 7. Effects
