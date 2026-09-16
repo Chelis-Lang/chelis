@@ -860,6 +860,42 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
         ),
         _row(
+            "claim.same_shape.specialization.blas.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_blas_region_still_specializes_and_executes",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_dense_gather_region_still_specializes_and_executes",
+        ),
+        _row(
             "claim.same_shape.specialization.named.agreeing.eval",
             EXECUTES,
             EXECUTES,
@@ -2477,6 +2513,28 @@ _CLAIM_BARRIER_NAMED_AND_LITERAL = """\
 _CLAIM_BARRIER_LITERAL_ONLY = """\
                         site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
 """
+_SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/specialize.rs"
+_BLAS_REGION_BARRIER = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+"""
+_BLAS_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+"""
+_DENSE_GATHER_REGION_BARRIER = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+        {
+"""
+_DENSE_GATHER_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+"""
 
 
 def remove_named_claim_from_producer_barrier(source: str) -> str:
@@ -2528,6 +2586,80 @@ def validate_claimed_producer_barrier_mutation(
         _CLAIM_BARRIER_SOURCE.write_text(original)
     if _CLAIM_BARRIER_SOURCE.read_text() != original:
         raise OracleFailure("claimed-producer barrier mutation did not restore its source")
+
+
+def remove_specializer_region_barrier(source: str, recognizer: str) -> str:
+    """Controlled mutation: let one recognizer bypass claimed producers."""
+
+    anchors = {
+        "blas": (_BLAS_REGION_BARRIER, _BLAS_REGION_BARRIER_REMOVED),
+        "dense_gather": (
+            _DENSE_GATHER_REGION_BARRIER,
+            _DENSE_GATHER_REGION_BARRIER_REMOVED,
+        ),
+    }
+    try:
+        anchor, replacement = anchors[recognizer]
+    except KeyError as error:
+        raise OracleFailure(
+            f"unknown specialization barrier mutation {recognizer!r}"
+        ) from error
+    if source.count(anchor) != 1:
+        raise OracleFailure(
+            f"{recognizer} specialization barrier mutation anchor is missing or ambiguous"
+        )
+    return source.replace(anchor, replacement, 1)
+
+
+def validate_specializer_region_barrier_mutations(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B covers both multi-node specialization recognizers."""
+
+    cases = (
+        (
+            "blas",
+            "blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        (
+            "dense_gather",
+            "dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+    )
+    original = _SPECIALIZER_SOURCE.read_text()
+    for recognizer, test in cases:
+        command = (
+            "cargo",
+            "test",
+            "-p",
+            "chelis-ir",
+            "--test",
+            "issue_1948_same_shape_result_claim_sources",
+            test,
+            "--",
+            "--exact",
+            "--nocapture",
+        )
+        try:
+            _SPECIALIZER_SOURCE.write_text(
+                remove_specializer_region_barrier(original, recognizer)
+            )
+            completed = _run_text(runner, command)
+            output = f"{completed.stdout}\n{completed.stderr}"
+            if completed.returncode == 0:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation escaped its receipt"
+                )
+            if "a declined replacement must leave a valid executable graph" not in output:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation failed for an unrelated reason"
+                )
+        finally:
+            _SPECIALIZER_SOURCE.write_text(original)
+        if _SPECIALIZER_SOURCE.read_text() != original:
+            raise OracleFailure(
+                f"{recognizer} specialization barrier mutation did not restore its source"
+            )
 
 
 def _run_text(
@@ -2659,6 +2791,7 @@ def validate(
         validate_target_receipt(target, completed)
     if registry is None and targets is None and phase in ("b", "final"):
         validate_claimed_producer_barrier_mutation(runner)
+        validate_specializer_region_barrier_mutations(runner)
 
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)

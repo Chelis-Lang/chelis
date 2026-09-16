@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "ffa53c9153d490ca1cd5bc4760181c467cf9708291ac4eecffa5736bd0f45b25",
+  "corpus_sha256": "b75d434b8dbab013a8739554ddf950ddc61e586313f2a83b949317d5ffab02f1",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -205,6 +205,42 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.literal.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.blas_interior_literal_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.named.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.blas_interior_named_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.unclaimed.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.unclaimed_blas_region_still_specializes_and_executes"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.literal.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.named.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.unclaimed.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.unclaimed_dense_gather_region_still_specializes_and_executes"
     },
     {
       "id": "claim.same_shape.specialization.named.agreeing.eval",

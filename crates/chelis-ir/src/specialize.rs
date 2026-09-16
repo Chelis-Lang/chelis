@@ -142,9 +142,14 @@ fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
             // Empty contractions (including [05-OP-51]'s zero-channel
             // convolution) retain their RISC zero/empty result. BlasMatmul's
             // verified domain requires positive matrix dimensions.
@@ -212,9 +217,15 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
-        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+        {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
@@ -440,6 +451,45 @@ struct DenseGatherInfo {
     expand_one_hot: NodeId,
     expand_values: NodeId,
     one_hot: NodeId,
+}
+
+/// A multi-node specializer may replace a matched region only when no node it
+/// bypasses owns a declared-result obligation.
+///
+/// Producer claims are observable traps, not ordinary liveness roots. Keeping
+/// an interior producer alive after its consumer has been replaced disconnects
+/// the trap from execution, while transferring the claim to a different
+/// primitive changes §4.7 attribution. The complete named-and-literal
+/// classification therefore gates every region replacement at the match
+/// boundary. One-node expansions such as `lower_unmatched_one_hot` instead
+/// remap the source node's dependencies onto their replacement result.
+fn matched_region_is_claim_free(
+    claimed_result_producers: &[bool],
+    replaced_region: impl IntoIterator<Item = NodeId>,
+) -> bool {
+    replaced_region.into_iter().all(|id| {
+        !*claimed_result_producers
+            .get(id.0)
+            .expect("matched specialization region belongs to the input DAG")
+    })
+}
+
+impl MatmulInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [output, self.sum, self.mul, self.expand_a, self.expand_b]
+    }
+}
+
+impl DenseGatherInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [
+            output,
+            self.mul,
+            self.expand_one_hot,
+            self.expand_values,
+            self.one_hot,
+        ]
+    }
 }
 
 fn detect_dense_gather_pattern(dag: &Dag, sum_id: NodeId) -> Option<DenseGatherInfo> {

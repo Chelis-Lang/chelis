@@ -374,7 +374,7 @@ contracts; #1372 continues to own the general side-annotation rebuild class.
 | cloning/import | preserve identities on ordinary clone; rename independent artifact domains on import; do not collide same-spelled names |
 | DCE | unread signature witnesses and potentially trapping extent checks survive; deleting either must make a mismatch test fail |
 | CSE/fusion | preserve each observable guard occurrence and bound evaluation; never fuse away a scalar whose value a bound needs; spec/06 §5.3 still forbids merging potentially trapping nodes |
-| specialization/constant folding | carry claims onto replacement axes; keep independent extent facts separate; a known mismatch still fails at the required point |
+| specialization/constant folding | retain the claimed primitive or decline a multi-node replacement whose complete matched region contains it; a one-node expansion remaps the obligation onto its executable replacement; keep independent extent facts separate; a known mismatch still fails at the required point |
 | grad | keep authored signatures separate from inferred expression types before lowering the activation; form every declaration claim against its ordered interface witnesses, then retain the forward activation as a shape dependency of every selected cotangent, including zero cotangents. Tensor, aggregate, and primitive-scalar single/multiple selections share this evaluator contract (#1920/#1924/#1934). Native primitive-scalar selections use the existing DAG cotangent reconstruction route under the same contract (#1934). The dependency is unconditional (#1935); bounds keep spec/05's zero-cotangent boundary |
 | vmap | preserve the binding/claim relationship with shifted axes, share the rank-0 bound, and execute it once as spec/06 §3.7 requires; `vmap(grad(...))` retains the batched forward activation as the batched cotangents' shape dependency, remaps the complete ordered entry-witness set and every rendered dimension origin through the batched node map, and fails before publishing an artifact when any mapped root, witness or dimension declaration is unresolved (#1932) |
 | wire/cache | preserve claim references, ordered witnesses and independent facts or reject the artifact; no missing-field empty default |
@@ -773,8 +773,15 @@ discarded. A fresh `Copy` return carrier follows the result value and every
 required witness; an existing returned value is never mutated to depend on
 a later call. These dependencies participate in root-scoped evaluation and DCE:
 an unrelated export does not activate another invocation's checks. A witness
-without a requirement adds no trap dependency. CSE, specialization and folding preserve the check or discharge
-it from independent evidence; they cannot infer success from its requirement.
+without a requirement adds no trap dependency. CSE, specialization and folding
+preserve the check or discharge it from independent evidence; they cannot infer
+success from its requirement. A multi-node specialization recognizer enumerates
+the complete region it would replace and declines the replacement when any
+region member owns a named or literal result claim. Merely retaining that
+producer through DCE is insufficient once the replacement disconnects it, and
+moving its obligation onto a different primitive would violate spec/04 §4.7's
+attribution rule. A one-node expansion may proceed only when it remaps the
+source node's claim dependency onto the executable replacement result.
 Grad retains primal checks and assigns zero cotangent to shape values. Vmap
 keeps the result scalar and shifts its observed input axis past the batch axis.
 

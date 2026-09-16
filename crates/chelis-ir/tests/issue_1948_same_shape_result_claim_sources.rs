@@ -15,11 +15,382 @@ use chelis_ir::optimize::dead_code_eliminate;
 use chelis_ir::verify::verify;
 use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
 
+#[derive(Clone, Copy)]
+enum InteriorClaim {
+    None,
+    Named,
+    Literal,
+}
+
 fn wildcard_f32() -> TensorType {
     TensorType {
         dims: vec![DimInfo::Named("*".into(), None)],
         precision: Prim::F32,
     }
+}
+
+fn mat_f32(rows: usize, cols: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision: Prim::F32,
+    }
+}
+
+fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
+        precision: Prim::F32,
+    }
+}
+
+fn vec_i32(len: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(len)],
+        precision: Prim::Int32,
+    }
+}
+
+fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> Option<NodeId> {
+    match claim {
+        InteriorClaim::None => None,
+        InteriorClaim::Literal => Some(dag.add_node(
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![scalar_from_i64("test", Prim::Int64, required).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            None,
+        )),
+        InteriorClaim::Named => {
+            let declared = dag.add_node(
+                RiscOp::Load {
+                    name: "declared".into(),
+                },
+                Vec::new(),
+                TensorType {
+                    dims: vec![DimInfo::Named("n".into(), None)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let caller = dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::Caller,
+                    parameter: "declared".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![declared],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let claim = dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::ResultClaim {
+                        claim: "n".into(),
+                        axis: RtAxis::Lit(0),
+                    },
+                    parameter: "declared".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![declared],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            dag.add_shape_dep(claim, caller);
+            Some(claim)
+        }
+    }
+}
+
+fn blas_pattern(claim: InteriorClaim) -> Dag {
+    let mut dag = Dag::new();
+    let claim = interior_claim_token(&mut dag, claim, 5);
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        Vec::new(),
+        mat_f32(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        Vec::new(),
+        mat_f32(3, 4),
+        None,
+    );
+    let expand_a = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::RtDim::Lit(4),
+        },
+        vec![a],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
+    let expand_b = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::Lit(2),
+        },
+        vec![b],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
+    let mul = dag.add_node(
+        RiscOp::Mul,
+        vec![expand_a, expand_b],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
+    if let Some(claim) = claim {
+        dag.add_result_claim_dep(mul, claim);
+    }
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![mul],
+        mat_f32(2, 4),
+        None,
+    );
+    dag.add_root(sum);
+    dag
+}
+
+fn eval_blas_pattern(dag: &Dag, declared: Option<usize>) -> Result<Vec<f64>, String> {
+    let values = eval_tensor_with(dag, |name| match name {
+        "declared" => declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent])),
+        "a" => Some(TensorValue::from_vec(vec![2, 3], vec![1.0; 6])),
+        "b" => Some(TensorValue::from_vec(vec![3, 4], vec![1.0; 12])),
+        _ => None,
+    })?;
+    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+}
+
+fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
+    let mut dag = Dag::new();
+    let claim = interior_claim_token(&mut dag, claim, 5);
+    let values = dag.add_node(
+        RiscOp::Load {
+            name: "values".into(),
+        },
+        Vec::new(),
+        mat_f32(2, 3),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        Vec::new(),
+        vec_i32(4),
+        None,
+    );
+    let one_hot = dag.add_node(
+        RiscOp::OneHot { vocab: 2 },
+        vec![indices],
+        mat_f32(4, 2),
+        None,
+    );
+    let expand_one_hot = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::RtDim::Lit(3),
+        },
+        vec![one_hot],
+        tensor3_f32(4, 2, 3),
+        None,
+    );
+    let expand_values = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::Lit(4),
+        },
+        vec![values],
+        tensor3_f32(4, 2, 3),
+        None,
+    );
+    let mul = dag.add_node(
+        RiscOp::Mul,
+        vec![expand_one_hot, expand_values],
+        tensor3_f32(4, 2, 3),
+        None,
+    );
+    if let Some(claim) = claim {
+        dag.add_result_claim_dep(mul, claim);
+    }
+    let sum = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![mul],
+        mat_f32(4, 3),
+        None,
+    );
+    dag.add_root(sum);
+    dag
+}
+
+fn eval_dense_gather_pattern(dag: &Dag, declared: Option<usize>) -> Result<Vec<f64>, String> {
+    let values = eval_tensor_with(dag, |name| match name {
+        "declared" => declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent])),
+        "values" => Some(TensorValue::from_vec(
+            vec![2, 3],
+            vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+        )),
+        "indices" => Some(TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0])),
+        _ => None,
+    })?;
+    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+}
+
+fn assert_specialized_claim_trap(
+    dag: &Dag,
+    specialize: impl Fn(&Dag) -> Dag,
+    eval: impl Fn(&Dag) -> Result<Vec<f64>, String>,
+    expected: &str,
+) -> Dag {
+    assert!(verify(dag).is_empty());
+    assert_eq!(eval(dag).unwrap_err(), expected);
+    let specialized = specialize(dag);
+    assert!(
+        verify(&specialized).is_empty(),
+        "a declined replacement must leave a valid executable graph: {:?}",
+        verify(&specialized)
+    );
+    assert_eq!(
+        eval(&specialized).unwrap_err(),
+        expected,
+        "specialization plus DCE must preserve the interior producer trap and attribution"
+    );
+    specialized
+}
+
+#[test]
+fn blas_interior_named_claim_blocks_replacement_and_traps_after_dce() {
+    let dag = blas_pattern(InteriorClaim::Named);
+    let specialized = assert_specialized_claim_trap(
+        &dag,
+        chelis_ir::specialize::specialize_for_blas,
+        |dag| eval_blas_pattern(dag, Some(5)),
+        "extent `n`: claimed = 5, mul axis 0 = 2\n\
+         numeric trap: domain in mul at int64",
+    );
+    assert!(
+        !specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
+        "the complete BLAS match must be declined when an interior producer is claimed"
+    );
+}
+
+#[test]
+fn blas_interior_literal_claim_blocks_replacement_and_traps_after_dce() {
+    let dag = blas_pattern(InteriorClaim::Literal);
+    let specialized = assert_specialized_claim_trap(
+        &dag,
+        chelis_ir::specialize::specialize_for_blas,
+        |dag| eval_blas_pattern(dag, None),
+        "extent `5`: claimed = 5, mul axis 0 = 2\n\
+         numeric trap: domain in mul at int64",
+    );
+    assert!(
+        !specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
+        "literal and named claims use the same complete BLAS-region barrier"
+    );
+}
+
+#[test]
+fn unclaimed_blas_region_still_specializes_and_executes() {
+    let dag = blas_pattern(InteriorClaim::None);
+    let expected = eval_blas_pattern(&dag, None).unwrap();
+    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    assert!(verify(&specialized).is_empty());
+    assert!(
+        specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }))
+    );
+    assert_eq!(eval_blas_pattern(&specialized, None).unwrap(), expected);
+}
+
+#[test]
+fn dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce() {
+    let dag = dense_gather_pattern(InteriorClaim::Named);
+    let specialized = assert_specialized_claim_trap(
+        &dag,
+        chelis_ir::specialize::specialize_for_exact_arithmetic,
+        |dag| eval_dense_gather_pattern(dag, Some(5)),
+        "extent `n`: claimed = 5, mul axis 0 = 4\n\
+         numeric trap: domain in mul at int64",
+    );
+    assert!(
+        !specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Gather { .. })),
+        "the complete dense-gather match must be declined when an interior producer is claimed"
+    );
+}
+
+#[test]
+fn dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce() {
+    let dag = dense_gather_pattern(InteriorClaim::Literal);
+    let specialized = assert_specialized_claim_trap(
+        &dag,
+        chelis_ir::specialize::specialize_for_exact_arithmetic,
+        |dag| eval_dense_gather_pattern(dag, None),
+        "extent `5`: claimed = 5, mul axis 0 = 4\n\
+         numeric trap: domain in mul at int64",
+    );
+    assert!(
+        !specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Gather { .. })),
+        "literal and named claims use the same complete dense-gather-region barrier"
+    );
+}
+
+#[test]
+fn unclaimed_dense_gather_region_still_specializes_and_executes() {
+    let dag = dense_gather_pattern(InteriorClaim::None);
+    let expected = eval_dense_gather_pattern(&dag, None).unwrap();
+    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    assert!(verify(&specialized).is_empty());
+    assert!(
+        specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
+    );
+    assert_eq!(
+        eval_dense_gather_pattern(&specialized, None).unwrap(),
+        expected
+    );
 }
 
 fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, NodeId) {

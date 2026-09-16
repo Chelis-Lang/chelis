@@ -276,13 +276,19 @@
         "agreeing_named_result_claim_survives_fusion_and_dce",
         "agreeing_named_result_claim_survives_specialization_and_dce",
         "an_interior_named_result_claim_splits_the_fusion_chain",
+        "blas_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        "blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        "dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        "dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
         "identical_members_deduplicate_but_distinct_paths_remain",
         "malformed_same_shape_relations_are_verifier_errors",
         "named_result_claim_traps_after_fusion_and_dce",
         "named_result_claim_traps_after_specialization_and_dce",
-        "rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation"
+        "rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation",
+        "unclaimed_blas_region_still_specializes_and_executes",
+        "unclaimed_dense_gather_region_still_specializes_and_executes"
       ],
-      "note": "The returned producer derives one complete positive-rank agreement relation: identical node identities deduplicate, distinct paths remain, rank-zero inputs are excluded, and an empty relation is a verifier error. Named producer claims are shared rewrite barriers: failing and agreeing obligations survive specialization, fusion, and DCE."
+      "note": "The returned producer derives one complete positive-rank agreement relation: identical node identities deduplicate, distinct paths remain, rank-zero inputs are excluded, and an empty relation is a verifier error. Named and literal producer claims are shared rewrite barriers: failing and agreeing obligations survive identity cleanup, fusion and DCE, while complete claimed BLAS and dense-gather regions decline replacement and unclaimed controls still specialize."
     },
     {
       "phase": "b",
