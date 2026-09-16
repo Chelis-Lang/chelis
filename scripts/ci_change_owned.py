@@ -1249,6 +1249,11 @@ def load_duration_baseline(path: Path = DURATION_BASELINE_PATH) -> DurationBasel
         data.get("default_milliseconds"),
         "duration baseline default_milliseconds",
     )
+    if default_milliseconds != DEFAULT_DURATION_MILLISECONDS:
+        raise ValueError(
+            "duration baseline default_milliseconds must be "
+            f"{DEFAULT_DURATION_MILLISECONDS}"
+        )
     sources = data.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("duration baseline requires at least one source")
@@ -1551,13 +1556,50 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         raise ValueError("plan_digest must be a SHA-256 digest")
 
 
-def verify_plan_digest(plan: Mapping[str, Any]) -> None:
+def verify_plan_duration_baseline(
+    plan: Mapping[str, Any],
+    duration_baseline: DurationBaseline,
+) -> None:
+    planning = plan["shard_planning"]["change_owned"]
+    if planning["baseline_digest"] != duration_baseline.digest:
+        raise ValueError(
+            "plan duration baseline digest does not match the checked-out baseline"
+        )
+    if (
+        planning["default_milliseconds"]
+        != duration_baseline.default_milliseconds
+    ):
+        raise ValueError(
+            "plan duration fallback does not match the checked-out baseline"
+        )
+    expected_weights = {
+        canonical: duration_baseline.targets.get(
+            Identity.parse(canonical),
+            duration_baseline.default_milliseconds,
+        )
+        for canonical in sorted(
+            set(plan["change_owned"]) - set(plan["standing_coverage_reuse"])
+        )
+    }
+    if planning["weights_milliseconds"] != expected_weights:
+        raise ValueError(
+            "plan duration weights do not match the checked-out baseline"
+        )
+
+
+def verify_plan_digest(
+    plan: Mapping[str, Any],
+    *,
+    duration_baseline: DurationBaseline | None = None,
+) -> None:
     _validate_plan_shape(plan)
     expected = _digest_without(plan, "plan_digest")
     if plan.get("plan_digest") != expected:
         raise ValueError(
             f"plan digest mismatch: expected {expected}, got {plan.get('plan_digest')}"
         )
+    if duration_baseline is not None:
+        verify_plan_duration_baseline(plan, duration_baseline)
 
 
 def attach_receipt_digest(receipt: dict[str, Any]) -> None:
@@ -2218,6 +2260,7 @@ def _listing_tests_for_group(
     exclusions: Mapping[TestIdentity, Any],
     *,
     manual_only: bool = False,
+    allow_empty: bool = False,
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -2236,6 +2279,7 @@ def _listing_tests_for_group(
                 identity,
                 exclusions,
                 manual_only=manual_only,
+                allow_empty=allow_empty,
             )
         )
     if len(selected) != len(set(selected)):
@@ -2275,6 +2319,7 @@ def _listing_tests(
     exclusions: Mapping[TestIdentity, Any],
     *,
     manual_only: bool = False,
+    allow_empty: bool = False,
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -2332,7 +2377,7 @@ def _listing_tests(
             f"configured={sorted(configured_nonmatching)}, "
             f"observed={sorted(nonmatching)}"
         )
-    if not selected:
+    if not selected and not allow_empty:
         raise ValueError(f"selected integration has no active tests: {expected}")
     return sorted(selected)
 
@@ -2417,8 +2462,11 @@ def execute_shard(
     output: Path,
     repo: Path = ROOT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = run_command,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     checked_out = _commit(repo, "HEAD")
     if checked_out != plan["candidate_sha"]:
         raise ValueError(
@@ -2453,6 +2501,7 @@ def execute_shard(
     selected_tests: list[str] = []
     executed_tests: list[str] = []
     executed_targets: list[str] = []
+    not_applicable_targets: list[str] = []
     failures: list[str] = []
 
     def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -2581,7 +2630,20 @@ def execute_shard(
                     identities,
                     exclusions,
                     manual_only=manual_only,
+                    allow_empty=(
+                        lane == "package-expansion" and not manual_only
+                    ),
                 )
+                group_not_applicable = [
+                    canonical
+                    for canonical in canonicals
+                    if not any(
+                        test.startswith(f"{canonical}::")
+                        for test in listed_tests
+                    )
+                ]
+                not_applicable_targets.extend(group_not_applicable)
+                executed_targets.extend(group_not_applicable)
                 selected_tests.extend(listed_tests)
                 commands.append(
                     {
@@ -2596,6 +2658,7 @@ def execute_shard(
                         "returncode": listed.returncode,
                         "stdout": listed.stdout,
                         "stderr": listed.stderr or "",
+                        "not_applicable_targets": group_not_applicable,
                     }
                 )
             except (
@@ -2633,6 +2696,18 @@ def execute_shard(
                 continue
             list_seconds = round(time.monotonic() - started, 3)
             list_finished_at = commands[-1]["finished_at"]
+            if not listed_tests:
+                for canonical in canonicals:
+                    target_timings[canonical] = {
+                        "command_group": canonicals,
+                        "list_started_at": list_started_at,
+                        "list_finished_at": list_finished_at,
+                        "list_seconds": list_seconds,
+                        "run_started_at": None,
+                        "run_finished_at": None,
+                        "run_seconds": 0.0,
+                    }
+                continue
 
             run_command = target_group_command(
                 identities,
@@ -2726,7 +2801,8 @@ def execute_shard(
                             if test.startswith(prefix)
                         )
                         if target_selected == target_executed:
-                            executed_targets.append(canonical)
+                            if canonical not in executed_targets:
+                                executed_targets.append(canonical)
                         else:
                             failures.append(
                                 f"{canonical}: incomplete test results: "
@@ -2768,6 +2844,7 @@ def execute_shard(
                 "selected_tests": sorted(selected_tests),
                 "executed_targets": sorted(executed_targets),
                 "executed_tests": sorted(executed_tests),
+                "not_applicable_targets": sorted(not_applicable_targets),
             }
         )
     )
@@ -2811,9 +2888,12 @@ def prepare_shard(
     output: Path,
     github_output: Path,
     repo: Path = ROOT,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any] | None:
     """Write an empty receipt or tell the hosted worker to prepare execution."""
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     if lane not in LANE_KEYS:
         raise ValueError(f"unsupported lane: {lane}")
     if shard not in SHARDS:
@@ -2832,6 +2912,7 @@ def prepare_shard(
         shard=shard,
         output=output,
         repo=repo,
+        duration_baseline=duration_baseline,
     )
 
 
@@ -2839,8 +2920,11 @@ def _report_findings(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     lane: str,
+    duration_baseline: DurationBaseline | None = None,
 ) -> list[str]:
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     lane_key = LANE_KEYS[lane]
     findings: list[str] = []
     by_shard: dict[int, Mapping[str, Any]] = {}
@@ -2948,8 +3032,15 @@ def validate_change_owned_report(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     standing_coverage: Mapping[str, Any] | None = None,
+    *,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    findings = _report_findings(plan, receipts, "change-owned")
+    findings = _report_findings(
+        plan,
+        receipts,
+        "change-owned",
+        duration_baseline,
+    )
     reused_targets = validate_standing_coverage(plan, standing_coverage)
     if findings:
         raise ValueError("; ".join(findings))
@@ -3003,8 +3094,15 @@ def change_owned_shard_durations(
 def summarize_package_expansion(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
+    *,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    findings = _report_findings(plan, receipts, "package-expansion")
+    findings = _report_findings(
+        plan,
+        receipts,
+        "package-expansion",
+        duration_baseline,
+    )
     return {
         "version": 1,
         "lane": "package-expansion",

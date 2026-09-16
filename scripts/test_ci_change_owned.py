@@ -155,9 +155,11 @@ def load_config(content: str | None = None) -> owned.Config:
 def duration_baseline(
     weights: dict[owned.Identity, int] | None = None,
 ) -> owned.DurationBaseline:
+    if weights is None:
+        return owned.load_duration_baseline()
     return owned.DurationBaseline(
         default_milliseconds=owned.DEFAULT_DURATION_MILLISECONDS,
-        targets=weights or {},
+        targets=weights,
         digest="d" * 64,
     )
 
@@ -752,6 +754,28 @@ class DurationBaselineTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "positive integer"):
                 owned.load_duration_baseline(path)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_milliseconds": 1,
+                        "sources": [
+                            {
+                                "candidate_sha": "b" * 40,
+                                "plan_digest": "c" * 64,
+                            }
+                        ],
+                        "targets": {
+                            "p::smoke": {
+                                "milliseconds": 1,
+                                "samples": 1,
+                            }
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "must be 30000"):
+                owned.load_duration_baseline(path)
 
     def test_builder_rejects_nonfinite_authenticated_timing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -963,6 +987,29 @@ class PlanningTests(unittest.TestCase):
         mutated["manual_only_targets"] = []
         with self.assertRaises(ValueError):
             owned.verify_plan_digest(mutated)
+
+    def test_candidate_baseline_rejects_self_consistent_duration_rewrite(
+        self,
+    ) -> None:
+        baseline = duration_baseline()
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")]
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        planning = plan["shard_planning"]["change_owned"]
+        planning["baseline_digest"] = "e" * 64
+        planning["default_milliseconds"] = 1
+        planning["weights_milliseconds"] = {"q::smoke": 1}
+        shards, estimates = owned.duration_shard_map(
+            {owned.Identity("q", "smoke"): 1}
+        )
+        plan["shards"]["change_owned"] = shards
+        planning["estimated_milliseconds"] = estimates
+        owned.attach_plan_digest(plan)
+
+        owned.verify_plan_digest(plan)
+        with self.assertRaisesRegex(ValueError, "checked-out baseline"):
+            owned.verify_plan_digest(plan, duration_baseline=baseline)
 
     def test_mixed_code_and_new_prose_use_the_existing_docs_only_disposition(self) -> None:
         for path in ("changelog.d/new-fix.fixed.md", "docs/new-page.md",
@@ -1880,7 +1927,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     repo=root,
                     runner=run,
                 )
-            self.assertTrue(receipt["success"])
+            self.assertTrue(receipt["success"], receipt["failures"])
             self.assertEqual(
                 calls[0],
                 ["cargo", "build", "--workspace", "--lib", "--bins", "--locked"],
@@ -1953,6 +2000,187 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 command[command.index("--run-ignored") + 1],
                 "all",
             )
+
+    def test_package_expansion_accepts_an_all_ignored_ordinary_target(
+        self,
+    ) -> None:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan(lane="package-expansion")
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                self.assertEqual(command[1:3], ["nextest", "list"])
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(
+                        {
+                            "rust-suites": {
+                                identity.canonical: {
+                                    "testcases": {
+                                        "ignored_case": {
+                                            "ignored": True,
+                                            "filter-match": {
+                                                "status": "matches",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                    "",
+                )
+
+            with mock.patch.object(
+                owned,
+                "_commit",
+                return_value="b" * 40,
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="package-expansion",
+                    shard=owned.shard_for(identity),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+
+            self.assertTrue(receipt["success"])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(receipt["executed_targets"], [identity.canonical])
+            self.assertEqual(receipt["selected_tests"], [])
+            self.assertEqual(receipt["executed_tests"], [])
+            listing = json.loads(
+                (root / "receipt/test-list.json").read_text()
+            )
+            self.assertEqual(
+                listing["not_applicable_targets"],
+                [identity.canonical],
+            )
+
+    def test_package_expansion_isolates_an_ignored_only_target_in_a_batch(
+        self,
+    ) -> None:
+        ignored = owned.Identity("p", "smoke")
+        active = next(
+            owned.Identity("p", f"z{index}")
+            for index in range(100)
+            if owned.shard_for(owned.Identity("p", f"z{index}"))
+            == owned.shard_for(ignored)
+        )
+        plan = self._plan(lane="package-expansion")
+        plan["eligible_targets"].append(active.canonical)
+        plan["package_expansion"].append(active.canonical)
+        plan["test_exclusions"] = []
+        plan["shards"]["package_expansion"] = owned.shard_map(
+            [ignored, active]
+        )
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+
+            def run(command, **kwargs):
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[2] == "list":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        json.dumps(
+                            {
+                                "rust-suites": {
+                                    ignored.canonical: {
+                                        "testcases": {
+                                            "ignored_case": {
+                                                "ignored": True,
+                                                "filter-match": {
+                                                    "status": "matches",
+                                                },
+                                            }
+                                        }
+                                    },
+                                    active.canonical: {
+                                        "testcases": {
+                                            "active_case": {
+                                                "ignored": False,
+                                                "filter-match": {
+                                                    "status": "matches",
+                                                },
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                        ),
+                        "",
+                    )
+                junit = target / "nextest/ci-full/junit.xml"
+                junit.parent.mkdir(parents=True, exist_ok=True)
+                junit.write_text(
+                    f'<testsuite><testcase name="active_case" '
+                    f'classname="{active.canonical}"/></testsuite>'
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"CARGO_TARGET_DIR": str(target)},
+                ),
+                mock.patch.object(
+                    owned,
+                    "_commit",
+                    return_value="b" * 40,
+                ),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="package-expansion",
+                    shard=owned.shard_for(ignored),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+
+            self.assertTrue(receipt["success"], receipt["failures"])
+            self.assertEqual(
+                receipt["executed_targets"],
+                sorted([ignored.canonical, active.canonical]),
+            )
+            self.assertEqual(
+                receipt["selected_tests"],
+                [f"{active.canonical}::active_case"],
+            )
+            self.assertEqual(
+                receipt["executed_tests"],
+                [f"{active.canonical}::active_case"],
+            )
+
+    def test_change_owned_rejects_an_all_ignored_ordinary_target(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                identity.canonical: {
+                    "testcases": {
+                        "ignored_case": {
+                            "ignored": True,
+                            "filter-match": {"status": "matches"},
+                        }
+                    }
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "no active tests"):
+            owned._listing_tests(listing, identity, {})
 
     def test_product_build_failure_writes_receipt_and_skips_targets(self) -> None:
         plan = self._plan()

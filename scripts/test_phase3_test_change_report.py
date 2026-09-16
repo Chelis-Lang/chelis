@@ -416,6 +416,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("shell", step)
         self.assertNotIn("continue-on-error", job)
+        artifact = next(
+            s
+            for s in steps
+            if s.get("with", {}).get("name") == "phase3-test-changes"
+        )
+        self.assertEqual(
+            artifact["if"],
+            "${{ always() && hashFiles('target/phase3-test-changes.json') != '' }}",
+        )
+        self.assertEqual(
+            artifact["with"]["if-no-files-found"],
+            "error",
+        )
         enforcing = [
             s
             for s in steps
@@ -452,6 +465,10 @@ class WorkflowTests(unittest.TestCase):
         artifacts = [s for s in ack_steps if s.get("with", {}).get("name") == "phase3-test-changes"]
         self.assertEqual(len(artifacts), 1)
         self.assertTrue(artifacts[0]["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(
+            artifacts[0]["if"],
+            "always() && hashFiles('target/phase3-test-changes.json') != ''",
+        )
         self.assertEqual(artifacts[0]["with"]["path"], "target/phase3-test-changes.json")
         self.assertEqual(artifacts[0]["with"]["if-no-files-found"], "error")
 
