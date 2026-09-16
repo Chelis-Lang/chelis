@@ -2535,6 +2535,7 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
     stack_guard!("param_name_for_refs", param, None);
     match param {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
+        deep::Expr::Atom(_, _) => None,
         deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
         // A Deep param is `(name {type: ...})` — a List with the name as
         // the FIRST element and the meta map as the second. `children()`
@@ -2545,7 +2546,12 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
             .first()
             .and_then(symbol_name)
             .map(str::to_string),
-        _ => None,
+        // Stamped symbol-headed structural lists preserve the same positional
+        // entry without inventing a vocabulary tag.
+        deep::Expr::BareList(elements, _) => {
+            elements.first().and_then(symbol_name).map(str::to_string)
+        }
+        deep::Expr::Node(_, _) | deep::Expr::Map(_, _) | deep::Expr::UnknownForm(_) => None,
     }
 }
 

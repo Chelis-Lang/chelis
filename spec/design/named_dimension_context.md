@@ -81,9 +81,10 @@ concat's named-axis unknown rule retain their existing admission policies
 (§§4.5.4, 4.7.2–4.7.3). Truly unknown arithmetic remains unknown. The consumer
 oracle pairs known contradictions with runtime-admissible unknown claims and
 tests whole, live, decoded and layered contexts in both multiplication orders.
-The convolution formula has private-seam coverage only: the labelled source
-positive still encounters the baseline concrete-metadata restriction in the
-final checker validator. That is not claimed fixed by an inference formula.
+The convolution formula has private-seam coverage only. PP9 removes the former
+checker-level concrete-metadata restriction because symbolic metadata is legal
+language input; backend execution support and loud refusal remain separately
+owned by `loud_unsupported.md` and [#730].
 
 For example, `aligned[d](x: tensor[d,f32], gain: tensor[fixed,f32]) ->
 tensor[d,f32] = mul(x,gain)` establishes the output label `fixed`; the same

@@ -24,8 +24,9 @@
 //!    (Type / Effect / Linearity) so the tool's error tag stays faithful to the
 //!    pass that actually failed. The cases span the full pass surface: type /
 //!    precision, declared-pure-body-performs-Random/IO, effect propagation to a
-//!    held caller, linearity use-after-consume, and the two cross-def structural
-//!    detectors (base-case-free recursion group, top-level binding cycle).
+//!    held caller, linearity use-after-consume, and the remaining cross-def
+//!    structural detector (top-level binding cycle). A separate acceptance row
+//!    pins [04-INF-2]/[04-INF-3] uniform recursion after PP9.
 //!
 //! ## Verdict definition
 //!
@@ -133,8 +134,7 @@ impl Verdict {
 
 /// Run full whole-program `chelis check` on `module`, mirroring
 /// `cmd_check_one_deep` exactly: `check_ir_fitness` (the whole-module
-/// type/structural pass, including the cross-def `detect_trivial_non_terminating_fns`
-/// and `detect_top_level_binding_cycles` detectors) FIRST, THEN
+/// type/structural pass, including `detect_top_level_binding_cycles`) FIRST, THEN
 /// `check_typed_program` -> `check_program` (effects) -> `check_linearity`,
 /// short-circuiting on the first failing pass and naming it.
 ///
@@ -453,11 +453,9 @@ def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
 
 /// Constructed: a `ping` / `pong` mutually-recursive pair where `ping` holds
 /// the sole base case (`if eq(n, 0) then 0 ...`) and `pong` is unconditional.
-/// Splicing `ping`'s body to drop the base case (new body `pong(sub(n, 1))`)
-/// closes the recursion group with no base case anywhere, which the whole-module
-/// `detect_trivial_non_terminating_fns` detector flags. The detector is a
-/// recursion-group property, so it fires only when the full rewritten module is
-/// analyzed. Checks clean standalone (the base case is present).
+/// Splicing `ping`'s body to drop that case leaves one uniform recursive
+/// instantiation, which [04-INF-2]/[04-INF-3] admit. Both the fragment tool and
+/// full check must accept the rewritten module after PP9.
 const PINGPONG_MODULE: &str = r#"module Frag.PingPong
 export (ping, pong)
 def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
@@ -466,8 +464,8 @@ def pong(n: int32) -> int32 = ping(sub(n, 1))
 
 /// Constructed: a module carrying a top-level value-binding cycle
 /// (`a` reads `b`, `b` reads `a`), which the whole-module
-/// `detect_top_level_binding_cycles` detector flags. This is the SECOND
-/// cross-def structural detector the fitness pass runs. The body-replacement
+/// `detect_top_level_binding_cycles` detector flags. This cross-def structural
+/// detector remains checker-owned. The body-replacement
 /// tool only targets functions with a declared signature, so a value-binding
 /// cycle cannot be introduced through a splice; this fixture verifies the
 /// oracle ([`full_check_verdict`]) mirrors `cmd_check_one_deep` by running
@@ -826,18 +824,15 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
     );
 }
 
-// ── Cross-def structural fitness (whole-module detectors) ───────────────────
+// ── Cross-def fitness and uniform-recursion acceptance ──────────────────────
 
 #[test]
-fn pingpong_drop_base_case_agrees_reject() {
+fn pingpong_drop_base_case_agrees_accept() {
     // `ping` holds the sole base case of the `ping`/`pong` group. Splicing its
-    // body to call `pong` unconditionally removes the only base case, so the
-    // whole-module `detect_trivial_non_terminating_fns` detector flags both
-    // `ping` and `pong` as trivially non-terminating. That detector is a
-    // recursion-group property and only fires when the FULL rewritten module is
-    // analyzed. The tool runs `check_ir_fitness` on the rewritten module and so
-    // REJECTS, matching `cmd_check_one_deep`. Reject identity is a structural
-    // Type rejection on both paths.
+    // body to call `pong` unconditionally removes that case but does not change
+    // the recursive instantiation. [04-INF-2]/[04-INF-3] therefore admit it.
+    // PP9 requires both the tool and full `chelis check` to ACCEPT; any backend
+    // refusal is a separate chelis#730 capability decision.
     let module = render_deep(PINGPONG_MODULE);
     let body = render_body(
         "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
@@ -848,8 +843,8 @@ fn pingpong_drop_base_case_agrees_reject() {
         &module,
         "ping",
         &body,
-        Verdict::Reject(FailingPass::Type),
-        true,
+        Verdict::Accept,
+        false,
     );
 }
 

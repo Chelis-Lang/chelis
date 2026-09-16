@@ -34,14 +34,19 @@ pub(super) fn validate_vmap_extent_dependencies(
     type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let defs = collect_functions(exprs, type_env);
+    let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
+    let defs = collect_functions(exprs, type_env, &declared_signatures);
     let summaries = summarize_functions(&defs);
     for expr in exprs {
         walk_vmap_sites(expr, &defs, &summaries, errors);
     }
 }
 
-fn collect_functions(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> BTreeMap<String, FunctionDef> {
+fn collect_functions(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+) -> BTreeMap<String, FunctionDef> {
     let mut defs = BTreeMap::new();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -54,12 +59,16 @@ fn collect_functions(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> BTreeMap<Str
             continue;
         };
         let param_types = build_def_param_scope(expr, type_env);
+        let declared_param_types = declared_signatures
+            .get(name)
+            .map(|signature| signature.param_types.as_slice());
         let tensor_params = params
             .iter()
             .enumerate()
             .filter_map(|(index, param)| {
-                param_types
-                    .get(param)
+                declared_param_types
+                    .and_then(|types| types.get(index))
+                    .or_else(|| param_types.get(param))
                     .is_some_and(type_expr_contains_tensor)
                     .then_some(index)
             })

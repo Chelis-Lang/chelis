@@ -1,21 +1,15 @@
-//! Issue #186 regression: `validate_ir_builtin_symbolic_requirements`
-//! rejected every well-formed `conv` call at `chelis check` time.
-//!
-//! Reproduction surface for this file is the `check_ir_program` entry point
-//! (what `chelis check` drives), not the bare `infer_program` entry point.
-//! The existing `infer.rs` unit test `builtin_conv_accepts_int_stride_padding`
-//! passes through `infer_program` and therefore does NOT exercise the
-//! `validate_ir_program` pass that runs the symbolic-requirements check; that
-//! is why the bug went undetected until a real Surf user hit it.
+//! Issue #186 regression coverage for convolution's post-inference semantic
+//! checks. PP9 runs the spec-owned checks at every public checker entry and
+//! removes the backend-only concrete-metadata refusal.
 //!
 //! Diagnosis (see commit body of the diagnosis commit on this branch):
 //!   - `app_result_type_is_concrete` looks for a `:type` entry on the app
 //!     node's metadata. Surf-desugared apps carry only `:span`; the inference
 //!     pass does not stamp inferred app types back into Deep metadata, and
 //!     the annotation pass that does (`annotate_ir_program_with_context`)
-//!     runs AFTER `validate_ir_program`. So the output-dims check is
+//!     ran after the former validator. So the output-dims check was
 //!     structurally always-false for any Surf source, concrete or not.
-//!   - The `expr_tensor_type_is_concrete` helper resolves args via
+//!   - The former `expr_tensor_type_is_concrete` helper resolved args via
 //!     `expr_type_expr`, which does not peek through `(borrow {} ...)`.
 //!     Surf programs that use `&x` / `&k` (the idiomatic read-only form,
 //!     and what the `School.Nn.Conv.conv_small` sig requires) therefore also
@@ -118,71 +112,37 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
     }
 }
 
-/// EXPECT: A Surf-source conv call whose input tensor has a non-concrete
-/// spatial dim (`h`) is rejected by the symbolic-requirements validator
-/// with the "concrete tensor argument metadata" error. The IR lowering
-/// requires concrete spatial dims to compute strides, so this negative
-/// remains a real constraint even after the fix.
+/// PP9 / [05-OP-51]: symbolic tensor metadata is a legal checker input.
+/// Backends that cannot lower it refuse it under chelis#730 instead.
 #[test]
-fn issue186_surf_conv_nonconcrete_input_dim_rejected() {
+fn issue186_surf_conv_nonconcrete_input_dim_is_checker_legal() {
     let src = r#"
-def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
+def call_conv(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) =
   conv(x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-concrete input dim");
-    assert!(
-        rep.errors.iter().any(|e| e
-            .message
-            .contains("requires concrete tensor argument metadata")),
-        "expected concrete-tensor-arg-metadata error, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
-/// EXPECT (sibling sweep, `mean` arm): a `mean(&x, axis)` call where the
-/// reduced axis is non-concrete is still rejected. Before the fix the
-/// validator's `expr_type_expr` did not peek through `(borrow {} ...)`,
-/// so `tensor_dims_from_type_expr` returned None and the
-/// "concrete reduced axis extent" error never fired for borrowed inputs.
+/// PP9: a symbolic selected extent is not a `mean` type error.
 #[test]
-fn issue186_surf_mean_borrowed_nonconcrete_axis_rejected() {
+fn issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal() {
     let src = r#"
 def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for borrowed mean with non-concrete axis");
-    assert!(
-        rep.errors.iter().any(|e| e
-            .message
-            .contains("requires a concrete reduced axis extent")),
-        "expected mean concrete-reduced-axis error, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic mean extent is not a type error");
 }
 
-/// EXPECT (sibling sweep, `layer_norm` arm): a `layer_norm(&x, &g, &b, 0.00001f32)`
-/// call whose normalized axis is non-concrete is still rejected. Same
-/// borrow-blindness root cause as the mean arm above.
+/// PP9: a symbolic normalized extent is not a `layer_norm` type error.
 #[test]
-fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_rejected() {
+fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal() {
     let src = r#"
 def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
   layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep =
-        res.expect_err("expected check failure for borrowed layer_norm with non-concrete axis");
-    assert!(
-        rep.errors.iter().any(|e| e
-            .message
-            .contains("requires a concrete normalized axis extent")),
-        "expected layer_norm concrete-normalized-axis error, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic layer_norm extent is not a type error");
 }
 
 // ─── Red Team #205 follow-up findings ────────────────────────────
@@ -722,14 +682,8 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// passthrough fix is shape-preserving only, not a blanket "trust
 /// the inner op's output" path.
 ///
-/// Issue #212 / RT-205 round-4 broadened cascade-suppression marker
-/// insertion so `y = sum(...)` now lands in `failed_let_names`
-/// (sum is a recognized shape-sensitive builtin with no derive
-/// arm); the validator-side "concrete tensor argument metadata"
-/// diagnostic is suppressed, and HM's rank-4-input check fires
-/// instead with a more informative message. Both pre- and
-/// post-#212 the program is rejected; the assertion broadens to
-/// accept either diagnostic source.
+/// PP9 deletes the symbolic-metadata diagnostic and its cascade side channel.
+/// The ordinary type mismatch still rejects this rank-changing wrapper.
 #[test]
 fn red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected() {
     let src = r#"
@@ -744,24 +698,17 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.contains("concrete tensor argument metadata")
-                || e.message.contains("dimension mismatch")
+            .any(|e| e.message.contains("dimension mismatch")
                 || e.message.contains("body doesn't match declared signature")
-                || e.message.contains("equal input/kernel ranks")
                 || e.message.contains("equal input/kernel ranks")),
         "expected rejection of sum-wrapped chain, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 
-/// EXPECT (RT-205 round-2 F3): chained conv where the first call
-/// fails for a real reason (non-concrete input dim) produces exactly
-/// ONE diagnostic, not a duplicate cascade. The validator suppresses
-/// the second call's "concrete tensor argument metadata" error when
-/// its input is a `(var name)` whose let-binding's own RHS already
-/// pushed a diagnostic.
+/// PP9: symbolic metadata remains legal through a chained convolution.
 #[test]
-fn red_team_205_round2_f3_cascading_errors_dedupe() {
+fn red_team_205_round2_f3_symbolic_chain_is_checker_legal() {
     let src = r#"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
@@ -769,33 +716,12 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 }
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-concrete input dim");
-    let conv_metadata_errors: Vec<_> = rep
-        .errors
-        .iter()
-        .filter(|e| {
-            e.message
-                .contains("requires concrete tensor argument metadata")
-        })
-        .collect();
-    assert_eq!(
-        conv_metadata_errors.len(),
-        1,
-        "expected exactly 1 metadata-cascade error, got {:?}",
-        conv_metadata_errors
-            .iter()
-            .map(|e| &e.message)
-            .collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
-/// EXPECT (RT-205 round-2 F3 negative parity): two independent
-/// (non-cascading) failures still produce two errors. The
-/// suppression key is "let-bound name whose RHS already failed",
-/// not "any duplicate-shaped message".
+/// PP9: independent symbolic conv calls are both checker-legal.
 #[test]
-fn red_team_205_round2_f3_independent_failures_not_suppressed() {
+fn red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal() {
     let src = r#"
 def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3, 3, 3, f32]) -> (tensor[1, 8, 6, 6, f32], tensor[1, 8, 6, 6, f32]) = {
   y1 = conv(&x1, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
@@ -804,25 +730,7 @@ def f(x1: tensor[1, 3, h, 16, f32], x2: tensor[1, 3, h, 16, f32], k: tensor[8, 3
 }
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-concrete input dim");
-    let conv_metadata_errors: Vec<_> = rep
-        .errors
-        .iter()
-        .filter(|e| {
-            e.message
-                .contains("requires concrete tensor argument metadata")
-        })
-        .collect();
-    assert_eq!(
-        conv_metadata_errors.len(),
-        2,
-        "expected 2 independent metadata errors (one per call), got {:?}",
-        conv_metadata_errors
-            .iter()
-            .map(|e| &e.message)
-            .collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-2 F4): a rank-5 input tensor produces
@@ -880,15 +788,10 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, 2, f32]) -> tensor[1, 8,
 
 // ─── Red Team #205 round-3 follow-up findings ────────────────────
 
-/// EXPECT (RT-205 round-3 F-A): cascade dedup must apply when the
-/// let RHS is a shape-passthrough wrapper over a failed
-/// shape-sensitive call. Before the fix, `failed_let_names` was
-/// only populated when the immediate outer call was itself
-/// shape-sensitive; `y = relu(conv(bad))` left `y` unmarked and
-/// the downstream `conv(&y, ...)` produced a redundant cascade
-/// error.
+/// PP9: a symbolic conv stays checker-legal through a unary shape-preserving
+/// wrapper.
 #[test]
-fn red_team_205_round3_f_a_cascade_through_passthrough_relu() {
+fn red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal() {
     let src = r#"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = relu(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]))
@@ -896,33 +799,13 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 }
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-concrete input dim");
-    let conv_metadata_errors: Vec<_> = rep
-        .errors
-        .iter()
-        .filter(|e| {
-            e.message
-                .contains("requires concrete tensor argument metadata")
-        })
-        .collect();
-    assert_eq!(
-        conv_metadata_errors.len(),
-        1,
-        "expected exactly 1 metadata-cascade error through relu wrapper, got {:?}",
-        conv_metadata_errors
-            .iter()
-            .map(|e| &e.message)
-            .collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
-/// EXPECT (RT-205 round-3 F-A): same dedup through a binary
-/// passthrough wrapper. `add(conv(bad), &b)` is the canonical
-/// conv+bias pattern; the cascade dedup must reach through it
-/// when the inner conv fails.
+/// PP9: a symbolic conv stays checker-legal through the canonical conv+bias
+/// shape-preserving wrapper.
 #[test]
-fn red_team_205_round3_f_a_cascade_through_passthrough_add() {
+fn red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal() {
     let src = r#"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {
   y = add(conv(&x, &k1, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)]), &b)
@@ -930,25 +813,7 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 }
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-concrete input dim");
-    let conv_metadata_errors: Vec<_> = rep
-        .errors
-        .iter()
-        .filter(|e| {
-            e.message
-                .contains("requires concrete tensor argument metadata")
-        })
-        .collect();
-    assert_eq!(
-        conv_metadata_errors.len(),
-        1,
-        "expected exactly 1 metadata-cascade error through add wrapper, got {:?}",
-        conv_metadata_errors
-            .iter()
-            .map(|e| &e.message)
-            .collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic conv metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-3 F-A negative parity): when the
@@ -1107,16 +972,16 @@ def f(x: tensor[1, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8,
 /// when a let-bound name's RHS is a comparison/bool binary whose
 /// own validation failed. The passthrough allowlist contains
 /// `cmplt`, `lt`, `gt`, `gte`, `lte`, `eq`, `neq`, `and`, `or`, so
-/// when one of these chains over a failed inner shape-sensitive
-/// call, the cascade-dedup helper sees through them. Probe each by
-/// wrapping a non-concrete-dim conv and checking that exactly ONE
-/// metadata diagnostic fires (not two).
+/// PP9 removes the backend-only symbolic-metadata diagnostic. The comparison
+/// wrappers can still fail for their own result-type reasons, but they must
+/// never resurrect that retired checker rejection.
 #[test]
-fn red_team_205_round3_f_b_binary_compare_cascade_dedup() {
+fn red_team_205_round3_f_b_binary_compare_does_not_restore_metadata_rejection() {
     let compare_ops = ["cmplt", "lt", "gt", "gte", "lte", "eq", "neq"];
     for op in &compare_ops {
-        // x has non-concrete h, so conv(&x, ...) fails. y = op(conv(...), &b);
-        // downstream conv(&y, ...) should NOT produce its own cascade error.
+        // Symbolic conv metadata is checker-legal. Comparison inference may
+        // still reject its own operands, but it must not recreate the retired
+        // backend capability diagnostic.
         let src = format!(
             r#"
 def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8, 3, 3, f32], b: tensor[1, 8, 6, 6, f32]) -> tensor[1, 16, 4, 4, f32] = {{
@@ -1126,34 +991,26 @@ def f(x: tensor[1, 3, h, 16, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16, 8
 "#
         );
         let deep = surf_to_deep(&src);
-        let res = check_ir_program(&deep);
-        let rep = res.expect_err("expected check failure for non-concrete input");
-        let metadata_errors: Vec<_> = rep
-            .errors
-            .iter()
-            .filter(|e| {
-                e.message
-                    .contains("requires concrete tensor argument metadata")
-            })
-            .collect();
-        assert_eq!(
-            metadata_errors.len(),
-            1,
-            "op `{op}` cascade-dedup failed: expected 1 metadata error, got {:?}",
-            metadata_errors
+        let messages = match check_ir_program(&deep) {
+            Ok(_) => Vec::new(),
+            Err(report) => report
+                .errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect::<Vec<_>>(),
+        };
+        assert!(
+            !messages
                 .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
+                .any(|message| message.contains("concrete tensor argument metadata")),
+            "op `{op}` restored the retired symbolic-metadata rejection: {messages:?}"
         );
     }
 }
 
-/// EXPECT (RT-205 round-3 F-C): symbolic batch dim is accepted in a
-/// conv call. Per spec/05 §4.5 the canonical signature is
-/// `tensor[batch, in_c, h, w, p]`; `batch` is named and the IR
-/// lowering carries it through. The validator's arg-concreteness
-/// check now permits axis 0 to be `NonConcrete` while still
-/// requiring concrete `in_c`, `h`, `w` and a fully-concrete kernel.
+/// EXPECT (RT-205 round-3 F-C): a symbolic batch dim is accepted in a
+/// conv call. PP9 generalizes that language-level acceptance to symbolic
+/// tensor metadata; backend implementation remains a separate capability.
 #[test]
 fn red_team_205_round3_f_c_symbolic_batch_single_call() {
     let src = r#"
@@ -1199,48 +1056,27 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
     }
 }
 
-/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete
-/// SPATIAL dim (h or w) is still rejected. The lenience is
-/// surgically limited to axis 0 (batch); spatial axes feed the
-/// stride formula and must be concrete.
+/// PP9: a symbolic spatial extent is legal at the checker boundary.
 #[test]
-fn red_team_205_round3_f_c_nonconcrete_spatial_still_rejected() {
+fn red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal() {
     let src = r#"
 def f(x: tensor[1, 3, h, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected rejection for non-concrete spatial dim");
-    assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.contains("concrete tensor argument metadata")),
-        "expected concreteness rejection for h, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic spatial metadata is not a type error");
 }
 
-/// EXPECT (RT-205 round-3 F-C negative parity): non-concrete in_c
-/// (input axis 1) is still rejected. in_c must equal kernel axis 1
-/// and feeds the matmul lowering, so symbolic in_c is not
-/// supported per the F-C scope.
+/// PP9: a symbolic channel extent is legal when the input/kernel equality
+/// constraint is preserved.
 #[test]
-fn red_team_205_round3_f_c_nonconcrete_in_channels_still_rejected() {
+fn red_team_205_round3_f_c_nonconcrete_in_channels_is_checker_legal() {
     let src = r#"
 def f(x: tensor[1, in_c, 8, 8, f32], k: tensor[8, in_c, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
   conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected rejection for non-concrete in_c");
-    assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.contains("concrete tensor argument metadata")),
-        "expected concreteness rejection for in_c, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("symbolic channel metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-3 F-C negative parity): a chained
@@ -1279,12 +1115,9 @@ def f(x: tensor[batch, 3, 8, 8, f32], k1: tensor[8, 3, 3, 3, f32], k2: tensor[16
     );
 }
 
-/// EXPECT: A direct-Deep conv call whose stride argument is a `(var ...)`
-/// rather than an integer literal is rejected with a clear error. The
-/// IR lowering requires the stride/padding to be statically-knowable
-/// integers (`extract_int_literal` on the arg must succeed at lowering).
+/// [05-OP-51]: runtime stride values are legal and retain runtime guards.
 #[test]
-fn issue186_deep_conv_nonliteral_stride_rejected() {
+fn issue186_deep_conv_nonliteral_stride_is_checker_legal() {
     let src = "(def {type: (t-prim {} int64)} stride_v (lit {type: (t-prim {} int64)} 1)) \
                (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (d-lit {} 3) (d-lit {} 8) (d-lit {} 8) (t-prim {} f32))} 0)) \
                (def {} k (lit {type: (t-tensor {} (d-lit {} 8) (d-lit {} 3) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0)) \
@@ -1292,15 +1125,5 @@ fn issue186_deep_conv_nonliteral_stride_rejected() {
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (var {} stride_v) (app {} (var {} Cons) (var {} stride_v) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for non-literal stride");
-    assert!(
-        rep.errors.iter().any(|e| e
-            .message
-            .contains("requires literal per-axis stride and padding metadata")
-            || e.message
-                .contains("requires concrete tensor argument metadata")),
-        "expected literal-int-stride error, got {:?}",
-        rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
+    check_ir_program(&deep).expect("runtime stride metadata is not a type error");
 }

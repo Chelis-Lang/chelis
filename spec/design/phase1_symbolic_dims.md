@@ -34,7 +34,8 @@ Phase 0 required concrete dimensions at IR lowering time. The GPU backend needs 
 ### Current shipped boundary
 
 - implemented: symbolic dims on the stable tensor ABI, repeated symbolic-occurrence validation, symbolic `sum`/`max_reduce`/`softmax`, symbolic matmul/expand/reshape/permute paths, HIP memory formulas
-- not yet implemented: symbolic normalized-axis support for `mean`/`layer_norm`, HIP `pad`/`shrink`
+- checker-admitted but not yet implemented on every backend: symbolic normalized-axis execution for `mean`/`layer_norm`
+- not yet implemented: HIP `pad`/`shrink`
 
 ### Execution Strategy
 

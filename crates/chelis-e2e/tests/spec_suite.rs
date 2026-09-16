@@ -291,6 +291,42 @@ fn spec_unbound_variable_is_error() {
     );
 }
 
+#[test]
+fn spec_top_level_initialization_cycle_is_not_a_perfect_wrapperless_check() {
+    // [04-INF-4]/[04-INF-7]/[04-INF-8], chelis#1601: this suite calls the
+    // wrapper-less public APIs directly, so the initialization report must
+    // live in their shared semantic driver rather than only in
+    // `check_typed_program`.
+    let declarations =
+        chelis_surf::parser::parse_str("a = b\nb = a\n").expect("cycle fixture must parse");
+    let deep_exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let inferred = chelis_types::infer_program(&deep_exprs);
+    assert!(
+        inferred
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::CycleDetected)),
+        "infer_program must report the top-level initialization cycle: {:?}",
+        inferred.errors
+    );
+    let report = chelis_types::check_program(&deep_exprs);
+    assert!(report.score < 1.0, "a cycle cannot receive perfect fitness");
+    let diagnostics = |errors: &[chelis_types::errors::CheckError]| {
+        errors
+            .iter()
+            .map(|error| {
+                format!(
+                    "{}|{}|{}",
+                    error.kind.diagnostic_name(),
+                    error.message,
+                    error.suggestions.join("\u{1f}")
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(diagnostics(&report.errors), diagnostics(&inferred.errors));
+}
+
 // =========================================================================
 // Category 3: Lowering
 // =========================================================================

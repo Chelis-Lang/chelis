@@ -3381,6 +3381,8 @@ Reading notes:
 > the same defects; a check that one admitted representation receives SHALL be
 > applied to every other admitted representation of the same program. A
 > representation the checker admits but a check cannot read is a silent
-> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped.
-
-(Not fully implemented; see chelis#1125.)
+> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped. A
+> check applied at one entry and not another SHALL be resolved by deciding the
+> check, never by narrowing the entry that applies it: either every entry
+> applies it, or no entry does and the rejection it performed moves to the
+> stage whose capability it describes.

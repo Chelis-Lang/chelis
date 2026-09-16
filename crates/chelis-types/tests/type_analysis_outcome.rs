@@ -64,22 +64,18 @@ fn analysis_accepts_finite_recursive_functions() {
 }
 
 #[test]
-fn analysis_rejects_recursion_without_a_base_case() {
+fn analysis_accepts_recursion_without_a_base_case() {
     let surf = "module Rec\ndef forever(n: int32) -> int32 = forever(n)\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 
-    let TypeAnalysisOutcome::Rejected { fitness } = analyze_ir_program(&exprs) else {
-        panic!("base-case-free recursion must reject type analysis");
-    };
-    assert!(
-        fitness
-            .errors
-            .iter()
-            .any(|error| error.message.contains("no base case")),
-        "the rejection must identify the missing base case: {:?}",
-        fitness.errors
-    );
+    // [04-INF-2]/[04-INF-3] admit uniform recursion. A backend may still refuse
+    // an unsupported recursive lowering under chelis#730, but that capability
+    // boundary is not a type-analysis rejection.
+    assert!(matches!(
+        analyze_ir_program(&exprs),
+        TypeAnalysisOutcome::Accepted { .. }
+    ));
 }
 
 #[test]
