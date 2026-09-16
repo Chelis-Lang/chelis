@@ -788,47 +788,49 @@ fn a_late_bound_secondary_operand_is_validated_too() {
     }
 }
 
-/// The other half of the per-route-kind boundary rule, and the reason it has
-/// to be per kind at all.
-///
-/// A collection, host or string route's operand is NOT required to be a
-/// tensor carrying a shape. A polymorphic definition legitimately calls
-/// `dict_of`, `len` or `where` over a value that acquires its constructor
-/// only at a call site, and `packages/chelis-std/src/io/json.ch` really does:
-/// `parse_object` returns `Some((dict_of([]), ...))` under a declared
-/// `Dict[string, Json]`, where the empty list literal's element type never
-/// binds inside the declaration. Rejecting that at the boundary took the
-/// whole standard library out.
-///
-/// So the obligation is discharged silently, and the route's own validation
-/// runs at each binding instead. REGRESSION TEST for the acceptance halves,
-/// which a boundary rule that did not distinguish route kinds rejected;
-/// DISPOSITION LOCK for the rejection, which is the same cell the
-/// collection-route table above already asserts.
+/// [04-INF-9] narrows the old route-kind boundary: a newly authored generic
+/// `len` or `index` wrapper may not publish its unresolved operation-admission
+/// contract, even when the local lambda is never applied. `where` retains the
+/// non-collection disposition this matrix established, and `dict_of([])` may
+/// still be decided by its declaration's explicit result type.
 #[test]
-fn a_never_bound_generic_operand_is_accepted_and_validated_at_its_binding() {
-    // Never applied: accepted, with no diagnostic at all.
+fn never_bound_collection_contracts_reject_while_other_routes_keep_their_dispositions() {
     for (route, program) in [
         (
             "len",
             "def f() -> int32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
         ),
         (
-            "where",
-            "def f(c: tensor[3, bool], b: tensor[3, f32]) -> int32 = {\n  g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
-        ),
-        (
             "index",
             "def f(xs: List[int32]) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  1i32\n}\n",
         ),
     ] {
-        check(program).unwrap_or_else(|e| {
-            panic!(
-                "{route}: a generic operand that never binds must be accepted, not reported:\n{}",
-                summary(&e)
-            )
-        });
+        let errors =
+            check(program).expect_err("an authored generic collection contract must be rejected");
+        let prefix =
+            format!("unresolved `{route}` shape obligation in `f` at declaration boundary");
+        assert!(
+            errors.iter().any(|error| {
+                matches!(
+                    error.kind,
+                    chelis_types::errors::CheckErrorKind::TypeMismatch
+                ) && error.message.starts_with(&prefix)
+            }),
+            "{route}: the declaration-boundary rejection must name the collection operation:\n{}",
+            summary(&errors)
+        );
     }
+
+    check(
+        "def f(c: tensor[3, bool], b: tensor[3, f32]) -> int32 = {\n  \
+         g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "where: the unchanged non-collection route must remain accepted:\n{}",
+            summary(&e)
+        )
+    });
 
     // The standard library's own shape, reduced to one declaration.
     check("def f() -> Dict[string, int32] = dict_of([])\n").unwrap_or_else(|e| {

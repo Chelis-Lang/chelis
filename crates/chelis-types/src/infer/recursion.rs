@@ -18,11 +18,150 @@ use std::cell::RefCell;
 use crate::env::Env;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction};
+use crate::types::{DimVar, NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction, VarGen};
 use crate::unify::Subst;
 
 thread_local! {
     static GROUP_CTX: RefCell<Option<GroupCtx>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RecursiveExpected<'a> {
+    Provisional(&'a Type),
+    Published(&'a Scheme),
+}
+
+type SchemeInstantiation = (Type, Vec<(TypeVar, Type)>, Vec<(DimVar, DimVar)>);
+
+/// Compiler-owned expected type for one recursive member inference. A
+/// published expectation is instantiated through the ordinary Env/Subst path
+/// so its checked contracts receive fresh identities; a provisional first-pass
+/// type remains borrowed and carries no scheme payload.
+pub(super) struct PreparedRecursiveExpected<'a> {
+    provisional: Option<&'a Type>,
+    published: Option<SchemeInstantiation>,
+}
+
+pub(super) struct DeclaredMemberRequest<'a> {
+    name: &'a str,
+    binder_names: Option<&'a UnordSet<String>>,
+    declared_scheme: Option<&'a Scheme>,
+    use_published_as_declared: bool,
+}
+
+impl<'a> DeclaredMemberRequest<'a> {
+    pub(super) fn new(
+        name: &'a str,
+        binder_names: Option<&'a UnordSet<String>>,
+        declared_scheme: Option<&'a Scheme>,
+        use_published_as_declared: bool,
+    ) -> Self {
+        Self {
+            name,
+            binder_names,
+            declared_scheme,
+            use_published_as_declared,
+        }
+    }
+}
+
+impl<'a> PreparedRecursiveExpected<'a> {
+    pub(super) fn prepare(
+        expected: Option<RecursiveExpected<'a>>,
+        env: &Env,
+        var_gen: &mut VarGen,
+        subst: &mut Subst,
+    ) -> Self {
+        match expected {
+            Some(RecursiveExpected::Provisional(ty)) => Self {
+                provisional: Some(ty),
+                published: None,
+            },
+            Some(RecursiveExpected::Published(scheme)) => Self {
+                provisional: None,
+                published: Some(env.instantiate_scheme(scheme, var_gen, subst)),
+            },
+            None => Self {
+                provisional: None,
+                published: None,
+            },
+        }
+    }
+
+    pub(super) fn expected_type(&self) -> Option<&Type> {
+        self.published
+            .as_ref()
+            .map(|(ty, _, _)| ty)
+            .or(self.provisional)
+    }
+
+    pub(super) fn is_published(&self) -> bool {
+        self.published.is_some()
+    }
+
+    pub(super) fn begin_caller(
+        &self,
+        name: &str,
+        binder_names: Option<&UnordSet<String>>,
+    ) -> CallerGuard {
+        let mapping = self
+            .published
+            .as_ref()
+            .map_or(&[][..], |(_, mapping, _)| mapping.as_slice());
+        begin_caller(name, binder_names, mapping)
+    }
+
+    /// Prepare the declaration-side type and recursive caller identity without
+    /// making an unsigned published expectation look authored. A real
+    /// declaration scheme (including #2041's private rejected-signature
+    /// recovery) wins; otherwise a published expectation is declaration-like
+    /// only when the caller confirms the member already owns a defsig.
+    pub(super) fn prepare_declared_member(
+        &self,
+        request: DeclaredMemberRequest<'_>,
+        env: &Env,
+        var_gen: &mut VarGen,
+        subst: &mut Subst,
+    ) -> DeclaredMemberSetup {
+        let instantiation = if let Some(scheme) = request.declared_scheme {
+            Some(env.instantiate_scheme(scheme, var_gen, subst))
+        } else if request.use_published_as_declared {
+            self.published.clone()
+        } else {
+            None
+        };
+        let Some((ty, mapping, dvar_mapping)) = instantiation else {
+            let caller_guard = if group_member(request.name) {
+                self.begin_caller(request.name, None)
+            } else {
+                CallerGuard::inactive()
+            };
+            return DeclaredMemberSetup {
+                ty: None,
+                dim_names: UnordMap::new(),
+                type_names: UnordMap::new(),
+                caller_guard,
+            };
+        };
+        let caller_guard = if group_member(request.name) {
+            begin_caller(request.name, request.binder_names, &mapping)
+        } else {
+            CallerGuard::inactive()
+        };
+        DeclaredMemberSetup {
+            ty: Some(ty),
+            dim_names: env.declared_dim_names_for(request.name, &dvar_mapping),
+            type_names: env.declared_type_names_for(request.name, &mapping),
+            caller_guard,
+        }
+    }
+}
+
+pub(super) struct DeclaredMemberSetup {
+    pub(super) ty: Option<Type>,
+    pub(super) dim_names: UnordMap<DimVar, String>,
+    pub(super) type_names: UnordMap<TypeVar, String>,
+    pub(super) caller_guard: CallerGuard,
 }
 
 struct GroupCtx {
@@ -40,6 +179,11 @@ struct GroupCtx {
 struct MemberSnapshot {
     tvars: Vec<TypeVar>,
     tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
+    /// chelis#1654: part of the snapshot because it is part of the scheme's
+    /// identity. A member that acquired a collection obligation while its
+    /// group was inferred has NOT been left unchanged, and comparing only the
+    /// quantifiers and the body would report that it had.
+    constraints: Vec<crate::types::CollectionConstraint>,
     body: Type,
     /// Whether the member's `def` authored explicit type binders (`[a]`).
     /// Authored parameters take the strict caller's-own-instantiation rule;
@@ -99,6 +243,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             MemberSnapshot {
                 tvars: scheme.tvars.clone(),
                 tvar_restrictions: scheme.tvar_restrictions.clone(),
+                constraints: scheme.constraints.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
             },
@@ -195,6 +340,7 @@ pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
         };
         snapshot.tvars == scheme.tvars
             && snapshot.tvar_restrictions == scheme.tvar_restrictions
+            && snapshot.constraints == scheme.constraints
             && snapshot.body == scheme.body
     })
 }

@@ -50,9 +50,59 @@ def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &ten
         String::from_utf8_lossy(&output.stderr)
     );
     let schema: Value = serde_json::from_slice(&output.stdout).expect("schema JSON");
-    assert_eq!(schema["format_version"], 2);
+    // chelis#1654 bumped the public JSON schema to 3 for the obligations.
+    assert_eq!(schema["format_version"], 3);
     assert_eq!(
         schema["modules"][0]["functions"][0]["type_variable_restrictions"],
         serde_json::json!([{"variable": "t0", "domain": "active_float"}])
+    );
+}
+
+#[test]
+fn reef_schema_json_preserves_a_checked_collection_relation() {
+    let directory = tempdir().expect("fixture directory must be created");
+    let root = directory.path().join("schema-collection-contract");
+    write(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "schema-collection-contract"
+version = "1.0.0"
+compiler = "={}"
+module_prefix = "Relation"
+"#,
+            chelis_compiler_api::COMPILER_VERSION
+        ),
+    );
+    write(
+        &root.join("src/main.ch"),
+        r#"module Relation.Main
+export (measure)
+measure = len
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["reef", "schema", root.to_str().unwrap()])
+        .output()
+        .expect("reef schema must run");
+    assert!(
+        output.status.success(),
+        "reef schema failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let schema: Value = serde_json::from_slice(&output.stdout).expect("schema JSON");
+    let function = &schema["modules"][0]["functions"][0];
+    assert_eq!(schema["format_version"], 3);
+    assert_eq!(
+        function["collection_obligations"],
+        serde_json::json!([{
+            "len": {
+                "operand": "(t-var {} t0)",
+                "result": "(t-var {} t1)"
+            }
+        }])
     );
 }

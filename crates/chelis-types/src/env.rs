@@ -711,6 +711,16 @@ impl Env {
             }
             tvar_mapping.push((tv, fresh));
         }
+        // chelis#1654: renaming the quantifiers is exactly what turns a
+        // scheme-level obligation into one this USE owes, so it is done here,
+        // in the one instantiation mechanism, for the reason stated above:
+        // a second copy of this loop that dropped the obligations would
+        // compile, and the only symptom would be a program that should have
+        // been rejected type-checking.
+        //
+        // The renaming is applied AFTER the dimension and rank quantifiers are
+        // inserted below, so a constraint whose carried type mentions one gets
+        // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
         for &dv in &scheme.dvars {
             // Mint the variable directly rather than destructuring
@@ -726,6 +736,10 @@ impl Env {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
+        }
+        for constraint in &scheme.constraints {
+            let renamed = constraint.map_types(|ty| subst.apply(ty));
+            inference_subst.record_collection_contract(renamed);
         }
         (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
     }
@@ -785,11 +799,39 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        let level_scheme = self.generalize_by_levels(ty, subst);
+        self.generalize_owned(ty, subst, None)
+    }
+
+    /// Generalize one deferred declaration using only the contract instances
+    /// created while that declaration was inferred.
+    ///
+    /// Recursive siblings share one inference level, so level membership alone
+    /// cannot distinguish two fully monomorphic checked function values. The
+    /// driver records each member's exact instance IDs and supplies them here.
+    pub(crate) fn generalize_with_collection_contracts(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: &[crate::unify::CollectionContractId],
+    ) -> Scheme {
+        self.generalize_owned(ty, subst, Some(owned_contracts))
+    }
+
+    fn generalize_owned(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> Scheme {
+        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let sweep_scheme = self.generalize_by_sweep(ty, subst);
+                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                assert_eq!(
+                    level_scheme.constraints, sweep_scheme.constraints,
+                    "level-based collection obligations diverged from the reference environment sweep"
+                );
                 assert_eq!(
                     level_scheme.tvars, sweep_scheme.tvars,
                     "level-based type quantifiers diverged from the reference environment sweep"
@@ -812,10 +854,86 @@ impl Env {
                 );
             }
         });
+        // Transport contracts this scheme now owns have moved off the
+        // inference-local contract ledger. Each later instantiation installs a
+        // fresh renamed instance with its own application identity.
+        //
+        // The exact instance IDs come back from the split. Removing by relation
+        // equality could erase a monomorphic recursive sibling's identical
+        // contract, which belongs to a different value.
+        if !ledger_removals.is_empty() {
+            subst.take_collection_contracts(&ledger_removals);
+        }
         level_scheme
     }
 
-    fn generalize_by_levels(&self, ty: &Type, subst: &Subst) -> Scheme {
+    /// chelis#1654: split the pending collection constraints into the ones
+    /// this generalization quantifies and the variables the rest must keep
+    /// monomorphic.
+    ///
+    /// Only relations already owned by a checked function value reach this
+    /// split. Their complete variable footprint must be visible in the value's
+    /// type; there are no hidden intermediate variables and no body-inferred
+    /// relation graph. Consumed application instances are absent from
+    /// `pending_collection_contracts` and therefore cannot be republished.
+    fn collection_constraints_to_quantify(
+        body: &Type,
+        body_variables: &[TypeVar],
+        body_candidates: &[TypeVar],
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> CollectionQuantification {
+        let mut split = CollectionQuantification::default();
+        let pending = subst.pending_collection_contracts();
+        if pending.is_empty() {
+            return split;
+        }
+        let visible = body_variables.iter().copied().collect::<UnordSet<_>>();
+        let candidates = body_candidates.iter().copied().collect::<UnordSet<_>>();
+        let current_level = subst.current_level();
+        for (id, level, constraint) in pending {
+            let owned = match owned_contracts {
+                Some(owned) => owned.contains(&id),
+                None => level > current_level,
+            };
+            if !owned {
+                continue;
+            }
+            let mut footprint = UnordSet::default();
+            for carried in constraint.carried_types() {
+                footprint.extend(free_tvars(carried));
+            }
+            let footprint = footprint.into_sorted();
+            let owned = if footprint.is_empty() {
+                crate::unify::collection_contract_visible_in_type(&constraint, body)
+            } else {
+                footprint.iter().all(|var| candidates.contains(var))
+            };
+            if owned {
+                split.ledger_removals.push(id);
+                if !split.constraints.contains(&constraint) {
+                    split.constraints.push(constraint);
+                }
+            } else if footprint.is_empty() || footprint.iter().all(|var| !visible.contains(var)) {
+                // The expression discarded the function-bearing subvalue:
+                // `(len, 1).1` and `ignore(len)` must not leave the detached
+                // contract behind to reject an unrelated result.
+                split.ledger_removals.push(id);
+            } else {
+                split
+                    .pinned
+                    .extend(footprint.into_iter().filter(|var| candidates.contains(var)));
+            }
+        }
+        split
+    }
+
+    fn generalize_by_levels(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
@@ -826,18 +944,31 @@ impl Env {
         // `Subst::pending_gate_result_vars`. Levels cannot see that tie -- it
         // lives in the gate ledger, not in any unification.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
-        let tvars = ty_tvars
-            .into_iter()
-            .filter(|v| {
-                subst.level_of_tvar(*v) > level
-                        // spec/04 §3.1.1: a variable minted for an in-group
-                        // recursive instantiation stays monomorphic while its
-                        // group is inferred, so a let-bound alias of a group
-                        // member cannot smuggle in polymorphic recursion.
-                        && !crate::infer::recursion::tvar_pinned(*v)
-                        && !pending_t.contains(v)
-            })
+        // spec/04 §3.1.1: a variable minted for an in-group recursive
+        // instantiation stays monomorphic while its group is inferred, so a
+        // let-bound alias of a group member cannot smuggle in polymorphic
+        // recursion.
+        let generalizable = |v: TypeVar| {
+            subst.level_of_tvar(v) > level
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+        };
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Move only already-checked transport contracts whose complete
+        // variable footprint belongs to this generalized function value.
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -846,23 +977,27 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: ty_dvars
-                .into_iter()
-                .filter(|v| {
-                    subst.level_of_dvar(*v) > level
-                        && !pending_d.contains(v)
-                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                })
-                .collect(),
-            rvars: ty_rvars
-                .into_iter()
-                .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: ty_dvars
+                    .into_iter()
+                    .filter(|v| {
+                        subst.level_of_dvar(*v) > level
+                            && !pending_d.contains(v)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: ty_rvars
+                    .into_iter()
+                    .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
 
     /// The pre-#1207 environment-sweep implementation, kept as the reference
@@ -879,7 +1014,12 @@ impl Env {
     /// either here would make the oracle disagree with a correct production
     /// path. Keep the two sets of exclusions in step.
     #[cfg(feature = "generalize-sweep-oracle")]
-    fn generalize_by_sweep(&self, ty: &Type, subst: &Subst) -> Scheme {
+    fn generalize_by_sweep(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
@@ -887,14 +1027,27 @@ impl Env {
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
         let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
-        let tvars = free_tvars(&ty)
-            .into_iter()
-            .filter(|v| {
-                !env_tvars.contains(v)
-                    && !crate::infer::recursion::tvar_pinned(*v)
-                    && !pending_t.contains(v)
-            })
+        let generalizable = |v: TypeVar| {
+            !env_tvars.contains(&v)
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+        };
+        let ty_tvars = free_tvars(&ty);
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Mirror the checked-contract split in the reference generalizer.
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -903,24 +1056,42 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: free_dvars(&ty)
-                .into_iter()
-                .filter(|v| {
-                    !env_dvars.contains(v)
-                        && !pending_d.contains(v)
-                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
-                })
-                .collect(),
-            rvars: free_rvars(&ty)
-                .into_iter()
-                .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: free_dvars(&ty)
+                    .into_iter()
+                    .filter(|v| {
+                        !env_dvars.contains(v)
+                            && !pending_d.contains(v)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: free_rvars(&ty)
+                    .into_iter()
+                    .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
+}
+
+/// chelis#1654: what one generalization decided about the pending collection
+/// obligations. See [`Env::collection_constraints_to_quantify`].
+#[derive(Default)]
+struct CollectionQuantification {
+    /// Obligations this scheme now owns, in ledger order.
+    constraints: Vec<CollectionConstraint>,
+    /// Exact ledger entries either moved into the scheme or discarded with a
+    /// function-bearing subvalue no longer visible in the generalized type.
+    ledger_removals: Vec<crate::unify::CollectionContractId>,
+    /// Body variables that must stay monomorphic because an obligation this
+    /// scheme does NOT own still carries them.
+    pinned: UnordSet<TypeVar>,
 }
 
 /// True when `ty` contains a tensor whose shape carries the named
@@ -1022,6 +1193,61 @@ mod module_scope_tests {
 
         assert!(env.lookup("borrowed").is_none());
         assert!(env.lookup_terminal_unique("borrowed").is_some());
+    }
+
+    #[test]
+    fn same_level_monomorphic_contracts_keep_distinct_declaration_owners() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let list = Type::Adt(
+            "List".to_string(),
+            vec![Type::Tensor(
+                vec![Dim::Lit(2), Dim::Lit(3)],
+                TensorPrec::Concrete(Prim::F32),
+            )],
+        );
+        let result = Type::Tensor(
+            vec![Dim::Wildcard, Dim::Wildcard],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let constraint = CollectionConstraint::Concat {
+            lhs: list.clone(),
+            rhs: Type::Prim(Prim::Int32),
+            result: result.clone(),
+        };
+        let checked = Scheme {
+            tvars: Vec::new(),
+            tvar_restrictions: Vec::new(),
+            dvars: Vec::new(),
+            rvars: Vec::new(),
+            constraints: vec![constraint.clone()],
+            body: Type::Fn(vec![list, Type::Prim(Prim::Int32)], Box::new(result)),
+        };
+
+        let component = subst.enter_level(&var_gen);
+        let first_mark = subst.collection_contract_mark();
+        let first_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let first_ids = subst.collection_contract_ids_since(first_mark);
+        let second_mark = subst.collection_contract_mark();
+        let second_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let second_ids = subst.collection_contract_ids_since(second_mark);
+        subst.leave_level(component, &var_gen);
+
+        let first = env.generalize_with_collection_contracts(&first_ty, &subst, &first_ids);
+        assert_eq!(first.constraints, vec![constraint.clone()]);
+        assert_eq!(
+            subst.pending_collection_contracts().len(),
+            1,
+            "generalizing one recursive sibling must not absorb the other's contract"
+        );
+
+        let second = env.generalize_with_collection_contracts(&second_ty, &subst, &second_ids);
+        assert_eq!(second.constraints, vec![constraint]);
+        assert!(
+            subst.pending_collection_contracts().is_empty(),
+            "each sibling must consume exactly its own contract instance"
+        );
     }
 }
 
@@ -1170,6 +1396,7 @@ mod tests {
     /// distinguishable from the correct one.
     fn restricted_scheme() -> Scheme {
         Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
             dvars: vec![DimVar(3), DimVar(4)],
@@ -1389,6 +1616,7 @@ mod tests {
         let quantified_dim = DimVar(20);
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1424,6 +1652,7 @@ mod tests {
         let outer_dim = DimVar(22);
         let outer_rank = RankVar(32);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1464,6 +1693,7 @@ mod tests {
         let target_dim = DimVar(51);
         let target_rank = RankVar(61);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],

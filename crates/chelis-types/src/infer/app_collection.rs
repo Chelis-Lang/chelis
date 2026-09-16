@@ -22,7 +22,132 @@ pub(super) fn collection_helper_type_error(
     )
 }
 
+/// Decide a transported checked collection contract against settled operands.
+///
+/// Scheme instantiation installs a fresh relation instance on the
+/// inference-local contract ledger. An application binds the exact instances
+/// its callee produced to that call's arguments and evidence, then decides them
+/// here after ordinary call unification has settled every available operand.
+/// An unresolved consumed instance remains owned by that declaration boundary;
+/// a merely returned or aggregated function value remains transportable.
+///
+/// The eager arms in `app_post.rs` and transported tensor-concat calls feed
+/// the same call-site evidence to [`tensor_concat_result_type`]. The checked
+/// function value carries the generic operation rule; its application
+/// contributes the axis expression and any statically visible list elements.
+///
+/// `Ok(Some(result))` is the type the rule produces, which the caller unifies
+/// into whatever the call already published. `Ok(None)` means an operand is
+/// still undecided -- a variable, or an error witness whose diagnostic is
+/// already owned upstream -- and the caller suspends or suppresses. `Err` is
+/// the rule's own rejection text.
+///
+pub(crate) fn decide_collection_constraint(
+    constraint: &CollectionConstraint,
+    tensor_concat: Option<&TensorConcatCallEvidence>,
+    subst: &mut Subst,
+) -> Result<Option<Type>, String> {
+    let applied = constraint.map_types(|ty| subst.apply(ty));
+    if applied
+        .operands()
+        .iter()
+        .any(|ty| matches!(ty, Type::Error(_)))
+    {
+        return Ok(None);
+    }
+    if applied
+        .operands()
+        .iter()
+        .any(|ty| matches!(ty, Type::Var(_)))
+    {
+        return Ok(None);
+    }
+    match &applied {
+        CollectionConstraint::Len { operand, .. } => match operand {
+            Type::Adt(name, _) if name == "List" || name == "Dict" => {
+                Ok(Some(Type::Prim(Prim::Int64)))
+            }
+            other => Err(format!("len expects List or Dict input, got {other}")),
+        },
+        CollectionConstraint::Index { list, index, .. } => {
+            match index {
+                Type::Prim(Prim::Int64) => {}
+                other => return Err(format!("index expects int64 index, got {other}")),
+            }
+            match list {
+                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                    Ok(Some(args[0].clone()))
+                }
+                other => Err(format!("index expects List input, got {other}")),
+            }
+        }
+        CollectionConstraint::Append { list, value, .. } => match list {
+            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                if let Err(te) = unify(&args[0], value, subst) {
+                    // Name the rule. A bare unification message reads as a
+                    // precision mismatch between two types the source never
+                    // mentions together, and the eager arms all name the
+                    // builtin they rejected for.
+                    return Err(format!(
+                        "append expects a value of the list's element type, got {list} and {value}; {}",
+                        te.message
+                    ));
+                }
+                Ok(Some(Type::Adt(
+                    "List".to_string(),
+                    vec![subst.apply(&args[0])],
+                )))
+            }
+            other => Err(format!("append expects List input, got {other}")),
+        },
+        CollectionConstraint::Concat { lhs, rhs, .. } => match (lhs, rhs) {
+            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                if lhs_name == "List"
+                    && rhs_name == "List"
+                    && lhs_args.len() == 1
+                    && rhs_args.len() == 1 =>
+            {
+                // The element equation, not just `(List, List)` membership:
+                // `concat(List[f32], List[int64])` satisfies membership and
+                // violates the rule.
+                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
+                    return Err(format!(
+                        "concat expects matching List inputs, got {lhs} and {rhs}; {}",
+                        te.message
+                    ));
+                }
+                Ok(Some(Type::Adt(
+                    "List".to_string(),
+                    vec![subst.apply(&lhs_args[0])],
+                )))
+            }
+            (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
+                if lhs_name == "List" && lhs_args.len() == 1 =>
+            {
+                let (raw_axis, list_info) = tensor_concat
+                    .map(|evidence| (evidence.raw_axis, evidence.list_info.clone()))
+                    .unwrap_or((None, ConcatListInfo::BindingLen(None)));
+                tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst).map(Some)
+            }
+            (lhs, rhs) => Err(format!(
+                "concat expects matching List inputs, got {lhs} and {rhs}"
+            )),
+        },
+    }
+}
+
+/// Static source evidence used by the tensor overload of a consumed checked
+/// `concat` value. This is application state, not part of the serialized
+/// function contract: aliases and imports carry the generic rule, and each
+/// call supplies its own axis and visible element shapes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TensorConcatCallEvidence {
+    pub(super) raw_axis: Option<i64>,
+    pub(super) list_info: ConcatListInfo,
+}
+
 /// How the concat arm can see the list's elements (chelis#594).
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum ConcatListInfo {
     /// A literal `Cons` chain at the call site: each element's full dim
     /// vector, in list order (read from the current inference epoch's
@@ -34,6 +159,38 @@ pub(super) enum ConcatListInfo {
     /// come from the §4.5.2 joined element type, so the sum is
     /// `joined extent x length` and requires uniform extents.
     BindingLen(Option<usize>),
+}
+
+/// Read the tensor-concat evidence from one already-inferred application.
+///
+/// Direct and transported calls share this extraction so neither route can
+/// retain the axis while dropping literal element extents, or vice versa.
+pub(super) fn tensor_concat_call_evidence(
+    kids: &[deep::Expr],
+    env: &Env,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &InferenceProduct,
+) -> TensorConcatCallEvidence {
+    let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+    let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
+        Some(elements) => ConcatListInfo::Direct(
+            elements
+                .iter()
+                .map(
+                    |elem| match product.current_owner_type(elem, subst, errors) {
+                        Some(Type::Tensor(dims, _)) => dims,
+                        _ => Vec::new(),
+                    },
+                )
+                .collect(),
+        ),
+        None => ConcatListInfo::BindingLen(static_list_len(kids.get(1), env)),
+    };
+    TensorConcatCallEvidence {
+        raw_axis,
+        list_info,
+    }
 }
 
 /// Result type of a tensor `concat(list, axis)` (spec/04-type-system.md

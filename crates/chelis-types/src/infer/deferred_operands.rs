@@ -68,6 +68,32 @@ pub(super) fn validate_deferred_tensor_operands(
             )),
         }
     }
+    // A consumed checked collection contract that still has an unresolved
+    // operand would become a newly published generic operation predicate if
+    // this declaration generalized it. [04-INF-9] rejects that authored
+    // boundary. Transport-only instances owned by an enclosing recursive
+    // component remain live for that component's later generalization.
+    for constraint in subst.take_boundary_collection_contracts() {
+        let resolved = constraint
+            .operands()
+            .into_iter()
+            .map(|operand| subst.apply(operand))
+            .find(|operand| matches!(operand, Type::Var(_)));
+        let Some(resolved) = resolved else {
+            // Error operands already own their diagnostic. A consumed
+            // relation with settled operands was decided at application exit.
+            continue;
+        };
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "{} expects a collection operand, got {}",
+                constraint.builtin(),
+                subject_for(&resolved, declared_type_names)
+            ),
+            Vec::new(),
+        ));
+    }
     // Whatever is left never had its operand bound to anything.
     for (tv, gate) in subst.take_deferred_tensor_operands() {
         let resolved = subst.apply(&Type::Var(tv));

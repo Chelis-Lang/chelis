@@ -5,7 +5,11 @@ use std::fs;
 use std::path::Path;
 
 pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
-pub const SHELL_FORMAT_VERSION: u32 = 4;
+// v4 carries #2071's authored and operation-value type-variable domains. v5
+// adds checked collection-operation relations. Positional bincode cannot read
+// either change as an absent field without changing the programs an export
+// admits, so both require exact version rejection.
+pub const SHELL_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -39,8 +43,66 @@ pub struct ShellSymbol {
     /// never a representation.
     pub type_repr: Option<String>,
     pub type_variable_restrictions: Vec<TypeVariableRestriction>,
+    /// Published description of this function value's checked
+    /// collection-operation relations. This ledger contributes to CHB package
+    /// identity; it is not a serialized checker-reuse environment. Every
+    /// canonical variable must also occur in `type_repr`; newly authored
+    /// wrappers may not publish hidden body-inferred predicates ([04-INF-9]).
+    pub collection_obligations: Vec<CollectionObligation>,
     pub effects: Vec<String>,
     pub has_body: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CollectionObligation {
+    Len {
+        operand: String,
+        result: String,
+    },
+    Index {
+        list: String,
+        index: String,
+        result: String,
+    },
+    Append {
+        list: String,
+        value: String,
+        result: String,
+    },
+    Concat {
+        lhs: String,
+        rhs: String,
+        result: String,
+    },
+}
+
+impl CollectionObligation {
+    pub fn builtin(&self) -> &'static str {
+        match self {
+            Self::Len { .. } => "len",
+            Self::Index { .. } => "index",
+            Self::Append { .. } => "append",
+            Self::Concat { .. } => "concat",
+        }
+    }
+
+    pub fn types(&self) -> Vec<&str> {
+        match self {
+            Self::Len { operand, result } => vec![operand, result],
+            Self::Index {
+                list,
+                index,
+                result,
+            } => vec![list, index, result],
+            Self::Append {
+                list,
+                value,
+                result,
+            } => vec![list, value, result],
+            Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
+        }
+    }
 }
 
 /// A canonical quantified-type-variable domain carried across public package
@@ -165,8 +227,18 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
         )?;
         for symbol in &module.exports {
             validate_nonempty_trimmed("export name", &symbol.name)?;
-            let type_variables = match &symbol.type_repr {
-                Some(type_repr) => Some(canonical_type_variables(type_repr)?),
+            validate_collection_obligations_for_type_repr(
+                symbol.type_repr.as_deref(),
+                &symbol.collection_obligations,
+            )
+            .map_err(|message| {
+                validation_error(&format!(
+                    "collection obligations for export `{}` in module `{}` {message}",
+                    symbol.name, module.module
+                ))
+            })?;
+            let variables = match &symbol.type_repr {
+                Some(type_repr) => Some(canonical_variables(type_repr, true)?),
                 None if symbol.kind == SymbolKind::Value => {
                     return Err(validation_error(&format!(
                         "value export `{}` in module `{}` requires a type representation",
@@ -188,10 +260,10 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
                     symbol.name, module.module
                 )));
             }
-            if let Some(type_variables) = type_variables {
+            if let Some(variables) = variables {
                 for restriction in &symbol.type_variable_restrictions {
                     let index = canonical_type_variable_index(&restriction.variable)?;
-                    if !type_variables.contains(&index) {
+                    if !variables.types.contains(&index) {
                         return Err(validation_error(&format!(
                             "export `{}` in module `{}` restricts `{}` but that canonical variable is absent from its type representation",
                             symbol.name, module.module, restriction.variable
@@ -269,28 +341,44 @@ fn canonical_type_variable_index(value: &str) -> Result<u32, bincode::Error> {
     })
 }
 
-fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::Error> {
+#[derive(Default)]
+struct CanonicalVariables {
+    types: BTreeSet<u32>,
+    dimensions: BTreeSet<u32>,
+    ranks: BTreeSet<u32>,
+}
+
+fn canonical_variables(
+    type_repr: &str,
+    require_contiguous: bool,
+) -> Result<CanonicalVariables, bincode::Error> {
     let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
         validation_error(&format!("type representation is not valid Deep: {error}"))
     })?;
 
     fn visit(
         expr: &chelis_deep::Expr,
-        variables: &mut BTreeSet<u32>,
+        variables: &mut CanonicalVariables,
     ) -> Result<(), bincode::Error> {
         use chelis_deep::{Atom, DeepTag, Expr};
 
         match expr {
             Expr::Atom(..) => {}
             Expr::Node(node, _) => {
-                if node.tag() == DeepTag::TVar {
+                let namespace = match node.tag() {
+                    DeepTag::TVar => Some(("t-var", &mut variables.types, "t")),
+                    DeepTag::DVar => Some(("d-var", &mut variables.dimensions, "d")),
+                    DeepTag::DRank => Some(("d-rank", &mut variables.ranks, "r")),
+                    _ => None,
+                };
+                if let Some((tag, namespace, prefix)) = namespace {
                     let Some(Expr::Atom(Atom::Name(name), _)) = node.children_slice().first()
                     else {
-                        return Err(validation_error(
-                            "t-var type representation is missing its canonical identity",
-                        ));
+                        return Err(validation_error(&format!(
+                            "{tag} type representation is missing its canonical identity"
+                        )));
                     };
-                    variables.insert(canonical_type_variable_index(name)?);
+                    namespace.insert(canonical_variable_index(name, prefix, tag)?);
                 }
                 for child in node.children_slice() {
                     visit(child, variables)?;
@@ -309,16 +397,43 @@ fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::E
         Ok(())
     }
 
-    let mut variables = BTreeSet::new();
+    let mut variables = CanonicalVariables::default();
     visit(&expression, &mut variables)?;
-    for (expected, actual) in variables.iter().copied().enumerate() {
-        if actual != expected as u32 {
-            return Err(validation_error(
-                "type representation variables must be contiguous from `t0`",
-            ));
+    if require_contiguous {
+        for (namespace, prefix, indices) in [
+            ("type", "t", &variables.types),
+            ("dimension", "d", &variables.dimensions),
+            ("rank", "r", &variables.ranks),
+        ] {
+            for (expected, actual) in indices.iter().copied().enumerate() {
+                if actual != expected as u32 {
+                    return Err(validation_error(&format!(
+                        "type representation {namespace} variables must be contiguous from `{prefix}0`"
+                    )));
+                }
+            }
         }
     }
     Ok(variables)
+}
+
+fn canonical_variable_index(value: &str, prefix: &str, tag: &str) -> Result<u32, bincode::Error> {
+    let Some(index) = value.strip_prefix(prefix) else {
+        return Err(validation_error(&format!(
+            "{tag} identities must use canonical `{prefix}<index>` spelling"
+        )));
+    };
+    if index.is_empty()
+        || !index.bytes().all(|byte| byte.is_ascii_digit())
+        || (index.len() > 1 && index.starts_with('0'))
+    {
+        return Err(validation_error(&format!(
+            "{tag} identities must use canonical `{prefix}<index>` spelling"
+        )));
+    }
+    index
+        .parse()
+        .map_err(|_| validation_error(&format!("{tag} identity index exceeds the u32 range")))
 }
 
 fn validate_compiler_pin(pin: &str) -> Result<(), bincode::Error> {
@@ -351,6 +466,90 @@ fn validate_strict_order<'a>(
     Ok(())
 }
 
+/// Validate one published collection-contract ledger against its callable
+/// type representation.
+///
+/// Both CHB validation and public Reef-schema deserialization use this
+/// boundary so canonical Deep parsing, ledger identity, and carried-variable
+/// membership cannot drift between package formats.
+pub fn validate_collection_obligations_for_type_repr(
+    type_repr: Option<&str>,
+    obligations: &[CollectionObligation],
+) -> Result<(), String> {
+    if obligations.is_empty() {
+        return Ok(());
+    }
+
+    validate_collection_obligation_ledger(obligations)?;
+    let type_repr =
+        type_repr.ok_or_else(|| "require a function type representation".to_string())?;
+    let expression = chelis_deep::parse_and_stamp_type(type_repr).map_err(|error| {
+        format!("require a function type representation that is valid Deep: {error}")
+    })?;
+    if !matches!(
+        &expression,
+        chelis_deep::Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::TFn
+    ) {
+        return Err("require a function type representation".to_string());
+    }
+
+    let variables =
+        canonical_variables(type_repr, true).map_err(|error| validation_message(&error))?;
+    for obligation in obligations {
+        for carried in obligation.types() {
+            let carried_variables =
+                canonical_variables(carried, false).map_err(|error| validation_message(&error))?;
+            for (prefix, carried_indices, declared_indices) in [
+                ("t", &carried_variables.types, &variables.types),
+                ("d", &carried_variables.dimensions, &variables.dimensions),
+                ("r", &carried_variables.ranks, &variables.ranks),
+            ] {
+                for index in carried_indices {
+                    if !declared_indices.contains(index) {
+                        return Err(format!(
+                            "contain a `{}` contract variable `{prefix}{index}` absent from its type representation",
+                            obligation.builtin()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the canonical identity of one published collection-contract
+/// ledger.
+///
+/// Parsing alone is insufficient at an artifact trust boundary: whitespace
+/// variants describe the same Deep type while producing distinct CHB bytes.
+/// Exact canonical rendering plus strict order makes semantic identity and
+/// artifact identity agree.
+pub fn validate_collection_obligation_ledger(
+    obligations: &[CollectionObligation],
+) -> Result<(), String> {
+    let mut previous: Option<(&str, Vec<&str>)> = None;
+    for obligation in obligations {
+        for carried in obligation.types() {
+            let expression = chelis_deep::parse_and_stamp_type(carried).map_err(|error| {
+                format!("contain a type representation that is not valid Deep: {error}")
+            })?;
+            let canonical = chelis_deep::printer::print_expr(&expression);
+            if canonical != carried {
+                return Err(format!(
+                    "must use exact canonical Deep rendering; got `{carried}`, canonical form is `{canonical}`"
+                ));
+            }
+        }
+        let key = (obligation.builtin(), obligation.types());
+        if previous.as_ref().is_some_and(|prior| prior >= &key) {
+            return Err("must be strictly sorted with no duplicates".to_string());
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
 fn is_lowercase_hex_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -362,6 +561,14 @@ fn validation_error(message: &str) -> bincode::Error {
     Box::new(bincode::ErrorKind::Custom(format!(
         "invalid shell envelope: {message}"
     )))
+}
+
+fn validation_message(error: &bincode::Error) -> String {
+    let rendered = error.to_string();
+    rendered
+        .strip_prefix("invalid shell envelope: ")
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -401,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v3_envelope() {
+    fn shell_encoding_has_an_explicit_v5_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
@@ -409,8 +616,7 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
             SHELL_FORMAT_VERSION
         );
-        // v4 carries operation-value domains separately from authored dtype bounds.
-        assert_eq!(SHELL_FORMAT_VERSION, 4);
+        assert_eq!(SHELL_FORMAT_VERSION, 5);
     }
 
     #[test]
@@ -434,8 +640,170 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 4"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 5"
         );
+    }
+
+    #[test]
+    fn shell_decode_rejects_the_pre_collection_contract_version() {
+        let mut bytes = encode_shell(&fixture_shell()).expect("encode shell");
+        bytes[8..12].copy_from_slice(&4_u32.to_le_bytes());
+
+        let error = decode_shell(&bytes).expect_err("CHB v4 must not decode without relations");
+        assert_eq!(
+            error.to_string(),
+            "invalid shell envelope: shell format version 4 is unsupported; expected 5"
+        );
+    }
+
+    #[test]
+    fn checked_collection_contracts_round_trip_and_change_identity() {
+        let mut obligated = fixture_shell();
+        let symbol = &mut obligated.modules[0].exports[0];
+        symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+        symbol.collection_obligations = vec![CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-var {} t1)".into(),
+        }];
+
+        let encoded = encode_shell(&obligated).expect("checked contract encodes");
+        assert_eq!(decode_shell(&encoded).unwrap(), obligated);
+        assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+    }
+
+    #[test]
+    fn checked_collection_contract_ledger_is_strictly_canonical() {
+        let append = CollectionObligation::Append {
+            list: "(t-var {} t0)".into(),
+            value: "(t-var {} t1)".into(),
+            result: "(t-var {} t0)".into(),
+        };
+        let len = CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-var {} t1)".into(),
+        };
+
+        let mut canonical = fixture_shell();
+        let symbol = &mut canonical.modules[0].exports[0];
+        symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+        symbol.collection_obligations = vec![append.clone(), len.clone()];
+        let encoded = encode_shell(&canonical).expect("canonical relation ledger must encode");
+        assert_eq!(
+            decode_shell(&encoded).expect("canonical relation ledger must decode"),
+            canonical
+        );
+
+        for (label, obligations) in [
+            ("duplicate", vec![len.clone(), len.clone()]),
+            ("noncanonical order", vec![len.clone(), append.clone()]),
+        ] {
+            let mut invalid = fixture_shell();
+            let symbol = &mut invalid.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            symbol.collection_obligations = obligations;
+
+            let error = validate_shell(&invalid)
+                .expect_err("noncanonical relation ledger must fail validation");
+            assert!(
+                error.to_string().contains("strictly sorted"),
+                "unexpected {label} validation diagnostic: {error}"
+            );
+            assert!(
+                encode_shell(&invalid).is_err(),
+                "{label} relation ledger must not encode"
+            );
+            assert!(
+                decode_shell(&encode_unvalidated(&invalid)).is_err(),
+                "{label} relation ledger must not decode"
+            );
+        }
+
+        for (label, mutate) in [
+            ("operand whitespace", 0usize),
+            ("result whitespace", 1usize),
+        ] {
+            let mut invalid = fixture_shell();
+            let symbol = &mut invalid.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            let mut noncanonical = len.clone();
+            if let CollectionObligation::Len { operand, result } = &mut noncanonical {
+                if mutate == 0 {
+                    *operand = "(t-var   {} t0)".into();
+                } else {
+                    *result = "(t-var {}   t1)".into();
+                }
+            }
+            symbol.collection_obligations = vec![noncanonical];
+
+            let error =
+                validate_shell(&invalid).expect_err("noncanonical Deep must fail validation");
+            assert!(
+                error.to_string().contains("canonical Deep"),
+                "unexpected {label} validation diagnostic: {error}"
+            );
+            assert!(
+                encode_shell(&invalid).is_err(),
+                "{label} relation ledger must not encode"
+            );
+            assert!(
+                decode_shell(&encode_unvalidated(&invalid)).is_err(),
+                "{label} relation ledger must not decode"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_collection_contracts_reject_hidden_or_malformed_variables() {
+        let mut hidden = fixture_shell();
+        hidden.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
+            operand: "(t-var {} t0)".into(),
+            result: "(t-prim {} int64)".into(),
+        }];
+        assert!(
+            validate_shell(&hidden)
+                .unwrap_err()
+                .to_string()
+                .contains("absent from its type representation")
+        );
+
+        let mut malformed = fixture_shell();
+        malformed.modules[0].exports[0].collection_obligations = vec![CollectionObligation::Len {
+            operand: "List[t0]".into(),
+            result: "(t-prim {} int64)".into(),
+        }];
+        assert!(
+            validate_shell(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("not valid Deep")
+        );
+
+        for (operand, variable) in [
+            (
+                "(t-tensor {} (d-var {} d1) (d-rank {} r0) (t-prim {} f32))",
+                "`d1`",
+            ),
+            (
+                "(t-tensor {} (d-var {} d0) (d-rank {} r1) (t-prim {} f32))",
+                "`r1`",
+            ),
+        ] {
+            let mut hidden_shape = fixture_shell();
+            let symbol = &mut hidden_shape.modules[0].exports[0];
+            symbol.type_repr = Some(
+                "(t-fn {} (t-tensor {} (d-var {} d0) (d-rank {} r0) (t-prim {} f32)) (t-prim {} int64))"
+                    .into(),
+            );
+            symbol.collection_obligations = vec![CollectionObligation::Len {
+                operand: operand.into(),
+                result: "(t-prim {} int64)".into(),
+            }];
+            let error = validate_shell(&hidden_shape).unwrap_err();
+            assert!(
+                error.to_string().contains(variable),
+                "unexpected hidden-variable diagnostic: {error}"
+            );
+        }
     }
 
     #[test]
@@ -627,6 +995,7 @@ mod tests {
                     kind: SymbolKind::Value,
                     type_repr: Some("(t-fn {} (t-prim {} f32) (t-prim {} f32))".to_string()),
                     type_variable_restrictions: Vec::new(),
+                    collection_obligations: Vec::new(),
                     effects: Vec::new(),
                     has_body: true,
                 }],

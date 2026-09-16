@@ -61,13 +61,20 @@ not designed in this round.
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
 CHB decoding consumes the complete input and re-encodes to the same canonical
-bytes. CHB format 4 begins with the `CHELCHB\0` magic and an explicit little-
+bytes. CHB format 5 begins with the `CHELCHB\0` magic and an explicit little-
 endian format version; predecessor and unknown-version layouts are rejected
 rather than interpreted through bincode field coincidence. Each exported
 function carries a canonical `type_variable_restrictions` ledger keyed to the
-alpha-canonical type-variable identity in its printed type. `reef schema` JSON
-uses schema `format_version: 2` and the same ledger, so the machine-readable
-authoring ABI and the installable CHB describe the same constrained scheme.
+alpha-canonical type-variable identity in its printed type. CHB format 5 adds
+a `collection_obligations` ledger carrying the checked relation of a
+first-class `len`, `index`, `append`, or `concat` value as the rule name plus
+its operand and result types in canonical Deep form under those same
+identities. A relation variable absent from the printed callable type is
+rejected rather than published as a hidden predicate. `reef schema` JSON uses
+schema `format_version: 3` and the same two ledgers, so the machine-readable
+authoring ABI and the installable CHB describe the same published checked
+scheme identity. These publication surfaces are not compiler checker-reuse
+inputs in this slice; serialized TypeEnv owns that path.
 The ledger is derived from the checker Scheme by structural traversal across
 separate type, dimension, and rank namespaces.
 Its operation-value domains retain scalar-or-tensor operand restrictions

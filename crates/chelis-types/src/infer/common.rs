@@ -2289,6 +2289,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             "uniform_like".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![template, low, high],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2318,6 +2319,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             helper.to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![tensor],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2509,11 +2511,11 @@ pub(super) fn infer_top_level(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     prebound_type_failure: Option<&ErrorWitness>,
-    provisional_recursive_type: Option<&Type>,
+    recursive_expected: Option<recursion::RecursiveExpected<'_>>,
     defer_recursive_binding: bool,
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
-) -> Option<(String, Type)> {
+) -> Option<(String, Type, Vec<crate::unify::CollectionContractId>)> {
     let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
@@ -2550,18 +2552,20 @@ pub(super) fn infer_top_level(
         // ordinary declaration owns this per-definition level and closes it
         // before its inferred scheme is generalized.
         let ordinary_level = (!defer_recursive_binding).then(|| subst.enter_level(vg));
+        let collection_contract_mark = subst.collection_contract_mark();
+        let recursive_expected =
+            recursion::PreparedRecursiveExpected::prepare(recursive_expected, env, vg, subst);
+        let provisional_recursive_type = recursive_expected.expected_type();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         // spec/04 §3.1.1: when this def is a member of the active recursive
         // binding group, remember which fresh tvars its own body was
         // instantiated at, so in-group recursive calls can be validated
         // against the caller's own instantiation.
-        let mut recursion_caller_guard = recursion::CallerGuard::inactive();
         // chelis#260: the names of this signature's declared dim parameters,
         // keyed by the FRESH variables the instantiation below mints. Empty
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
-        let mut declared_dim_names: UnordMap<DimVar, String> = UnordMap::new();
         // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
         // signature's AUTHORED type binders, keyed by the fresh variables the
         // instantiation below mints. Empty when the signature authored none,
@@ -2569,41 +2573,35 @@ pub(super) fn infer_top_level(
         // is never a member. The deferred-borrow drain reports on these fresh
         // variables long after this instantiation, so the composed map is
         // parked on `Env` below.
-        let mut declared_type_names: UnordMap<TypeVar, String> = UnordMap::new();
+        let binder_names = declared_signatures
+            .get(&name)
+            .map(|metadata| &metadata.binders);
         let rejected_signature = env.rejected_signature(&name).cloned();
-        let declared_ty = if provisional_recursive_type.is_none() || rejected_signature.is_some() {
-            rejected_signature
-                .as_ref()
-                .map(|rejected| &rejected.scheme)
-                .or_else(|| env.lookup(&name))
-                .map(|s| {
-                    let s = s.clone();
-                    // All three renamings: the type mapping validates in-group
-                    // recursive calls and names this signature's authored type
-                    // binders, and the dim mapping names its declared dimension
-                    // parameters. A recursive `def` can collapse two rigid dims or
-                    // two rigid type binders exactly like a non-recursive one, so
-                    // neither branch may be the one that falls back to the internal
-                    // id (spec/04 [04-FIT-9], [04-INF-6]).
-                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
-                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
-                    declared_type_names = env.declared_type_names_for(&name, &mapping);
-                    if recursion::group_member(&name) {
-                        recursion_caller_guard = recursion::begin_caller(
-                            &name,
-                            declared_signatures.get(&name).map(|m| &m.binders),
-                            &mapping,
-                        );
-                    }
-                    ty
-                })
+        let replaying_authored_signature =
+            recursive_expected.is_published() && declared_signatures.contains_key(&name);
+        let declared_scheme = if let Some(rejected) = &rejected_signature {
+            Some(&rejected.scheme)
+        } else if provisional_recursive_type.is_none() {
+            env.lookup(&name)
         } else {
-            if recursion::group_member(&name) {
-                recursion_caller_guard = recursion::begin_caller(&name, None, &[]);
-            }
             None
         };
-        let _recursion_caller_guard = recursion_caller_guard;
+        let recursion::DeclaredMemberSetup {
+            ty: declared_ty,
+            dim_names: declared_dim_names,
+            type_names: declared_type_names,
+            caller_guard: _recursion_caller_guard,
+        } = recursive_expected.prepare_declared_member(
+            recursion::DeclaredMemberRequest::new(
+                &name,
+                binder_names,
+                declared_scheme,
+                replaying_authored_signature,
+            ),
+            env,
+            vg,
+            subst,
+        );
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
@@ -2978,9 +2976,15 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
-            Some((name, scheme_body))
+            Some((
+                name,
+                scheme_body,
+                subst.collection_contract_ids_since(collection_contract_mark),
+            ))
         } else {
-            let scheme = env.generalize(&scheme_body, subst);
+            let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+            let scheme =
+                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
             env.bind(name, scheme);
             None
         }

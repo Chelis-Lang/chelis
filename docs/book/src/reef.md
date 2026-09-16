@@ -118,14 +118,21 @@ under a different timestamp. The CHB embeds the SHA-256 of the canonical
 source archive, so changing the epoch intentionally changes both artifact
 identities.
 
-CHB format 2 has an explicit `CHELCHB\0` magic and version envelope. Each
+CHB format 5 has an explicit `CHELCHB\0` magic and version envelope. Each
 function symbol records any quantified type-variable domain restrictions by
 the same alpha-canonical variable identity used in its printed type. The
-machine-readable output of `chelis reef schema` reports `format_version: 2`
+machine-readable output of `chelis reef schema` reports `format_version: 3`
 and the identical `type_variable_restrictions` ledger; for example, a shared
 active-float precision appears as
 `[{"variable":"t0","domain":"active_float"}]`. Older unversioned CHB bytes
 and unknown versions are rejected explicitly.
+
+CHB format 5 adds a `collection_obligations` ledger to each function symbol.
+An already-checked `len`, `index`, `append`, or `concat` value retains its
+operand/result relation, written in canonical Deep form under the printed
+type's alpha-canonical variables. Hidden relation variables are rejected;
+newly authored wrappers must state a sufficient public type contract. Two
+exports that differ only in their checked relations have different identities.
 
 ## Auto-fetch During Build
 

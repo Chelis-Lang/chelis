@@ -36,12 +36,13 @@ module_prefix = "Restriction"
     write(
         &root.join("src/main.ch"),
         r#"module Restriction.Main
-export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded)
+export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded, measure)
 def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[p](value: &tensor[n, p]) -> &tensor[n, p] = value
 def integer_identity(value: int32) -> int32 = value
 def int_bounded[q: Int](value: q) -> q = value
 def numeric_bounded[q: Numeric](value: q) -> q = value
+measure = len
 "#,
     );
     (directory, root)
@@ -73,7 +74,7 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let schema = package_schema(&root).expect("schema package must check");
     let schema_json = serde_json::to_value(schema).expect("schema must serialize");
 
-    assert_eq!(schema_json["format_version"], 2);
+    assert_eq!(schema_json["format_version"], 3);
     assert_eq!(
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
@@ -95,6 +96,32 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             "{name} must not acquire a restriction"
         );
     }
+    assert_eq!(
+        exported(&schema_json, "measure", "functions")["collection_obligations"],
+        serde_json::json!([{
+            "len": {
+                "operand": "(t-var {} t0)",
+                "result": "(t-var {} t1)"
+            }
+        }])
+    );
+    let decoded_current = serde_json::from_value::<PackageSchema>(schema_json.clone())
+        .expect("current package schema version must decode");
+    assert_eq!(
+        serde_json::to_value(decoded_current).expect("decoded current schema must reserialize"),
+        schema_json,
+        "current package schema must round-trip without identity drift"
+    );
+    for version in [2, 99] {
+        let mut incompatible = schema_json.clone();
+        incompatible["format_version"] = version.into();
+        let error = serde_json::from_value::<PackageSchema>(incompatible)
+            .expect_err("non-current package schema versions must be rejected");
+        assert!(
+            error.to_string().contains("unsupported") && error.to_string().contains("expected 3"),
+            "unexpected version {version} diagnostic: {error}"
+        );
+    }
     let mut missing_required_field = schema_json.clone();
     missing_required_field["modules"][0]["functions"][0]
         .as_object_mut()
@@ -102,15 +129,172 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         .remove("type_variable_restrictions");
     assert!(
         serde_json::from_value::<PackageSchema>(missing_required_field).is_err(),
-        "schema v2 consumers must not silently default a missing restriction ledger"
+        "schema v3 consumers must not silently default a missing restriction ledger"
     );
+    let mut missing_collection_ledger = schema_json.clone();
+    missing_collection_ledger["modules"][0]["functions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("collection_obligations");
+    assert!(
+        serde_json::from_value::<PackageSchema>(missing_collection_ledger).is_err(),
+        "schema v3 consumers must not silently default a missing collection ledger"
+    );
+
+    let canonical_append = serde_json::json!({
+        "append": {
+            "list": "(t-var {} t0)",
+            "value": "(t-var {} t1)",
+            "result": "(t-var {} t0)"
+        }
+    });
+    let canonical_len = serde_json::json!({
+        "len": {
+            "operand": "(t-var {} t0)",
+            "result": "(t-var {} t1)"
+        }
+    });
+    let mut canonical_multi_relation = schema_json.clone();
+    let measure = canonical_multi_relation["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|module| module["functions"].as_array_mut().unwrap())
+        .find(|function| function["name"] == "measure")
+        .unwrap();
+    measure["collection_obligations"] =
+        serde_json::json!([canonical_append.clone(), canonical_len.clone()]);
+    serde_json::from_value::<PackageSchema>(canonical_multi_relation.clone())
+        .expect("a sorted unique canonical relation ledger must deserialize");
+
+    for (label, obligations) in [
+        (
+            "duplicate",
+            serde_json::json!([canonical_len.clone(), canonical_len.clone()]),
+        ),
+        (
+            "noncanonical order",
+            serde_json::json!([canonical_len.clone(), canonical_append.clone()]),
+        ),
+        (
+            "noncanonical Deep",
+            serde_json::json!([{
+                "len": {
+                    "operand": "(t-var   {} t0)",
+                    "result": "(t-var {} t1)"
+                }
+            }]),
+        ),
+    ] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["collection_obligations"] = obligations;
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("noncanonical schema obligation ledger must be rejected");
+        assert!(
+            error.to_string().contains("collection obligations"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
+
+    let hidden = "(t-var {} t99)";
+    let t0 = "(t-var {} t0)";
+    let t1 = "(t-var {} t1)";
+    for (label, obligation) in [
+        (
+            "len operand",
+            serde_json::json!({"len": {"operand": hidden, "result": t1}}),
+        ),
+        (
+            "len result",
+            serde_json::json!({"len": {"operand": t0, "result": hidden}}),
+        ),
+        (
+            "index list",
+            serde_json::json!({"index": {"list": hidden, "index": t1, "result": t0}}),
+        ),
+        (
+            "index index",
+            serde_json::json!({"index": {"list": t0, "index": hidden, "result": t1}}),
+        ),
+        (
+            "index result",
+            serde_json::json!({"index": {"list": t0, "index": t1, "result": hidden}}),
+        ),
+        (
+            "append list",
+            serde_json::json!({"append": {"list": hidden, "value": t1, "result": t0}}),
+        ),
+        (
+            "append value",
+            serde_json::json!({"append": {"list": t0, "value": hidden, "result": t0}}),
+        ),
+        (
+            "append result",
+            serde_json::json!({"append": {"list": t0, "value": t1, "result": hidden}}),
+        ),
+        (
+            "concat lhs",
+            serde_json::json!({"concat": {"lhs": hidden, "rhs": t1, "result": t0}}),
+        ),
+        (
+            "concat rhs",
+            serde_json::json!({"concat": {"lhs": t0, "rhs": hidden, "result": t0}}),
+        ),
+        (
+            "concat result",
+            serde_json::json!({"concat": {"lhs": t0, "rhs": t1, "result": hidden}}),
+        ),
+    ] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["collection_obligations"] = serde_json::json!([obligation]);
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("a hidden collection-contract variable must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("absent from its type representation"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
+
+    for (label, type_repr) in [("malformed", "not Deep"), ("nonfunction", "(t-var {} t0)")] {
+        let mut invalid = schema_json.clone();
+        let measure = invalid["modules"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|module| module["functions"].as_array_mut().unwrap())
+            .find(|function| function["name"] == "measure")
+            .unwrap();
+        measure["type_repr"] = type_repr.into();
+        let error = serde_json::from_value::<PackageSchema>(invalid)
+            .expect_err("collection obligations require a valid callable type");
+        assert!(
+            error.to_string().contains("function type representation"),
+            "unexpected {label} diagnostic: {error}"
+        );
+    }
 
     let artifacts = build_package_with_options(&root, &BuildOptions { auto_fetch: false })
         .expect("schema package must build");
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 4);
+    assert_eq!(shell_json["format_version"], 5);
     assert_eq!(
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()
@@ -132,4 +316,13 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
             "{name} must not acquire a restriction"
         );
     }
+    assert_eq!(
+        exported(&shell_json, "measure", "exports")["collection_obligations"],
+        serde_json::json!([{
+            "len": {
+                "operand": "(t-var {} t0)",
+                "result": "(t-var {} t1)"
+            }
+        }])
+    );
 }
