@@ -9444,7 +9444,15 @@ impl<'program> LowerCtx<'program> {
                 crate::lowering_trace::Collector::execution_observation(&self.dag, execution)
             })
         });
-        let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        let remap = self
+            .splice_dag(&specialized_grad_dag, &arg_map)
+            .unwrap_or_else(|message| {
+                raise_fatal_lowering_error(
+                    format!("internal `grad(...)` splice correspondence failed: {message}"),
+                    Some(body.span()),
+                    body.span_id().map(ToOwned::to_owned),
+                )
+            });
         #[cfg(feature = "lowering-trace")]
         let mut effect_remap = None;
         if let Some(child) = subctx.execution.take() {
@@ -10376,7 +10384,15 @@ impl<'program> LowerCtx<'program> {
                     body.span_id().map(ToOwned::to_owned),
                 )
             });
-        let remap = self.splice_dag(&specialized_vmapped, &arg_map);
+        let remap = self
+            .splice_dag(&specialized_vmapped, &arg_map)
+            .unwrap_or_else(|message| {
+                raise_fatal_lowering_error(
+                    format!("internal `vmap` splice correspondence failed: {message}"),
+                    Some(body.span()),
+                    body.span_id().map(ToOwned::to_owned),
+                )
+            });
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
@@ -10623,7 +10639,9 @@ impl<'program> LowerCtx<'program> {
         }
         arg_map.merge(captured_bindings);
 
-        let remap = self.splice_dag(&vmapped, &arg_map);
+        let remap = self
+            .splice_dag(&vmapped, &arg_map)
+            .unwrap_or_else(|message| invalid_mapping(format!("splice failed: {message}")));
         let mapped_root = |old: NodeId| {
             root_map
                 .get(&old)
@@ -10679,6 +10697,23 @@ impl<'program> LowerCtx<'program> {
         for cotangent in flattened.iter().filter(|id| **id != forward_activation) {
             self.dag.add_shape_dep(*cotangent, forward_activation);
         }
+        crate::verify::verify_mapped_gradient_closure(crate::verify::MappedGradientClosure {
+            source: &grad_result.dag,
+            mapped: &vmapped,
+            node_map: &batched_ids,
+            root_map: &root_map,
+            spliced: &self.dag,
+            splice_map: &remap,
+            forward_source: grad_result.output_node,
+            forward_activation,
+            cotangents: &flattened,
+            expected_cotangents: selected.len(),
+        })
+        .unwrap_or_else(|message| {
+            invalid_mapping(format!(
+                "post-splice closure verification failed: {message}"
+            ))
+        });
         if axis > 0 {
             for result in &mut flattened {
                 let result_ty = self
@@ -10708,7 +10743,13 @@ impl<'program> LowerCtx<'program> {
                 .collect();
             flattened = indices
                 .iter()
-                .filter_map(|index| groups.get(index).copied())
+                .map(|index| {
+                    groups.get(index).copied().unwrap_or_else(|| {
+                        invalid_mapping(format!(
+                            "cotangent packing has no selected parameter {index}"
+                        ))
+                    })
+                })
                 .collect();
         }
         match flattened.as_slice() {
@@ -10764,11 +10805,17 @@ impl<'program> LowerCtx<'program> {
         &mut self,
         dag: &Dag,
         arg_map: &UnordMap<String, NodeId>,
-    ) -> UnordMap<NodeId, NodeId> {
+    ) -> Result<UnordMap<NodeId, NodeId>, String> {
         let mut remap = UnordMap::<NodeId, NodeId>::new();
         for node in dag.nodes() {
             let new_id = match &node.op {
                 RiscOp::Load { name } => {
+                    if !node.shape_deps.is_empty() {
+                        return Err(format!(
+                            "load node {:?} carries shape dependencies that cannot be attached to an argument substitution",
+                            node.id
+                        ));
+                    }
                     if let Some(existing) = arg_map.get(name.as_str()) {
                         *existing
                     } else {
@@ -10785,7 +10832,18 @@ impl<'program> LowerCtx<'program> {
                     }
                 }
                 op => {
-                    let inputs = node.inputs.iter().map(|id| remap[id]).collect::<Vec<_>>();
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .map(|id| {
+                            remap.get(id).copied().ok_or_else(|| {
+                                format!(
+                                    "value input {id:?} of source node {:?} has no splice mapping",
+                                    node.id
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     // Preserve the source DAG node's span_id (see Load arm).
                     let new_id = self.dag.add_node(
                         op.clone(),
@@ -10802,13 +10860,19 @@ impl<'program> LowerCtx<'program> {
                     // shape-deps across the splice. Deps are earlier nodes,
                     // already in `remap`.
                     self.dag
-                        .preserve_shape_deps(new_id, &node.shape_deps, &remap);
+                        .preserve_shape_deps_strict(new_id, &node.shape_deps, &remap)
+                        .map_err(|message| {
+                            format!(
+                                "shape-only correspondence for source node {:?} failed: {message}",
+                                node.id
+                            )
+                        })?;
                     new_id
                 }
             };
             remap.insert(node.id, new_id);
         }
-        remap
+        Ok(remap)
     }
 
     fn extract_fn_parts<'a>(&self, expr: &'a Expr) -> Option<(Vec<String>, &'a Expr)> {
@@ -17430,7 +17494,7 @@ mod fused_zero_tests {
                 ),
             );
         }
-        let splice = ctx.splice_dag(&vectorized, &args);
+        let splice = ctx.splice_dag(&vectorized, &args).unwrap();
         let selected = [
             splice[&roots[&grad.grad_nodes[&x]]],
             splice[&roots[&grad.grad_nodes[&y]]],
@@ -17721,7 +17785,7 @@ mod fused_zero_tests {
             ));
             assert!(vectorized.get(root).unwrap().shape_deps.is_empty());
             let mut ctx = context();
-            let remap = ctx.splice_dag(&vectorized, &UnordMap::new());
+            let remap = ctx.splice_dag(&vectorized, &UnordMap::new()).unwrap();
             let forward = remap[&root];
             let zero = ctx.zero_tensor_node(&tensor_type(&[2], Prim::F32), None);
             ctx.dag.add_shape_dep(zero, forward);

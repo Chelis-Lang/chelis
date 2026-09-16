@@ -195,12 +195,65 @@ pub fn vectorize_axis0_with_node_map(
             inputs.push(expanded);
         }
 
+        // A non-shared constant tensor has one authored payload, not one
+        // payload per mapped lane. Preserve that payload at its original
+        // type and make the old node's mapped identity an explicit batch
+        // broadcast. Merely prepending the batch dimension while cloning the
+        // flat storage creates a malformed constant whose cardinality no
+        // longer matches its declared type (chelis#1932).
+        if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
+            let raw = out.add_node(
+                node.op.clone(),
+                Vec::new(),
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            if let Some(raw_node) = out.node_mut(raw)
+                && !node.merged_spans.is_empty()
+            {
+                raw_node.merged_spans = node.merged_spans.clone();
+            }
+            let (size, expand_inputs) = match concrete_batch {
+                Some(batch) => (RtDim::Lit(batch), vec![raw]),
+                None => {
+                    let witness = batch_witness.ok_or_else(|| {
+                        "vmap cannot locate a batched tensor witness for a constant tensor"
+                            .to_string()
+                    })?;
+                    (
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                        vec![raw, witness],
+                    )
+                }
+            };
+            let new_id = out.add_node(
+                RiscOp::Expand { axis: 0, size },
+                expand_inputs,
+                output_type,
+                node.span_id.clone(),
+            );
+            mapped_ids.push(new_id);
+            let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
+            if let Some(new_node) = out.node_mut(new_id) {
+                new_node.merged_spans = node.merged_spans.clone();
+                new_node.shape_deps = remapped_shape_deps;
+            }
+            if let Some(reusable_input) = node.reusable_input {
+                out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
+            }
+            continue;
+        }
+
         // Vmap is a pure clone of the per-node operator (with axis
         // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
         let new_id = out.add_node(op, inputs, output_type, node.span_id.clone());
         mapped_ids.push(new_id);
+        let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
         if let Some(new_node) = out.node_mut(new_id) {
             if !node.merged_spans.is_empty() {
                 new_node.merged_spans = node.merged_spans.clone();
@@ -212,11 +265,7 @@ pub fn vectorize_axis0_with_node_map(
             // later id, which is exactly why `vectorize_axis0_with_node_map`
             // returns the mapping. The remap below is therefore the
             // correctness step, not a no-op that happens to look like one.
-            new_node.shape_deps = node
-                .shape_deps
-                .iter()
-                .map(|dep| mapped_ids[dep.0])
-                .collect();
+            new_node.shape_deps = remapped_shape_deps;
         }
         if let Some(reusable_input) = node.reusable_input {
             out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
@@ -268,6 +317,21 @@ pub fn vectorize_axis0_with_node_map(
     }
 
     Ok((out, mapped_ids))
+}
+
+fn remap_shape_deps(
+    owner: NodeId,
+    source_deps: &[NodeId],
+    mapped_ids: &[NodeId],
+) -> Result<Vec<NodeId>, String> {
+    source_deps
+        .iter()
+        .map(|dep| {
+            mapped_ids.get(dep.0).copied().ok_or_else(|| {
+                format!("vmap shape dependency {dep:?} of node {owner:?} has no mapped identity")
+            })
+        })
+        .collect()
 }
 
 fn shift_input_axis(dim: &RtDim) -> RtDim {
