@@ -533,6 +533,13 @@ origins are not collapsed or treated as a request to choose: the complete
 member set remains the observation, and successful operand agreement
 establishes its one result extent.
 
+Fusion treats every producer carrying `result_claim_deps` as a barrier, whether
+the producer starts or occurs inside a candidate chain. Absorbing that producer
+into `FusedElem` would replace the numbered-spec primitive attribution with the
+fusion implementation's identity unless the fused representation carried an
+explicit per-step claim owner; the current representation deliberately makes
+that loss impossible by retaining the original producer node.
+
 At execution the operation's independent operand-rank/shape agreement runs
 first across that complete set. Only after agreement succeeds does the
 declared-result guard compare the agreed output-axis extent. A disagreement

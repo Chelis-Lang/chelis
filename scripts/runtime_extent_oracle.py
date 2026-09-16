@@ -764,6 +764,24 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly",
         ),
         _row(
+            "claim.same_shape.fusion.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_fusion_and_dce",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.interior.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.an_interior_named_result_claim_splits_the_fusion_chain",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_fusion_and_dce",
+        ),
+        _row(
             "claim.same_shape.distinct_paths.c",
             "nonconforming_rejection",
             EXECUTES,

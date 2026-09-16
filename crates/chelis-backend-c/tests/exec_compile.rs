@@ -1848,6 +1848,7 @@ fn checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_s
             let harness = format!(
                 r#"
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
 int main(void) {{
     int64_t dim = 4;
@@ -5381,6 +5382,7 @@ const HOST_GUARD_HARNESS: &str = r#"
 #include <string.h>
 #include <math.h>
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 
 static chelis_tensor *make_ranked_view(
     float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
@@ -6038,6 +6040,7 @@ fn direct_extrema_adjoint_bit_case(
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
@@ -6228,6 +6231,7 @@ fn host_scalar_relu_reduced_bits_case(tag: &str, ty: HostType, inputs: &[u16], e
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern uint16_t the_fn(uint16_t);
 int main(void) {{
@@ -8027,6 +8031,7 @@ fn host_declared_result_extent_guard_traps_and_executes_under_sanitizers() {
             r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 chelis_tensor *the_fn(chelis_tensor *);
 int main(void) {{
     int64_t dims[2] = {{{rows}, 4}};

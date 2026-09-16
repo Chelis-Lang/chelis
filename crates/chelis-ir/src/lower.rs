@@ -2335,7 +2335,13 @@ pub(crate) fn try_lower_staged_host_region(
         // A staged host region's inputs are the partition's, not an author's.
         ctx.prepare_parameter_witnesses(&names, &types, None, false);
         ctx.binding_witnesses.clear();
-        let result = ctx.lower_expr_with_claim(expr, Some(result_claim), false);
+        // Do not infer equality between repeated spellings in the machine-built
+        // parameter list above. The returned result type is nevertheless the
+        // authored declaration's claim, so resolve it against the first exact
+        // parameter witness for each binder and give an eligible same-shape
+        // producer the same ownership it has outside staging.
+        ctx.signature_is_authored = true;
+        let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
         ctx.preserve_declared_result(&result, result_claim, None);
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "7717032d1e594c7ce3db2557295b0810465da81c28f7ba35053dcf3d445a6e6f",
+  "corpus_sha256": "89f08fcf0d30faf9ab057d452da8277e6842e4725e5e3a2927e939a84d16bc6a",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -121,6 +121,24 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_fusion_and_dce"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.interior.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.an_interior_named_result_claim_splits_the_fusion_chain"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.named_result_claim_traps_after_fusion_and_dce"
     },
     {
       "id": "claim.same_shape.no_origin.c",
