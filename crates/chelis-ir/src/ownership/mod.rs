@@ -255,6 +255,17 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::result_extent_sites(self.dag, root)
     }
 
+    /// The complete positive-rank operand relation for a verified same-shape
+    /// result. Verification rejects malformed or empty relations before a
+    /// backend can obtain this view.
+    pub fn same_shape_result_agreement(
+        self,
+        node: NodeId,
+    ) -> Option<crate::axis_sources::SameShapeAgreement> {
+        crate::axis_sources::same_shape_result_agreement(self.dag, node)
+            .expect("verified same-shape result agreement")
+    }
+
     pub fn literal_result_witness_requirements(
         self,
         witness: NodeId,

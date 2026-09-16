@@ -497,6 +497,45 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
     )
 }
 
+/// Validate a producer's complete positive-rank agreement relation before
+/// reading the extent used by its declared-result claim.
+fn same_shape_agreement_extent(
+    agreement: &crate::axis_sources::SameShapeAgreement,
+    axis: usize,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<usize, String> {
+    let first_id = *agreement
+        .members()
+        .first()
+        .ok_or("same-shape result has no positive-rank agreement member")?;
+    let first = values.get(&first_id).ok_or_else(|| {
+        format!(
+            "same-shape agreement member {} is not available",
+            first_id.0
+        )
+    })?;
+    if first.shape.is_empty() {
+        return Err(format!(
+            "same-shape agreement member {} realized rank zero",
+            first_id.0
+        ));
+    }
+    for member in &agreement.members()[1..] {
+        let value = values
+            .get(member)
+            .ok_or_else(|| format!("same-shape agreement member {} is not available", member.0))?;
+        if value.shape != first.shape {
+            return Err(shape_disagreement(first, value));
+        }
+    }
+    first.shape.get(axis).copied().ok_or_else(|| {
+        format!(
+            "same-shape result axis {axis} is outside agreed rank {}",
+            first.shape.len()
+        )
+    })
+}
+
 /// Broadcast a rank-0 operand over the other's shape, and report any other
 /// disagreement as a typed error.
 ///
@@ -2600,6 +2639,12 @@ where
                             None => continue,
                         }
                     }
+                    crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
+                        same_shape_agreement_extent(agreement, *axis, &values)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                        reason,
+                    ) => return Err(reason.clone()),
                     // Read only after the node has produced its value; taken
                     // by the loop at the foot of the body.
                     crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,

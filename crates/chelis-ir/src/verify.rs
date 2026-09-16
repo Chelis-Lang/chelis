@@ -825,6 +825,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
+        if crate::axis_sources::is_same_shape_result_op(&node.op)
+            && let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
+        {
+            errors.push(reason);
+        }
+
         if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
             if !node.output_type.precision.is_float() {
                 errors.push(format!(
@@ -1058,7 +1064,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             let supported = usize::try_from(*axis).ok().is_some_and(|axis| {
                 axis < node.output_type.dims.len()
                     && (crate::axis_sources::expand_or_reshape_carrier(&node.op, axis).is_some()
-                        || crate::axis_sources::op_computed_axis_extent(&node.op, axis).is_some())
+                        || crate::axis_sources::op_computed_axis_extent(&node.op, axis).is_some()
+                        || matches!(
+                            crate::axis_sources::same_shape_result_agreement(dag, node.id),
+                            Ok(Some(_))
+                        ))
             });
             if required.0 >= node.id.0 || !supported {
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));

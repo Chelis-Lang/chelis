@@ -39,16 +39,16 @@
       "receipt": "literal_claim.literal_claim_transport_survives_nested_and_unused_calls"
     },
     {
-      "id": "claim.literal.pass_through.c",
+      "id": "claim.literal.same_shape_producer.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin"
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
     },
     {
-      "id": "claim.literal.pass_through.eval",
+      "id": "claim.literal.same_shape_producer.eval",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin"
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
     },
     {
       "id": "claim.named.nested_fresh_result.c",
@@ -63,30 +63,6 @@
       "receipt": "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder"
     },
     {
-      "id": "claim.named.pass_through.c",
-      "baseline": "silent_unguarded",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin"
-    },
-    {
-      "id": "claim.named.pass_through.eval",
-      "baseline": "silent_unguarded",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin"
-    },
-    {
-      "id": "claim.named.pass_through.inlined_root.c",
-      "baseline": "silent_unguarded",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes"
-    },
-    {
-      "id": "claim.named.pass_through.inlined_root.eval",
-      "baseline": "silent_unguarded",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes"
-    },
-    {
       "id": "claim.named.resolved.inlined_root.c",
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
@@ -97,6 +73,138 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.named.same_shape_producer.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer"
+    },
+    {
+      "id": "claim.same_shape.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly"
+    },
+    {
+      "id": "claim.same_shape.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly"
+    },
+    {
+      "id": "claim.same_shape.distinct_paths.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution"
+    },
+    {
+      "id": "claim.same_shape.distinct_paths.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution"
+    },
+    {
+      "id": "claim.same_shape.no_origin.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.no_origin.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_disagreement.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_disagreement.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_one.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add"
+    },
+    {
+      "id": "claim.same_shape.operand_one.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add"
+    },
+    {
+      "id": "claim.same_shape.rank_zero.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation"
+    },
+    {
+      "id": "claim.same_shape.repeated_path.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim"
+    },
+    {
+      "id": "claim.same_shape.repeated_path.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim"
+    },
+    {
+      "id": "claim.same_shape.reversed.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.reversed.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_1948_same_shape.a_statically_refuted_same_shape_result_is_a_dimension_mismatch"
+    },
+    {
+      "id": "claim.same_shape.structure.dedup",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.identical_members_deduplicate_but_distinct_paths_remain"
+    },
+    {
+      "id": "claim.same_shape.structure.malformed",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_issue_1948_same_shape.malformed_same_shape_relations_are_verifier_errors"
     },
     {
       "id": "class.load_load.c",

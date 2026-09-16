@@ -1833,6 +1833,14 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
                 // the wrong branch.
                 panic!("node {node} axis {axis} is a class site with no carrier");
             }
+            chelis_ir::axis_sources::LocalGuardObservation::SameShapeAgreement(_) => {
+                panic!(
+                    "node {node} axis {axis} is a producer-owned result site, not a local class site"
+                );
+            }
+            chelis_ir::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(reason) => {
+                panic!("node {node} axis {axis} has a malformed same-shape relation: {reason}");
+            }
         }
     }
 }

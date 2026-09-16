@@ -1470,10 +1470,19 @@ impl CEmitter {
     /// already-compatible input shapes stay byte-identical.
     fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
-        let input_dims = node
-            .inputs
+        let Some(agreement) = dag.same_shape_result_agreement(node.id) else {
+            return;
+        };
+        let input_dims = agreement
+            .members()
             .iter()
-            .filter_map(|input| dag.get(*input).map(|n| n.output_type.dims.as_slice()))
+            .map(|input| {
+                dag.get(*input)
+                    .expect("verified agreement member")
+                    .output_type
+                    .dims
+                    .as_slice()
+            })
             .collect::<Vec<_>>();
         let all_static =
             dims_static(&node.output_type.dims) && input_dims.iter().all(|dims| dims_static(dims));
@@ -1482,16 +1491,16 @@ impl CEmitter {
                 .iter()
                 .all(|right| left.is_empty() || right.is_empty() || left == right)
         });
-        if (all_static && statically_compatible) || node.inputs.len() < 2 {
+        if (all_static && statically_compatible) || agreement.members().len() < 2 {
             return;
         }
         let id = node.id.0;
-        for (left_index, left) in node.inputs.iter().enumerate() {
+        for (left_index, left) in agreement.members().iter().enumerate() {
             let a = left.0;
-            for right in &node.inputs[left_index + 1..] {
+            for right in &agreement.members()[left_index + 1..] {
                 let b = right.0;
                 self.line(&format!(
-                    "if (t{a}_rank > 0 && t{b}_rank > 0 && t{a}_rank != t{b}_rank) {{ \
+                    "if (t{a}_rank != t{b}_rank) {{ \
                      fprintf(stderr, \"chelis: elementwise operand rank mismatch at node {id}: %d vs %d\\n\", \
                      t{a}_rank, t{b}_rank); abort(); }} \
                      if (t{a}_rank == t{b}_rank) {{ for (int __d = 0; __d < t{a}_rank; __d++) {{ \
@@ -1505,27 +1514,14 @@ impl CEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
-        // chelis#664: same-shape elementwise family — guard operand
-        // agreement before the op emitters index operands through the
-        // output's shape.
-        if matches!(
-            node.op,
-            RiscOp::Add
-                | RiscOp::Sub
-                | RiscOp::Mul
-                | RiscOp::Div
-                | RiscOp::TruncDiv
-                | RiscOp::Mod
-                | RiscOp::FloorDiv
-                | RiscOp::MaxElem
-                | RiscOp::MinElem
-                | RiscOp::ExtremaAdjoint { .. }
-                | RiscOp::ReluAdjoint
-                | RiscOp::CmpLt
-                | RiscOp::FusedElem { .. }
-        ) {
-            self.emit_elementwise_operand_guard(node, dag);
-        }
+        // chelis#664/#1948: every semantic same-shape producer validates its
+        // complete positive-rank operand relation before the op emitters index
+        // operands through the output's shape. Nonmembers and rank-zero
+        // results return immediately inside the shared derivation.
+        self.emit_elementwise_operand_guard(node, dag);
+        // chelis#1948: operand agreement precedes the producer-owned result
+        // claim, and both precede the operation's allocation or first access.
+        self.emit_same_shape_result_guards(node);
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, value, &node.output_type)?,
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
@@ -6806,6 +6802,26 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         for (axis, extent_expr) in extents {
             self.emit_runtime_dim_site(id, *axis, extent_expr);
         }
+        self.emit_local_dim_guards_matching(id, extents, false);
+        self.emit_inherited_result_guards_matching(id, extents, false);
+    }
+
+    fn is_same_shape_observation(
+        observation: &chelis_ir::axis_sources::LocalGuardObservation,
+    ) -> bool {
+        matches!(
+            observation,
+            chelis_ir::axis_sources::LocalGuardObservation::SameShapeAgreement(_)
+                | chelis_ir::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(_)
+        )
+    }
+
+    fn emit_local_dim_guards_matching(
+        &mut self,
+        id: usize,
+        extents: &[(usize, String)],
+        same_shape: bool,
+    ) {
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete
         // user-facing line is `numeric trap: domain in <op> at int64` with no
@@ -6843,6 +6859,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // Consume claims, not axes: multiple claims on one axis can be
         // interleaved with claims on another axis in declaration order.
         for (axis, site) in sites {
+            if Self::is_same_shape_observation(&site.observed) != same_shape {
+                continue;
+            }
             let guard_key = (id, axis, site.clone());
             if self.emitted_local_dim_guards.contains(&guard_key) {
                 continue;
@@ -6875,7 +6894,49 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.indent -= 1;
             self.line("}");
         }
-        self.emit_inherited_result_guards(id, extents);
+    }
+
+    /// Emit producer-owned result claims after the same-shape relation has
+    /// agreed and before the producer allocates or reads an element.
+    fn emit_same_shape_result_guards(&mut self, node: &DagNode) {
+        use chelis_ir::axis_sources::LocalGuardObservation;
+        let mut extents = Vec::new();
+        let add_extent =
+            |axis: usize, observation: &LocalGuardObservation, extents: &mut Vec<_>| {
+                let LocalGuardObservation::SameShapeAgreement(agreement) = observation else {
+                    return;
+                };
+                let member = agreement
+                    .members()
+                    .first()
+                    .expect("verified nonempty same-shape agreement");
+                if !extents
+                    .iter()
+                    .any(|(existing, _): &(usize, String)| *existing == axis)
+                {
+                    extents.push((axis, format!("chelis_tensor_shape(t{}, {axis})", member.0)));
+                }
+            };
+        if let Some(sites) = self.local_dim_guard_sites.get(&node.id.0) {
+            for (axis, claim) in sites {
+                add_extent(*axis, &claim.observed, &mut extents);
+            }
+        }
+        for site in &self.inherited_result_sites {
+            if site.producer() != node.id {
+                continue;
+            }
+            let RtAxis::Lit(axis) = site.producer_axis();
+            add_extent(axis as usize, site.observation(), &mut extents);
+        }
+        if extents.is_empty() {
+            return;
+        }
+        for (axis, extent) in &extents {
+            self.emit_runtime_dim_site(node.id.0, *axis, extent);
+        }
+        self.emit_local_dim_guards_matching(node.id.0, &extents, true);
+        self.emit_inherited_result_guards_matching(node.id.0, &extents, true);
     }
 
     /// Shape-preserving producers know their result extent from input metadata.
@@ -6933,13 +6994,24 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     /// Consume invocation frames in declaration/axis order at one producer.
-    fn emit_inherited_result_guards(&mut self, id: usize, extents: &[(usize, String)]) {
+    fn emit_inherited_result_guards_matching(
+        &mut self,
+        id: usize,
+        extents: &[(usize, String)],
+        same_shape: bool,
+    ) {
         let sites = self
             .inherited_result_sites
             .iter()
-            .filter(|site| site.producer() == NodeId(id))
+            .filter(|site| {
+                site.producer() == NodeId(id)
+                    && Self::is_same_shape_observation(site.observation()) == same_shape
+            })
             .cloned()
             .collect::<Vec<_>>();
+        if sites.is_empty() {
+            return;
+        }
         let observations = sites
             .iter()
             .filter_map(|site| {

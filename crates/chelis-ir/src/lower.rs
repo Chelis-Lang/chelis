@@ -2317,7 +2317,12 @@ pub(crate) fn try_lower_staged_host_region(
         // A staged host region's inputs are the partition's, not an author's.
         ctx.prepare_parameter_witnesses(&names, &types, None, false);
         ctx.binding_witnesses.clear();
-        let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
+        let result = ctx.lower_expr_with_claim(
+            expr,
+            Some(result_claim),
+            options.literal_result_claim_ownership
+                == LiteralResultClaimOwnership::AuthoredTensorHelper,
+        );
         ctx.preserve_declared_result(&result, result_claim, None);
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {
@@ -2435,7 +2440,7 @@ fn lower_subexpr_program_inner_impl(
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
-    let value = ctx.lower_expr_with_claim(expr, result_claim);
+    let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
     // chelis#1374/#1376: an exported kernel carries its own declared result
     // claim. Without this the obligation existed only on the inlining paths,
     // so `out = f(...)` and a compiled `def f` ran unguarded.
@@ -7374,7 +7379,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> LoweredValue {
-        self.lower_expr_with_claim(expr, None)
+        self.lower_expr_with_claim(expr, None, false)
     }
 
     fn host_value_type(
@@ -7658,7 +7663,16 @@ impl<'program> LowerCtx<'program> {
 
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
-    fn lower_expr_with_claim(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
+    ///
+    /// Checked function metadata can also supply `claim`, but only an authored
+    /// declaration may move a same-shape result obligation onto the producer.
+    /// Inferred metadata retains the earlier source-preservation path.
+    fn lower_expr_with_claim(
+        &mut self,
+        expr: &Expr,
+        claim: Option<&TensorType>,
+        authored_result_claim: bool,
+    ) -> LoweredValue {
         // Resolve in the declaring activation, BEFORE a nested helper can
         // install its own same-spelled binders. A function expression resolves
         // its declaration only after lower_fn has installed its parameters.
@@ -7686,8 +7700,10 @@ impl<'program> LowerCtx<'program> {
         for (axis, label, required, literal) in requirements {
             if let Some(mut id) = result.as_single_node() {
                 if literal
-                    && self.literal_result_claim_ownership
+                    && (self.literal_result_claim_ownership
                         == LiteralResultClaimOwnership::AuthoredTensorHelper
+                        || (authored_result_claim
+                            && self.same_shape_result_owner_is_admitted(id, axis)))
                     && self.literal_result_token_owner_is_admitted(id, axis)
                 {
                     let value = match &self.dag.get(required).expect("literal requirement").op {
@@ -7720,7 +7736,13 @@ impl<'program> LowerCtx<'program> {
                     self.dag.add_shape_dep(id, required);
                     self.invocation_witnesses.push(id);
                 } else {
-                    self.preserve_computed_result_axis(id, axis, label, required);
+                    self.preserve_computed_result_axis(
+                        id,
+                        axis,
+                        label,
+                        required,
+                        authored_result_claim,
+                    );
                 }
             }
         }
@@ -7732,6 +7754,9 @@ impl<'program> LowerCtx<'program> {
     /// declaration token must not manufacture a new realized-extent guard for
     /// an op-computed source that C2.5 deliberately excludes.
     fn literal_result_token_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
+        if self.same_shape_result_owner_is_admitted(id, axis) {
+            return true;
+        }
         match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis) {
             Some(crate::axis_sources::AxisSource::OpComputed { axis, .. }) => {
                 self.dag.get(id).is_some_and(|node| {
@@ -7741,6 +7766,16 @@ impl<'program> LowerCtx<'program> {
             Some(_) => true,
             None => false,
         }
+    }
+
+    fn same_shape_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
+        self.dag.get(id).is_some_and(|node| {
+            axis < node.output_type.dims.len()
+                && matches!(
+                    crate::axis_sources::same_shape_result_agreement(&self.dag, id),
+                    Ok(Some(_))
+                )
+        })
     }
 
     fn owns_literal_result_claim_axis(&self, id: NodeId, axis: usize) -> bool {
@@ -8222,7 +8257,11 @@ impl<'program> LowerCtx<'program> {
             .and_then(stamped_parts)
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
             .map(Self::type_from_type_expr);
-        let body_id = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
+        let body_id = self.lower_expr_with_claim(
+            &elems[3],
+            declared_result.as_ref(),
+            declared_result.is_some(),
+        );
         if !name.is_empty() {
             if self.is_host_list_expr(&elems[3]) {
                 self.list_bindings.insert(name.clone(), elems[3].clone());
@@ -10020,8 +10059,9 @@ impl<'program> LowerCtx<'program> {
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
+        let authored_result_claim = fn_expr.signature.is_some();
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
-            self.lower_expr_with_claim(body, Some(&declared_result))
+            self.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
         });
         if let Some(ret_ty_expr) = fn_expr.result_type() {
             let ret_ty = Self::type_from_type_expr_with_subst(
@@ -10128,7 +10168,7 @@ impl<'program> LowerCtx<'program> {
                 &self.rank_substitutions,
             )
         });
-        let result = self.lower_expr_with_claim(body, claim.as_ref());
+        let result = self.lower_expr_with_claim(body, claim.as_ref(), function.signature.is_some());
         if let Some(claim) = &claim {
             self.preserve_declared_result(&result, claim, None);
         }
@@ -14786,8 +14826,21 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
         label: String,
         required: NodeId,
+        authored_result_claim: bool,
     ) {
         use crate::axis_sources::AxisSource;
+        if authored_result_claim {
+            match crate::axis_sources::same_shape_result_agreement(&self.dag, id) {
+                Ok(Some(_)) => {
+                    self.attach_result_claim(id, axis, required);
+                    return;
+                }
+                Err(reason) => {
+                    raise_fatal_lowering_error(reason, None, self.current_span_id.clone());
+                }
+                Ok(None) => {}
+            }
+        }
         let captured_declaration = self.dag.get(required).and_then(|token| {
             matches!(
                 token.op,
@@ -14817,7 +14870,13 @@ impl<'program> LowerCtx<'program> {
                 axis: RtAxis::Lit(axis),
             } => {
                 let input = self.dag.get(id).expect("result").inputs[input];
-                self.preserve_computed_result_axis(input, axis as usize, label, required);
+                self.preserve_computed_result_axis(
+                    input,
+                    axis as usize,
+                    label,
+                    required,
+                    authored_result_claim,
+                );
             }
             AxisSource::ScalarInput { input } => {
                 let target = self.dag.get(id).expect("result").inputs[input];
@@ -14936,11 +14995,7 @@ impl<'program> LowerCtx<'program> {
             // Literal result metadata retains its existing guard path.
             // Named requirements retain graph identity independently of shape.
             let resolved = match dim {
-                DimInfo::Lit(_)
-                    if self.literal_result_claim_ownership
-                        == LiteralResultClaimOwnership::AuthoredTensorHelper
-                        && self.owns_literal_result_claim_axis(id, axis) =>
-                {
+                DimInfo::Lit(_) if self.owns_literal_result_claim_axis(id, axis) => {
                     // This exact helper lowering installed the declaration's
                     // token before lowering the body. Re-stamping would create
                     // a second, provenance-losing obligation.
@@ -16383,6 +16438,7 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
+        let authored_result_claim = claim.is_some();
         let declared_result = claim.cloned().or_else(|| {
             elems
                 .get(1)
@@ -16424,7 +16480,8 @@ impl<'program> LowerCtx<'program> {
             })
             .unzip();
         self.prepare_parameter_witnesses(&params, &formal_types, call_span, true);
-        let result = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
+        let result =
+            self.lower_expr_with_claim(&elems[3], declared_result.as_ref(), authored_result_claim);
         if let Some(ty) = &declared_result {
             self.preserve_declared_result(&result, ty, None);
         }

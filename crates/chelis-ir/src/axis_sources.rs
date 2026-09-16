@@ -248,6 +248,118 @@ fn shape_preserving(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
     }
 }
 
+/// Whether this operation semantically produces a result with the shape of
+/// all of its positive-rank operands.
+///
+/// Administrative identity nodes stay outside this set: a `Copy`, `Drop`,
+/// `Realize`, or `Store` forwards an existing value rather than becoming the
+/// primitive named by a declared-result guard. Casts remain in the set because
+/// spec/04 §4.7 gives a cast the placement of its input while retaining the
+/// cast as the primitive that produced the returned value.
+pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
+    matches!(
+        op,
+        RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::CmpLt
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
+            | RiscOp::Neg
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Round
+            | RiscOp::Recip
+            | RiscOp::UniformLike { .. }
+            | RiscOp::Dropout { .. }
+            | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
+            | RiscOp::FusedElem { .. }
+    )
+}
+
+/// The complete positive-rank operand relation for a same-shape result.
+///
+/// Members are node identities rather than input slots. Repeated edges to the
+/// same value therefore form one agreement member, while distinct operand
+/// paths remain distinct. Source order is retained only for deterministic
+/// comparison order; no member is the result claim's semantic owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SameShapeAgreement {
+    members: Vec<NodeId>,
+}
+
+impl SameShapeAgreement {
+    pub fn members(&self) -> &[NodeId] {
+        &self.members
+    }
+}
+
+/// Derive the complete agreement relation for a positive-rank same-shape
+/// result.
+///
+/// `Ok(None)` means the operation is not a same-shape producer, or that its
+/// result is rank zero and therefore has no result axis to observe. A
+/// positive-rank producer must have at least one positive-rank operand, and
+/// every such operand must have the result rank. Returning an error rather
+/// than an empty set prevents a malformed result claim from disappearing.
+pub fn same_shape_result_agreement(
+    dag: &Dag,
+    node: NodeId,
+) -> Result<Option<SameShapeAgreement>, String> {
+    let owner = dag
+        .get(node)
+        .ok_or_else(|| format!("same-shape result references missing node {}", node.0))?;
+    if !is_same_shape_result_op(&owner.op) || owner.output_type.dims.is_empty() {
+        return Ok(None);
+    }
+    let result_rank = owner.output_type.dims.len();
+    let mut members = Vec::new();
+    for input in &owner.inputs {
+        let operand = dag.get(*input).ok_or_else(|| {
+            format!(
+                "same-shape result at node {} references missing operand {}",
+                node.0, input.0
+            )
+        })?;
+        let operand_rank = operand.output_type.dims.len();
+        if operand_rank == 0 {
+            continue;
+        }
+        if operand_rank != result_rank {
+            return Err(format!(
+                "same-shape result at node {} has positive-rank operand {} of rank {}, expected rank {}",
+                node.0, input.0, operand_rank, result_rank
+            ));
+        }
+        if !members.contains(input) {
+            members.push(*input);
+        }
+    }
+    if members.is_empty() {
+        return Err(format!(
+            "same-shape result at node {} has rank {} but no positive-rank agreement member",
+            node.0, result_rank
+        ));
+    }
+    Ok(Some(SameShapeAgreement { members }))
+}
+
 /// The sources of a node that declares its own shape with no operand to read
 /// it from: `Const` (a uniform fill at positive rank) and `ConstTensor`.
 ///
@@ -2418,6 +2530,18 @@ pub enum LocalGuardObservation {
     /// So the derivation states HOW to compute it, once, and both lanes read
     /// that one answer rather than each asking the operation again.
     ComputedExtent(ComputedAxisExtent),
+    /// Validate every distinct positive-rank operand shape, then read this
+    /// axis from their one agreed shape.
+    ///
+    /// The relation is complete and nonempty by construction. It is observed
+    /// before the producer runs: operand disagreement is reported first, and
+    /// only an agreed result extent reaches the producer-owned claim.
+    SameShapeAgreement(SameShapeAgreement),
+    /// A malformed same-shape producer is retained as an explicit failed
+    /// observation instead of degrading to `RealizedExtent` or disappearing.
+    /// Verification rejects it before execution; raw evaluator entrypoints
+    /// still return this reason if handed an unverified graph.
+    MalformedSameShapeAgreement(String),
 }
 
 /// The extent an admitted [`AxisSource::OpComputed`] axis will produce,
@@ -2561,6 +2685,9 @@ fn op_computed_axis_origin_bounded(
         return None;
     }
     let owner = dag.get(node)?;
+    if is_same_shape_result_op(&owner.op) {
+        return None;
+    }
     match output_axis_sources(dag, node).into_iter().nth(axis)? {
         AxisSource::OpComputed {
             op: origin,
@@ -2786,19 +2913,25 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
             let attributed_node = dag
                 .get(attributed)
                 .expect("result producer belongs to graph");
-            let observation = if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
-                LocalGuardObservation::Carrier(carrier.clone())
-            } else if let Some(computed) = op_computed_axis_extent(&node.op, axis) {
-                LocalGuardObservation::ComputedExtent(computed)
-            } else if let Some(AxisSource::InputAxis { input, axis }) =
-                output_axis_sources(dag, producer).get(axis)
-            {
-                LocalGuardObservation::Carrier(RtDim::InputAxis {
-                    tensor: *input,
-                    axis: *axis,
-                })
-            } else {
-                LocalGuardObservation::RealizedExtent
+            let observation = match same_shape_result_agreement(dag, producer) {
+                Ok(Some(agreement)) => LocalGuardObservation::SameShapeAgreement(agreement),
+                Err(reason) => LocalGuardObservation::MalformedSameShapeAgreement(reason),
+                Ok(None) => {
+                    if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
+                        LocalGuardObservation::Carrier(carrier.clone())
+                    } else if let Some(computed) = op_computed_axis_extent(&node.op, axis) {
+                        LocalGuardObservation::ComputedExtent(computed)
+                    } else if let Some(AxisSource::InputAxis { input, axis }) =
+                        output_axis_sources(dag, producer).get(axis)
+                    {
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: *input,
+                            axis: *axis,
+                        })
+                    } else {
+                        LocalGuardObservation::RealizedExtent
+                    }
+                }
             };
             ResultExtentSite {
                 output_axis: RtAxis::Lit(i32::try_from(output_axis).expect("rank fits int32")),
@@ -3212,24 +3345,20 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 continue;
             };
             let axis = usize::try_from(*axis).expect("verified result axis");
-            let observed = if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
-                LocalGuardObservation::Carrier(carrier.clone())
-            } else {
-                let extent =
-                    op_computed_axis_extent(&node.op, axis).expect("verified result producer");
-                LocalGuardObservation::ComputedExtent(extent)
-            };
-            let op = expansion_kind(dag, node.id).map_or_else(
-                || crate::grad::risc_op_name(&node.op),
-                ExpansionKind::primitive_name,
-            );
+            let site = result_extent_sites(dag, node.id)
+                .into_iter()
+                .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
+                .expect("verified result producer");
+            let RtAxis::Lit(producer_axis) = site.producer_axis;
+            let producer_axis =
+                usize::try_from(producer_axis).expect("verified result producer axis");
             sites.push((
-                (node.id.0, axis),
+                (site.producer.0, producer_axis),
                 LocalGuardClaim {
                     claim: claim.clone(),
                     canonical: CanonicalExtent::Witness(*required),
-                    op,
-                    observed,
+                    op: site.operation,
+                    observed: site.observation,
                 },
             ));
         }
