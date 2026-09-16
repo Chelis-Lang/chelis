@@ -421,8 +421,9 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     );
 }
 
-/// Negative: equal total capacity does not satisfy the per-axis exact-shape
-/// requirement when source and consumer ranks differ.
+/// Negative: equal total capacity does not make a mixed-positive-rank
+/// same-shape producer valid. The malformed relation must be rejected before
+/// storage planning can consider an in-place alias.
 #[test]
 fn fan_in_different_rank_does_not_alias() {
     let ty_r1 = TensorType {
@@ -433,24 +434,18 @@ fn fan_in_different_rank_does_not_alias() {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
         precision: Prim::F32,
     };
-    let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let result = codegen_hip(&dag, "test_fan_in_different_rank").unwrap();
-    let hip = &result.c_source;
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // Forbidden alias for the rank-2 output shape literal.
-    let forbidden_r2 = format!(
-        "d_t{fused_id} = chelis_gpu_alloc_view(2, (int[]){{ 2, 4 }}, CHELIS_DTYPE_F32, d_t{a_id}->data, d_t{a_id}->storage_size);"
-    );
+    let (dag, _, _) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
+    let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+        Ok(_) => panic!("mixed-positive-rank same-shape producer must be rejected"),
+        Err(error) => error,
+    };
+    let rendered = error.to_string();
     assert!(
-        !hip.contains(&forbidden_r2),
-        "different-rank fan-in must NOT alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
-    );
-    let forbidden_guard = expected_contiguity_guard(a_id);
-    assert!(
-        !hip.contains(&forbidden_guard),
-        "different-rank must NOT emit contiguity guard; got:\n{hip}"
+        rendered.contains("same-shape result at node 6")
+            && rendered.contains("positive-rank operand")
+            && rendered.contains("rank 1")
+            && rendered.contains("expected rank 2"),
+        "unexpected malformed-agreement rejection: {error}"
     );
 }
 
