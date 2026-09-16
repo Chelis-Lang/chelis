@@ -444,6 +444,13 @@ name = "hip_entry_obligation_witness"
 package = "chelis-cli"
 name = "runtime_extent_slice_b"
 
+# chelis#2108: callable/AD diagnostic routing plus the supported scalar-host
+# and primitive-scalar reverse-DAG neighbors. These short build-only cases
+# catch host-gradient applicability changes before ownership lowering.
+[[standing_target]]
+package = "chelis-cli"
+name = "pr799_callable_diagnostic_surface"
+
 # chelis#1787: this file's census builds every executable Phase 0 example to C,
 # so a merge that adds an example, or that makes one stop building, breaks it on
 # `main` with no per-pull-request job to catch it. That happened once already,

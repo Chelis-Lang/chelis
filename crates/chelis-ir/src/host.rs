@@ -10229,6 +10229,94 @@ fn pack_grad_roots(plan: &GradPackPlan, roots: &mut impl Iterator<Item = HostExp
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct ScalarGradBodyRequirements {
+    has_tensor_value: bool,
+    reaches_host_collection_transform: bool,
+}
+
+impl ScalarGradBodyRequirements {
+    fn merge(&mut self, other: Self) {
+        self.has_tensor_value |= other.has_tensor_value;
+        self.reaches_host_collection_transform |= other.reaches_host_collection_transform;
+    }
+}
+
+/// Classify the body rather than its public signature when choosing between
+/// scalar-host AD and reverse-DAG AD. A scalar-returning function can still
+/// contain rank-zero tensor values through [05-OP-50], including in a called
+/// scalar helper. Conversely, host collection transforms carry callbacks and
+/// must keep the deliberate scalar-host rejection even when their callbacks
+/// contain tensor intermediates.
+fn scalar_grad_body_requirements(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    visiting: &mut UnordSet<String>,
+) -> ScalarGradBodyRequirements {
+    let mut requirements = ScalarGradBodyRequirements {
+        has_tensor_value: matches!(
+            expr_host_type(expr, program, scope),
+            HostTypeTerm::Tensor(_)
+        ),
+        reaches_host_collection_transform: false,
+    };
+
+    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+        && let Some(name) = kids.first().and_then(direct_var_name)
+    {
+        let scalar_def = resolve_scalar_def(program, name);
+        if scalar_def.is_none() {
+            requirements.reaches_host_collection_transform |= matches!(
+                terminal_name(name),
+                "map" | "filter" | "fold" | "scan" | "partition" | "flat_map"
+            );
+        }
+        if !requirements.reaches_host_collection_transform
+            && let Some((param_names, param_tys, body)) = scalar_def
+            && visiting.insert(name.to_string())
+        {
+            let callee_scope = param_names
+                .iter()
+                .cloned()
+                .zip(param_tys.iter().cloned())
+                .collect();
+            requirements.merge(scalar_grad_body_requirements(
+                body,
+                program,
+                &callee_scope,
+                visiting,
+            ));
+            visiting.remove(name);
+        }
+    }
+
+    visit_semantic_expr_children(expr, |child| {
+        requirements.merge(scalar_grad_body_requirements(
+            child, program, scope, visiting,
+        ));
+    });
+    requirements
+}
+
+fn pure_scalar_callable_needs_reverse_dag(program: &HostLoweringSession<'_>, name: &str) -> bool {
+    if top_level_fn_needs_host_lane_tensor_lowering(program, name) {
+        return false;
+    }
+    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, name) else {
+        return false;
+    };
+    let scope = param_names
+        .iter()
+        .cloned()
+        .zip(param_tys.iter().cloned())
+        .collect();
+    let mut visiting = UnordSet::new();
+    visiting.insert(name.to_string());
+    let requirements = scalar_grad_body_requirements(body, program, &scope, &mut visiting);
+    requirements.has_tensor_value && !requirements.reaches_host_collection_transform
+}
+
 /// Reconstruct primitive and finite recursive cotangents from one reverse DAG.
 /// The IR stages each target as typed leaves plus runtime List controls and
 /// retains the forward activation as a dependency of its cotangents. This host
@@ -10254,16 +10342,21 @@ fn try_lower_general_list_grad_app(
     let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
         return Ok(None);
     };
-    // Keep recursive pure-scalar callables at the existing scalar host
-    // boundary. Entering the tensor DAG for that previously rejected surface
-    // would replace its bounded scalar refusal with an inlining diagnostic.
-    // This applicability decision precedes lowering: entered extent failures
-    // and other deliberate DAG diagnostics still propagate without fallback.
+    // A scalar signature does not determine the lowering route. Pure scalar
+    // arithmetic stays at the scalar-host AD boundary, and an unsupported
+    // host collection transform deliberately declines there to the
+    // unresolved-transform marker. A body with [05-OP-50] tensor values needs
+    // the reverse DAG even when its parameters and result are all scalar.
+    //
+    // This body-sensitive decision precedes lowering: mixed/tensor callables
+    // and DAG-backed scalar bodies still enter the #2078 path, so their
+    // forward extent failures and deliberate DAG diagnostics propagate
+    // without fallback.
     let pure_scalar_callable =
         lookup_declared_fn_type(program, fn_name).is_some_and(|(parameters, result)| {
             parameters.iter().all(is_dual_scalar_type) && is_dual_scalar_type(&result)
         });
-    if pure_scalar_callable && top_level_fn_needs_host_lane_tensor_lowering(program, fn_name) {
+    if pure_scalar_callable && !pure_scalar_callable_needs_reverse_dag(program, fn_name) {
         return Ok(None);
     }
     let Some(Expr::List(fn_list, _)) = lookup_program_def(&defs, fn_name) else {
