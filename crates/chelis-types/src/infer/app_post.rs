@@ -2605,14 +2605,22 @@ pub(super) fn finish_unified_app(
                                     ),
                                 );
                             }
-                            // to_list requires a fully resolved
-                            // precision: a polymorphic precision must
-                            // be resolved before to_list can name a
-                            // concrete element type. Defer if the
-                            // precision is still a var.
                             let precision = match precision {
                                 TensorPrec::Concrete(p) => p,
-                                TensorPrec::Var(_) => return result_ty,
+                                // [05-OP-57] fixes the result constructor and
+                                // leaf relation independently of whether the
+                                // authored precision has been instantiated:
+                                // tensor[n, p] becomes List[p]. Returning the
+                                // builtin scheme's opaque result variable here
+                                // erased the known List constructor and made a
+                                // following index look unresolved at [04-INF-9]'s
+                                // declaration boundary (chelis#2126).
+                                TensorPrec::Var(variable) => {
+                                    return Type::Adt(
+                                        "List".to_string(),
+                                        vec![Type::Var(variable)],
+                                    );
+                                }
                             };
                             if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
                                 return report(

@@ -266,7 +266,7 @@ def first[rows, dtype](frame: Frame[rows, dtype]) -> dtype =
       match cols with {
         | Leaf { value: column } =>
           match column with {
-            | Column(values) => index(to_list(values), 0)
+            | Column(values) => index(to_list(values), 0i64)
           }
       }
   }
