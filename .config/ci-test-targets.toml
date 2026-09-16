@@ -782,6 +782,168 @@ prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# Exact shared scripts changed by the integer spelling migration. The PR
+# script-unit selection discovers every named test module; production oracles
+# with stronger standing jobs retain those jobs as their owners below.
+[[path_rule]]
+prefix = "scripts/builtin_atom_semantic_contracts.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_builtin_atom_registry imports and mutation-tests the semantic contract table in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_materialization.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the materialization-case selection and expectations are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_operations.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact wire operation field registrations are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/front_end_performance_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_front_end_performance_fixtures imports the generator and checks exact rendered programs in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/integer_dtype_spelling_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated oracle scanner, boundary contract and command roster are mutation-tested by script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/nautilus_local_gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated integer spelling oracle boundary test pins the local Nautilus canary's canonical dtype spellings"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_cache_compatibility.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_runtime_extent_cache_compatibility imports and checks the exact diagnostic contract in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_compiled_value_ownership_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the compiled ownership oracle's ledger and receipt mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_faithful_observation_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 source, receipt and mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_front_end_performance_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact front-end fixture rendering tests run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_integer_dtype_spelling_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated corpus scanner and boundary mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_extent_cache_compatibility.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact cache diagnostic result contract tests run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/compiled_value_ownership_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "compiled-value-ownership-phase0-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the standing compiled value ownership job executes the Phase 2 and launch oracle entry points"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/faithful_observation_phase2_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "faithful-observation-phase2-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the standing faithful observation job executes the complete Phase 2 oracle"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/unrepresentable_domain_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "integration"
+cadence = "pull_request and push"
+reason = "the required integration gate executes the behavioral unrepresentable-domain oracle"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "spec/05-risc-primitives.md"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/conformance/hull/programs/"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull gate executes every frozen program against the candidate compiler"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/support/capacity_census_stdlib_tests.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/support/helper_summary_fatal.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
+
 [[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"

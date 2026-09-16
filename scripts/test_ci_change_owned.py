@@ -405,6 +405,64 @@ class SchemaTests(unittest.TestCase):
                 rule = by_path[path]
                 self.assertEqual(rule.disposition, "packages")
                 self.assertEqual(rule.packages, ("chelis-cli",))
+        for path in (
+            "scripts/builtin_atom_semantic_contracts.py",
+            "scripts/capacity_census_wire_materialization.py",
+            "scripts/capacity_census_wire_operations.py",
+            "scripts/front_end_performance_fixtures.py",
+            "scripts/integer_dtype_spelling_oracle.py",
+            "scripts/nautilus_local_gate.py",
+            "scripts/runtime_extent_cache_compatibility.py",
+            "scripts/test_compiled_value_ownership_oracle.py",
+            "scripts/test_faithful_observation_phase2_oracle.py",
+            "scripts/test_front_end_performance_fixtures.py",
+            "scripts/test_integer_dtype_spelling_oracle.py",
+            "scripts/test_runtime_extent_cache_compatibility.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+        exact_job_owners = {
+            "scripts/compiled_value_ownership_oracle.py": (
+                "heavy-e2e.yml",
+                "compiled-value-ownership-phase0-oracle",
+            ),
+            "scripts/faithful_observation_phase2_oracle.py": (
+                "heavy-e2e.yml",
+                "faithful-observation-phase2-oracle",
+            ),
+            "scripts/unrepresentable_domain_oracle.py": ("ci.yml", "integration"),
+            "tests/conformance/hull/programs/": (
+                "conformance.yml",
+                "conformance",
+            ),
+        }
+        for path, expected in exact_job_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    expected,
+                )
+        package_owners = {
+            "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
+            "tests/support/helper_summary_fatal.ch": (
+                "chelis-cli",
+                "chelis-compiler-api",
+                "chelis-ir",
+            ),
+        }
+        for path, expected in package_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, expected)
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(

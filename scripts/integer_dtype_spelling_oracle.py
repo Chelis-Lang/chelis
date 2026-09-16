@@ -173,6 +173,16 @@ def boundary_contract_errors() -> list[str]:
             ('Self::I32 => "int32"', 'Self::I64 => "int64"'),
         )
     )
+    errors.extend(
+        _require(
+            "scripts/nautilus_local_gate.py",
+            (
+                "range(cast(0, i64),",
+                "cast(0, i64))",
+                "j: i64",
+            ),
+        )
+    )
     return errors
 
 

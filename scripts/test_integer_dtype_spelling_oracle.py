@@ -43,6 +43,9 @@ class CorpusScanTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_repository_boundary_contract_is_current(self) -> None:
+        self.assertEqual(oracle.boundary_contract_errors(), [])
+
     def test_test_plan_covers_both_ingresses_migration_and_wire_compatibility(self) -> None:
         plan = "\n".join(" ".join(command) for command in oracle.TEST_COMMANDS)
         for required in (
