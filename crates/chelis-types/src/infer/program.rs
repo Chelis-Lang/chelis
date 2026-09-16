@@ -462,7 +462,16 @@ pub(super) fn infer_program_with_product_in_session(
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
-    let metadata_prebound_names = UnordSet::new();
+    let (metadata_prebound_names, function_metadata_failures) =
+        prebind_defsig_less_function_body_types(
+            &items,
+            &declared_signatures,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &adt_reg,
+            errors,
+        );
     let top_level_references = TopLevelReferenceGraph::build(&items);
     product.function_inference_plan =
         FunctionInferencePlan::build_from_reference_graph(&top_level_references);
@@ -563,6 +572,9 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
             );
+            let prebound_type_failure = external_input_failure
+                .as_ref()
+                .or_else(|| function_metadata_failures.get(&declaration_index));
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -571,7 +583,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                external_input_failure.as_ref(),
+                prebound_type_failure,
                 provisional_types
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
@@ -661,7 +673,14 @@ pub(super) fn infer_program_with_product_in_session(
     }
     product.resolve_owner_types(&subst);
 
-    // Third pass: reject tensor types whose element precision isn't supported
+    // PP9 / [04-TOT-5]: every public entry reaches one ordered semantic pass
+    // protocol after inference. Build the same declaration-type view the IR
+    // entries supply; stamped input stays stamped and every reader below must
+    // handle that carrier directly.
+    let semantic_type_env = build_ir_type_env(exprs);
+    validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
+
+    // Final shared checks: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
@@ -727,13 +746,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        /* combined_ir_for_validate = */ &library_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: inference may have abandoned its schedule. Stop before the
@@ -742,13 +755,13 @@ pub(crate) fn build_type_env_from_library_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
         errors,
     );
-    log_sub("validate_ir_program", &mut sub_t);
+    log_sub("validate_semantic_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
@@ -843,7 +856,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 /// Internal sequencing:
 /// 1. Build the per-decl `IrTypeEnv` from un-annotated source.
 /// 2. Run `infer_ir_program_with_state` once, populating `state`.
-/// 3. Run all validators (`validate_ir_program`,
+/// 3. Run all validators (`validate_semantic_program`,
 ///    `validate_tensor_precisions_in_program`).
 /// 4. Annotate the library exprs once using the populated `state.env`.
 /// 5. Build `library_ir_annotated` from the annotated exprs.
@@ -882,20 +895,14 @@ pub(crate) fn build_compiled_library_context_in_session(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        /* combined_ir_for_validate = */ &library_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
@@ -1053,20 +1060,14 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        &combined_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &combined_ir,
         &product.top_level_references,
@@ -1249,13 +1250,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut product = infer_ir_program_with_state(
-        new_exprs,
-        &mut state,
-        &combined_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let mut product = infer_ir_program_with_state(new_exprs, &mut state, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
@@ -1267,13 +1262,13 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(
+    validate_semantic_program(
         new_exprs,
         &combined_ir,
         &product.top_level_references,
         errors,
     );
-    log_sub("validate_ir_program", &mut sub_t);
+    log_sub("validate_semantic_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
@@ -1346,14 +1341,6 @@ pub(crate) fn check_typed_program_in_session(
     // passes its input through untouched otherwise.
     let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, errors);
-    // [04-INF-4] makes eager value cycles an ingress-independent checker
-    // error. Reuse the canonical graph that scheduled inference rather than
-    // repeating its lexical walk. Keep reporting after inference to preserve
-    // the shared diagnostic order: body-inference errors first, then
-    // `CycleDetected`.
-    product
-        .top_level_references
-        .report_initialization_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1414,7 +1401,7 @@ pub(crate) fn infer_ir_program_in_session(
         stack_scope.drain_into(errors);
         return stats;
     }
-    validate_ir_program(exprs, &type_env, &product.top_level_references, errors);
+    validate_semantic_program(exprs, &type_env, &product.top_level_references, errors);
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     // Surface any walker stack bail as a hard located error.
@@ -1424,32 +1411,30 @@ pub(crate) fn infer_ir_program_in_session(
 
 pub(super) fn infer_ir_program_with_env(
     exprs: &[deep::Expr],
-    type_env: &IrTypeEnv,
+    _type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
-    // Backwards-compat wrapper. Callers (like `infer_ir_program` and
-    // `check_typed_program` callers) run `validate_ir_program`
-    // separately, so we pass `None` here to skip the embedded validate.
+    // Backwards-compat wrapper. Public callers run the shared semantic pass
+    // protocol after this driver returns.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
-    infer_ir_program_with_state(
-        exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
-    )
+    let mut product = infer_ir_program_with_state(exprs, &mut state, errors);
+    product.resolve_owner_types(&state.subst);
+    product
 }
 
 /// Run the inference / IR binding / shape-validation passes against
 /// `state`, mutating it as it goes. Library state should be supplied by
-/// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
-/// path. Source IR types are collected with their exact final declaration
-/// origins and bound into `state.env` here; the
-/// `combined_ir` is what `validate_ir_program` consults so
-/// new-code shape validation can look up declared types of library
-/// references.
+/// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic path.
+/// Declaration-local external-input ascriptions are prebound while their
+/// declaration is checked. A compiler-authored function body stamp may supply
+/// a defsig-less callable header, but body stamps never create eager-value
+/// scope. Callers supply their complete declaration-type view to
+/// `validate_semantic_program` after this driver returns so layered new code
+/// can resolve library references without changing inference scope.
 pub(super) fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
     state: &mut TypeEnvInner,
-    combined_ir: &IrTypeEnv,
-    run_validate_passes_on: Option<&[deep::Expr]>,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
     let mut product = InferenceProduct::default();
@@ -1487,71 +1472,6 @@ pub(super) fn infer_ir_program_with_state(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
-    // The canonical collector returns each final name-keyed IR type together
-    // with the exact flattened declaration ordinal that produced it. Duplicate
-    // names intentionally retain last-declaration-wins semantics, while the
-    // origin keeps an owning witness from leaking into an earlier body.
-    let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
-
-    // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
-    // check unit already had their AUTHORITATIVE declared type bound into
-    // `state.env` by `collect_all_declarations` above. The prebind below reads
-    // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
-    // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. It may bind an
-    // eager value's name too: chelis#1134 scope is decided by
-    // `Env::top_level_value_visibility`, so a binding that exists early can no
-    // longer make a later value readable, and the two ingresses stay in
-    // agreement without this ingress withholding anything. Letting a body stamp
-    // overwrite a defsig binding replaces the declared signature with the
-    // body's own type, so `infer_top_level`'s body-vs-defsig
-    // unification (which the IR ingress DOES run) then compares the body
-    // against itself and silently accepts a `defsig`/body mismatch. The typed
-    // ingress (`infer_program_with_product_in_session`) has no such rebind and
-    // rejects the mismatch; keeping the defsig binding here restores parity.
-    // For every well-typed program the defsig type and the body stamp agree, so
-    // this skip is a no-op except on exactly the mismatch that must be rejected.
-    let defsig_names: chelis_unord::UnordSet<&str> = items
-        .iter()
-        .filter_map(|(_, expr)| match stamped_parts(expr) {
-            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        })
-        .collect();
-
-    let mut prebound_type_failures = UnordMap::new();
-    for (name, ty_expr) in &collected_ir_types.type_env {
-        let metadata_level = state.subst.enter_level(&state.var_gen);
-        let resolved = resolve_deep_type(
-            ty_expr,
-            &mut state.var_gen,
-            &state.adt_reg,
-            TypeUseSite::CompilerMetadata,
-            BinderMode::TrustedCompilerMetadata,
-            errors,
-        );
-        state.subst.leave_level(metadata_level, &state.var_gen);
-        match resolved {
-            Ok(ty) => {
-                if defsig_names.contains(name.as_str()) {
-                    // Preserve the defsig-derived binding (chelis#1124); do not
-                    // overwrite the declared signature with the body's stamp.
-                    continue;
-                }
-                let scheme = state.env.generalize(&ty, &state.subst);
-                state.env.bind(name.clone(), scheme);
-            }
-            Err(witness) => {
-                // The prebinding pass owns this diagnostic. Carry its witness
-                // into the matching def-body pass so a literal/ascription
-                // consumer propagates the same failure instead of resolving
-                // the cloned metadata and reporting it a second time.
-                let declaration_index = collected_ir_types.final_origin_by_name[name];
-                prebound_type_failures.insert(declaration_index, witness);
-            }
-        }
-    }
-
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
     // one stderr line per top-level decl with its name and inference time.
     // Aggregated by name in caller scripts to attribute cost per module.
@@ -1561,11 +1481,22 @@ pub(super) fn infer_ir_program_with_state(
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
-    let metadata_prebound_names = collected_ir_types
-        .type_env
-        .keys()
-        .cloned()
-        .collect::<UnordSet<_>>();
+    // PP9 uses the same two bounded prebind capabilities at both entries:
+    // [04-INF-4] external-input ascriptions are declaration-local, while a
+    // defsig-less function body stamp supplies the callable header that
+    // [04-INF-2]/[04-INF-3] make forward-visible. Eager values are never
+    // prebound from body metadata, preserving #1134's source-order rule.
+    let external_input_types = collect_literal_external_input_types(&items);
+    let (metadata_prebound_names, function_metadata_failures) =
+        prebind_defsig_less_function_body_types(
+            &items,
+            &declared_signatures,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &state.adt_reg,
+            errors,
+        );
     let top_level_references = TopLevelReferenceGraph::build(&items);
     product.function_inference_plan =
         FunctionInferencePlan::build_from_reference_graph(&top_level_references);
@@ -1661,12 +1592,20 @@ pub(super) fn infer_ir_program_with_state(
             state
                 .env
                 .set_current_declaration_ordinal(Some(declaration_index));
-            // An explicitly typed self-reference (`x = (x : T)`) needs no
-            // separate external-input prebind at this ingress: its body stamp
-            // is in `collected_ir_types`, so the loop above already bound it
-            // or recorded its resolution failure. Resolving the same type
-            // expression again here would report that failure twice and
-            // split the ingresses on exactly the input [04-INF-4] aligns.
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
+            let prebound_type_failure = external_input_failure
+                .as_ref()
+                .or_else(|| function_metadata_failures.get(&declaration_index));
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1675,7 +1614,7 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
                 &mut product,
-                prebound_type_failures.get(&declaration_index),
+                prebound_type_failure,
                 provisional_types
                     .get(&declaration_index)
                     .map(recursion::RecursiveExpected::Provisional),
@@ -1778,24 +1717,6 @@ pub(super) fn infer_ir_program_with_state(
         // program and spend the phase's remaining budget doing it. The caller's
         // `cancellation_gate` turns this early return into a hard failure.
         return product;
-    }
-
-    for warning in chelis_deep::validate::validate(exprs) {
-        errors.push(
-            CheckError::new(
-                match warning.kind {
-                    chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
-                    _ => CheckErrorKind::Other,
-                },
-                warning.message,
-                vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
-            )
-            .at_offset(warning.offset),
-        );
-    }
-
-    if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, &top_level_references, errors);
     }
 
     product.top_level_references = top_level_references;
@@ -2316,6 +2237,63 @@ fn collect_literal_external_input_types(
                 .then(|| (declaration_index, ty_expr.clone()))
         })
         .collect()
+}
+
+/// Prebind the compiler-authored type stamp of each defsig-less function at
+/// both checker entries.
+///
+/// [04-INF-2]/[04-INF-3] make function declarations forward-visible, and a
+/// defsig-less serialized function has no other callable header. Restricting
+/// this prebind to function bodies keeps [04-INF-4]'s eager-value scope
+/// source-ordered. An explicit `defsig` remains authoritative and is never
+/// overwritten by body metadata (#1124).
+#[allow(clippy::too_many_arguments)]
+fn prebind_defsig_less_function_body_types(
+    items: &[(Option<String>, &deep::Expr)],
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> (UnordSet<String>, UnordMap<usize, ErrorWitness>) {
+    let CollectedIrTypes {
+        type_env,
+        final_origin_by_name,
+    } = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let mut prebound_names = UnordSet::new();
+    let mut failures = UnordMap::new();
+    for (name, ty_expr) in type_env {
+        let Some(&declaration_index) = final_origin_by_name.get(&name) else {
+            continue;
+        };
+        if declared_signatures.contains_key(&name)
+            || !definition_owns_function_metadata_prebind(items[declaration_index].1)
+        {
+            continue;
+        }
+        prebound_names.insert(name.clone());
+        let metadata_level = subst.enter_level(vg);
+        let resolved = resolve_deep_type(
+            &ty_expr,
+            vg,
+            adt_reg,
+            TypeUseSite::CompilerMetadata,
+            BinderMode::TrustedCompilerMetadata,
+            errors,
+        );
+        subst.leave_level(metadata_level, vg);
+        match resolved {
+            Ok(ty) => {
+                let scheme = env.generalize(&ty, subst);
+                env.bind(name, scheme);
+            }
+            Err(witness) => {
+                failures.insert(declaration_index, witness);
+            }
+        }
+    }
+    (prebound_names, failures)
 }
 
 /// [04-INF-4]'s typed literal self-reference declares an external input. Its

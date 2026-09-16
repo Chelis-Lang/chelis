@@ -2043,7 +2043,6 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 /// | conv output type   | `derive_conv_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
 /// | conv output type   | `derive_conv_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
 /// | conv validator     | `conv_parameters`| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
-/// | conv axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
 /// | softmax axis         | softmax arm (~7630)                  | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
 /// | shape axis           | shape arm (~8238)                    | yes (issue #206)     | non-neg + rank bounds     | yes (eval)           |
 /// | split axis           | split arm (~8959)                    | yes                  | rank bounds + diagnostic  | yes (eval)           |

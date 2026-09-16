@@ -317,13 +317,11 @@ out = layer_norm(&x, &g, &b, 0.00001f32)
 // Case 3 -- conv on [1, 3, 8, 8] with kernel [8, 3, 3, 3], stride=1,
 // padding=0. Output shape per `floor((in + 2p - k) / s) + 1` = [1, 8, 6, 6].
 //
-// `conv`'s typer (`crates/chelis-types/src/infer.rs::
-// conv_input_dims_concrete_modulo_batch`) needs explicit shape metadata
-// on the call site, so the fixture wraps the call in a typed `def` whose
-// parameters carry the full tensor[...] shape. The eval pipeline is
-// driven with `eval_surf_selected` so the formal-parameter binding in
-// `def run_conv` doesn't trip the "missing input" path -- only the
-// `out` root is forward-evaluated.
+// The fixture wraps the call in a typed `def` whose parameters carry the
+// full tensor[...] shape used by convolution inference and evaluation. The
+// eval pipeline is driven with `eval_surf_selected` so the formal-parameter
+// binding in `def run_conv` doesn't trip the "missing input" path -- only
+// the `out` root is forward-evaluated.
 //
 // In addition to the elementwise reference comparison against the pure-
 // Rust conv reference (locking the wiring against silent corruption),

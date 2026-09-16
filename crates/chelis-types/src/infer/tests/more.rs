@@ -597,7 +597,7 @@ fn checked_program_annotates_apps_and_updates_type_env() {
 }
 
 #[test]
-fn ir_rejects_symbolic_normalized_axis_for_layer_norm() {
+fn ir_accepts_symbolic_normalized_axis_for_layer_norm() {
     let exprs = chelis_deep::parser::parse_str(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
@@ -605,14 +605,8 @@ fn ir_rejects_symbolic_normalized_axis_for_layer_norm() {
          (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
     )
     .unwrap();
-    let err = check_ir_program(&exprs).expect_err("symbolic hidden axis should be rejected");
-    assert!(
-        err.errors
-            .iter()
-            .any(|error| error.message.contains("concrete normalized axis extent")),
-        "expected layer_norm symbolic normalized-axis error, got: {:?}",
-        err.errors
-    );
+    check_ir_program(&exprs)
+        .expect("symbolic normalized-axis metadata is legal at the language checker");
 }
 
 #[test]

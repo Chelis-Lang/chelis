@@ -240,11 +240,9 @@ fn matmul_unbound_operand_single_diagnostic_no_accept() {
 
 #[test]
 fn conv_unbound_operand_rejected_no_accept_no_ice() {
-    // conv additionally carries a pre-existing IR-fitness validator
-    // (`validate_conv`, issue #186) that fires on non-concrete argument
-    // metadata, independent of and untouched by the #784 guard. So the
-    // correct rejection here is TWO diagnostics: the unbound var plus the
-    // conv metadata validator. Not a flood, not a silent accept, no ICE.
+    // PP9 removes the backend-only concrete-metadata refusal from the
+    // language checker. The authored unbound operand remains one loud error;
+    // the old capability diagnostic must not survive as a cascade.
     let msgs = reject_messages(
         "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv(missing_x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n  cast(0.0, f32)\n}\n",
         "conv main-pass",
@@ -254,16 +252,11 @@ fn conv_unbound_operand_rejected_no_accept_no_ice() {
             .any(|m| m.contains("unbound variable") && m.contains("missing_x")),
         "conv main-pass: must report the unbound var; got {msgs:?}",
     );
-    let non_unbound: Vec<_> = msgs
-        .iter()
-        .filter(|m| !m.contains("unbound variable"))
-        .collect();
     assert!(
-        non_unbound
+        !msgs
             .iter()
-            .all(|m| m.contains("conv") && m.contains("concrete tensor argument metadata")),
-        "conv main-pass: the only non-unbound diagnostic must be the #186 metadata \
-         validator (no flood, no leaked bare-var cascade); got {msgs:?}",
+            .any(|m| m.contains("concrete tensor argument metadata")),
+        "conv main-pass: a backend capability restriction must not leak into checking; got {msgs:?}",
     );
     assert!(
         !msgs

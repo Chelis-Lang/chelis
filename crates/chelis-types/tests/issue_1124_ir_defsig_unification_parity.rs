@@ -7,8 +7,9 @@
 //! authoritative binding a `(defsig ...)` had already installed. The later
 //! body-vs-declared unification in `infer_top_level` then compared the body
 //! against itself, so a `defsig`/body type mismatch was SILENTLY ACCEPTED by
-//! the IR ingress while `check_typed_program` (which has no such prebind)
-//! rejected it. This was a verified fail-open in the shipped checker.
+//! the IR ingress while the typed ingress rejected it. This was a verified
+//! fail-open in the shipped checker. PP9 gives both entries one function-only
+//! metadata prebind that never overwrites an explicit signature.
 //!
 //! The contract these tests lock: for every input the IR ingress
 //! (`check_ir_program`) and the typed ingress (`check_typed_program`) produce
@@ -109,10 +110,9 @@ fn ir_ingress_accepts_matching_defsig_body_like_typed_ingress() {
     );
 }
 
-/// Over-rejection guard for the prebind's actual job: a `defsig`-less def is
-/// still bound from its body type stamp for cross-reference resolution, so it
-/// must remain accepted by both ingresses. The chelis#1124 fix only suppresses
-/// the overwrite for names that already carry a `defsig`.
+/// Over-rejection guard: an ordinary `defsig`-less def remains accepted at
+/// both ingresses. Function body stamps have the separate forward-call role
+/// below; eager values do not receive module-wide metadata scope.
 #[test]
 fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
     let ir = ir_diagnostics(NO_DEFSIG);
@@ -140,10 +140,8 @@ fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
 ///
 /// It reads a FUNCTION deliberately. [04-INF-4] governs non-function `def`s
 /// only, so the equivalent value shape below is now a rejection at both
-/// ingresses and can no longer observe the prebind. Asserted against the IR
-/// ingress ONLY: the body-stamp prebind is a capability the IR ingress has and
-/// the typed ingress does not, and that difference is pre-existing and
-/// orthogonal to both issues.
+/// ingresses and can no longer observe the prebind. PP9 / [04-TOT-5] makes
+/// this function-metadata capability common to both checker entries.
 const DEFSIG_LESS_FORWARD_FN: &str = "(def {} caller (fn {} (params {}) (app {} (var {} helper))))\n\n\
      (def {} helper (fn {type: (t-fn {} (t-prim {} int32))} (params {}) \
      (lit {type: (t-prim {} int32)} 1)))\n";
@@ -156,11 +154,16 @@ const DEFSIG_LESS_FORWARD_FN: &str = "(def {} caller (fn {} (params {}) (app {} 
 #[test]
 fn ir_ingress_resolves_defsig_less_forward_function_reference() {
     let ir = ir_diagnostics(DEFSIG_LESS_FORWARD_FN);
+    let typed = typed_diagnostics(DEFSIG_LESS_FORWARD_FN);
 
+    assert_eq!(
+        ir, typed,
+        "PP9 requires ingress parity for forward functions"
+    );
     assert!(
         ir.is_empty(),
         "a defsig-less forward function reference must remain accepted by the \
-         IR ingress (the prebind binds the referenced def from its body stamp), \
+         checker (the shared prebind binds the referenced def from its body stamp), \
          got: {ir:?}"
     );
 }

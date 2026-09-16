@@ -6,24 +6,24 @@
 use super::shape_honesty::*;
 use super::*;
 
-pub(super) fn validate_ir_program(
+/// The ordered semantic pass protocol shared by every public checker entry.
+///
+/// PP9 / [04-TOT-5] keeps language-required checks here and leaves backend
+/// capability refusals to their owning lowering stages. Callers supply the
+/// declaration-type view appropriate to their context; the program carrier is
+/// preserved and every reader in this protocol must consume it structurally.
+pub(super) fn validate_semantic_program(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     top_level_references: &TopLevelReferenceGraph,
     errors: &mut DiagnosticSink<'_>,
 ) {
     top_level_references.report_initialization_errors(errors);
-    detect_trivial_non_terminating_fns(exprs, errors);
     validate_core_transform_fragment(exprs, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);
     let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
-    // Names of let-bindings whose RHS validation already emitted a
-    // diagnostic (so their derived output type is unknown). Downstream
-    // shape-sensitive calls that consume such a name emit a redundant
-    // cascade diagnostic; suppress it. See RT-205 round-2 F3.
-    let mut failed_let_names: UnordSet<String> = UnordSet::new();
     // chelis#930: per-top-level-declaration cancellation, same grain as
     // inference. Without it this validator is one uninterruptible step whose
     // cost grows with the program, and interrupt latency is bounded by the
@@ -38,7 +38,6 @@ pub(super) fn validate_ir_program(
             expr,
             &shape_env,
             &mut static_env,
-            &mut failed_let_names,
             &declared_signatures,
             errors,
         );
@@ -414,289 +413,6 @@ fn validate_core_transform_target(
     ));
 }
 
-/// Detect fn defs whose body is a direct self-call with no conditional
-/// guard — e.g. `def a(x) = a(x)`. These are guaranteed non-terminating
-/// when called and, because the DAG lowerer can't represent recursion,
-/// get silently elided to an identity in the generated C (source/object
-/// divergence). Flag at check time so the user sees a clear error
-/// instead of shipping a program that means something else than written.
-///
-/// This only catches the most trivial shape — a body that is literally
-/// `(app (var name) ...)` with the def's own name as the callee. Real
-/// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
-/// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
-pub(super) fn detect_trivial_non_terminating_fns(
-    exprs: &[deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
-) {
-    // Collect each def's "terminal callees" — the top-level fn names
-    // reached at every tail position of the body. `Some(set)` means
-    // every tail is a call; the set is who's called. `None` means the
-    // body has at least one non-call tail (a base case exists).
-    let mut terminal_callees: UnordMap<String, Option<UnordSet<String>>> = UnordMap::new();
-    let mut def_order: Vec<String> = Vec::new();
-    for expr in top_level_decl_items(exprs) {
-        // chelis#1107 amendment: carrier-preserving read.
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(body) = kids.get(1) else { continue };
-        // Check params for a name that shadows the def — a body that
-        // terminal-calls a shadowed name is NOT self-recursion.
-        let mut shadows: UnordSet<String> = UnordSet::new();
-        if let deep::Expr::List(fn_list, _) = body
-            && get_tag(fn_list) == Some(DeepTag::Fn)
-            && let Some(deep::Expr::List(params, _)) = children(fn_list).first()
-            && get_tag(params) == Some(DeepTag::Params)
-        {
-            for param in children(params) {
-                if let Some(pname) = param_name_for_refs(param) {
-                    shadows.insert(pname);
-                }
-            }
-        }
-        let fn_body = match body {
-            deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => {
-                children(list).get(1)
-            }
-            _ => None,
-        };
-        let entry = if let Some(fn_body) = fn_body {
-            let mut callees: UnordSet<String> = UnordSet::new();
-            if collect_terminal_callees(fn_body, &shadows, &mut callees) {
-                Some(callees)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        def_order.push(name.to_string());
-        terminal_callees.insert(name.to_string(), entry);
-    }
-
-    // Greatest-fixed-point: start with ALL defs whose every tail is a
-    // call (no base case) and iteratively remove any def that calls out
-    // to a base-case def (outside the candidate set). What survives is
-    // a closed recursion group with no base case anywhere.
-    let mut non_terminating: UnordSet<String> = terminal_callees
-        .to_sorted()
-        .into_iter()
-        .filter_map(|(name, callees)| {
-            callees.as_ref().and_then(|set| {
-                if set.is_empty() {
-                    None
-                } else {
-                    Some(name.clone())
-                }
-            })
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        let snapshot: Vec<String> = non_terminating.to_sorted().into_iter().cloned().collect();
-        for name in &snapshot {
-            let Some(Some(callees)) = terminal_callees.get(name) else {
-                non_terminating.remove(name);
-                changed = true;
-                continue;
-            };
-            // Every callee must either be `name` itself OR remain in the
-            // non_terminating candidate set. If any callee has a known
-            // base case (isn't in non_terminating), this def has an
-            // escape route and isn't trivially non-terminating.
-            let ok = callees
-                .to_sorted()
-                .into_iter()
-                .all(|callee| callee == name || non_terminating.contains(callee));
-            if !ok {
-                non_terminating.remove(name);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for name in &def_order {
-        if non_terminating.contains(name) {
-            errors.push(CheckError::new(
-                CheckErrorKind::CycleDetected,
-                format!(
-                    "def `{name}` is trivially non-terminating. Every tail position \
-                     calls back into the same recursion group `{name}` with no base case; \
-                     add an `if`/`match` exit that returns without recursing"
-                ),
-                vec![
-                    "Trivial (self- or mutual-) recursion without a base case isn't \
-                     representable in the Phase 0 DAG lowering and would compile to \
-                     an infinite loop or silent identity."
-                        .to_string(),
-                ],
-            ));
-        }
-    }
-}
-
-/// Walk `expr` and, for every terminal (tail) position, record the name
-/// called (if the tail is `(app (var Y) ...)`). Returns `true` if EVERY
-/// terminal is a call (no base-case leaf); `false` if any terminal is a
-/// non-call (literal, var-read, tuple, etc.) — a base case exists.
-pub(super) fn collect_terminal_callees(
-    expr: &deep::Expr,
-    shadowed: &UnordSet<String>,
-    out: &mut UnordSet<String>,
-) -> bool {
-    stack_guard!("collect_terminal_callees", expr, false);
-    match expr {
-        deep::Expr::MetaExpr(meta, _) => collect_terminal_callees(&meta.expr, shadowed, out),
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                let Some(callee) = kids.first() else {
-                    return false;
-                };
-                // chelis#1107 amendment: carrier-preserving read.
-                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
-                    return false;
-                };
-                let Some(cname) = callee_kids.first().and_then(symbol_name) else {
-                    return false;
-                };
-                if shadowed.contains(cname) {
-                    return false;
-                }
-                out.insert(cname.to_string());
-                true
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                kids.get(1)
-                    .map(|body| collect_terminal_callees(body, shadowed, out))
-                    .unwrap_or(false)
-            }
-            Some(DeepTag::If) => {
-                let kids = children(list);
-                if kids.len() < 3 {
-                    return false;
-                }
-                let then_ok = collect_terminal_callees(&kids[1], shadowed, out);
-                let else_ok = collect_terminal_callees(&kids[2], shadowed, out);
-                then_ok && else_ok
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return false;
-                }
-                kids.iter().skip(1).all(|arm| {
-                    if let deep::Expr::List(arm_list, _) = arm
-                        && get_tag(arm_list) == Some(DeepTag::Arm)
-                    {
-                        children(arm_list)
-                            .get(2)
-                            .map(|body| collect_terminal_callees(body, shadowed, out))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                })
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
-    let fn_list = match def_body {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => list,
-        _ => return false,
-    };
-    // If any fn param shadows the def name, the callee reference inside
-    // the body refers to the param (a callable HOF argument), not the def
-    // itself. This is a legitimate HOF call, not recursion.
-    if let Some(params_list) = children(fn_list).first()
-        && let deep::Expr::List(params, _) = params_list
-        && get_tag(params) == Some(DeepTag::Params)
-    {
-        for param in children(params) {
-            if param_name_for_refs(param).as_deref() == Some(def_name) {
-                return false;
-            }
-        }
-    }
-    let Some(body) = children(fn_list).get(1) else {
-        return false;
-    };
-    every_terminal_is_self_call(body, def_name)
-}
-
-/// True when every terminal (tail) position of `expr` is a direct call
-/// to `def_name`. Walks through `let` bodies, both arms of `if`, and
-/// every `match` arm body. Any non-self-call terminal (a literal, a
-/// different fn call, a non-self var) makes this false — that terminal
-/// is a potential base case and the recursion isn't trivial.
-#[allow(dead_code)]
-pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
-    stack_guard!("every_terminal_is_self_call", expr, false);
-    match expr {
-        deep::Expr::MetaExpr(meta, _) => every_terminal_is_self_call(&meta.expr, def_name),
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                let Some(callee) = kids.first() else {
-                    return false;
-                };
-                // chelis#1107 amendment: carrier-preserving read.
-                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
-                    return false;
-                };
-                callee_kids.first().and_then(symbol_name) == Some(def_name)
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                kids.get(1)
-                    .map(|body| every_terminal_is_self_call(body, def_name))
-                    .unwrap_or(false)
-            }
-            Some(DeepTag::If) => {
-                let kids = children(list);
-                if kids.len() < 3 {
-                    return false;
-                }
-                every_terminal_is_self_call(&kids[1], def_name)
-                    && every_terminal_is_self_call(&kids[2], def_name)
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return false;
-                }
-                kids.iter().skip(1).all(|arm| {
-                    if let deep::Expr::List(arm_list, _) = arm
-                        && get_tag(arm_list) == Some(DeepTag::Arm)
-                    {
-                        children(arm_list)
-                            .get(2)
-                            .map(|body| every_terminal_is_self_call(body, def_name))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                })
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// Yield each top-level declaration, flattening through a `(module {} name ...)`
 /// wrapper if present. Deep sources produced by Surf `module X` desugaring
 /// have every def/defsig/deftype inside this wrapper; without flattening,
@@ -1015,7 +731,6 @@ pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &mut UnordMap<String, StaticValue>,
-    failed_let_names: &mut UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
@@ -1024,14 +739,7 @@ pub(super) fn validate_ir_expr(
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some(DeepTag::Module) {
                 for elem in list.elements.iter().skip(3) {
-                    validate_ir_expr(
-                        elem,
-                        type_env,
-                        static_env,
-                        failed_let_names,
-                        declared_signatures,
-                        errors,
-                    );
+                    validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
                 }
                 return StaticValue::Unknown;
             }
@@ -1054,7 +762,6 @@ pub(super) fn validate_ir_expr(
                     value_expr,
                     signature_env.as_ref().unwrap_or(type_env),
                     static_env,
-                    failed_let_names,
                     declared_signatures,
                     errors,
                 );
@@ -1070,7 +777,6 @@ pub(super) fn validate_ir_expr(
                         elem,
                         &scoped_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
@@ -1092,7 +798,6 @@ pub(super) fn validate_ir_expr(
                         elem,
                         type_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
@@ -1109,25 +814,17 @@ pub(super) fn validate_ir_expr(
                 // bound `y = conv(...)` and silently rejects the next
                 // shape-sensitive call that consumes `y` (RT-205 F5).
                 let mut scoped_type_env = type_env.clone();
-                if let Some(deep::Expr::List(bind_list, _)) = kids.first()
-                    && get_tag(bind_list) == Some(DeepTag::Bind)
+                if let Some(bind_expr) = kids.first()
+                    && let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(bind_expr)
                 {
-                    let bind_children = children(bind_list);
                     let mut index = 0;
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
                             let value_expr = &bind_children[index + 1];
-                            // Recurse into the RHS so its own validation
-                            // can push diagnostics and suppress downstream
-                            // cascade errors via `failed_let_names` (set
-                            // below when the RHS is a recognized
-                            // shape-sensitive form whose output type is
-                            // non-derivable, RT-205 round-4 / issue #212).
                             let value = validate_ir_expr(
                                 value_expr,
                                 &scoped_type_env,
                                 &mut scoped_static_env,
-                                failed_let_names,
                                 declared_signatures,
                                 errors,
                             );
@@ -1137,7 +834,6 @@ pub(super) fn validate_ir_expr(
                                 value_expr,
                                 &mut scoped_type_env,
                                 &scoped_static_env,
-                                failed_let_names,
                             );
                         }
                         index += 2;
@@ -1148,7 +844,6 @@ pub(super) fn validate_ir_expr(
                         body,
                         &scoped_type_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
@@ -1165,13 +860,7 @@ pub(super) fn validate_ir_expr(
                     && let Some(func_name) = active_ir_builtin_name(list, static_env)
                     && is_ir_shape_sensitive_builtin(func_name)
                 {
-                    validate_ir_builtin_symbolic_requirements(
-                        list,
-                        func_name,
-                        type_env,
-                        failed_let_names,
-                        errors,
-                    );
+                    validate_ir_builtin_semantic_requirements(list, func_name, type_env, errors);
                 }
             }
 
@@ -1195,14 +884,7 @@ pub(super) fn validate_ir_expr(
                 return kids
                     .first()
                     .map(|inner| {
-                        validate_ir_expr(
-                            inner,
-                            type_env,
-                            static_env,
-                            failed_let_names,
-                            declared_signatures,
-                            errors,
-                        )
+                        validate_ir_expr(inner, type_env, static_env, declared_signatures, errors)
                     })
                     .unwrap_or(StaticValue::Unknown);
             }
@@ -1216,14 +898,7 @@ pub(super) fn validate_ir_expr(
                     .iter()
                     .skip(1)
                     .map(|arg| {
-                        validate_ir_expr(
-                            arg,
-                            type_env,
-                            static_env,
-                            failed_let_names,
-                            declared_signatures,
-                            errors,
-                        )
+                        validate_ir_expr(arg, type_env, static_env, declared_signatures, errors)
                     })
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
@@ -1240,46 +915,24 @@ pub(super) fn validate_ir_expr(
             }
 
             for elem in &list.elements {
-                validate_ir_expr(
-                    elem,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             map.visit_syntax(&mut |_, value| {
-                validate_ir_expr(
-                    value,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
             });
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             meta.metadata.visit_syntax(&mut |_, value| {
-                validate_ir_expr(
-                    value,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
             });
             validate_ir_expr(
                 &meta.expr,
                 type_env,
                 static_env,
-                failed_let_names,
                 declared_signatures,
                 errors,
             )
@@ -1288,39 +941,18 @@ pub(super) fn validate_ir_expr(
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
             let bridged = deep::Expr::List(node.to_list(*span), *span);
-            validate_ir_expr(
-                &bridged,
-                type_env,
-                static_env,
-                failed_let_names,
-                declared_signatures,
-                errors,
-            )
+            validate_ir_expr(&bridged, type_env, static_env, declared_signatures, errors)
         }
         deep::Expr::BareList(elems, _) => {
             let mut last = StaticValue::Unknown;
             for child in elems {
-                last = validate_ir_expr(
-                    child,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                last = validate_ir_expr(child, type_env, static_env, declared_signatures, errors);
             }
             last
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                validate_ir_expr(
-                    child,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                validate_ir_expr(child, type_env, static_env, declared_signatures, errors);
             }
             StaticValue::Unknown
         }
@@ -1534,131 +1166,6 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-/// Is `name` a unary shape-passthrough op for the purposes of let-RHS
-/// recognition? Must match the unary arm of
-/// `derive_ir_builtin_output_type` so the failed-marker insertion in
-/// the let arm covers the same surface as the type-derivation
-/// passthrough recognition (issue #212 / RT-205 round-4).
-pub(super) fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "relu"
-            | "tanh"
-            | "sigmoid"
-            | "gelu"
-            | "silu"
-            | "exp"
-            | "log"
-            | "neg"
-            | "recip"
-            | "sqrt"
-            | "abs"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "atan"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "not"
-            | "softmax"
-    )
-}
-
-/// Is `name` a binary shape-passthrough op? Must match the binary arm
-/// of `derive_ir_builtin_output_type` for the same reason as
-/// `is_ir_unary_shape_passthrough_builtin` (issue #212 / RT-205
-/// round-4).
-pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "add"
-            | "sub"
-            | "mul"
-            | "div"
-            | "max_elem"
-            | "min_elem"
-            | "cmplt"
-            | "lt"
-            | "gt"
-            | "gte"
-            | "lte"
-            | "eq"
-            | "neq"
-            | "and"
-            | "or"
-    )
-}
-
-/// Recognise a let-RHS expression as a "shape-sensitive form" for the
-/// purposes of cascade-suppression marker insertion: either a direct
-/// recognised shape-sensitive IR builtin, or a unary/binary shape-
-/// passthrough wrapper around one (recursively). Peeks through
-/// borrow wrappers like the rest of the validator.
-///
-/// Returns true when, structurally, this RHS shape COULD have a
-/// derivable output type via `derive_ir_builtin_output_type` -- which since
-/// chelis#668 means a shape-sensitive callee that also has an arm in that
-/// function, not merely a shape-sensitive one; the
-/// caller pairs this with `derived.is_none()` to detect the "should
-/// have derived but didn't" failure mode (issue #212 / RT-205
-/// round-4). The decoupled structural check means we no longer
-/// depend on whether the RHS validation pushed a diagnostic at this
-/// level: cascade-suppressed intermediate let-binders are still
-/// marked failed so the suppression propagates unboundedly down the
-/// chain.
-pub(super) fn let_rhs_is_recognized_shape_sensitive(
-    expr: &deep::Expr,
-    static_env: &UnordMap<String, StaticValue>,
-) -> bool {
-    stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
-    let inner = peel_borrow(expr);
-    // chelis#1107 amendment: carrier-preserving read.
-    let Some((DeepTag::App, _, kids)) = stamped_parts(inner) else {
-        return false;
-    };
-    let Some(func_name) = kids.first().and_then(ir_builtin_name_of_expr) else {
-        return false;
-    };
-    if !compiler_name_is_active(func_name, static_env) {
-        return false;
-    }
-    // Both halves are required. `is_ir_shape_sensitive_builtin` alone would
-    // mark `y = expand(...)`, `insert`, and `stride` as failed derivations
-    // although this validator no longer derives anything for them, and a
-    // marked name silences the whole `conv` validator downstream
-    // (chelis#668 round-1 P0). `ir_builtin_has_output_type_derivation` alone
-    // would mark every `y = relu(x)`, because the Identity fallthrough has an
-    // arm for `relu` while the recursion below is what is meant to reach it.
-    if is_ir_shape_sensitive_builtin(func_name) && ir_builtin_has_output_type_derivation(func_name)
-    {
-        return true;
-    }
-    if is_ir_unary_shape_passthrough_builtin(func_name)
-        && let Some(arg) = kids.get(1)
-    {
-        return let_rhs_is_recognized_shape_sensitive(arg, static_env);
-    }
-    if is_ir_binary_shape_passthrough_builtin(func_name) {
-        // Either operand being a recognised shape-sensitive form is
-        // sufficient: the passthrough derivation uses the first
-        // resolvable operand's type and falls through to the second,
-        // so a failed inner shape-sensitive call on either side
-        // means the whole RHS is structurally broken.
-        if let Some(lhs) = kids.get(1)
-            && let_rhs_is_recognized_shape_sensitive(lhs, static_env)
-        {
-            return true;
-        }
-        if let Some(rhs) = kids.get(2)
-            && let_rhs_is_recognized_shape_sensitive(rhs, static_env)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     stack_guard!("expr_type_expr", expr, None);
     match expr {
@@ -1748,104 +1255,15 @@ pub(super) fn extend_ir_env_with_fn_params(
     scoped
 }
 
-pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &ShapeTypeEnv) -> bool {
-    // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
-    // not silently bypass the dim-concreteness check.
-    arg_tensor_type_expr(expr, type_env)
-        .map(|ty| type_expr_is_ir_concrete(&ty))
-        .unwrap_or(false)
-}
-
-/// Static-lowering metadata for convolution: every non-batch extent must
-/// be concrete. The batch dimension retains its symbolic identity during
-/// checking; support for its execution is a separate target obligation.
-pub(super) fn conv_input_dims_concrete_modulo_batch(
-    expr: Option<&deep::Expr>,
-    type_env: &ShapeTypeEnv,
-) -> bool {
-    let Some(expr) = expr else {
-        return false;
-    };
-    let Some(ty) = arg_tensor_type_expr(expr, type_env) else {
-        return false;
-    };
-    let Some(dims) = tensor_dims_from_type_expr(&ty) else {
-        // Not a tensor; fall back to scalar-prim check.
-        return type_expr_is_ir_concrete(&ty);
-    };
-    if dims.len() < 3 {
-        // Rank mismatch is reported separately; return true so the
-        // signature rank guard can fire instead of
-        // suppressing it with a metadata error.
-        return true;
-    }
-    // Every channel/spatial axis must be concrete; batch may be symbolic.
-    dims[1..].iter().all(|d| matches!(d, DeepDimKind::Lit(_)))
-}
-
-pub(super) fn validate_ir_builtin_symbolic_requirements(
+pub(super) fn validate_ir_builtin_semantic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &ShapeTypeEnv,
-    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    match func_name {
-        "conv" => validate_conv_symbolic_requirements(list, type_env, failed_let_names, errors),
-        "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                "IR builtin `mean` requires a concrete reduced axis extent".to_string(),
-                vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
-            ));
-        }
-        "layer_norm" => {
-            let x_dims = list
-                .elements
-                .get(3)
-                .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-                .and_then(|ty| tensor_dims_from_type_expr(&ty));
-            if matches!(
-                x_dims.as_ref().and_then(|dims| dims.last()),
-                Some(DeepDimKind::NonConcrete)
-            ) {
-                errors.push(validator_error(
-                    CheckErrorKind::DimensionMismatch,
-                    list,
-                    "IR builtin `layer_norm` requires a concrete normalized axis extent"
-                        .to_string(),
-                    vec!["Use a concrete d-lit dimension for the final axis".to_string()],
-                ));
-            }
-        }
-        _ => {}
+    if func_name == "conv" {
+        validate_conv_semantic_requirements(list, type_env, errors);
     }
-}
-
-/// Return `true` if any of `list`'s tensor arguments (positional 3, 4)
-/// is a `(var <name>)` whose `name` is in `failed_let_names`. Used by
-/// `validate_conv_symbolic_requirements` to suppress the cascade
-/// diagnostic when a let-bound name's own derivation already emitted
-/// the owning diagnostic (RT-205 round-2 F3).
-pub(super) fn conv_input_is_failed_let_name(
-    list: &deep::List,
-    failed_let_names: &UnordSet<String>,
-) -> bool {
-    if failed_let_names.is_empty() {
-        return false;
-    }
-    for arg in list.elements.iter().skip(3).take(2) {
-        let inner = peel_borrow(arg);
-        if let deep::Expr::List(arg_list, _) = inner
-            && get_tag(arg_list) == Some(DeepTag::Var)
-            && let Some(name) = children(arg_list).first().and_then(symbol_name)
-            && failed_let_names.contains(name)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Build a `CheckError` for a validator-arm diagnostic that
@@ -1900,56 +1318,40 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
         .and_then(|(start, _)| start.parse::<usize>().ok())
 }
 
-/// Backend shape requirements of the canonical convolution call. The checker
-/// diagnoses invalid ranks/types; this pass owns static lowering obligations.
-pub(super) fn validate_conv_symbolic_requirements(
+/// [05-OP-51] check-time obligations for canonical convolution.
+///
+/// Literal-provable stride, padding, kernel, fit, and arithmetic failures are
+/// type errors. Symbolic tensor extents and runtime stride/padding metadata are
+/// legal language inputs and retain runtime guards; backend capability limits
+/// are not checker signatures.
+pub(super) fn validate_conv_semantic_requirements(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
-    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let [_, _, _, input, kernel, strides, padding] = list.elements.as_slice() else {
         return;
     };
-    if conv_input_is_failed_let_name(list, failed_let_names) {
-        return;
-    }
-    if !conv_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
-        || !expr_tensor_type_is_concrete(kernel, type_env)
-    {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            "IR builtin `conv` requires concrete tensor argument metadata".to_string(),
-            vec![],
-        ));
-        return;
-    }
-    let Some(input_dims) =
-        arg_tensor_type_expr(input, type_env).and_then(|t| tensor_dims_from_type_expr(&t))
-    else {
+    let input_dims =
+        arg_tensor_type_expr(input, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let kernel_dims =
+        arg_tensor_type_expr(kernel, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let spatial_rank = input_dims
+        .as_ref()
+        .or(kernel_dims.as_ref())
+        .and_then(|dims| dims.len().checked_sub(2))
+        .filter(|rank| *rank > 0)
+        .or_else(|| {
+            collect_shape_list_elements(strides)
+                .map(|entries| entries.len())
+                .or_else(|| collect_shape_list_elements(padding).map(|entries| entries.len()))
+        });
+    let Some(spatial_rank) = spatial_rank else {
         return;
     };
-    let Some(kernel_dims) =
-        arg_tensor_type_expr(kernel, type_env).and_then(|t| tensor_dims_from_type_expr(&t))
-    else {
-        return;
-    };
-    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
-        return;
-    }
-    let params = match conv_parameters(strides, padding, input_dims.len() - 2) {
+    let params = match conv_parameters(strides, padding, spatial_rank) {
         Ok(Some(params)) => params,
-        Ok(None) => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                "IR builtin `conv` requires literal per-axis stride and padding metadata"
-                    .to_string(),
-                vec![],
-            ));
-            return;
-        }
+        Ok(None) => return,
         Err(message) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
@@ -1960,16 +1362,19 @@ pub(super) fn validate_conv_symbolic_requirements(
             return;
         }
     };
+    let (Some(input_dims), Some(kernel_dims)) = (input_dims, kernel_dims) else {
+        return;
+    };
+    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
+        return;
+    }
     for (axis, ((input, kernel), (stride, low, high))) in input_dims[2..]
         .iter()
         .zip(&kernel_dims[2..])
         .zip(params)
         .enumerate()
     {
-        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
-            return;
-        };
-        if *kernel <= 0 {
+        if matches!(kernel, DeepDimKind::Lit(value) if *value <= 0) {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
                 list,
@@ -1978,6 +1383,9 @@ pub(super) fn validate_conv_symbolic_requirements(
             ));
             return;
         }
+        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
+            continue;
+        };
         if conv_output_extent(*input, *kernel, stride, low, high).is_none() {
             errors.push(validator_error(CheckErrorKind::DimensionMismatch, list,
                 match input.checked_add(low).and_then(|n| n.checked_add(high)) {
@@ -2065,22 +1473,6 @@ pub(super) fn derive_ir_builtin_output_type(
         }
         _ => None,
     }
-}
-
-/// Does `derive_ir_builtin_output_type` have an arm for `name`?
-///
-/// This mirrors the `match` above and must list exactly the callees it
-/// dispatches on. It exists because the two questions "is this operation
-/// shape-sensitive" and "can this validator derive its output type" stopped
-/// having the same answer when chelis#668 deleted the
-/// `stride`/`expand`/`insert` arms. Keying
-/// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
-/// bindings as FAILED derivations, which suppressed every downstream `conv`
-/// check (round-1 P0). The failed-derivation marker means "this validator owed
-/// a type here and could not produce one", so it must be keyed on the table
-/// that owes it.
-pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
-    matches!(name, "conv" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
 }
 
 /// Derive the output tensor type of a shape-preserving unary
@@ -2244,30 +1636,6 @@ pub(super) fn build_tensor_type_expr_with_batch(
     }
     elements.push(prec);
     deep::Expr::List(deep::List { elements }, zero)
-}
-
-pub(super) fn ir_builtin_axis_dim(
-    list: &deep::List,
-    type_env: &ShapeTypeEnv,
-    tensor_arg_index: usize,
-    axis_arg_index: usize,
-) -> Option<DeepDimKind> {
-    let tensor_dims = list
-        .elements
-        .get(3 + tensor_arg_index)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
-    // Negative axes index from the end; normalize against the operand
-    // rank so this concrete-extent check inspects the same axis the op
-    // actually reduces.
-    // Issue #216: cast-aware so a `cast(N, int32)`-wrapped axis arg
-    // still resolves through to the operand's concrete dim.
-    let raw_axis = list
-        .elements
-        .get(3 + axis_arg_index)
-        .and_then(extract_int_for_dim)?;
-    let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
-    tensor_dims.get(axis).copied()
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
