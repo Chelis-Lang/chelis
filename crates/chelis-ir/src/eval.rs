@@ -497,6 +497,45 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
     )
 }
 
+/// Validate a producer's complete positive-rank agreement relation before
+/// reading the extent used by its declared-result claim.
+fn same_shape_agreement_extent(
+    agreement: &crate::axis_sources::SameShapeAgreement,
+    axis: usize,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<usize, String> {
+    let first_id = *agreement
+        .members()
+        .first()
+        .ok_or("same-shape result has no positive-rank agreement member")?;
+    let first = values.get(&first_id).ok_or_else(|| {
+        format!(
+            "same-shape agreement member {} is not available",
+            first_id.0
+        )
+    })?;
+    if first.shape.is_empty() {
+        return Err(format!(
+            "same-shape agreement member {} realized rank zero",
+            first_id.0
+        ));
+    }
+    for member in &agreement.members()[1..] {
+        let value = values
+            .get(member)
+            .ok_or_else(|| format!("same-shape agreement member {} is not available", member.0))?;
+        if value.shape != first.shape {
+            return Err(shape_disagreement(first, value));
+        }
+    }
+    first.shape.get(axis).copied().ok_or_else(|| {
+        format!(
+            "same-shape result axis {axis} is outside agreed rank {}",
+            first.shape.len()
+        )
+    })
+}
+
 /// Broadcast a rank-0 operand over the other's shape, and report any other
 /// disagreement as a typed error.
 ///
@@ -1774,12 +1813,13 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
 /// The structural fix is a per-scope rename and belongs to the claim
 /// transport, not here.
 ///
-/// The second return value is exactly that set: the names this function
-/// DELIBERATELY left out because their scopes disagreed. It is returned
-/// rather than re-derived because disagreement is a property of the supplied
-/// values and not of the graph, so nothing downstream can recover it; keying
-/// the tolerance on multi-scope membership instead would excuse an agreeing
-/// name a caller simply omitted, which is an omitted binding like any other.
+/// The second return value is exactly the names this function deliberately
+/// leaves for run-time binding: names whose supplied scopes disagree, plus a
+/// name whose selected origin is a local scalar input to its declaring
+/// operation. The former cannot be re-derived because disagreement belongs
+/// to the supplied values; the latter is explicit in `dim_extent_origins` and
+/// does not exist until that operation executes. Neither case excuses an
+/// omitted external binding.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
@@ -1874,8 +1914,14 @@ fn infer_symbolic_bindings_from_inputs(
                     bindings.insert(name.clone(), extent);
                 }
             }
-            crate::axis_sources::ExtentOrigin::OpComputed { .. }
-            | crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {}
+            crate::axis_sources::ExtentOrigin::OpComputed { .. } => {}
+            crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {
+                // A node-valued reshape/expand target has no entry value to
+                // bind. `bind_symbolic_dims` may leave its output type
+                // symbolic; `op_declared_axes_by_node` binds the exact
+                // observed extent immediately after the owner executes.
+                deliberately_unbound.insert(name.clone());
+            }
         }
     }
 
@@ -2133,6 +2179,7 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
             // actually EVALUATE so the mid-evaluation binding sees its
             // extent (the consumer reads the dim, not the value).
             stack.extend(node.shape_deps.iter().copied());
+            stack.extend(node.result_claim_deps.iter().copied());
         }
     }
     live
@@ -2600,6 +2647,12 @@ where
                             None => continue,
                         }
                     }
+                    crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
+                        same_shape_agreement_extent(agreement, *axis, &values)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                        reason,
+                    ) => return Err(reason.clone()),
                     // Read only after the node has produced its value; taken
                     // by the loop at the foot of the body.
                     crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,

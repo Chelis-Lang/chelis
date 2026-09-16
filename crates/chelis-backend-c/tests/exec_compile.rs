@@ -118,20 +118,19 @@ fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
             StorageView::I8(v) => v.iter().map(|x| *x as u8).collect(),
             StorageView::Bool(v) => v.to_vec(),
         };
-        for extent in [4, 3, 0] {
-            let source = codegen(
-                &checked_literal_dag(storage.clone(), extent, dtype),
-                "literal_probe",
-            )
-            .unwrap()
-            .c_source;
-            let bytes = expected
-                .iter()
-                .map(u8::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            let harness = format!(
-                r#"
+        let source = codegen(
+            &checked_literal_dag(storage.clone(), 4, dtype),
+            "literal_probe",
+        )
+        .unwrap()
+        .c_source;
+        let bytes = expected
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let harness = format!(
+            r#"
 #include "chelis_runtime.h"
 #include <string.h>
 extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
@@ -143,20 +142,28 @@ int main(void) {{
  chelis_tensor_release(out[0]);return 0;
 }}
 "#,
-                dtype = dtype.runtime_dtype().unwrap().c_macro()
+            dtype = dtype.runtime_dtype().unwrap().c_macro()
+        );
+        let out = checked_indexing_run(&source, &harness);
+        assert!(out.status.success(), "{dtype:?}: {out:?}");
+
+        for extent in [3, 0] {
+            let error = chelis_ir::ownership::lower_dag_ownership(checked_literal_dag(
+                storage.clone(),
+                extent,
+                dtype,
+            ))
+            .expect_err("malformed literal cardinality must reject before codegen");
+            assert_eq!(
+                error,
+                chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                    unit: "dag".into(),
+                    detail: format!(
+                        "constant tensor at node 0 stores 4 values but its concrete shape requires {extent}"
+                    ),
+                },
+                "{dtype:?}/{extent}"
             );
-            let out = checked_indexing_run(&source, &harness);
-            if extent == 4 {
-                assert!(out.status.success(), "{dtype:?}: {out:?}");
-            } else {
-                assert_eq!(out.status.code(), Some(1), "{dtype:?}/{extent}: {out:?}");
-                assert!(
-                    String::from_utf8_lossy(&out.stderr)
-                        .lines()
-                        .any(|s| s == "numeric trap: domain in const at int64"),
-                    "{out:?}"
-                );
-            }
         }
         let empty = storage.reuse_gather(&[]);
         let source = codegen(&checked_literal_dag(empty, 0, dtype), "literal_probe")
@@ -579,7 +586,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 host_source.contains("blas_plan_"),
                 "summary must execute instead of its helper"
             );
-            host_source.push_str("\nvoid checked_blas(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_blas(in[0],in[1]); }\n");
+            host_source.push_str("\nvoid checked_blas(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=chelis_fn_686f73745f626c6173(in[0],in[1]); }\n");
             sources.push(host_source);
         }
         let input_dtype = operand.runtime_dtype().unwrap().c_macro();
@@ -948,7 +955,7 @@ int main(void) {{
                 };
                 let mut host_source = emit_host_program(&program, "host_sparse_boundary").unwrap();
                 assert!(host_source.contains("CHELIS_SPARSE_ADD"));
-                host_source.push_str("\nvoid sparse_boundary(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_sparse_add(in[0],in[1],in[2]); }\n");
+                host_source.push_str("\nvoid sparse_boundary(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=chelis_fn_686f73745f7370617273655f616464(in[0],in[1],in[2]); }\n");
                 sources.push(host_source);
             }
             for source in sources {
@@ -1841,6 +1848,7 @@ fn checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_s
             let harness = format!(
                 r#"
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
 int main(void) {{
     int64_t dim = 4;
@@ -5374,6 +5382,7 @@ const HOST_GUARD_HARNESS: &str = r#"
 #include <string.h>
 #include <math.h>
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 
 static chelis_tensor *make_ranked_view(
     float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
@@ -6031,6 +6040,7 @@ fn direct_extrema_adjoint_bit_case(
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
@@ -6221,6 +6231,7 @@ fn host_scalar_relu_reduced_bits_case(tag: &str, ty: HostType, inputs: &[u16], e
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern uint16_t the_fn(uint16_t);
 int main(void) {{
@@ -8020,6 +8031,7 @@ fn host_declared_result_extent_guard_traps_and_executes_under_sanitizers() {
             r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 chelis_tensor *the_fn(chelis_tensor *);
 int main(void) {{
     int64_t dims[2] = {{{rows}, 4}};

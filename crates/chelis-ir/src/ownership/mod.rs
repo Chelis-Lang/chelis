@@ -255,6 +255,17 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::result_extent_sites(self.dag, root)
     }
 
+    /// The complete positive-rank operand relation for a verified same-shape
+    /// result. Verification rejects malformed or empty relations before a
+    /// backend can obtain this view.
+    pub fn same_shape_result_agreement(
+        self,
+        node: NodeId,
+    ) -> Option<crate::axis_sources::SameShapeAgreement> {
+        crate::axis_sources::same_shape_result_agreement(self.dag, node)
+            .expect("verified same-shape result agreement")
+    }
+
     pub fn literal_result_witness_requirements(
         self,
         witness: NodeId,
@@ -2398,7 +2409,12 @@ fn require_dag_arity(
 }
 
 fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
-    for input in node.inputs.iter().chain(&node.shape_deps) {
+    for input in node
+        .inputs
+        .iter()
+        .chain(&node.shape_deps)
+        .chain(&node.result_claim_deps)
+    {
         if input.0 >= node.id.0 || dag.get(*input).is_none() {
             return Err(OwnershipError::DagInput {
                 node: node.id.0,
@@ -2410,11 +2426,11 @@ fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<()
 }
 
 fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
-    dag.nodes()
-        .iter()
-        .skip(consumer.0 + 1)
-        .any(|node| node.inputs.contains(&owner) || node.shape_deps.contains(&owner))
-        || dag.roots().contains(&owner)
+    dag.nodes().iter().skip(consumer.0 + 1).any(|node| {
+        node.inputs.contains(&owner)
+            || node.shape_deps.contains(&owner)
+            || node.result_claim_deps.contains(&owner)
+    }) || dag.roots().contains(&owner)
 }
 
 fn require_live_dag_owner(

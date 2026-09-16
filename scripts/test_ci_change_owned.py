@@ -335,6 +335,15 @@ class SchemaTests(unittest.TestCase):
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
                 self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
         by_path = {rule.prefix: rule for rule in config.path_rules}
+        runtime_extent_oracle_tests = by_path["scripts/test_runtime_extent_oracle.py"]
+        self.assertEqual(
+            (
+                runtime_extent_oracle_tests.owner.workflow,
+                runtime_extent_oracle_tests.owner.job,
+                runtime_extent_oracle_tests.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "chelis#1277"),
+        )
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
         deep_spec = by_path["spec/03-deep-syntax.md"]

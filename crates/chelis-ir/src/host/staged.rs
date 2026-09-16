@@ -260,6 +260,84 @@ impl Partition<'_> {
         if start == end && !has_controls {
             return Ok(());
         }
+        fn add_value_export(logical: &Dag, dependency: NodeId, exports: &mut BTreeSet<NodeId>) {
+            let Some(node) = logical.get(dependency) else {
+                return;
+            };
+            if matches!(node.op, RiscOp::ExtentWitness { .. }) {
+                for prerequisite in node
+                    .inputs
+                    .iter()
+                    .chain(&node.shape_deps)
+                    .chain(&node.result_claim_deps)
+                {
+                    add_value_export(logical, *prerequisite, exports);
+                }
+            } else {
+                exports.insert(dependency);
+            }
+        }
+        fn import_dependency(
+            logical: &Dag,
+            available: &BTreeSet<StageValue>,
+            names: &BTreeMap<StageValue, String>,
+            dag: &mut Dag,
+            remap: &mut BTreeMap<NodeId, NodeId>,
+            dependency: NodeId,
+        ) -> Result<NodeId, String> {
+            if let Some(mapped) = remap.get(&dependency) {
+                return Ok(*mapped);
+            }
+            let source = logical.get(dependency).ok_or("missing staged dependency")?;
+            let imported = if matches!(source.op, RiscOp::ExtentWitness { .. }) {
+                let inputs = source
+                    .inputs
+                    .iter()
+                    .map(|dependency| {
+                        import_dependency(logical, available, names, dag, remap, *dependency)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let shape_deps = source
+                    .shape_deps
+                    .iter()
+                    .map(|dependency| {
+                        import_dependency(logical, available, names, dag, remap, *dependency)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let id = dag.add_node(
+                    source.op.clone(),
+                    inputs,
+                    source.output_type.clone(),
+                    source.span_id.clone(),
+                );
+                let result_claim_deps = source
+                    .result_claim_deps
+                    .iter()
+                    .map(|dependency| {
+                        import_dependency(logical, available, names, dag, remap, *dependency)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let imported = dag.node_mut(id).expect("new staged witness");
+                imported.merged_spans = source.merged_spans.clone();
+                imported.shape_deps = shape_deps;
+                imported.result_claim_deps = result_claim_deps;
+                id
+            } else {
+                if !available.contains(&StageValue::Tensor(dependency)) {
+                    return Err("an executable staged helper contains an unresolved input".into());
+                }
+                dag.add_node(
+                    RiscOp::Load {
+                        name: names[&StageValue::Tensor(dependency)].as_str().into(),
+                    },
+                    Vec::new(),
+                    source.output_type.clone(),
+                    None,
+                )
+            };
+            remap.insert(dependency, imported);
+            Ok(imported)
+        }
         // Only values read after this cut cross the ABI. In particular, an
         // intermediate consumed inside this segment is not kept as an output.
         let mut exports = self
@@ -269,17 +347,14 @@ impl Partition<'_> {
             .copied()
             .collect::<BTreeSet<_>>();
         for node in &self.logical.nodes()[end..] {
-            exports.extend(node.inputs.iter().chain(&node.shape_deps).copied().filter(
-                |dependency| {
-                    !matches!(
-                        self.logical.get(*dependency).map(|node| &node.op),
-                        Some(RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                            ..
-                        })
-                    )
-                },
-            ));
+            for dependency in node
+                .inputs
+                .iter()
+                .chain(&node.shape_deps)
+                .chain(&node.result_claim_deps)
+            {
+                add_value_export(self.logical, *dependency, &mut exports);
+            }
         }
         for source in self.sources.iter().filter(|source| source.before >= end) {
             exports.extend(
@@ -296,45 +371,34 @@ impl Partition<'_> {
         let mut remap = BTreeMap::new();
         let mut outputs = Vec::new();
         for node in &self.logical.nodes()[start..end] {
-            for &dependency in node.inputs.iter().chain(&node.shape_deps) {
-                if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
-                    let dependency_node = self
-                        .logical
-                        .get(dependency)
-                        .ok_or("missing staged dependency")?;
-                    if matches!(
-                        dependency_node.op,
-                        RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                            ..
-                        }
-                    ) {
-                        let id = dag.add_node(
-                            dependency_node.op.clone(),
-                            Vec::new(),
-                            dependency_node.output_type.clone(),
-                            dependency_node.span_id.clone(),
-                        );
-                        dag.node_mut(id)
-                            .expect("new literal result claim")
-                            .merged_spans = dependency_node.merged_spans.clone();
-                        entry.insert(id);
-                        continue;
-                    }
-                    if !self.available.contains(&StageValue::Tensor(dependency)) {
-                        return Err(
-                            "an executable staged helper contains an unresolved input".into()
-                        );
-                    }
-                    entry.insert(dag.add_node(
-                        RiscOp::Load {
-                            name: self.names[&StageValue::Tensor(dependency)].as_str().into(),
-                        },
-                        Vec::new(),
-                        dependency_node.output_type.clone(),
-                        None,
-                    ));
+            if matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                        | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
                 }
+            ) {
+                // A result-claim token is semantic metadata owned by its
+                // producer, not an independently executable staged value.
+                // Materialize it only when an owner in this segment imports
+                // the dependency; otherwise reconstruct it at the later cut.
+                continue;
+            }
+            for &dependency in node
+                .inputs
+                .iter()
+                .chain(&node.shape_deps)
+                .chain(&node.result_claim_deps)
+            {
+                import_dependency(
+                    self.logical,
+                    &self.available,
+                    &self.names,
+                    &mut dag,
+                    &mut remap,
+                    dependency,
+                )?;
             }
             let id = dag.add_node(
                 node.op.clone(),
@@ -345,6 +409,7 @@ impl Partition<'_> {
             let copied = dag.node_mut(id).expect("new staged node");
             copied.merged_spans = node.merged_spans.clone();
             copied.shape_deps = node.shape_deps.iter().map(|i| remap[i]).collect();
+            copied.result_claim_deps = node.result_claim_deps.iter().map(|i| remap[i]).collect();
             copied.reusable_input = node
                 .reusable_input
                 .and_then(|input| remap.get(&input).copied());
@@ -365,7 +430,8 @@ impl Partition<'_> {
                 !matches!(
                     node.op,
                     RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
                         ..
                     }
                 )
@@ -712,6 +778,129 @@ mod tests {
                 assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
             }
         }
+    }
+
+    #[test]
+    fn completion_roots_do_not_take_ownership_of_named_result_claims() {
+        let mut dag = Dag::new();
+        let tensor = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let declaring = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![x],
+            scalar_type(),
+            None,
+        );
+        let claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::ResultClaim {
+                    claim: "n".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![x],
+            scalar_type(),
+            None,
+        );
+        dag.add_shape_dep(claim, declaring);
+        let actual = dag.add_node(
+            RiscOp::Load {
+                name: "host-source".into(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let result = dag.add_node(RiscOp::Add, vec![x, x], tensor.clone(), None);
+        dag.add_result_claim_dep(result, claim);
+        dag.add_root(result);
+        let sources = vec![HostSource {
+            before: actual.0,
+            occurrences_before: None,
+            value: StageValue::Tensor(actual),
+            ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+                .unwrap()
+                .remove(0),
+            captures: vec![(
+                "x".into(),
+                StageValue::Tensor(x),
+                HostTypeTerm::Tensor(tensor.clone()),
+            )],
+        }];
+        let plan = partition(
+            &dag,
+            &sources,
+            &[HostParam {
+                name: "x".into(),
+                ty: HostTypeTerm::Tensor(tensor),
+            }],
+            &BTreeMap::from([(x, "x".into())]),
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        let mut retained_owner = false;
+        for stage in plan.stages() {
+            if let HostStage::Kernel { dag, .. } = stage {
+                assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+                let claims = dag
+                    .nodes()
+                    .iter()
+                    .filter(|node| {
+                        matches!(
+                            node.op,
+                            RiscOp::ExtentWitness {
+                                site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                                ..
+                            }
+                        )
+                    })
+                    .map(|node| node.id)
+                    .collect::<BTreeSet<_>>();
+                for node in dag.nodes() {
+                    retained_owner |= node
+                        .result_claim_deps
+                        .iter()
+                        .any(|dependency| claims.contains(dependency));
+                    assert!(
+                        !matches!(node.op, RiscOp::Const { .. })
+                            || node.shape_deps.iter().all(|dependency| {
+                                !matches!(
+                                    dag.get(*dependency).map(|dependency| &dependency.op),
+                                    Some(RiscOp::ExtentWitness {
+                                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. },
+                                        ..
+                                    })
+                                )
+                            }),
+                        "completion sentinel took named claim ownership: {node:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            retained_owner,
+            "the executable result producer must retain its named claim across the cut"
+        );
     }
 
     #[test]

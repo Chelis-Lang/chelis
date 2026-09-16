@@ -6757,8 +6757,8 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
 }
 
 // ---------------------------------------------------------------------------
-// chelis#1798: a declared result axis that PASSES THROUGH an op-computed
-// extent.
+// chelis#1798/#1948: a declared result axis returned by a same-shape
+// operation over op-computed operands.
 //
 // `preserve_declared_result` dispatched on the RESULT node's own axis source,
 // so a claim was stamped only when the declared axis WAS the op-computed one.
@@ -6768,21 +6768,12 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
 // op-computed arm refused the forwarded source outright: the claim was dropped
 // and both lanes returned the extent the operation computed at exit zero.
 //
-// The repair resolves the declared axis through
-// `axis_sources::op_computed_axis_origin`, which returns the `(node, axis)` of
-// the operation that INTRODUCES the extent, and runs the op-computed arm
-// against that origin. `runtime_extent_slice_b_sources.rs`'s origin-walk row
-// names the two resolvers where they are tested and pins the difference
-// between them; this header names only its own.
-// `spec/04-type-system.md` section 4.7 puts the guard at "the source position
-// of the operation that introduces the guarded extent", which is that origin,
-// so the claim is stamped there as well as on the result and [04-NUM-9]'s
-// `<op>` slot names `shrink`.
-//
-// Both operands of the `add` shrink the SAME extent in every fixture here.
-// Only input 0's origin carries the stamp, and a second operand of a
-// different extent would trap through the `add`'s own elementwise check with
-// a different message, which would measure that check rather than this claim.
+// The original repair selected operand 0's op-computed origin and named its
+// `shrink`. chelis#1948 closes the remaining source-order seam under
+// spec/04 §4.7: `add` produced the returned value, so it owns the declared
+// result guard after its complete positive-rank operand agreement succeeds.
+// `op_computed_axis_origin` no longer recurses through this same-shape
+// producer to choose an operand.
 // ---------------------------------------------------------------------------
 
 /// chelis#1798's reproducer, with `declared` naming the result extent and
@@ -6803,8 +6794,8 @@ fn pass_through_op_computed_source(w_len: usize, declared: &str) -> String {
     )
 }
 
-/// claim.named.pass_through.{eval,c}: the NAMED claim over a forwarded
-/// op-computed extent is guarded at the `shrink` that introduces it.
+/// claim.named.same_shape_producer.{eval,c}: the NAMED claim over a returned
+/// same-shape value is guarded by the `add` that produced it.
 ///
 /// One test for both lanes because the rendering is the same rendering: the
 /// context line and [04-NUM-9]'s trap line are asserted on each lane
@@ -6819,7 +6810,7 @@ fn pass_through_op_computed_source(w_len: usize, declared: &str) -> String {
 /// Disposition lock for the agreeing block, which exited zero there too and
 /// must keep doing so: it is the non-vacuity control.
 #[test]
-fn a_pass_through_named_claim_is_guarded_at_its_op_computed_origin() {
+fn a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -6829,12 +6820,12 @@ fn a_pass_through_named_claim_is_guarded_at_its_op_computed_origin() {
     let mismatched = pass_through_op_computed_source(2, "n");
     let (eval_ok, eval_out) = eval_result(&dir, "pass_through_named.ch", &mismatched);
     let (c_ok, c_out) = c_run_result(&dir, "pass_through_named_c", &mismatched);
-    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
+    let context = "extent `n`: claimed = 2, add axis 0 = 3";
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
         assert!(!ok, "{lane}: a claim of 2 over a shrink of 3 traps: {out}");
         assert!(
-            out.contains(&domain_trap_line("shrink")),
-            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+            out.contains(&domain_trap_line("add")),
+            "{lane}: [04-NUM-9]'s line names the returned producer: {out}"
         );
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
         assert!(
@@ -6856,7 +6847,8 @@ fn a_pass_through_named_claim_is_guarded_at_its_op_computed_origin() {
     }
 }
 
-/// claim.literal.pass_through.{eval,c}: the LITERAL half of the same class.
+/// claim.literal.same_shape_producer.{eval,c}: the LITERAL half of the same
+/// returned-producer class.
 ///
 /// The issue reported the named spelling; the literal one is silent through
 /// the same forwarded source for the same reason, and it reaches the guard
@@ -6867,7 +6859,7 @@ fn a_pass_through_named_claim_is_guarded_at_its_op_computed_origin() {
 /// printed `out = tensor(shape=[3], data=[4.0, 6.0, 8.0])` and exited ZERO on
 /// both lanes under a declared `tensor[2, f32]`.
 #[test]
-fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
+fn a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -6877,12 +6869,12 @@ fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
     let mismatched = pass_through_op_computed_source(2, "2");
     let (eval_ok, eval_out) = eval_result(&dir, "pass_through_lit.ch", &mismatched);
     let (c_ok, c_out) = c_run_result(&dir, "pass_through_lit_c", &mismatched);
-    let context = "extent `2`: claimed = 2, shrink axis 0 = 3";
+    let context = "extent `2`: claimed = 2, add axis 0 = 3";
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
         assert!(!ok, "{lane}: a literal claim of 2 over 3 traps: {out}");
         assert!(
-            out.contains(&domain_trap_line("shrink")),
-            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+            out.contains(&domain_trap_line("add")),
+            "{lane}: [04-NUM-9]'s line names the returned producer: {out}"
         );
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
     }
@@ -6901,8 +6893,8 @@ fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
     }
 }
 
-/// claim.named.pass_through.inlined_root.{eval,c}: the same forwarded origin
-/// reached through an INLINED root rather than a value binding.
+/// claim.named.same_shape_producer.inlined_root.{eval,c}: the same returned
+/// producer reached through an INLINED root rather than a value binding.
 ///
 /// `def main() -> tensor[2, f32] = f(...)` inlines `f`, so two claims reach
 /// one origin: the callee's `n`, and the root's own literal 2. The claim
@@ -6927,7 +6919,7 @@ fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
 /// printed `main = tensor(shape=[3], data=[4.0, 6.0, 8.0])` and exited ZERO on
 /// both lanes.
 #[test]
-fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
+fn an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -6954,12 +6946,12 @@ fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
     let mismatched = source(4);
     let (eval_ok, eval_out) = eval_result(&dir, "pass_through_root.ch", &mismatched);
     let (c_ok, c_out) = c_run_result(&dir, "pass_through_root_c", &mismatched);
-    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
+    let context = "extent `n`: claimed = 2, add axis 0 = 3";
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
         assert!(!ok, "{lane}: the root's claim of 2 over 3 traps: {out}");
         assert!(
-            out.contains(&domain_trap_line("shrink")),
-            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+            out.contains(&domain_trap_line("add")),
+            "{lane}: [04-NUM-9]'s line names the returned producer: {out}"
         );
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
         assert!(

@@ -31,6 +31,15 @@ cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the completion oracle compares the reviewed phase-B baseline and required exit states"
 tracking_issue = "chelis#1277"
 
+[[path_rule]]
+prefix = "scripts/test_runtime_extent_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-extent corpus and controlled-mutation unit contracts execute in script-unit"
+tracking_issue = "chelis#1277"
+
 # The runtime-representation gate executes the frozen inventory and mutations.
 [[path_rule]]
 prefix = "scripts/test_runtime_representation_oracle.py"

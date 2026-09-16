@@ -542,6 +542,7 @@ impl EvaluationPlan {
                 .inputs
                 .iter()
                 .chain(&node.shape_deps)
+                .chain(&node.result_claim_deps)
                 .any(|input| !seen.get(input.0).copied().unwrap_or(false))
             {
                 return Err(format!(

@@ -1453,8 +1453,8 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
     );
 }
 
-/// chelis#1798: the origin walk crosses PASS-THROUGH hops and stops at an
-/// axis the operation sets.
+/// chelis#1798/#1948: the origin walk stops at a same-shape result producer
+/// and at an axis the operation sets.
 ///
 /// `op_computed_axis_origin` answers which operation introduces an axis's
 /// extent, which is where `spec/04-type-system.md` section 4.7 places a local
@@ -1467,17 +1467,17 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
 /// `issue_616_runtime_movement_c_parity::checked_movement_expansion_guards_preserve_expand_and_insert_identity`
 /// observes as the trap renaming itself from `expand` to `shrink`.
 ///
-/// EVIDENTIARY STATUS: regression test for both rows. `op_computed_axis_origin`
-/// did not exist before this change, and the pass-through row is the behaviour
-/// chelis#1798 reports missing; the set-axis row is the measured divergence
-/// from the value resolver, whose answer is asserted beside it so the two
-/// cannot be conflated again.
+/// EVIDENTIARY STATUS: regression test for both rows. chelis#1948 supersedes
+/// the old source-order attribution through `add`: the complete same-shape
+/// relation remains available, but no operand is selected as the declared
+/// result owner. The set-axis row remains the measured divergence from the
+/// value resolver.
 #[test]
-fn the_op_computed_origin_walk_crosses_pass_through_and_stops_at_a_set_axis() {
-    use chelis_ir::axis_sources::op_computed_axis_origin;
+fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
+    use chelis_ir::axis_sources::{op_computed_axis_origin, same_shape_result_agreement};
 
-    // A pass-through hop: `add` forwards its operand's axis, so the origin is
-    // the `shrink` one node upstream.
+    // `add` physically forwards one input's axis, but its result claim is
+    // owned by `add` and observes both distinct positive-rank operands.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec![named("r")]);
     let y = load(&mut dag, "y", vec![named("s")]);
@@ -1506,8 +1506,16 @@ fn the_op_computed_origin_walk_crosses_pass_through_and_stops_at_a_set_axis() {
     );
     assert_eq!(
         op_computed_axis_origin(&dag, sum, 0),
-        Some((left, 0)),
-        "so the origin is the `shrink` the extent came from"
+        None,
+        "a same-shape result never selects an operand origin"
+    );
+    assert_eq!(
+        same_shape_result_agreement(&dag, sum)
+            .unwrap()
+            .unwrap()
+            .members(),
+        &[left, right],
+        "both distinct operands remain in the complete agreement relation"
     );
 
     // Negative parity: an axis the `expand` SETS from an operand's shape is a

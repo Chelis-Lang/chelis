@@ -1358,6 +1358,14 @@ pub(crate) fn check_typed_program_in_session(
         if !errors.is_empty() {
             return Err(stats);
         }
+        // spec/06 §3.7: an extent derived from vmapped tensor elements is a
+        // check-time `batch_varying_extent` type error at every source
+        // ingress. IR reaches this validator before annotation; typed Surf
+        // supplies the equivalent canonical annotated type environment here.
+        validate_vmap_extent_dependencies(&annotated_exprs, &annotated_type_env, errors);
+        if !errors.is_empty() {
+            return Err(stats);
+        }
         // chelis#930: annotation and the signature fixed point below both
         // abandon their walks on cancellation.
         if cancellation_gate(errors) {

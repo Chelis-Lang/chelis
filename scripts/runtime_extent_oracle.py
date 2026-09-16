@@ -700,16 +700,16 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "exec_c.numeric_local_extent_claims_execute_exactly",
         ),
         _row(
-            "claim.literal.pass_through.c",
+            "claim.literal.same_shape_producer.c",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
         ),
         _row(
-            "claim.literal.pass_through.eval",
+            "claim.literal.same_shape_producer.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
         ),
         _row(
             "claim.named.nested_fresh_result.c",
@@ -724,28 +724,206 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
         ),
         _row(
-            "claim.named.pass_through.c",
+            "claim.named.same_shape_producer.c",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
         ),
         _row(
-            "claim.named.pass_through.eval",
+            "claim.named.same_shape_producer.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
         ),
         _row(
-            "claim.named.pass_through.inlined_root.c",
+            "claim.named.same_shape_producer.inlined_root.c",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes",
+            "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer",
         ),
         _row(
-            "claim.named.pass_through.inlined_root.eval",
+            "claim.named.same_shape_producer.inlined_root.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes",
+            "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer",
+        ),
+        # chelis#1948: the returned same-shape primitive owns its declared
+        # result guard. Every runtime row is split by lane even though one
+        # dedicated test executes both; the relation/verification controls
+        # remain independent IR receipts.
+        _row(
+            "claim.same_shape.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly",
+        ),
+        _row(
+            "claim.same_shape.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_fusion_and_dce",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.interior.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.an_interior_named_result_claim_splits_the_fusion_chain",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_fusion_and_dce",
+        ),
+        _row(
+            "claim.same_shape.distinct_paths.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution",
+        ),
+        _row(
+            "claim.same_shape.distinct_paths.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution",
+        ),
+        _row(
+            "claim.same_shape.no_origin.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.no_origin.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_disagreement.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_disagreement.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_one.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add",
+        ),
+        _row(
+            "claim.same_shape.operand_one.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add",
+        ),
+        _row(
+            "claim.same_shape.rank_zero.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation",
+        ),
+        _row(
+            "claim.same_shape.repeated_path.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim",
+        ),
+        _row(
+            "claim.same_shape.repeated_path.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim",
+        ),
+        _row(
+            "claim.same_shape.reversed.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
+        ),
+        _row(
+            "claim.same_shape.reversed.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_blas_region_still_specializes_and_executes",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_dense_gather_region_still_specializes_and_executes",
+        ),
+        _row(
+            "claim.same_shape.specialization.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_specialization_and_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_specialization_and_dce",
+        ),
+        _row(
+            "claim.same_shape.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_1948_same_shape.a_statically_refuted_same_shape_result_is_a_dimension_mismatch",
+        ),
+        _row(
+            "claim.same_shape.structure.dedup",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.identical_members_deduplicate_but_distinct_paths_remain",
+        ),
+        _row(
+            "claim.same_shape.structure.malformed",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "ir_issue_1948_same_shape.malformed_same_shape_relations_are_verifier_errors",
         ),
         # Round 1's P1. A RUNTIME padding bound is a different witness from
         # a literal one, and the rows are separate because the claim's
@@ -2327,6 +2505,163 @@ def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestT
         raise OracleFailure(f"corpus rows have no executable receipt: {missing}")
 
 
+_CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/axis_sources.rs"
+_CLAIM_BARRIER_NAMED_AND_LITERAL = """\
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+"""
+_CLAIM_BARRIER_LITERAL_ONLY = """\
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+"""
+_SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/specialize.rs"
+_BLAS_REGION_BARRIER = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+"""
+_BLAS_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+"""
+_DENSE_GATHER_REGION_BARRIER = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+        {
+"""
+_DENSE_GATHER_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+"""
+
+
+def remove_named_claim_from_producer_barrier(source: str) -> str:
+    """Controlled mutation: regress the central barrier to literal-only."""
+
+    if source.count(_CLAIM_BARRIER_NAMED_AND_LITERAL) != 1:
+        raise OracleFailure(
+            "claimed-producer barrier mutation anchor is missing or ambiguous"
+        )
+    return source.replace(
+        _CLAIM_BARRIER_NAMED_AND_LITERAL,
+        _CLAIM_BARRIER_LITERAL_ONLY,
+        1,
+    )
+
+
+def validate_claimed_producer_barrier_mutation(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B detects a named-claim omission in the central barrier."""
+
+    original = _CLAIM_BARRIER_SOURCE.read_text()
+    mutated = remove_named_claim_from_producer_barrier(original)
+    command = (
+        "cargo",
+        "test",
+        "-p",
+        "chelis-ir",
+        "--test",
+        "issue_1948_same_shape_result_claim_sources",
+        "named_result_claim_traps_after_specialization_and_dce",
+        "--",
+        "--exact",
+        "--nocapture",
+    )
+    try:
+        _CLAIM_BARRIER_SOURCE.write_text(mutated)
+        completed = _run_text(runner, command)
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            raise OracleFailure(
+                "claimed-producer barrier mutation escaped the specialization receipt"
+            )
+        if "specialization must not eliminate a named claimed producer" not in output:
+            raise OracleFailure(
+                "claimed-producer barrier mutation failed for an unrelated reason"
+            )
+    finally:
+        _CLAIM_BARRIER_SOURCE.write_text(original)
+    if _CLAIM_BARRIER_SOURCE.read_text() != original:
+        raise OracleFailure("claimed-producer barrier mutation did not restore its source")
+
+
+def remove_specializer_region_barrier(source: str, recognizer: str) -> str:
+    """Controlled mutation: let one recognizer bypass claimed producers."""
+
+    anchors = {
+        "blas": (_BLAS_REGION_BARRIER, _BLAS_REGION_BARRIER_REMOVED),
+        "dense_gather": (
+            _DENSE_GATHER_REGION_BARRIER,
+            _DENSE_GATHER_REGION_BARRIER_REMOVED,
+        ),
+    }
+    try:
+        anchor, replacement = anchors[recognizer]
+    except KeyError as error:
+        raise OracleFailure(
+            f"unknown specialization barrier mutation {recognizer!r}"
+        ) from error
+    if source.count(anchor) != 1:
+        raise OracleFailure(
+            f"{recognizer} specialization barrier mutation anchor is missing or ambiguous"
+        )
+    return source.replace(anchor, replacement, 1)
+
+
+def validate_specializer_region_barrier_mutations(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B covers both multi-node specialization recognizers."""
+
+    cases = (
+        (
+            "blas",
+            "blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        (
+            "dense_gather",
+            "dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+    )
+    original = _SPECIALIZER_SOURCE.read_text()
+    for recognizer, test in cases:
+        command = (
+            "cargo",
+            "test",
+            "-p",
+            "chelis-ir",
+            "--test",
+            "issue_1948_same_shape_result_claim_sources",
+            test,
+            "--",
+            "--exact",
+            "--nocapture",
+        )
+        try:
+            _SPECIALIZER_SOURCE.write_text(
+                remove_specializer_region_barrier(original, recognizer)
+            )
+            completed = _run_text(runner, command)
+            output = f"{completed.stdout}\n{completed.stderr}"
+            if completed.returncode == 0:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation escaped its receipt"
+                )
+            if "a declined replacement must leave a valid executable graph" not in output:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation failed for an unrelated reason"
+                )
+        finally:
+            _SPECIALIZER_SOURCE.write_text(original)
+        if _SPECIALIZER_SOURCE.read_text() != original:
+            raise OracleFailure(
+                f"{recognizer} specialization barrier mutation did not restore its source"
+            )
+
+
 def _run_text(
     runner: Callable[..., subprocess.CompletedProcess[str]], argv: Sequence[str]
 ) -> subprocess.CompletedProcess[str]:
@@ -2454,6 +2789,9 @@ def validate(
     for target in selected_targets:
         completed = _run_text(runner, target.argv)
         validate_target_receipt(target, completed)
+    if registry is None and targets is None and phase in ("b", "final"):
+        validate_claimed_producer_barrier_mutation(runner)
+        validate_specializer_region_barrier_mutations(runner)
 
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)

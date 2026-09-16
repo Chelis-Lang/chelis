@@ -378,11 +378,12 @@ fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
         .map(|i| format!("a{i}"))
         .collect::<Vec<_>>()
         .join(",");
+    let authored_f = "chelis_fn_66";
     if header
         .lines()
-        .any(|line| line.starts_with("chelis_tensor* f("))
+        .any(|line| line.starts_with(&format!("chelis_tensor* {authored_f}(")))
     {
-        text.push_str(&format!("chelis_tensor *result = f({args});\n"));
+        text.push_str(&format!("chelis_tensor *result = {authored_f}({args});\n"));
     } else {
         // A single pure tensor definition is exported through the named
         // kernel ABI. Exercise that public entry rather than inventing a

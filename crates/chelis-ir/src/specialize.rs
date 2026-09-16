@@ -53,12 +53,11 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
-        if let Some(source) = identity_source(node, dag, literal_result_claim_producers[node.id.0])
-        {
+        if let Some(source) = identity_source(node, dag, claimed_result_producers[node.id.0]) {
             let mapped = id_map[&source];
             id_map.insert(node.id, mapped);
             append_node_provenance(&mut out, mapped, node);
@@ -83,6 +82,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -94,8 +94,8 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     out
 }
 
-fn identity_source(node: &DagNode, dag: &Dag, owns_literal_result_claim: bool) -> Option<NodeId> {
-    if owns_literal_result_claim {
+fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option<NodeId> {
+    if owns_result_claim {
         return None;
     }
     if node.inputs.len() != 1 {
@@ -142,9 +142,14 @@ fn identity_source(node: &DagNode, dag: &Dag, owns_literal_result_claim: bool) -
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
             // Empty contractions (including [05-OP-51]'s zero-channel
             // convolution) retain their RISC zero/empty result. BlasMatmul's
             // verified domain requires positive matrix dimensions.
@@ -173,6 +178,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             );
             append_consumed_provenance(&mut out, new_id, dag, node, &info);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -196,6 +202,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -210,9 +217,15 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
-        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_result_producers,
+                info.replaced_region(node.id),
+            )
+        {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
@@ -223,6 +236,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
             );
             append_dense_gather_provenance(&mut out, new_id, dag, node, &info);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -246,6 +260,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -266,6 +281,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
             let indices = id_map[&node.inputs[0]];
             let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -289,6 +305,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -434,6 +451,45 @@ struct DenseGatherInfo {
     expand_one_hot: NodeId,
     expand_values: NodeId,
     one_hot: NodeId,
+}
+
+/// A multi-node specializer may replace a matched region only when no node it
+/// bypasses owns a declared-result obligation.
+///
+/// Producer claims are observable traps, not ordinary liveness roots. Keeping
+/// an interior producer alive after its consumer has been replaced disconnects
+/// the trap from execution, while transferring the claim to a different
+/// primitive changes §4.7 attribution. The complete named-and-literal
+/// classification therefore gates every region replacement at the match
+/// boundary. One-node expansions such as `lower_unmatched_one_hot` instead
+/// remap the source node's dependencies onto their replacement result.
+fn matched_region_is_claim_free(
+    claimed_result_producers: &[bool],
+    replaced_region: impl IntoIterator<Item = NodeId>,
+) -> bool {
+    replaced_region.into_iter().all(|id| {
+        !*claimed_result_producers
+            .get(id.0)
+            .expect("matched specialization region belongs to the input DAG")
+    })
+}
+
+impl MatmulInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [output, self.sum, self.mul, self.expand_a, self.expand_b]
+    }
+}
+
+impl DenseGatherInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [
+            output,
+            self.mul,
+            self.expand_one_hot,
+            self.expand_values,
+            self.one_hot,
+        ]
+    }
 }
 
 fn detect_dense_gather_pattern(dag: &Dag, sum_id: NodeId) -> Option<DenseGatherInfo> {
@@ -939,6 +995,60 @@ mod tests {
             },
             None,
         )
+    }
+
+    #[test]
+    fn every_identity_noop_respects_the_shared_named_claim_barrier() {
+        for op in [
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Sym("n".into())],
+            },
+            RiscOp::Permute { axes: vec![0] },
+        ] {
+            let mut dag = Dag::new();
+            let tensor = TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            };
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            let claim = dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim: "n".into(),
+                        axis: RtAxis::Lit(0),
+                    },
+                    parameter: "x".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![input],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let producer = dag.add_node(op.clone(), vec![input], tensor, None);
+            dag.add_shape_dep(producer, claim);
+            dag.add_root(producer);
+
+            let specialized = eliminate_closed_list_noops(&dag);
+            let retained = specialized
+                .nodes()
+                .iter()
+                .find(|node| node.op == op)
+                .expect("a named claimed identity producer must not be eliminated");
+            assert_eq!(retained.shape_deps.len(), 1);
+        }
     }
 
     #[test]
