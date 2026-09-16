@@ -128,7 +128,9 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
     ("fn with named params", "(def {} f (fn {} (params {} x) (var {} x)))"),
     (
         "fn with multiple params applied",
-        "(def {} my_add (fn {} (params {} a b) (app {} (var {} add) (var {} a) (var {} b))))",
+        "(def {} my_add (fn {} "
+        "(params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)})) "
+        "(app {} (var {} add) (var {} a) (var {} b))))",
     ),
     (
         "nested fn",
@@ -154,6 +156,14 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
         "(access {} (var {} p) value))))",
     ),
 ]
+
+# [04-INF-9] negative parity for the typed multiple-parameter control above:
+# structural Names remain valid, but authored arithmetic does not acquire an
+# implicit Numeric contract from its body.
+UNBOUNDED_GENERIC_ARITHMETIC_NEGATIVE_FIXTURE = (
+    "(def {} my_add (fn {} (params {} a b) "
+    "(app {} (var {} add) (var {} a) (var {} b))))"
+)
 
 # ── [03-PROG-1] top-level form fixtures ──────────────────────────────
 
@@ -762,6 +772,41 @@ def check_score_one_controls() -> None:
             fixture.unlink(missing_ok=True)
 
 
+def check_unbounded_generic_arithmetic_rejected() -> None:
+    """Negative parity: authored generic arithmetic needs a Numeric contract."""
+    print("── Obligation 2 negative: unbounded generic arithmetic rejects ──")
+    if UNBOUNDED_GENERIC_ARITHMETIC_NEGATIVE_FIXTURE in (
+        source for _, source in SCORE_ONE_CONTROL_FIXTURES
+    ):
+        raise OracleFailure(
+            "unbounded generic arithmetic cannot be a score-one control"
+        )
+    fixture = write_fixture(UNBOUNDED_GENERIC_ARITHMETIC_NEGATIVE_FIXTURE)
+    try:
+        result = run_chelis_check(fixture)
+        report = parse_check_json(result.stdout)
+        errors = report.get("errors", [])
+        has_numeric_contract_error = any(
+            error.get("kind") == "PrecisionMismatch"
+            and "Numeric" in str(error.get("message", ""))
+            for error in errors
+        )
+        if (
+            result.returncode == 0
+            or report.get("score") in (1, 1.0)
+            or not has_numeric_contract_error
+        ):
+            raise OracleFailure(
+                "[unbounded generic add] expected nonzero rejection below score "
+                "1.0 with a PrecisionMismatch naming Numeric admission.\n"
+                f"Source: {UNBOUNDED_GENERIC_ARITHMETIC_NEGATIVE_FIXTURE}\n"
+                f"Return code: {result.returncode}\nReport: {report}"
+            )
+        print("  PASS: unbounded generic add requires Numeric admission")
+    finally:
+        fixture.unlink(missing_ok=True)
+
+
 def check_top_level_form_rule() -> None:
     """Obligation 3: `spec/03-deep-syntax.md` [03-PROG-1] and [03-PROG-2].
 
@@ -969,6 +1014,7 @@ def check_metadata_contract() -> None:
 OBLIGATIONS = (
     check_keyword_in_expr_rejected,
     check_score_one_controls,
+    check_unbounded_generic_arithmetic_rejected,
     check_top_level_form_rule,
     check_validate_agrees_with_check,
     check_stamp_pass_integration_tests,

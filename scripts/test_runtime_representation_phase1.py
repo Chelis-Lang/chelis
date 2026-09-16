@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -257,6 +258,45 @@ class ReceiptTests(unittest.TestCase):
         ):
             with self.subTest(frozen=invalid_frozen), self.assertRaises(oracle.OracleFailure):
                 oracle.require_frozen_selection(frozen, invalid_frozen)
+
+    def test_runtime_manifest_rejects_stale_replaced_python_identities(self):
+        packet = oracle.frozen_manifest(
+            oracle.MANIFEST.read_bytes(),
+            oracle.MANIFEST_SHA256,
+        )
+        selected = oracle.python_selection(oracle.python_suite())
+        replacements = (
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'FrozenMutationContractTests.'
+                'test_rejection_obligation_drift_moves_digest_and_fails_comparison',
+                'scripts.test_runtime_representation_oracle.'
+                'BaselineTests.'
+                'test_freeze_digest_rejects_an_edited_coverage_manifest',
+            ),
+            (
+                'scripts.test_runtime_representation_oracle.'
+                'MutationContractTests.'
+                'test_mutation_body_change_moves_the_runtime_manifest_and_frozen_projection',
+                'scripts.test_runtime_representation_oracle.'
+                'MutationContractTests.'
+                'test_mutation_body_change_moves_the_freeze_digest',
+            ),
+        )
+        for current, stale in replacements:
+            with self.subTest(stale=stale):
+                self.assertIn(current, packet['python_required'])
+                self.assertIn(current, selected)
+                self.assertNotIn(stale, selected)
+                stale_required = sorted(
+                    stale if identity == current else identity
+                    for identity in packet['python_required']
+                )
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    re.escape(stale),
+                ):
+                    oracle.require_frozen_selection(selected, stale_required)
 
     def test_native_and_mutation_selections_remain_exact(self):
         expected = ['p::contract::negative']

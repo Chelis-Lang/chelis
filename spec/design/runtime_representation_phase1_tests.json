@@ -1734,9 +1734,9 @@
     "scripts.test_runtime_representation_oracle.BaselineTests.test_every_identity_is_kind_path_owner_only",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_every_row_has_a_phase_the_design_maps",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_foundation_digest_rejects_an_edited_row",
-    "scripts.test_runtime_representation_oracle.BaselineTests.test_freeze_digest_rejects_an_edited_coverage_manifest",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_only_explicit_exact_arithmetic_is_final_inside_the_capacity_owner",
     "scripts.test_runtime_representation_oracle.BaselineTests.test_the_sample_is_evidence_and_never_identity",
+    "scripts.test_runtime_representation_oracle.FrozenMutationContractTests.test_rejection_obligation_drift_moves_digest_and_fails_comparison",
     "scripts.test_runtime_representation_oracle.ManifestTests.test_checked_c_blas_has_submission_native_and_vendor_controls",
     "scripts.test_runtime_representation_oracle.ManifestTests.test_checked_c_index_projection_owners_require_their_executable_control",
     "scripts.test_runtime_representation_oracle.ManifestTests.test_checked_c_movement_has_delegation_mutations_and_native_execution",
@@ -1762,7 +1762,7 @@
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_header_mutations_remain_inside_their_include_guards",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_implementation_digest_is_independent_of_import_name",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_manifest_binds_exact_mutation_semantics_and_command",
-    "scripts.test_runtime_representation_oracle.MutationContractTests.test_mutation_body_change_moves_the_freeze_digest",
+    "scripts.test_runtime_representation_oracle.MutationContractTests.test_mutation_body_change_moves_the_runtime_manifest_and_frozen_projection",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_temporary_mutation_refuses_a_dirty_source",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_temporary_mutation_restores_original_bytes_after_failure",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_vocabulary_final_forms_do_not_admit_new_variants_or_owners",
@@ -1798,6 +1798,7 @@
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_public_command_rejects_development_shortcuts_before_source_validation",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_python_selection_executes_and_reports_additions_but_blocks_every_nonpass",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_runtime_archive_requires_current_cargo_artifact_identity",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_runtime_manifest_rejects_stale_replaced_python_identities",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_selection_requires_current_binary_and_exact_nonempty_census"
   ],
   "planner_mutations": [
