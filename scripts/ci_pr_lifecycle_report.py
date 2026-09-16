@@ -375,21 +375,34 @@ def validate_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
         ended_at = _timestamp(row.get("ended_at"), "agent wait ended_at")
         if ended_at < started_at:
             raise ReportError(f"agent wait {wait_id!r} ends before it starts")
+        head_sha = _optional_text(
+            row.get("head_sha"), "agent wait head_sha"
+        )
+        candidate_sha = _optional_text(
+            row.get("candidate_sha"), "agent wait candidate_sha"
+        )
+        if head_sha is None and candidate_sha is None:
+            raise ReportError(
+                f"agent wait {wait_id!r} requires head_sha or candidate_sha"
+            )
         run_ids_value = [
             _positive_int(run_id, f"agent wait {wait_id} run id")
             for run_id in _sequence(
                 row.get("run_ids", []), f"agent wait {wait_id} run_ids"
             )
         ]
+        if len(run_ids_value) != len(set(run_ids_value)):
+            raise ReportError(
+                f"agent wait {wait_id!r} contains duplicate run IDs"
+            )
         agent_waits.append(
             {
                 "wait_id": wait_id,
                 "pr_number": _positive_int(
                     row.get("pr_number"), "agent wait PR number"
                 ),
-                "head_sha": _optional_text(
-                    row.get("head_sha"), "agent wait head_sha"
-                ),
+                "head_sha": head_sha,
+                "candidate_sha": candidate_sha,
                 "cause": _validate_cause(row.get("cause"), "agent wait cause"),
                 "started_at": _timestamp_text(started_at),
                 "ended_at": _timestamp_text(ended_at),
@@ -756,9 +769,41 @@ def build_report(
 
     wait_rows: list[dict[str, Any]] = []
     wait_seconds_by_id: dict[str, float] = {}
+    run_rows_by_id = {row["run_id"]: row for row in run_rows}
     for row in ledger["agent_waits"]:
         if row["pr_number"] not in cohort:
             continue
+        for run_id in row["run_ids"]:
+            linked_run = run_rows_by_id.get(run_id)
+            if linked_run is None:
+                raise ReportError(
+                    f"agent wait {row['wait_id']!r} references unknown "
+                    f"workflow run {run_id}"
+                )
+            if linked_run["pr_number"] != row["pr_number"]:
+                raise ReportError(
+                    f"agent wait {row['wait_id']!r} run {run_id} belongs to "
+                    f"PR #{linked_run['pr_number']}, not PR #{row['pr_number']}"
+                )
+            if (
+                row["head_sha"] is not None
+                and linked_run["head_sha"] != row["head_sha"]
+            ):
+                raise ReportError(
+                    f"agent wait {row['wait_id']!r} run {run_id} does not "
+                    "match its head_sha"
+                )
+            run_candidate = (
+                linked_run["candidate_sha"] or linked_run["head_sha"]
+            )
+            if (
+                row["candidate_sha"] is not None
+                and run_candidate != row["candidate_sha"]
+            ):
+                raise ReportError(
+                    f"agent wait {row['wait_id']!r} run {run_id} does not "
+                    "match its candidate_sha"
+                )
         wait_seconds = _duration_seconds(
             row["started_at"],
             row["ended_at"],
@@ -975,10 +1020,12 @@ def build_report(
                 "Sum of each workflow attempt's earliest-job to latest-job "
                 "window. Concurrent attempts and workflows can overlap."
             ),
-            "agent_wait_minutes": (
-                "Sum of explicit attribution-ledger intervals during which an "
-                "agent was waiting for CI. It is never inferred from GitHub."
-            ),
+                "agent_wait_minutes": (
+                    "Sum of explicit attribution-ledger intervals during which an "
+                    "agent was waiting for CI. It is never inferred from GitHub, "
+                    "and supplied run IDs are checked against the PR and head or "
+                    "synthetic candidate identity."
+                ),
             "amplification_ratio": (
                 "Cumulative CI/Hull raw job-minutes divided by the sum of each "
                 "PR's latest-candidate CI/Hull raw job-minutes."
@@ -1238,16 +1285,24 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 (
-                    "| Wait ID | PR | Head | Start | End | Cause | Run IDs | "
-                    "Wait min | Evidence |"
+                    "| Wait ID | PR | Head | Candidate | Start | End | Cause | "
+                    "Run IDs | Wait min | Evidence |"
                 ),
-                "| --- | ---: | --- | --- | --- | --- | --- | ---: | --- |",
+                (
+                    "| --- | ---: | --- | --- | --- | --- | --- | --- | "
+                    "---: | --- |"
+                ),
             ]
         )
         for row in report["agent_wait_ledger"]:
             head = (
                 f"`{row['head_sha'][:12]}`"
                 if row["head_sha"] is not None
+                else "n/a"
+            )
+            candidate = (
+                f"`{row['candidate_sha'][:12]}`"
+                if row["candidate_sha"] is not None
                 else "n/a"
             )
             lines.append(
@@ -1257,6 +1312,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                         row["wait_id"],
                         f"#{row['pr_number']}",
                         head,
+                        candidate,
                         row["started_at"],
                         row["ended_at"],
                         row["cause"],

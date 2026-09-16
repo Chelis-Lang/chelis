@@ -219,7 +219,7 @@ def attribution_fixture() -> dict:
             {
                 "wait_id": "review-wait",
                 "pr_number": 1,
-                "head_sha": HEAD_B,
+                "candidate_sha": CANDIDATE_B,
                 "cause": "review-repair",
                 "started_at": "2026-09-16T11:00:00Z",
                 "ended_at": "2026-09-16T11:12:00Z",
@@ -348,6 +348,37 @@ class LifecycleReportTests(unittest.TestCase):
         ):
             report.build_report(
                 github_fixture(), prs=[1], attribution_payload=bad_scope
+            )
+
+        missing_identity = attribution_fixture()
+        del missing_identity["agent_waits"][0]["candidate_sha"]
+        with self.assertRaisesRegex(
+            report.ReportError, "requires head_sha or candidate_sha"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=missing_identity,
+            )
+
+        wrong_candidate = attribution_fixture()
+        wrong_candidate["agent_waits"][0]["candidate_sha"] = CANDIDATE_A
+        with self.assertRaisesRegex(
+            report.ReportError, "does not match its candidate_sha"
+        ):
+            report.build_report(
+                github_fixture(),
+                prs=[1],
+                attribution_payload=wrong_candidate,
+            )
+
+        unknown_run = attribution_fixture()
+        unknown_run["agent_waits"][0]["run_ids"] = [999]
+        with self.assertRaisesRegex(
+            report.ReportError, "references unknown workflow run"
+        ):
+            report.build_report(
+                github_fixture(), prs=[1], attribution_payload=unknown_run
             )
 
     def test_attempts_and_overlapping_jobs_use_distinct_clocks(self) -> None:
