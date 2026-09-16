@@ -592,6 +592,57 @@ def dag_cases():
             "ascription_id"
         ] = value
         add(name, bad, False)
+
+    # The named form observes the same tensor axis as an earlier Caller
+    # witness and retains that declaring witness as its sole shape dependency.
+    # It is a distinct representation from the literal form above: neither
+    # requirements nor a guessed parameter-less fallback are admitted.
+    named_local_ascription = copy.deepcopy(witness)
+    named_local_ascription["nodes"] = named_local_ascription["nodes"][:2]
+    named_local_ascription["nodes"][1]["op"]["requirements"] = []
+    named_local_ascription["nodes"][1]["op"]["claims"] = []
+    named_token = copy.deepcopy(named_local_ascription["nodes"][1])
+    named_token["id"] = 2
+    named_token["op"]["site"] = {
+        "local_ascription_claim": {
+            "ascription_id": 17,
+            "binding": "y",
+            "claim": "rows",
+            "axis": {"axis": "lit", "value": 0},
+        }
+    }
+    named_token["shape_deps"] = [1]
+    named_owner = copy.deepcopy(local_ascription["nodes"][2])
+    named_owner["id"] = 3
+    named_owner["shape_deps"] = [2]
+    named_local_ascription["nodes"].extend([named_token, named_owner])
+    named_local_ascription["roots"] = [3]
+    add("named-local-ascription-owned", named_local_ascription, True)
+    for name, mutate in (
+        (
+            "named-local-ascription-missing-declaration",
+            lambda value: value["nodes"][2].update(shape_deps=[]),
+        ),
+        (
+            "named-local-ascription-wrong-declaration",
+            lambda value: value["nodes"][2].update(shape_deps=[0]),
+        ),
+        (
+            "named-local-ascription-empty-parameter",
+            lambda value: value["nodes"][2]["op"].update(parameter=""),
+        ),
+        (
+            "named-local-ascription-literal-hybrid",
+            lambda value: value["nodes"][2]["op"].update(requirements=[2]),
+        ),
+        (
+            "named-local-ascription-missing-owner",
+            lambda value: value["nodes"][3].update(shape_deps=[]),
+        ),
+    ):
+        bad = copy.deepcopy(named_local_ascription)
+        mutate(bad)
+        add(name, bad, False)
     return cases
 
 

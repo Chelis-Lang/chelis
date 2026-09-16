@@ -214,6 +214,10 @@ pub(crate) fn lowered_library_payload_matches(
                 == sorted_btree_map_bytes(expected.program_signatures())?
             && sorted_btree_map_bytes(cached.program_types())?
                 == sorted_btree_map_bytes(expected.program_types())?
+            && bincode::serialize(cached.local_tensor_ascriptions())
+                .map_err(|error| error.to_string())?
+                == bincode::serialize(expected.local_tensor_ascriptions())
+                    .map_err(|error| error.to_string())?
             && sorted_btree_map_bytes(cached.lowered_names())?
                 == sorted_btree_map_bytes(expected.lowered_names())?,
     )

@@ -616,6 +616,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         adt_fields,
         tensor_bindings,
         session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
+        active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
@@ -1069,6 +1070,11 @@ struct EvalContext<'a> {
     /// invariant-predicate evaluator, which has no program and therefore no
     /// kernels: it interprets every application.
     session: Option<chelis_ir::host::HostLoweringSession<'a>>,
+    /// Active checked declaration frames. Synthetic local-ascription regions
+    /// select artifact-local identities through this stack so two composed
+    /// source units with equal names and byte offsets cannot cross-own a
+    /// runtime obligation.
+    active_declaration_names: Vec<String>,
     /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
     /// DAG draws no Random and is reused across applications. A Random-drawing
     /// kernel is re-lowered per application and never cached (see

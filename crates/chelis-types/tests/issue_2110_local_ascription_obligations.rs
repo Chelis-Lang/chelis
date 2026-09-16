@@ -4,8 +4,8 @@ use chelis_surf::parser::parse_str;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::{Dim, Type};
 use chelis_types::{
-    CheckedProgram, build_compiled_library_context, check_ir_program, check_ir_with_context,
-    check_linearity,
+    CheckedProgram, LocalTensorAscriptionOrigin, build_compiled_library_context, check_ir_program,
+    check_ir_with_context, check_linearity,
 };
 
 fn check_surf(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
@@ -15,6 +15,11 @@ fn check_surf(source: &str) -> Result<CheckedProgram, chelis_types::InferResult>
 
 fn checked_surf(source: &str) -> CheckedProgram {
     check_surf(source).unwrap_or_else(|result| panic!("type check failed: {:?}", result.errors))
+}
+
+fn check_deep(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
+    let program = chelis_deep::parser::parse_str(source).expect("Deep parse");
+    check_ir_program(&program)
 }
 
 fn source_at(source: &str, span: chelis_deep::Span) -> &str {
@@ -39,6 +44,10 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     };
 
     assert_eq!(ascription.id().get(), 0);
+    assert_eq!(
+        ascription.origin(),
+        LocalTensorAscriptionOrigin::SurfExplicit
+    );
     assert_eq!(ascription.declaration_name(), Some("f"));
     assert_eq!(ascription.binding_name(), "y");
     assert_eq!(source_at(source, ascription.binding_span()), "y");
@@ -70,6 +79,105 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     };
     assert_eq!(claim.axis(), 0);
     assert_eq!(claim.required_extent(), &Dim::Lit(9));
+}
+
+const DEEP_RUNTIME_LOCAL_ASCRIPTION: &str = r#"
+(defsig {}
+  f
+  (t-fn {}
+    (t-tensor {} (d-name {} *) (t-prim {} f32))
+    (t-tensor {} (d-name {} *) (t-prim {} f32))))
+(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-var {} _)}))
+    (let {}
+      (bind {}
+        y
+        (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+          (var {} pad)
+          (var {} x)
+          (app {}
+            (var {} Cons)
+            (app {}
+              (var {} Cons)
+              (lit {type: (t-prim {} int64)} 0)
+              (app {}
+                (var {} Cons)
+                (lit {type: (t-prim {} int64)} 0)
+                (var {} Nil)))
+            (var {} Nil))
+          (lit {type: (t-prim {} f32)} 0.0)))
+      (var {} y))))
+"#;
+
+#[test]
+fn hand_authored_deep_type_metadata_is_an_explicit_local_ascription() {
+    let checked = check_deep(DEEP_RUNTIME_LOCAL_ASCRIPTION)
+        .unwrap_or_else(|result| panic!("Deep type check failed: {:?}", result.errors));
+    let [ascription] = checked.local_tensor_ascriptions() else {
+        panic!(
+            "hand-authored Deep metadata must create one obligation: {:?}",
+            checked.local_tensor_ascriptions()
+        );
+    };
+    assert_eq!(
+        ascription.origin(),
+        LocalTensorAscriptionOrigin::DeepTypeMetadata
+    );
+    assert_eq!(ascription.binding_name(), "y");
+    assert_eq!(
+        ascription.declared_type(),
+        &Type::Tensor(
+            vec![Dim::Lit(2)],
+            chelis_types::types::TensorPrec::Concrete(chelis_types::types::Prim::F32)
+        )
+    );
+    assert_eq!(ascription.outstanding_claims().len(), 1);
+    assert_eq!(
+        ascription.outstanding_claims()[0].required_extent(),
+        &Dim::Lit(2)
+    );
+}
+
+#[test]
+fn hand_authored_deep_static_mismatch_is_dimension_mismatch() {
+    let source = r#"
+(def {}
+  out
+  (let {}
+    (bind {}
+      y
+      (app {type: (t-tensor {} (d-lit {} 9) (t-prim {} f32))}
+        (var {} pad)
+        (app {}
+          (var {} to_tensor)
+          (app {}
+            (var {} Cons)
+            (lit {type: (t-prim {} f32)} 1.0)
+            (var {} Nil)))
+        (app {}
+          (var {} Cons)
+          (app {}
+            (var {} Cons)
+            (lit {type: (t-prim {} int64)} 1)
+            (app {}
+              (var {} Cons)
+              (lit {type: (t-prim {} int64)} 0)
+              (var {} Nil)))
+          (var {} Nil))
+        (lit {type: (t-prim {} f32)} 0.0)))
+    (var {} y)))
+"#;
+    let result = check_deep(source).expect_err("static Deep mismatch must reject");
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "expected DimensionMismatch, got {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -135,6 +243,37 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     assert!(
         print_expr(ascription.authored_type()).contains("(d-name {} *)"),
         "the wildcard authored axis must survive even though it creates no claim"
+    );
+}
+
+#[test]
+fn authored_ascriptions_inside_match_arms_reach_the_checked_program() {
+    let checked = checked_surf(
+        r#"
+type Choice = | First | Second
+
+def f(choice: Choice, x: tensor[*, f32]) -> tensor[*, f32] =
+  match choice with {
+    | First => x
+    | Second => {
+        y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)
+        y
+      }
+  }
+"#,
+    );
+    let [ascription] = checked.local_tensor_ascriptions() else {
+        panic!(
+            "the authored match-arm binding must create one checked obligation: {:?}",
+            checked.local_tensor_ascriptions()
+        );
+    };
+    assert_eq!(ascription.binding_name(), "y");
+    assert_eq!(ascription.declaration_name(), Some("f"));
+    assert_eq!(ascription.outstanding_claims().len(), 1);
+    assert_eq!(
+        ascription.outstanding_claims()[0].required_extent(),
+        &Dim::Lit(2)
     );
 }
 

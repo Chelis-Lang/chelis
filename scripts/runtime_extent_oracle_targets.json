@@ -568,6 +568,43 @@
     },
     {
       "phase": "b",
+      "id": "surf_issue_2110_local_ascription_provenance",
+      "package": "chelis-surf",
+      "kind": "test",
+      "file": "crates/chelis-surf/tests/issue_2110_local_ascription_provenance.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata"
+      ],
+      "note": "Surf preserves an authored local tensor annotation as explicit provenance while marking compiler-inferred type metadata separately."
+    },
+    {
+      "phase": "b",
+      "id": "types_issue_2110_local_ascription",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_2110_local_ascription_obligations.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "authored_ascriptions_inside_match_arms_reach_the_checked_program",
+        "authored_wildcard_is_preserved_without_manufacturing_a_claim",
+        "checked_library_composition_preserves_both_identity_domains",
+        "checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
+        "claimed_axes_remain_in_authored_axis_order",
+        "hand_authored_deep_static_mismatch_is_dimension_mismatch",
+        "hand_authored_deep_type_metadata_is_an_explicit_local_ascription",
+        "inferred_metadata_does_not_become_authored_ascription_provenance",
+        "runtime_dependent_local_ascription_retains_exact_authored_claim",
+        "static_agreement_discharges_and_static_disagreement_stays_dimension_mismatch"
+      ],
+      "note": "The checker retains exact authored provenance, identity, source spans and ordered outstanding claims through checked-program and library composition; inferred metadata creates no obligation and graph-fixed disagreement remains DimensionMismatch."
+    },
+    {
+      "phase": "b",
       "id": "ir_issue_2110_local_ascription",
       "package": "chelis-ir",
       "kind": "test",
@@ -578,10 +615,13 @@
       "expected": [
         "aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
         "each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+        "grad_pruning_preserves_a_dead_except_for_trap_local_site",
         "host_evaluation_kernel_carries_the_same_local_ascription_site",
         "inferred_metadata_does_not_create_a_local_ascription_site",
         "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
         "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        "ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
         "rebuild_cse_dce_and_specialization_preserve_the_exact_site",
         "staged_host_partition_retains_the_local_ascription_site",
         "vmap_shifts_the_local_claim_and_initializer_axis_together"
@@ -598,23 +638,43 @@
         "mode": "all"
       },
       "expected": [
+        "a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        "a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        "a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
         "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
         "a_later_same_shape_consumer_does_not_take_the_initializer_claim",
         "a_named_local_claim_uses_its_declaring_runtime_extent",
+        "a_selected_static_branch_enforces_its_local_ascription_obligation",
+        "a_selected_static_match_arm_enforces_its_local_ascription_obligation",
         "a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
         "a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
         "a_value_dead_except_for_the_obligation_still_traps",
         "a_wildcard_local_ascription_creates_no_extent_obligation",
+        "agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        "agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        "agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        "an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        "an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
         "an_agreeing_literal_result_and_local_claim_execute_exactly",
         "an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        "an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
         "an_inferred_result_claim_does_not_replace_the_local_claim",
         "an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
         "an_inlined_callee_retains_its_local_ascription_obligation",
+        "an_invoked_local_closure_prepares_its_own_local_ascription",
+        "an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        "an_untaken_static_branch_creates_no_local_ascription_obligation",
+        "an_untaken_static_match_arm_creates_no_local_ascription_obligation",
         "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        "direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        "direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        "hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        "hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        "hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
         "inferred_metadata_does_not_create_a_local_runtime_claim",
         "multiple_local_axis_claims_fail_in_authored_axis_order"
       ],
-      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/dead/consumer paths, result-claim coexistence, wildcard and inferred controls, and authored axis order."
+      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/local-closure/dead/consumer paths, cross-let host alias attribution, single execution and nested shadowing, selected and untaken control-flow arms, host-effect placement, activation-scoped uninvoked closures, direct top-level grad/vmap transport, result-claim coexistence, wildcard and inferred controls, and authored axis order."
     },
     {
       "phase": "b",
@@ -640,9 +700,10 @@
         "mode": "all"
       },
       "expected": [
+        "composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
         "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
       ],
-      "note": "Stdlib and dependency cache payloads retain the checked obligation, and cached-library plus entry composition lowers it to an explicit site."
+      "note": "Stdlib and dependency cache payloads retain the checked obligation, cached-library plus entry composition lowers it to an explicit site, and independently checked same-offset bindings select their activation-local identities."
     },
     {
       "phase": "b",

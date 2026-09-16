@@ -515,6 +515,7 @@ impl InferenceProduct {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record_local_tensor_ascription(
         &mut self,
+        origin: LocalTensorAscriptionOrigin,
         binding_name: &str,
         binding_span: Span,
         ascription_span: Span,
@@ -540,6 +541,7 @@ impl InferenceProduct {
         self.local_tensor_ascriptions
             .push(CheckedLocalTensorAscription {
                 id: LocalAscriptionId(raw_id),
+                origin,
                 declaration_name: self.active_declaration_name.clone(),
                 binding_name: binding_name.to_string(),
                 binding_span,
@@ -2250,6 +2252,17 @@ impl LocalAscriptionId {
     }
 }
 
+/// Authored source channel that owns a local tensor ascription.
+///
+/// Surf stamps inferred metadata explicitly, so unmarked public Deep `type`
+/// metadata remains an authored contract rather than being confused with
+/// compiler-inferred Surf metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LocalTensorAscriptionOrigin {
+    SurfExplicit,
+    DeepTypeMetadata,
+}
+
 /// One declared tensor axis that checking could not independently discharge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LocalAscriptionAxisClaim {
@@ -2277,6 +2290,7 @@ impl LocalAscriptionAxisClaim {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedLocalTensorAscription {
     id: LocalAscriptionId,
+    origin: LocalTensorAscriptionOrigin,
     declaration_name: Option<String>,
     binding_name: String,
     binding_span: Span,
@@ -2290,6 +2304,10 @@ pub struct CheckedLocalTensorAscription {
 impl CheckedLocalTensorAscription {
     pub fn id(&self) -> LocalAscriptionId {
         self.id
+    }
+
+    pub fn origin(&self) -> LocalTensorAscriptionOrigin {
+        self.origin
     }
 
     pub fn declaration_name(&self) -> Option<&str> {
@@ -2323,6 +2341,45 @@ impl CheckedLocalTensorAscription {
     pub fn outstanding_claims(&self) -> &[LocalAscriptionAxisClaim] {
         &self.outstanding_claims
     }
+
+    /// Clone this checked obligation into an identity domain above an earlier
+    /// independently checked artifact. The source spans and declaration
+    /// identity stay unchanged; only the opaque artifact-local ID moves.
+    pub fn with_id_offset(&self, offset: u64) -> Option<Self> {
+        let mut remapped = self.clone();
+        remapped.id = LocalAscriptionId(remapped.id.0.checked_add(offset)?);
+        Some(remapped)
+    }
+}
+
+/// Compose checker-owned local obligations across independently checked units.
+///
+/// A replacement definition owns the active body for its declaration name, so
+/// obligations attached to the shadowed library body are unreachable and must
+/// not participate in source-span selection. Retained records keep their
+/// identities; new-code records move above that retained identity domain.
+pub fn compose_local_tensor_ascriptions(
+    library: &[CheckedLocalTensorAscription],
+    new_code: &[CheckedLocalTensorAscription],
+    replaced_definitions: &BTreeSet<String>,
+) -> Option<Vec<CheckedLocalTensorAscription>> {
+    let mut composed = library
+        .iter()
+        .filter(|ascription| {
+            ascription
+                .declaration_name()
+                .is_none_or(|name| !replaced_definitions.contains(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let new_code_id_offset = match composed.iter().map(|ascription| ascription.id.0).max() {
+        Some(last) => last.checked_add(1)?,
+        None => 0,
+    };
+    for ascription in new_code {
+        composed.push(ascription.with_id_offset(new_code_id_offset)?);
+    }
+    Some(composed)
 }
 
 fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
@@ -2539,21 +2596,21 @@ impl CheckedProgram {
 
         let linearity = library.linearity.merged_with(&new_code.linearity);
 
-        let new_code_id_offset = match library
-            .local_tensor_ascriptions
-            .iter()
-            .map(|ascription| ascription.id.0)
-            .max()
-        {
-            Some(last) => last.checked_add(1)?,
-            None => 0,
-        };
-        let mut local_tensor_ascriptions = library.local_tensor_ascriptions.clone();
-        for ascription in &new_code.local_tensor_ascriptions {
-            let mut remapped = ascription.clone();
-            remapped.id = LocalAscriptionId(remapped.id.0.checked_add(new_code_id_offset)?);
-            local_tensor_ascriptions.push(remapped);
-        }
+        let replaced_definitions = top_level_decl_items(&new_code.annotated_exprs)
+            .into_iter()
+            .filter_map(|expr| {
+                let (tag, _, children) = stamped_parts(expr)?;
+                (tag == DeepTag::Def)
+                    .then(|| children.first().and_then(symbol_name))
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+        let local_tensor_ascriptions = compose_local_tensor_ascriptions(
+            &library.local_tensor_ascriptions,
+            &new_code.local_tensor_ascriptions,
+            &replaced_definitions,
+        )?;
 
         let mut signature_inference = library.signature_inference.clone();
         for (name, sig) in &new_code.signature_inference.functions {

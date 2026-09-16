@@ -498,9 +498,16 @@ pub(super) fn infer_let(
                     Some(&mut rhs_type_metadata_resolution),
                 );
                 let rhs_type_before_ascription = subst.apply(&expr_ty);
-                let explicit_local_ascription = stamped_parts(rhs_expr)
+                let local_ascription_origin = match stamped_parts(rhs_expr)
                     .and_then(|(_, meta, _)| meta.surf_binding_type())
-                    .is_some_and(|origin| origin.value() == &BindingTypeOrigin::Explicit);
+                    .map(|origin| *origin.value())
+                {
+                    Some(BindingTypeOrigin::Explicit) => {
+                        Some(LocalTensorAscriptionOrigin::SurfExplicit)
+                    }
+                    Some(BindingTypeOrigin::Inferred) => None,
+                    None => Some(LocalTensorAscriptionOrigin::DeepTypeMetadata),
+                };
                 let mut checked_local_ascription = None;
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
@@ -537,9 +544,12 @@ pub(super) fn infer_let(
                         },
                     };
                     match unify(&expr_ty, &declared_ty, subst) {
-                        Ok(()) if explicit_local_ascription => {
-                            checked_local_ascription =
-                                Some((declared_ty_expr.clone(), declared_ty.clone()));
+                        Ok(()) if local_ascription_origin.is_some() => {
+                            checked_local_ascription = Some((
+                                local_ascription_origin.expect("checked above"),
+                                declared_ty_expr.clone(),
+                                declared_ty.clone(),
+                            ));
                         }
                         Ok(()) => {}
                         Err(e) => {
@@ -573,8 +583,9 @@ pub(super) fn infer_let(
                 } else {
                     expr_ty
                 };
-                if let Some((authored_type, declared_type)) = checked_local_ascription {
+                if let Some((origin, authored_type, declared_type)) = checked_local_ascription {
                     product.record_local_tensor_ascription(
+                        origin,
                         name,
                         bind_children[i].span(),
                         authored_type.span(),

@@ -595,10 +595,11 @@ names. Its execution controls preserve the 84 exact [05-OP-35] identities.
 
 The wire census verifies the compiler/Python publication graph, exact carrier
 shapes, codec and admission execution, and the default compiler-api library's
-compiled serialization obligations. The executed baseline's 96 numeric leaves
-have final authority: 79 verified transports and 17 exact numeric-operation
-registrations. WireDag v9 includes the u64 shape-dependency reference and the
-fixed-int64 extent carrier's literal-witness requirement role. The wire
+compiled serialization obligations. The executed baseline's 97 numeric leaves
+have final authority: 80 verified transports and 17 exact numeric-operation
+registrations. WireDag v14 includes the u64 shape-dependency reference, the
+opaque u64 local-ascription identity, and the fixed-int64 extent carrier's
+literal-witness requirement role. The wire
 baseline has no frozen cohort or static-descriptor admission path. Every new or
 changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
 or `NumericOperation(atom)`; a citation or maintainer override cannot supply
@@ -950,9 +951,10 @@ Deliverables, with phase homes:
    carriers/transports, and 223 exact numeric-operation registrations. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
-   96 final rows (79 verified transports and 17 numeric operations), with no
-   legacy cohort. Fresh actual verification includes WireDag v9's u64
-   shape-dependency transport and fixed-extent literal-witness role.
+   97 final rows (80 verified transports and 17 numeric operations), with no
+   legacy cohort. Fresh actual verification includes WireDag v14's u64
+   shape-dependency and local-ascription-identity transports plus the
+   fixed-extent literal-witness role.
    Nine binding rows have final nonnumeric authority, seven rows have final
    tagged-transport authority, and `NativeTensor.shape` has exact
    numeric-operation authority under [05-OP-45]. No binding row remains legacy.
@@ -1630,11 +1632,12 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 9 are
+**Current integration state.** Execution version 3 and WireDag version 14 are
 the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
-96 distinct numeric leaves: 79 verified transports and 17 numeric operations,
-with zero exception rows. It includes the shape-dependency transport and fixed
-literal-witness extent role, replaces the original 84-row legacy cohort and incorporates
+97 distinct numeric leaves: 80 verified transports and 17 numeric operations,
+with zero exception rows. It includes the shape-dependency and opaque
+local-ascription-identity transports plus the fixed literal-witness extent
+role, replaces the original 84-row legacy cohort and incorporates
 previously missed private codec/report leaves. The former execution scalar and
 tensor-element variants now delegate to the shared canonical carriers; counting
 those uses again would duplicate their defining leaves. Field-role checks still

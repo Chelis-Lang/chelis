@@ -439,10 +439,11 @@ numeric data, whether or not you have read that document:
   nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
   223 registered numeric operations (the [05-OP-35] stdlib registrations among
   them). It retains no grandfather, successor-override, permanent-disposition,
-  integer-plumbing, or other transition rows. The wire baseline has 96 final
-  numeric leaves: 79 verified transports and 17 exact numeric operations.
-  WireDag v9 includes the `WireDagNode.shape_deps: u64` transport and the fixed
-  `NonnegativeExtent` carrier's literal-witness requirement role. Its
+  integer-plumbing, or other transition rows. The wire baseline has 97 final
+  numeric leaves: 80 verified transports and 17 exact numeric operations.
+  WireDag v14 includes the `WireDagNode.shape_deps: u64` and opaque
+  local-ascription-identity transports plus the fixed `NonnegativeExtent`
+  carrier's literal-witness requirement role. Its
   private verifier requires current graph, codec/admission, cache, publication
   and mutation execution; neither a static descriptor nor a baseline grants
   wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final

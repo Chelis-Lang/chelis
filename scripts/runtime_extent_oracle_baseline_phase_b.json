@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "b75d434b8dbab013a8739554ddf950ddc61e586313f2a83b949317d5ffab02f1",
+  "corpus_sha256": "379f4e107028a50148fac9b89aa790bada8ea8ebc21b84618028a31af65b46a2",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -105,6 +105,90 @@
       "receipt": "api_issue_2110_local_ascription_cache.stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
     },
     {
+      "id": "claim.local_ascription.checked_rewrites",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.checker_owned_ascription_survives_clone_serialization_and_checker_rewrites"
+    },
+    {
+      "id": "claim.local_ascription.checker_transport",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.runtime_dependent_local_ascription_retains_exact_authored_claim"
+    },
+    {
+      "id": "claim.local_ascription.composed_identity_collision",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "api_issue_2110_local_ascription_cache.composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities"
+    },
+    {
+      "id": "claim.local_ascription.control_if.selected.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.selected.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.untaken.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.untaken.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_match.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_match.checker",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.authored_ascriptions_inside_match_arms_reach_the_checked_program"
+    },
+    {
+      "id": "claim.local_ascription.control_match.selected.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.selected.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.untaken.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.untaken.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation"
+    },
+    {
       "id": "claim.local_ascription.dead.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -117,6 +201,42 @@
       "receipt": "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps"
     },
     {
+      "id": "claim.local_ascription.deep.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.origin",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.hand_authored_deep_type_metadata_is_an_explicit_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.deep.runtime.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.runtime.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build"
+    },
+    {
       "id": "claim.local_ascription.direct.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -127,6 +247,126 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.fusion",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer"
+    },
+    {
+      "id": "claim.local_ascription.grad_pruning",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.grad_pruning_preserves_a_dead_except_for_trap_local_site"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.trap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.shadowing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.shadowing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.trap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner"
     },
     {
       "id": "claim.local_ascription.host_kernel",
@@ -213,6 +453,42 @@
       "receipt": "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation"
     },
     {
+      "id": "claim.local_ascription.local_closure.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.uninvoked.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.uninvoked.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation"
+    },
+    {
       "id": "claim.local_ascription.lowering",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
@@ -235,6 +511,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "ir_issue_2110_local_ascription.malformed_local_claim_roles_are_rejected_by_the_native_verifier"
+    },
+    {
+      "id": "claim.local_ascription.ownership_lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.ownership_lowering_keeps_the_claim_live_through_its_initializer_owner"
+    },
+    {
+      "id": "claim.local_ascription.provenance",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "surf_issue_2110_local_ascription_provenance.explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata"
     },
     {
       "id": "claim.local_ascription.rebuilds",

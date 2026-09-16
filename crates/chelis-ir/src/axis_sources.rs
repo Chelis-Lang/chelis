@@ -2950,33 +2950,29 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
         .collect()
 }
 
-/// Nodes any producer-owned result claim requires semantic rewrites to preserve.
+/// Nodes any producer-owned extent claim requires semantic rewrites to preserve.
 ///
-/// Both named `ResultClaim` and authored `LiteralResultClaim` tokens make
-/// their owner potentially trapping. Literal claims can be attached to an
-/// administrative Copy/Cast carrier while §4.7 attribution remains at the
-/// primitive behind that carrier, so the protected set includes that complete
-/// administrative chain. Named producer claims are attached directly to their
-/// producing primitive and enter through the same query.
+/// Named `ResultClaim`, authored `LiteralResultClaim`, and local
+/// `LocalAscriptionClaim` tokens make their owner potentially trapping.
+/// Claims can be attached to an administrative Copy/Cast carrier while §4.7
+/// attribution remains at the primitive behind that carrier, so the protected
+/// set includes that complete administrative chain.
 ///
 /// Every rewrite that can replace, merge, fold, fuse, specialize, or eliminate
 /// a producer consumes this one classification. Keeping the token forms behind
 /// this API prevents a new rewrite from accidentally protecting only one.
-pub(crate) fn claimed_result_producers(dag: &Dag) -> Vec<bool> {
-    result_claim_producers_matching(dag, directly_owns_result_claim)
+pub(crate) fn claimed_producers(dag: &Dag) -> Vec<bool> {
+    claim_producers_matching(dag, directly_owns_producer_claim)
 }
 
 /// Literal-only ownership carriers are a lowering representation detail, not
 /// the semantic rewrite barrier. Sparse helper recognition uses this narrower
 /// query only to peel those exact administrative carriers.
 pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
-    result_claim_producers_matching(dag, directly_owns_literal_result_claim)
+    claim_producers_matching(dag, directly_owns_literal_result_claim)
 }
 
-fn result_claim_producers_matching(
-    dag: &Dag,
-    directly_owns: impl Fn(&Dag, NodeId) -> bool,
-) -> Vec<bool> {
+fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> bool) -> Vec<bool> {
     let mut protected = vec![false; dag.len()];
     let mut pending = dag
         .nodes()
@@ -3008,7 +3004,7 @@ fn result_claim_producers_matching(
     protected
 }
 
-pub(crate) fn directly_owns_result_claim(dag: &Dag, owner: NodeId) -> bool {
+pub(crate) fn directly_owns_producer_claim(dag: &Dag, owner: NodeId) -> bool {
     dag.get(owner).is_some_and(|node| {
         node.shape_deps
             .iter()
@@ -3018,7 +3014,8 @@ pub(crate) fn directly_owns_result_claim(dag: &Dag, owner: NodeId) -> bool {
                     dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     })
                 )
@@ -3632,7 +3629,7 @@ mod tests {
     }
 
     #[test]
-    fn claimed_result_producers_cover_named_literal_and_the_owned_admin_chain() {
+    fn claimed_producers_cover_named_literal_local_and_the_owned_admin_chain() {
         let mut dag = Dag::new();
         let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
         let input = dag.add_node(
@@ -3681,16 +3678,37 @@ mod tests {
         );
         let named_owner = dag.add_node(RiscOp::Add, vec![input, input], tensor.clone(), None);
         dag.add_result_claim_dep(named_owner, named_claim);
+        let local_claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: 0,
+                    binding: "local".into(),
+                    claim: "4".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let local_owner = dag.add_node(RiscOp::Exp, vec![input], tensor.clone(), None);
+        dag.add_shape_dep(local_owner, local_claim);
         let unrelated = dag.add_node(RiscOp::Copy, vec![input], tensor, None);
 
-        let protected = claimed_result_producers(&dag);
+        let protected = claimed_producers(&dag);
         assert!(protected[owner.0]);
         assert!(protected[cast.0]);
         assert!(protected[producer.0]);
         assert!(protected[named_owner.0]);
+        assert!(protected[local_owner.0]);
         assert!(!protected[input.0]);
         assert!(!protected[claim.0]);
         assert!(!protected[named_claim.0]);
+        assert!(!protected[local_claim.0]);
         assert!(!protected[unrelated.0]);
     }
 

@@ -25,7 +25,7 @@ pub fn constant_fold(dag: &mut Dag) {
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
     let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     // Direct subtraction and value extrema fold through their exact typed
     // kernels below. The remaining legacy fold set computes on the f64 wide
@@ -46,7 +46,7 @@ pub fn constant_fold(dag: &mut Dag) {
     };
 
     for node in dag.nodes() {
-        if claimed_result_producers[node.id.0] {
+        if claimed_producers[node.id.0] {
             continue;
         }
         if node.inputs.len() == 2 {
@@ -241,7 +241,7 @@ fn dead_code_eliminate_impl(
         }
     }
     if implicit_observations {
-        for (id, claimed) in crate::axis_sources::claimed_result_producers(dag)
+        for (id, claimed) in crate::axis_sources::claimed_producers(dag)
             .into_iter()
             .enumerate()
         {
@@ -402,7 +402,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
     let mut seen: UnordMap<CseKey, NodeId> = UnordMap::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -437,7 +437,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             remapped_result_claims.clone(),
         );
 
-        if !claimed_result_producers[node.id.0]
+        if !claimed_producers[node.id.0]
             && !matches!(
                 node.op,
                 RiscOp::ExtentWitness { .. }
@@ -489,7 +489,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 new_dag.set_reusable_input(new_id, mapped_input);
             }
             id_map.insert(node.id.0, new_id);
-            if !claimed_result_producers[node.id.0] {
+            if !claimed_producers[node.id.0] {
                 seen.insert(cse_key, new_id);
             }
         }

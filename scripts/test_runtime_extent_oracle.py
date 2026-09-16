@@ -360,16 +360,79 @@ class RuntimeExtentOracleTests(unittest.TestCase):
     def test_claimed_producer_barrier_mutation_removes_only_the_named_form(
         self,
     ) -> None:
-        source = "before\n" + ORACLE._CLAIM_BARRIER_NAMED_AND_LITERAL + "after\n"
-        mutated = ORACLE.remove_named_claim_from_producer_barrier(source)
+        source = "before\n" + ORACLE._CLAIM_BARRIER_ALL_PRODUCER_CLAIMS + "after\n"
+        without_named = ORACLE.remove_named_claim_from_producer_barrier(source)
         self.assertEqual(
-            mutated,
-            "before\n" + ORACLE._CLAIM_BARRIER_LITERAL_ONLY + "after\n",
+            without_named,
+            "before\n" + ORACLE._CLAIM_BARRIER_LITERAL_AND_LOCAL + "after\n",
+        )
+        without_local = ORACLE.remove_local_claim_from_producer_barrier(source)
+        self.assertEqual(
+            without_local,
+            "before\n" + ORACLE._CLAIM_BARRIER_NAMED_AND_LITERAL + "after\n",
         )
         with self.assertRaisesRegex(
             ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
         ):
             ORACLE.remove_named_claim_from_producer_barrier("no barrier")
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_local_claim_from_producer_barrier("no barrier")
+
+    def test_local_ascription_layer_mutations_remove_only_the_selected_contract(
+        self,
+    ) -> None:
+        cases = (
+            (
+                ORACLE.remove_local_ascription_provenance,
+                ORACLE._LOCAL_ASCRIPTION_PROVENANCE,
+                ORACLE._LOCAL_ASCRIPTION_PROVENANCE_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_checker_transport,
+                ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT,
+                ORACLE._LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_library_carrier,
+                ORACLE._LOCAL_ASCRIPTION_LIBRARY_CARRIER,
+                ORACLE._LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_context_composition,
+                ORACLE._LOCAL_ASCRIPTION_CONTEXT_COMPOSITION,
+                ORACLE._LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_attachment,
+                ORACLE._LOCAL_ASCRIPTION_ATTACHMENT,
+                ORACLE._LOCAL_ASCRIPTION_ATTACHMENT_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_eval_observation,
+                ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION,
+                ORACLE._LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_c_observation,
+                ORACLE._LOCAL_ASCRIPTION_C_OBSERVATION,
+                ORACLE._LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED,
+            ),
+            (
+                ORACLE.remove_local_ascription_artifact_conversion,
+                ORACLE._LOCAL_ASCRIPTION_ARTIFACT_CONVERSION,
+                ORACLE._LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED,
+            ),
+        )
+        for mutate, anchor, replacement in cases:
+            with self.subTest(mutate=mutate.__name__):
+                source = f"before\n{anchor}after\n"
+                self.assertEqual(mutate(source), f"before\n{replacement}after\n")
+                with self.assertRaisesRegex(
+                    ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+                ):
+                    mutate("no contract")
 
     def test_specializer_region_mutations_remove_only_the_selected_barrier(
         self,

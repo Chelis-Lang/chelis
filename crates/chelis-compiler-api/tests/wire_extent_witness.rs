@@ -286,6 +286,110 @@ fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknow
 }
 
 #[test]
+fn named_local_ascription_site_requires_its_exact_declaring_witness_and_owner() {
+    let mut dag = fixture();
+    dag.nodes.truncate(2);
+    let WireRiscOp::ExtentWitness {
+        requirements,
+        claims,
+        ..
+    } = &mut dag.nodes[1].op
+    else {
+        unreachable!()
+    };
+    requirements.clear();
+    claims.clear();
+
+    let mut token = dag.nodes[1].clone();
+    token.id = 2;
+    token.shape_deps = vec![1];
+    let WireRiscOp::ExtentWitness {
+        site,
+        parameter,
+        requirements,
+        claims,
+        ..
+    } = &mut token.op
+    else {
+        unreachable!()
+    };
+    *site = WireExtentWitnessSite::LocalAscriptionClaim {
+        ascription_id: 11,
+        binding: "y".into(),
+        claim: "rows".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    *parameter = "x".into();
+    requirements.clear();
+    claims.clear();
+    dag.nodes.push(token);
+    dag.nodes.push(WireDagNode {
+        id: 3,
+        op: WireRiscOp::Copy,
+        inputs: vec![0],
+        output_type: WireTensorType {
+            dims: vec![WireDimInfo::Named {
+                name: "*".into(),
+                size: None,
+            }],
+            precision: "f32".into(),
+        },
+        shape_deps: vec![2],
+        span_id: None,
+        merged_spans: vec![],
+    });
+    dag.roots = vec![3];
+
+    let json = serde_json::to_value(&dag).unwrap();
+    let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+    for mutation in [
+        "missing_declaration",
+        "wrong_declaration",
+        "future_declaration",
+        "empty_parameter",
+        "wrong_observed_tensor",
+        "literal_hybrid",
+        "named_claim_hybrid",
+        "missing_owner",
+        "wrong_claimed_axis",
+        "wrong_witness_axis",
+        "ranked_output",
+    ] {
+        let mut malformed = json.clone();
+        match mutation {
+            "missing_declaration" => malformed["nodes"][2]["shape_deps"] = serde_json::json!([]),
+            "wrong_declaration" => malformed["nodes"][2]["shape_deps"] = serde_json::json!([0]),
+            "future_declaration" => malformed["nodes"][2]["shape_deps"] = serde_json::json!([3]),
+            "empty_parameter" => malformed["nodes"][2]["op"]["parameter"] = "".into(),
+            "wrong_observed_tensor" => malformed["nodes"][2]["inputs"] = serde_json::json!([1]),
+            "literal_hybrid" => {
+                malformed["nodes"][2]["op"]["requirements"] = serde_json::json!([2])
+            }
+            "named_claim_hybrid" => {
+                malformed["nodes"][2]["op"]["claims"] =
+                    serde_json::json!([{"claim": "rows", "requirement_declares": true}])
+            }
+            "missing_owner" => malformed["nodes"][3]["shape_deps"] = serde_json::json!([]),
+            "wrong_claimed_axis" => {
+                malformed["nodes"][2]["op"]["site"]["local_ascription_claim"]["axis"]["value"] =
+                    1.into()
+            }
+            "wrong_witness_axis" => malformed["nodes"][2]["op"]["axis"]["value"] = 1.into(),
+            "ranked_output" => {
+                malformed["nodes"][2]["output_type"] = malformed["nodes"][0]["output_type"].clone()
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            WireDag::from_validated_json(&malformed.to_string()).is_err(),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
 fn wire_dag_v8_rejects_before_witness_body_decode() {
     let legacy_with_malformed_body = r#"{
         "schema_version": 8,

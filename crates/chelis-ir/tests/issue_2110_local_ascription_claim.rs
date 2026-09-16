@@ -1,13 +1,14 @@
 //! chelis#2110: authored local tensor ascriptions become producer-owned
 //! runtime obligations without being confused with inferred type metadata.
 
-use chelis_ir::dag::{ExtentWitnessSite, RiscOp};
+use chelis_ir::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_ir::specialize::specialize_for_exact_arithmetic;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::check_ir_program;
+use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
     let decls = parse_str(source).expect("Surf parse");
@@ -132,6 +133,142 @@ fn rebuild_cse_dce_and_specialization_preserve_the_exact_site() {
         assert_eq!(&claims[0].3, "2");
         assert_eq!(&claims[0].4, &0);
     }
+}
+
+#[test]
+fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
+    fn fusion_dag(claimed: bool) -> Dag {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::F32,
+        };
+        let claim = claimed.then(|| {
+            dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::LocalAscriptionClaim {
+                        ascription_id: 0,
+                        binding: "y".into(),
+                        claim: "2".into(),
+                        axis: RtAxis::Lit(0),
+                    },
+                    parameter: String::new(),
+                    axis: RtAxis::Lit(0),
+                    requirements: vec![
+                        chelis_types::scalar_from_i64("test", Prim::Int64, 2).unwrap(),
+                    ],
+                    claims: Vec::new(),
+                },
+                Vec::new(),
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            )
+        });
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            ty.clone(),
+            None,
+        );
+        let add = dag.add_node(RiscOp::Add, vec![input, input], ty.clone(), None);
+        if let Some(claim) = claim {
+            dag.add_shape_dep(add, claim);
+        }
+        let neg = dag.add_node(RiscOp::Neg, vec![add], ty, None);
+        dag.add_root(neg);
+        dag
+    }
+
+    let unclaimed = fusion_dag(false);
+    assert!(
+        chelis_ir::fuse::fuse(&unclaimed)
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
+        "the unclaimed control must exercise fusion: {unclaimed:?}"
+    );
+
+    let original = fusion_dag(true);
+    let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&original));
+    let claims = local_claims(&fused);
+    assert_eq!(
+        claims.len(),
+        1,
+        "fusion must retain one exact site: {fused:?}"
+    );
+    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let owners = fused
+        .nodes()
+        .iter()
+        .filter(|node| node.shape_deps.contains(&token))
+        .collect::<Vec<_>>();
+    assert_eq!(owners.len(), 1, "the fused initializer must own the site");
+    assert!(
+        matches!(owners[0].op, RiscOp::Add),
+        "the claimed initializer must retain its primitive attribution: {:?}",
+        owners[0]
+    );
+    let error = eval_tensor_with(&fused, |name| {
+        (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]))
+    })
+    .expect_err("fusion must not erase the local trap");
+    assert_eq!(
+        error,
+        "extent `2`: claimed = 2, add axis 0 = 3\n\
+         numeric trap: domain in add at int64"
+    );
+}
+
+#[test]
+fn grad_pruning_preserves_a_dead_except_for_trap_local_site() {
+    let original = lower(
+        "def f(x: tensor[*, f32]) -> tensor[f32] = {\n  \
+         y: tensor[2, f32] = exp(neg(x))\n  \
+         sum(y, 0)\n\
+         }\n",
+    );
+    let output = original.roots()[0];
+    let input = original
+        .nodes()
+        .iter()
+        .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "x"))
+        .expect("input load")
+        .id;
+    let differentiated =
+        chelis_ir::grad::grad_dag_checked(&original, output, &[input]).expect("gradient lowering");
+    assert_eq!(
+        local_claims(&differentiated.dag).len(),
+        1,
+        "grad's forward-pruning rebuild must retain the initializer trap"
+    );
+}
+
+#[test]
+fn ownership_lowering_keeps_the_claim_live_through_its_initializer_owner() {
+    let dag = lower(&direct_source(
+        "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",
+    ));
+    let claims = local_claims(&dag);
+    let token = chelis_ir::dag::NodeId(claims[0].0);
+    let owner = dag
+        .nodes()
+        .iter()
+        .find(|node| node.shape_deps.contains(&token))
+        .expect("initializer owner")
+        .id;
+    let owned = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(dag).expect("ownership lowering"),
+    )
+    .expect("ownership verification");
+    let plan = chelis_ir::ownership::plan_c_storage(owned).expect("C storage plan");
+    let slot = plan.slot_for_node(token).expect("claim token storage");
+    assert!(
+        plan.slot(slot).expect("claim slot").last_use_index() >= owner.0,
+        "ownership lowering must keep the claim live until its producer reads it"
+    );
 }
 
 #[test]

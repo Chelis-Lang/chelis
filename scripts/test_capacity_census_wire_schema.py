@@ -541,6 +541,23 @@ class SchemaCases(unittest.TestCase):
                 cases[prefix + "local-ascription-id-negative"].expected
             )
             self.assertIsNone(cases[prefix + "local-ascription-id-float"].expected)
+            named = cases[prefix + "named-local-ascription-owned"]
+            self.assertEqual(
+                named.expected["nodes"][2]["shape_deps"],
+                [1],
+            )
+            self.assertEqual(
+                named.expected["nodes"][3]["shape_deps"],
+                [2],
+            )
+            for name in (
+                "named-local-ascription-missing-declaration",
+                "named-local-ascription-wrong-declaration",
+                "named-local-ascription-empty-parameter",
+                "named-local-ascription-literal-hybrid",
+                "named-local-ascription-missing-owner",
+            ):
+                self.assertIsNone(cases[prefix + name].expected, name)
 
 
 class ActualSchemaCodec(unittest.TestCase):
