@@ -41,6 +41,52 @@ class CorpusScanTests(unittest.TestCase):
             )
             self.assertEqual(oracle.retired_spelling_hits([source]), [])
 
+    def test_nested_surf_block_comments_are_not_dtype_spellings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "comments.ch"
+            source.write_text(
+                "{- retired int64 {- nested int32 -}\n"
+                "   external int16 vocabulary -}\n"
+                "value: i64 = 1i64\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(oracle.retired_spelling_hits([source]), [])
+
+    def test_surf_code_after_a_block_comment_is_still_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "legacy.ch"
+            source.write_text(
+                "{- external int64 vocabulary -} value: int32 = 1i32\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                oracle.retired_spelling_hits([source]),
+                [(source, 1, "int32")],
+            )
+
+    def test_deep_semicolon_comments_are_not_dtype_spellings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "comments.dp"
+            source.write_text(
+                "; retired int64 spelling\n"
+                "(def {} x (lit {type: (t-prim {} i64)} 1)) ; old int32 note\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(oracle.retired_spelling_hits([source]), [])
+
+    def test_deep_code_after_semicolon_comment_line_is_still_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "legacy.dp"
+            source.write_text(
+                "; external int64 vocabulary\n"
+                "(def {} x (lit {type: (t-prim {} int16)} 1))\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                oracle.retired_spelling_hits([source]),
+                [(source, 2, "int16")],
+            )
+
 
 class ContractTests(unittest.TestCase):
     def test_repository_boundary_contract_is_current(self) -> None:

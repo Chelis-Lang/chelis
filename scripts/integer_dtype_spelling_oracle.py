@@ -131,13 +131,29 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
 )
 
 
-def _code_without_strings_or_comments(line: str) -> str:
+def _code_without_strings_or_comments(text: str, *, suffix: str) -> str:
     output: list[str] = []
     in_string = False
     escaped = False
+    surf_block_depth = 0
     index = 0
-    while index < len(line):
-        char = line[index]
+    while index < len(text):
+        char = text[index]
+        pair = text[index : index + 2]
+        if surf_block_depth:
+            if suffix == ".ch" and pair == "{-":
+                surf_block_depth += 1
+                output.extend((" ", " "))
+                index += 2
+                continue
+            if suffix == ".ch" and pair == "-}":
+                surf_block_depth -= 1
+                output.extend((" ", " "))
+                index += 2
+                continue
+            output.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
         if in_string:
             if escaped:
                 escaped = False
@@ -153,8 +169,16 @@ def _code_without_strings_or_comments(line: str) -> str:
             output.append(" ")
             index += 1
             continue
-        if index + 1 < len(line) and line[index : index + 2] in {"//", "--"}:
-            break
+        if suffix == ".ch" and pair == "{-":
+            surf_block_depth = 1
+            output.extend((" ", " "))
+            index += 2
+            continue
+        if pair in {"//", "--"} or (suffix == ".dp" and char == ";"):
+            while index < len(text) and text[index] != "\n":
+                output.append(" ")
+                index += 1
+            continue
         output.append(char)
         index += 1
     return "".join(output)
@@ -163,10 +187,11 @@ def _code_without_strings_or_comments(line: str) -> str:
 def retired_spelling_hits(paths: Iterable[Path]) -> list[tuple[Path, int, str]]:
     hits: list[tuple[Path, int, str]] = []
     for path in paths:
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            code = _code_without_strings_or_comments(line)
+        code_text = _code_without_strings_or_comments(
+            path.read_text(encoding="utf-8"),
+            suffix=path.suffix,
+        )
+        for line_number, code in enumerate(code_text.splitlines(), start=1):
             hits.extend(
                 (path, line_number, match.group(1)) for match in RETIRED.finditer(code)
             )
