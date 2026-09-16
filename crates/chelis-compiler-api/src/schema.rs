@@ -866,9 +866,10 @@ pub struct ReplaceFunctionBodyRequest {
 /// `chelis check` of the rewritten module by construction (the splice-faithfulness
 /// gate locks that the rewrite is the module full check is run on); a returned
 /// result is a module that type-, effect-, and linearity-checks. Closure-scoped
-/// validation (caller-ward effect closure, the def's SCC for termination,
-/// per-def for type) is the future optimization, not a fragment-scoped path that
-/// could disagree.
+/// validation (caller-ward effect closure, retained declaration dependencies,
+/// and per-def type validation) is the future optimization, not a
+/// fragment-scoped path that could disagree. Uniform base-case-free recursion
+/// is checker-legal; backend support remains a separate chelis#730 boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReplaceFunctionBodyResult {
     /// Canonical Deep of just the changed `(def ...)` node.

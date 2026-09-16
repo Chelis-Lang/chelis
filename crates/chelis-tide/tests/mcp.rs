@@ -80,8 +80,9 @@ const PINGPONG_DEEP: &str = r#"(module {}
 "#;
 
 /// A replacement body for `ping` that drops the base case: it calls `pong`
-/// unconditionally, closing a base-case-free `ping`/`pong` recursion group. The
-/// whole-module non-termination detector flags it; the 2-decl fragment cannot.
+/// unconditionally, leaving one uniform `ping`/`pong` recursive instantiation.
+/// [04-INF-2]/[04-INF-3] make that checker-legal; any unsupported lowering is a
+/// separate chelis#730 capability boundary.
 const PINGPONG_NO_BASE_BODY: &str =
     "(app {} (var {} pong) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))";
 
@@ -471,20 +472,14 @@ fn replace_function_body_ill_typed_body_is_type_error() {
     );
 }
 
-/// Structured-error case: splicing away the sole base case of a cross-def
-/// recursion group is rejected by the tool, agreeing with full `chelis check`.
-/// `ping` holds the only base case of the `ping`/`pong` group; the new body
-/// calls `pong` unconditionally. A single-def-scoped view of `ping` alone would
-/// not catch it, but the whole-module check the tool runs
-/// (`detect_trivial_non_terminating_fns` in the fitness pass) does, so the tool
-/// returns a structured `check`/`type_error` rather than greening a module full
-/// check would reject. The fitness pass rejects a base-case-free recursion group
-/// before the separate whole-module inference that can wedge on it, so the tool
-/// returns promptly.
+/// Success case: splicing away the sole base case of a uniform cross-def
+/// recursion group is checker-legal and agrees with full `chelis check`.
+/// Backend support for the resulting recursion remains separately owned by
+/// chelis#730.
 #[test]
-fn replace_function_body_cross_def_base_case_drop_is_rejected() {
-    // Guard: the fixture itself checks clean (the base case is present), so the
-    // rejection below is the dropped base case, not a malformed fixture.
+fn replace_function_body_cross_def_base_case_drop_is_accepted() {
+    // Guard both the original and rewritten whole-module verdicts. This keeps
+    // the public MCP wrapper aligned with the fragment and checker contracts.
     let baseline =
         chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
             source_kind: chelis_compiler_api::schema::SourceKind::Deep,
@@ -505,27 +500,29 @@ fn replace_function_body_cross_def_base_case_drop_is_rejected() {
     }));
     let elapsed = start.elapsed();
     assert_eq!(
-        response["result"]["isError"], true,
-        "base-case drop must be rejected: {}",
+        response["result"]["isError"], false,
+        "uniform recursive replacement must be accepted: {}",
         response["result"]["structuredContent"]
     );
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["ok"], false);
-    assert_eq!(structured["stage"], "check");
-    let errors = structured["errors"].as_array().expect("errors array");
-    assert_eq!(errors[0]["kind"], "type_error");
+    assert_eq!(structured["ok"], true);
+    let module_deep = structured["result"]["module_deep"]
+        .as_str()
+        .expect("accepted replacement returns module_deep");
+    let rewritten =
+        chelis_compiler_api::compiler::check(chelis_compiler_api::schema::CheckRequest {
+            source_kind: chelis_compiler_api::schema::SourceKind::Deep,
+            source: module_deep.to_string(),
+        })
+        .expect("rewritten module checks");
     assert!(
-        errors[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("trivially non-terminating"),
-        "the diagnostic names the non-termination cause: {}",
-        errors[0]["message"]
+        rewritten.errors.is_empty(),
+        "MCP acceptance must agree with full check: {:?}",
+        rewritten.errors
     );
     assert!(
         elapsed < std::time::Duration::from_secs(30),
-        "tool path returns promptly (the fitness pass precedes any wedging \
-         whole-module inference), took {elapsed:?}"
+        "tool acceptance should return promptly, took {elapsed:?}"
     );
 }
 
