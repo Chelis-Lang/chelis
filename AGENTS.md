@@ -1,6 +1,9 @@
 # Chelis Agent Contract
 
-Canonical agent instructions for this repository.
+Keep this file concise and relevant to every agent working in this repository.
+Each added token is read tens of thousands of times. Link to longer guidance instead
+of duplicating it here.
+
 `CLAUDE.md` should resolve to this file so Claude-style and Codex-style entry points do
 not drift.
 
@@ -10,9 +13,8 @@ not drift.
 
 - Before writing implementation, write test stubs derived from the owning spec.
 - Every spec requirement should have a corresponding test before the code exists.
-- If the spec says "X is a type error," write the failing test before implementing the checker.
-- A phase is not done until every active spec requirement has both positive and negative
-  coverage.
+- If the spec says "X is a type error," write the failing test before implementing
+  the checker.
 
 ### Negative Test Parity
 
@@ -25,84 +27,77 @@ not drift.
 - After green CI, check what active requirements still lack tests.
 - Audit silent fallbacks, default values, empty error vectors, and `unwrap_or` paths.
 
-### Guard Inventories
-
-A guard list carries a reviewed disposition per row or is regenerated from the
-source tree. Do not hand-maintain a second copy of tree membership. Regeneration
-may discover rows; it must never assign reviewed semantic authority or erase a
-required coverage floor.
-
-### Phase Completion Criteria
-
-- Do not claim a phase is done based on crate-local green or narrative progress.
-- A phase is done when the executable acceptance surface is green, docs are honest, and
-  the red team can only find minor residual issues.
-- Budget for at least one adversarial validation pass that runs code, not just source review.
-
-### One Acceptance Oracle Per Phase
-
-The runtime representation host/C vocabulary and checked-metadata gate is
-`.venv/bin/python scripts/runtime_representation_oracle.py --phase 1`. It includes
-Phase 0 inventory/mutations and requires fresh frozen-selection/framework receipts.
-The hosted `runtime-representation` stage in `heavy-e2e.yml` owns daily and
-manually dispatched enforcement; ordinary PR success does not certify it, so
-dispatch that workflow on the candidate when claiming Phase 1 completion.
-`--fast` remains the pre-push gate and `--local` remains optional. Phase 1 does
-not validate the later generated ABI, native Python/DLPack or device execution
-obligations.
-
-
-- Every phase must name one authoritative completion oracle.
-- That oracle may be a single command, a named suite, or a documented manual runner, but
-  it must be explicit.
-- Supporting evidence may exist, but it does not replace the oracle.
-- If the oracle is manual or long-running, document it in the owning phase plan and the
-  current-state docs.
-
 ## Red Team Protocol
+
+See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics.
 
 ### Baseline
 
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
-- For this repository, a red-team round is a fresh local subagent reviewing from an
-  inline brief. Verifying a fix is not a round: the reviewer that reported the finding
-  checks the repair. A main-thread validation pass is neither, except the rerun of a
-  departed reviewer's exact reproduction, and a phase or pull request is red-teamed only
-  when the subagent actually ran the validation work.
-
-### Required Red-Team Behaviors
-
-- Write and run adversarial tests when coverage is missing.
-- Verify that inputs which should fail do fail, and with the right reason.
-- Verify that inputs which should pass do pass, with exact outputs where applicable.
-- Check docs and phase claims against the shipped behavior, not just intent.
-- Stay inside the brief: its head, files, in-scope claims, and any explicit limits bound
-  the round.
-  Record the exact reviewed commit and the worktree's baseline status, and use the
-  worktree and warm target the brief hands you rather than rebuilding cold.
-- Report a P3 in one line, without reproduction. A construct no maintainer would write
-  is not a finding.
-
-### Fresh-Context Enforcement
-
+- For this repository, a red-team *round* is a fresh local subagent reviewing from an
+  inline brief. After the review, keep the red-team agent alive and hand the worktree
+  back to the author for fixes.
+  When the author finishes making fixes, the red-team agent verifies by checking the
+  repair and assessing it for similar issues. Any additional issues are handed back to
+  the author for repairs.
+  This continues until the red-team is satisfied. This counts as *one round.*
 - A pull request gets at most three fresh rounds by default; a fourth needs the user's
   explicit approval. A prose-only pull request, design documents included, gets one,
   and a second needs the same approval. Rounds run from any platform count, and the
   pull request's round record is the counter. Verification does not count against the
-  cap; the end-of-pull-request round does.
-- A confirmed in-scope P0 or P1 does not by itself earn a fresh round. The reviewer that
-  reported it stays alive and verifies the fix: it holds the context, and verification
-  is a few turns. A fresh round is owed only when the fix introduces a new mechanism or
-  touches files the standing reviewer did not read, or once at the end of a long pull
-  request before ready-for-review. A one-word or one-line repair inside the files the
-  reviewer read never earns one.
+  cap; the end-of-pull-request round does. Do not push repair commits until the round
+  has finished.
+- A finding is in scope only when the pull request introduces it, worsens it, or
+  claims to correct it. Mere
+  discovery during review, including a pre-existing spec/implementation mismatch in an
+  unrelated surface, does not bring a finding into scope.
+- A confirmed in-scope P0 or P1 merits a fresh round **after the current round is finished**.
+  Unmigrated test assertions, old comments, and minor documentation drift do not merit
+  a new round. The reviewer that reported the finding stays alive and verifies the fix
+  during the current round: it holds the context, and verification is a few turns. A
+  fresh round involves a new reviewer and is owed only when the previous round had a
+  confirmed in-scope P0 or P1. A rebase with substantial conflicts or semantic overlap
+  merits a targeted red team focused on the overlap. You do not need permission to run
+  this targeted review, and it does not count toward the fresh-round limit.
+  A rebase with conflicts does not automatically require a red-team. Use your best judgement.
+- If you are already making other changes that require a push or CI rerun, fix all
+  known P2-or-lower red-team findings before that push.
+- If a rebase is already planned, rebase the PR onto current `main` before making and
+  pushing other changes. Minimize rebases otherwise.
+- Push and open the PR after running the gate but before the *first* red-team round so
+  CI can run in parallel.
+- State a pull request's or phase's claim at the granularity its oracle proves. An
+  unbounded universal claim invites sampling in every round and can never be closed.
+- For documentation and design reviews, assign severity by the contract impact rather
+  than by the mere presence of an inaccurate sentence. A wrong normative rule or a
+  plan that cannot close a named in-scope instance or acceptance requirement is P0 or
+  P1. A design document that misdescribes current `main`, or exposes a sequencing seam
+  between delivery slices while leaving the normative contract and named deliverable
+  achievable, is P2 or P3 and must be recorded as residual work rather than promoted
+  to a merge blocker.
+  Staleness against a sibling pull request's moving head, wording, line-level accuracy
+  of the pull request body, and anything whose fix would add text without a necessity
+  sentence are out of scope.
+- A finding class is the underlying defect category or unmet obligation, not its file,
+  line, or wording instance. Every round record names the class of each finding; when a
+  report leaves one unlabeled, the orchestrator assigns it while recording the round.
+  When two consecutive rounds report the same class, or replace a repaired finding with
+  a different class, stop patching witnesses: change the representation, the oracle,
+  the claim, or the brief before running another round. Do not keep expanding the pull
+  request to satisfy a moving brief.
+- Repairs under this gate may correct, remove, or narrow the pull request's existing
+  content. They must not add new design scope, implementation responsibilities,
+  inventories, mechanisms, or promises merely to absorb a finding. When a correction
+  would require that expansion, reduce the claim and track the additional work outside
+  the pull request.
+
+### Fresh-Context Enforcement
+
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use with pasted busy-signal output for that target, the report-length budget,
-  and the delivery channel. Context budgets and time limits are optional, with no
-  default. When set, include them in the brief. The brief does not open with "read
-  `AGENTS.md`".
+  it may use with pasted busy-signal output for that target, and the delivery channel.
+  The brief does not open with "read `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
   exact review head, has a known clean baseline, and has no concurrent writer or build
@@ -115,15 +110,10 @@ obligations.
   that target. Create a new worktree or target only when those reuse conditions do not
   hold.
 - Read what that signal actually says. It answers free, busy, unknown, or not clean,
-  and where those conflict the more cautious answer wins. Missing evidence withholds
-  free by design rather than standing in for an empty machine: a probe that could not
-  read the process table answers unknown, so unknown is a reason to wait rather than a
-  reason to proceed. A `--local` or full gate run is lease-proven and kernel-backed. A
-  run that takes no lease, `--fast` among them, is caught only by a scan of the
-  processes it spawned, so it is the weakest of the signals. A finished gate report is
-  printed under a history label and is never current state. Free is the probe's best
-  answer rather than a proof: it documents the residual case its own fail-safe does not
-  reach.
+  and where those conflict the more cautious answer wins. Unknown is a reason to wait
+  rather than a reason to proceed. A run that takes no lease, `--fast` among them, is
+  caught only by a scan of the processes it spawned. Free is the probe's best answer
+  rather than a proof.
 - A reviewer whose probes mutate tracked source does not share a worktree with anything
   that compiles, whatever the signal reports. This is an exception to warm reuse rather
   than a caveat on it: sequencing narrows the window in which one agent's inserted
@@ -138,23 +128,24 @@ obligations.
   red-team validation is blocked because fresh local subagent execution is unavailable.
 - A subagent that reuses a worktree must restore its temporary probes or mutations and
   report the final worktree status, unless the task explicitly asks to retain them.
+- When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
+  merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
+  and inspect the prospective merge result with `git merge-tree` or an equivalent
+  temporary integration. If GitHub's merge produces the intended semantic and
+  structural result without a dangerous conflict, preserve the reviewed head and its CI
+  evidence. Rebase only when that result differs, is unsafe or unclear, or another
+  identified semantic or structural issue requires a changed head.
 
-### Pull Request Review Gate
+### Pull Requests
 
 - Before starting work on a pull request, and again before merging it, read
   [the PR-author guide for tests and protected contracts](docs/guard_changes_for_pr_authors.md).
   Follow its change-specific instructions and use the checker's required
   acknowledgement lines in the PR description.
-- Every pull request, documentation-only work included, gets at least one compliant
-  red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
-  round reviews the pushed head while CI runs on it. Applicable CI checks must pass on
-  the head that goes ready-for-review, including any repairs made during review.
-  `--local` is optional for troubleshooting or additional local validation; it is not
-  a pull-request readiness requirement. Record the reviewed head and CI evidence in
-  the pull request. Any supporting local evidence must also name the head it covered;
-  evidence from before a repair does not validate the repaired candidate.
-  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
-  has the runs behind this rule.
+- Generally, assess your code with `python3 scripts/gate.py --fast` before pushing.
+  Trivial changes may warrant smaller focused tests or no local test when one would
+  provide no useful evidence.
+  Record the reviewed head and CI evidence in the pull request.
 - `PR Contract Acknowledgements` is the required owner for pull-request-description
   acknowledgements. A title or description edit reruns that check without cancelling
   or replacing compiler validation for the same commit. Generic edits do not enter
@@ -163,15 +154,6 @@ obligations.
   coordination dispatches fresh compiler and Hull workflows against the exact new
   synthetic merge. Wait for that receipt and the refreshed acknowledgement/changelog
   checks before proceeding.
-- Candidate lifecycle follows review rounds rather than a one-push ideal. Immediately
-  before the first push, fetch the actual target and rebase onto it unless the branch is
-  already based there, then publish the initial review candidate after its focused
-  checks and `--fast` gate. A review round may produce one consolidated repair
-  candidate containing all findings then known from that round; do not publish one
-  candidate per finding or while another known repair remains. The reviewer that
-  reported a blocking finding verifies that repair while CI runs. A clean reviewed
-  head becomes final by designation: review verification, finalization, and
-  PR-description edits do not require another commit.
 - Once a pull request exists, every base merge or base-changing rebase must be necessary
   under [Worktree And Branch Discipline](#worktree-and-branch-discipline). Before
   publishing it, add exactly one head-bound line to the PR body:
@@ -257,29 +239,6 @@ obligations.
   again by the candidate reports as inherited, so an inherited row is not proof the
   candidate is innocent of it. The summary prints the distance; treat a large one as a
   reason to read the rows rather than the counts.
-- Classify every finding against the pull request's stated scope. A finding is in scope
-  only when the pull request introduces it, worsens it, or claims to correct it. Mere
-  discovery during review, including a pre-existing spec/implementation mismatch in an
-  unrelated surface, does not bring a finding into scope.
-- State a pull request's or phase's claim at the granularity its oracle proves. An
-  unbounded universal claim invites sampling in every round and can never be closed.
-- For documentation and design reviews, assign severity by the contract impact rather
-  than by the mere presence of an inaccurate sentence. A wrong normative rule, or a
-  plan that cannot close a named in-scope instance or acceptance requirement, is P1. A
-  design document that misdescribes current `main`, or exposes a sequencing seam between
-  delivery slices while leaving the normative contract and named deliverable achievable,
-  is P2 and must be recorded as residual work rather than promoted to a merge blocker.
-  Staleness against a sibling pull request's moving head, wording, line-level accuracy
-  of the pull request body, and anything whose fix would add text without a necessity
-  sentence are out of scope.
-- A confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge until the
-  reviewer that reported it verifies the fix. Repeat fix and verification until that
-  reviewer reports no in-scope P0 or P1;
-  [Fresh-Context Enforcement](#fresh-context-enforcement) names the cases that owe a
-  fresh round instead. When that reviewer is no longer available, the orchestrator reruns
-  its exact reproduction against the fixed head and records the result as "reviewer
-  unavailable"; that record closes the finding, and the end-of-pull-request round, when
-  one is owed, re-checks it.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
   fixes, and textual changes do not inherently merit another round. A rebase does not
   by itself require a fresh round. When its hand-resolved intersection stays within
@@ -291,42 +250,6 @@ obligations.
   to, the reviewed files needs neither, and neither does one whose only hand-resolved
   conflicts are generated or digest lines that the owning script resolves (see
   [Worktree And Branch Discipline](#worktree-and-branch-discipline)).
-- A non-major finding does not block merge, but if you are already rebasing or fixing
-  something else, fold in the other relevant issues reviewers raised.
-- Repairs under this gate may correct, remove, or narrow the pull request's existing
-  content. They must not add new design scope, implementation responsibilities,
-  inventories, mechanisms, or promises merely to absorb a finding. When a correction
-  would require that expansion, reduce the claim and track the additional work outside
-  the pull request.
-- Separability sizes a pull request. Slices that must ship together are commits
-  inside one pull request; slices that can ship apart are separate pull requests. A
-  line count does not decide it. About 1,000 hand-written changed lines, excluding
-  regenerated artifacts such as embedded skill copies and generated registries, is the
-  point at which you owe a sentence justifying that the work is still one shippable
-  slice. It is not a threshold the next line breaches, and arguing it as one argues
-  about the wrong quantity: a pull request already past the figure invites the
-  sunk-cost reading that finishing is cheaper than splitting, which is not a judgement.
-- The sharper signal is the ratio of cases a claim covers to cases its tests prove.
-  A pull request whose oracle proves a small fraction of what its claim asserts is too
-  big for that oracle at any line count, and the repair is to narrow the claim or
-  extend the oracle. This is the measurable form of the claim-granularity rule above.
-  Put size inside the reviewing round's scope and invite the reviewer to disagree with
-  it; a reviewer told that size is settled cannot raise the finding that matters here.
-  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §6 has the
-  branches that outgrew the figure and the ratio that caught it.
-- A finding class is the underlying defect category or unmet obligation, not its file,
-  line, or wording instance. Every round record names the class of each finding; when a
-  report leaves one unlabeled, the orchestrator assigns it while recording the round.
-  When two consecutive rounds report the same class, or replace a repaired finding with
-  a different class, stop patching witnesses: change the representation, the oracle,
-  the claim, or the brief before running another round. Do not keep expanding the pull
-  request to satisfy a moving brief.
-- Route confirmed in-scope findings back to the original implementation agent when it
-  is still available so the fix retains its build context. Do not fix out-of-scope
-  findings in the pull request; link an existing issue or file one if the defect is not
-  already tracked. Record every round's exact head, verdict, commands, finding classes
-  and scope classifications, accepted-no-action observations, linked issues, residual
-  scope, and any explicit deadline in the pull request.
 
 ## Documentation And Spec Sync
 
@@ -845,41 +768,14 @@ When a public surface has an implicit invariant, make it explicit and test it.
   acting on it.
 - Do not run `git stash` in a shared clone. The stack is one stack for the whole
   repository: `push` with a pathspec that matches nothing is a silent no-op, the
-  paired `pop` then takes whatever a peer session left on top, and `pop` says nothing
-  about whose work it just applied to your tree. To discard your own changes use
-  `git checkout -- <paths>`. To park them, copy the files to task-owned scratch space.
-  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §5 records the
-  incident.
+  paired `pop` then takes whatever a peer session left on top. To discard your own
+  changes, use `git checkout -- <paths>`. To park them, copy the files to task-owned
+  scratch space.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md)
+  §5 records the incident.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
-- Before the first push for a new pull request, fetch its actual target branch and
-  rebase onto the fetched tip unless the branch is already based there. Resolve and
-  validate that integration before any hosted evidence exists. This preparation rule
-  does not authorize later refresh rebases after a review candidate has been published.
-- When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
-  merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
-  and inspect the prospective merge result with `git merge-tree` or an equivalent
-  temporary integration. If GitHub's merge produces the intended semantic and
-  structural result without a dangerous conflict, preserve the reviewed head and its CI
-  evidence. Rebase only when that result differs, is unsafe or unclear, or another
-  identified semantic or structural issue requires a changed head.
-- A non-trivial rebase or hand-resolved conflict requires review of the resolution
-  before any history rewrite is published. When the hand-resolved intersection is
-  inside the standing reviewer's prior files and mechanisms, that reviewer inspects
-  the intersection; the rebase does not automatically consume a fresh round. Run
-  `python3 scripts/gate.py --fast` on the result for a non-documentation change or the
-  focused documentation checks for a docs-only change. A content-preserving rebase may
-  retain supporting local evidence; record that its covered head differs, and require
-  applicable CI on the new head; the trusted targeted-rebase lane may reuse prior
-  evidence only under the Pull Request Review Gate above. Never force-push a red gate.
-  Obtain approval, then use an exact-head
-  `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
-  neither does one whose only hand-resolved conflicts are generated registry lines:
-  regenerate `rejection_registry_generated.rs` with
-  `scripts/generate_rejection_registries.py --write` and treat that result as
-  mechanical. Atom/region text hashes have been retired; contract changes still
-  owe their required clauses, semantic checks and exact PR acknowledgements.
 
 ## Build Toolchain
 
