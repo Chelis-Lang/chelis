@@ -831,8 +831,8 @@ canonical token, so a transcribed reference constant is repaired by
 
 This allowance does not admit malformed separators, a non-canonical decimal
 body on an integer-bodied literal, a suffix with different type/adoption
-meaning, or a token whose decoded value is non-finite. Surf has no infinity or
-NaN literal.
+meaning, or a token whose decoded value is non-finite.
+Surf has no infinity or NaN literal.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
 at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
