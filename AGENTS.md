@@ -27,6 +27,11 @@ not drift.
 - After green CI, check what active requirements still lack tests.
 - Audit silent fallbacks, default values, empty error vectors, and `unwrap_or` paths.
 
+### Phase Completion
+
+Every phase names one authoritative completion oracle. Use the
+[`phase-gate` skill](agent-skills/phase-gate/SKILL.md) before claiming completion.
+
 ## Red Team Protocol
 
 See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics.
@@ -35,6 +40,8 @@ See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics
 
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
+- Every pull request, documentation-only work included, gets at least one compliant
+  red-team round before merge.
 - For this repository, a red-team *round* is a fresh local subagent reviewing from an
   inline brief. After the review, keep the red-team agent alive and hand the worktree
   back to the author for fixes.
@@ -57,9 +64,10 @@ See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics
   a new round. The reviewer that reported the finding stays alive and verifies the fix
   during the current round: it holds the context, and verification is a few turns. A
   fresh round involves a new reviewer and is owed only when the previous round had a
-  confirmed in-scope P0 or P1. A rebase with substantial conflicts or semantic overlap
-  merits a targeted red team focused on the overlap. You do not need permission to run
-  this targeted review, and it does not count toward the fresh-round limit.
+  confirmed in-scope P0 or P1, subject to the round cap above. A rebase with substantial
+  conflicts or semantic overlap merits a targeted red team focused on the overlap. You
+  do not need permission to run this targeted review, and it does not count toward the
+  fresh-round limit.
   A rebase with conflicts does not automatically require a red-team. Use your best judgement.
 - If you are already making other changes that require a push or CI rerun, fix all
   known P2-or-lower red-team findings before that push.
@@ -167,6 +175,8 @@ See the [`redteam-exec` skill](agent-skills/redteam-exec/SKILL.md) for specifics
   suppresses expensive work but must fail the required Docs and Hull contexts. If it
   rejects an already-pushed head, repair the body and rerun that same workflow; do not
   manufacture another candidate change merely to satisfy the guard.
+- Never force-push a red gate. Obtain explicit approval before a force push, then use an
+  exact-head `--force-with-lease`.
 - A base-changing rebase may use incremental CI when the default-branch verifier finds
   the exact trusted receipt for the previous head, confirms the same target and a
   strict forward base update, verifies the new head contains that base, and binds the

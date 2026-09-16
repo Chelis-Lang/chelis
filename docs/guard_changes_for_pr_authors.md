@@ -20,11 +20,12 @@ owning design.
 Immediately before the first push, fetch the actual target and rebase onto it
 unless the branch is already based there. Run focused checks and
 `python3 scripts/gate.py --fast`, then publish the initial review candidate.
-Each review round may produce one consolidated repair candidate containing
-every finding currently known from that round.
-Reviewer verification happens on that repaired head while CI runs; it does not
-require a separate verification commit. A clean reviewed head becomes final by
-designation rather than by another push.
+During a review round, consolidate its findings into a local commit and hand
+that exact unpushed head to the standing reviewer. Do not push repair commits
+until the reviewer closes the round. Amend or replace the local commit as needed
+and repeat verification there. Once the round is satisfied, push the exact
+verified head once and let CI validate it. A confirmed in-scope P0 or P1 then
+requires a fresh round, subject to the repository's round cap.
 
 After the pull request exists, do not merge or rebase the target branch merely
 because it advanced. If a real conflict, unsafe prospective merge, or identified
