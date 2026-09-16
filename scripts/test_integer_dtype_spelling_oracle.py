@@ -54,6 +54,7 @@ class ContractTests(unittest.TestCase):
             "execution_wire_v3",
             "wire_dag_vocabulary",
             "cache_wire_compatibility",
+            "chelis-tide --test api",
             "chelis-prove --lib",
             "exact_tagged_c_header",
             "exact_tagged_c_abi",

@@ -185,7 +185,7 @@ c-earchin compatibility:
 V1 generators support:
 
 - `bool`
-- `int32`, `int64`
+- `i32`, `i64`
 - `f32`, `f64`
 - `string`
 - fixed-shape numeric tensors with literal dimensions and `f32`/`f64` elements,

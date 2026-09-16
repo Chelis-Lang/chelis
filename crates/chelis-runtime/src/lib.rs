@@ -659,8 +659,8 @@ fn einsum_result_dtype(operand: RuntimeDType, accumulator: RuntimeDType) -> Runt
         (RuntimeDType::Bool, _) => runtime_fail!("Domain: einsum is undefined for bool tensors"),
         _ => runtime_fail!(
             "Domain: einsum accumulator {} is invalid for operand dtype {}",
-            accumulator.name(),
-            operand.name()
+            diagnostic_dtype_name(accumulator),
+            diagnostic_dtype_name(operand)
         ),
     }
 }
@@ -727,6 +727,19 @@ fn tensor_elem_size(dtype: RuntimeDType) -> usize {
     dtype.byte_width()
 }
 
+/// Render a runtime dtype in user-facing Chelis diagnostics without changing
+/// the stable interchange spelling owned by `RuntimeDType::name`.
+#[inline]
+fn diagnostic_dtype_name(dtype: RuntimeDType) -> &'static str {
+    match dtype {
+        RuntimeDType::I8 => "i8",
+        RuntimeDType::I16 => "i16",
+        RuntimeDType::I32 => "i32",
+        RuntimeDType::I64 => "i64",
+        _ => dtype.name(),
+    }
+}
+
 fn validate_data_contract(
     data: *mut u8,
     byte_capacity: ByteCount,
@@ -746,7 +759,7 @@ fn validate_data_contract(
     if !(data as usize).is_multiple_of(alignment) {
         runtime_fail!(
             "Domain: {context} data pointer is not aligned for {}",
-            dtype.name()
+            diagnostic_dtype_name(dtype)
         );
     }
 }
@@ -981,7 +994,7 @@ unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: Runtime
         | RuntimeDType::F32
         | RuntimeDType::F64 => runtime_fail!(
             "Domain: internal index read requires a signed-integer dtype, got {}",
-            dtype.name()
+            diagnostic_dtype_name(dtype)
         ),
     }
 }
@@ -5425,8 +5438,8 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
     if dtype != rhs_dtype {
         runtime_fail!(
             "Domain: cmplt expects matching tensor dtype (lhs={}, rhs={})",
-            dtype.name(),
-            rhs_dtype.name()
+            diagnostic_dtype_name(dtype),
+            diagnostic_dtype_name(rhs_dtype)
         );
     }
     let dtype = require_signed_integer_or_float_dtype(dtype, "cmplt operands");
@@ -5617,8 +5630,8 @@ pub unsafe extern "C" fn chelis_tensor_where(
     if dtype != else_dtype {
         runtime_fail!(
             "Domain: where expects matching then/else dtype (then={}, else={})",
-            dtype.name(),
-            else_dtype.name()
+            diagnostic_dtype_name(dtype),
+            diagnostic_dtype_name(else_dtype)
         );
     }
     let out = chelis_alloc(
@@ -6041,9 +6054,9 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
     if lo_dtype != dtype || hi_dtype != dtype {
         runtime_fail!(
             "Domain: clamp expects matching dtype across tensor/lo/hi (tensor={}, lo={}, hi={})",
-            dtype.name(),
-            lo_dtype.name(),
-            hi_dtype.name()
+            diagnostic_dtype_name(dtype),
+            diagnostic_dtype_name(lo_dtype),
+            diagnostic_dtype_name(hi_dtype)
         );
     }
     let out = chelis_alloc(
@@ -6125,8 +6138,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     if dtype != rhs_dtype {
         runtime_fail!(
             "Domain: einsum expects matching tensor dtype (lhs={}, rhs={})",
-            dtype.name(),
-            rhs_dtype.name()
+            diagnostic_dtype_name(dtype),
+            diagnostic_dtype_name(rhs_dtype)
         );
     }
     let result_dtype = einsum_result_dtype(dtype, accumulator);

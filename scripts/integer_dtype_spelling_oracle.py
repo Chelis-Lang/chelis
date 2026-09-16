@@ -74,6 +74,16 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "nextest",
         "run",
         "-p",
+        "chelis-tide",
+        "--test",
+        "api",
+        "--no-fail-fast",
+    ),
+    (
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
         "chelis-prove",
         "--lib",
         "--no-fail-fast",
@@ -194,6 +204,12 @@ def boundary_contract_errors() -> list[str]:
         _require(
             "crates/chelis-vocab/src/lib.rs",
             ('Self::I32 => "int32"', 'Self::I64 => "int64"'),
+        )
+    )
+    errors.extend(
+        _require(
+            "crates/chelis-tide/tests/api.rs",
+            ('["value"]["dtype"],\n        "int64"',),
         )
     )
     errors.extend(

@@ -17,16 +17,23 @@ fn error_messages(program: &[chelis_deep::Expr]) -> Vec<String> {
 }
 
 #[test]
-fn prim_identity_uses_the_literal_suffix_spelling_only() {
-    for (name, prim) in [
-        ("i8", Prim::Int8),
-        ("i16", Prim::Int16),
-        ("i32", Prim::Int32),
-        ("i64", Prim::Int64),
+fn language_and_interchange_integer_names_are_distinct() {
+    for (language_name, interchange_name, prim) in [
+        ("i8", "int8", Prim::Int8),
+        ("i16", "int16", Prim::Int16),
+        ("i32", "int32", Prim::Int32),
+        ("i64", "int64", Prim::Int64),
     ] {
-        assert_eq!(Prim::parse_name(name), Some(prim));
-        assert_eq!(prim.name(), name);
-        assert_eq!(Type::Prim(prim).to_string(), name);
+        assert_eq!(Prim::parse_name(language_name), Some(prim));
+        assert_eq!(prim.name(), language_name);
+        assert_eq!(Type::Prim(prim).to_string(), language_name);
+        assert_eq!(prim.interchange_name(), interchange_name);
+        assert_eq!(Prim::parse_interchange_name(interchange_name), Some(prim));
+        assert_eq!(
+            Prim::parse_interchange_name(language_name),
+            None,
+            "versioned interchange must not admit the language spelling"
+        );
     }
     for retired in ["int8", "int16", "int32", "int64"] {
         assert_eq!(
@@ -37,13 +44,6 @@ fn prim_identity_uses_the_literal_suffix_spelling_only() {
         assert!(
             Prim::parse_interchange_name(retired).is_some(),
             "interchange keeps the ecosystem spelling"
-        );
-    }
-    for language_name in ["i8", "i16", "i32", "i64"] {
-        assert_eq!(
-            Prim::parse_interchange_name(language_name),
-            None,
-            "versioned interchange must not admit the language spelling"
         );
     }
 }

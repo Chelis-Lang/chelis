@@ -1377,14 +1377,14 @@
     },
     {
       "kind": "std-adt-numeric",
-      "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+      "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-adt-numeric",
-      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
       "flags": [
         "float-carrier",
         "numeric-op"
@@ -1392,21 +1392,21 @@
     },
     {
       "kind": "std-adt-numeric",
-      "id": "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+      "id": "time::Date: () (variant {} Date (field {} year (t-prim {} i64)) (field {} month (t-prim {} i64)) (field {} day (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-adt-numeric",
-      "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+      "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} i64)) (field {} hours (t-prim {} i64)) (field {} minutes (t-prim {} i64)) (field {} seconds (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-adt-numeric",
-      "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+      "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} i64) (t-prim {} string)) (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
@@ -1418,14 +1418,14 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+      "id": "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+      "id": "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
@@ -1449,7 +1449,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
       ]
@@ -1461,7 +1461,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+      "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
       ]
@@ -1515,21 +1515,21 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "id": "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
       ]
@@ -1591,7 +1591,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+      "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} i64)))",
       "flags": []
     },
     {
@@ -1651,28 +1651,28 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+      "id": "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+      "id": "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64) (t-adt {} List (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "id": "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "id": "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
       ]
@@ -1694,7 +1694,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+      "id": "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} i32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} i64))))",
       "flags": [
         "numeric-op"
       ]
@@ -1706,35 +1706,35 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
+      "id": "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} i64) (t-tensor {} (d-var {} n) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
@@ -1761,19 +1761,19 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} i64)) (t-prim {} string) (t-unit {}))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+      "id": "time::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
       ]
@@ -1815,28 +1815,28 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+      "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+      "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+      "id": "time::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+      "id": "time::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
       "flags": [
         "numeric-op"
       ]
@@ -1848,33 +1848,33 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+      "id": "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+      "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} i64) (t-prim {} i64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64)))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+      "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} i64)) (t-prim {} string))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+      "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} i64)))",
       "flags": []
     },
     {

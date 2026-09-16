@@ -17,7 +17,7 @@ saturate, or wrap"). That is the correct default and must not change. But it was
 (PR #1049, #729 Phase 1) with **no named escape hatch**, so every downstream site that
 legitimately wants truncation has nothing to migrate to. The Ecosystem Drift Canary
 records the cost: `coral`, `hull`, `school` (×2), and `hello-chelis` all fail with
-`numeric trap: domain in cast at int64` (auto-filed drift issues coral#23, hull#14,
+`numeric trap: domain in cast at i64` (auto-filed drift issues coral#23, hull#14,
 school#189, hello-chelis#19).
 
 `spec/design/dtype_semantics.md` §"cast ladder" and `spec/design/capability_table.md`
@@ -99,7 +99,7 @@ hello-chelis#19) close on pass automatically once the migrations land.
 ## 8. Acceptance
 
 - eval-vs-C byte-identical (f32-bit / exact-int) on a truncation matrix over
-  {f32,f64}→{int32,int64}, including boundary values (±0.9, exactly-integral, at/over the
+  {f32,f64}→{i32,i64}, including boundary values (±0.9, exactly-integral, at/over the
   target range → overflow trap, NaN/±inf → Domain trap). This is the standard cross-lane
   agreement gate.
 - negative parity: `cast_trunc` on non-float source, on bool, and gradient-through are

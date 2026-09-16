@@ -345,8 +345,8 @@ import Std.Test (assert_eq, assert_close_tensor, assert_true)
 def test_construction() -> unit ! { Test } = {
   prices = to_tensor([cast(100.0, f32), cast(200.0, f32), cast(300.0, f32)])
   df = from_pairs([("price", FloatCol(prices))])
-  _ = assert_eq(nrows(df), cast(3, int64), "nrows = 3")
-  assert_eq(ncols(df), cast(1, int64), "ncols = 1")
+  _ = assert_eq(nrows(df), cast(3, i64), "nrows = 3")
+  assert_eq(ncols(df), cast(1, i64), "ncols = 1")
 }
 
 def test_filter_by_mask() -> unit ! { Test } = {
@@ -354,7 +354,7 @@ def test_filter_by_mask() -> unit ! { Test } = {
   df = from_pairs([("price", FloatCol(prices))])
   mask = gt(get_float_col(df, "price"), cast(150.0, f32))
   filtered = filter(df, mask)
-  assert_eq(nrows(filtered), cast(2, int64), "filter keeps 2 rows")
+  assert_eq(nrows(filtered), cast(2, i64), "filter keeps 2 rows")
 }
 
 def test_with_column_preserves_existing() -> unit ! { Test } = {
@@ -362,7 +362,7 @@ def test_with_column_preserves_existing() -> unit ! { Test } = {
   vols = to_tensor([cast(0.1, f32), cast(0.2, f32), cast(0.3, f32)])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  _ = assert_eq(ncols(df2), cast(2, int64), "added column")
+  _ = assert_eq(ncols(df2), cast(2, i64), "added column")
   assert_close_tensor(get_float_col(df2, "price"), prices, cast(1e-10, f32), "price preserved")
 }
 ```

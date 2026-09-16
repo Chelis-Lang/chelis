@@ -461,12 +461,12 @@ static inline void chelis_launch_kernel(
     CHELIS_HIP_CHECK(hipGetDevice(&device));
     CHELIS_HIP_CHECK(hipGetDeviceProperties(&properties, device));
     if (grid_count < 0 || block_count <= 0) {
-        chelis_numeric_trap("numeric trap: domain in launch at int64");
+        chelis_numeric_trap("numeric trap: domain in launch at i64");
     }
     if (grid_count > properties.maxGridSize[0]
         || block_count > properties.maxThreadsDim[0]
         || block_count > properties.maxThreadsPerBlock) {
-        chelis_numeric_trap("numeric trap: overflow in launch at int64");
+        chelis_numeric_trap("numeric trap: overflow in launch at i64");
     }
     if (grid_count == 0) return;
     const dim3 grid((unsigned int)grid_count);

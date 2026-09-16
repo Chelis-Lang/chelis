@@ -24,9 +24,9 @@ the boundedness precondition the `generic-monomorphization` capability relies on
 #### Scenario: Direct uniform recursion is accepted
 
 - **WHEN** a generic function `loop` over `Box[a]` calls `loop` on a value of the same
-  `Box[a]` instantiation and the program applies `loop` at `Box[int32]`
+  `Box[a]` instantiation and the program applies `loop` at `Box[i32]`
 - **THEN** the checker accepts the program with `loop`'s recursive call typed at
-  `Box[int32]`
+  `Box[i32]`
 
 #### Scenario: Mutual uniform recursion is accepted
 

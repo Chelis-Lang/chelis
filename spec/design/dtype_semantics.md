@@ -54,14 +54,14 @@ Recorded so the next reader does not have to re-derive it:
    with siblings that do not call it. Optionality is the root cause, and
    optionality is the one thing a patch cannot remove.
 2. **There is no reference lane to patch toward.** eval-scalar rounds f16
-   correctly while eval-tensor does not ([#717]); C-tensor wraps int8 while
+   correctly while eval-tensor does not ([#717]); C-tensor wraps i8 while
    C-scalar does not ([#718]); prove's interpreter collapses what the SMT
    tier keeps exact ([#688]). "Make X match Y" is undefined when no Y holds
    the semantics.
 3. **Dtype discipline is the language's stated value proposition.** The
    spec's differentiators - no implicit precision promotion, explicit
    casts, named dimensions - are precision-centric promises. A numeric
-   layer with no grounded notion of `f16` or `int8` contradicts the
+   layer with no grounded notion of `f16` or `i8` contradicts the
    product's own core claim.
 
 ## Non-goals
@@ -122,8 +122,8 @@ in flight, and are edited in the same change set as §9.1 or not at all:
 | `f32` | IEEE binary32 | f32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`Overflow` out of range, `Domain` non-integral, [04-NUM-9]) | none |
-| `int32/16/8` | integers at width | exact at width | same rule at width | **trap** (`Overflow` / `Domain` at width) | none |
+| `i64` | integers in [-2^63, 2^63-1] | exact i64 | must be integral and in range, else **trap** | **trap** (`Overflow` out of range, `Domain` non-integral, [04-NUM-9]) | none |
+| `i32/i16/i8` | integers at width | exact at width | same rule at width | **trap** (`Overflow` / `Domain` at width) | none |
 | `bool` | {0, 1} | n/a (not arithmetic) | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
 | deferred names (spec §1.1.1) | rejected by the checker | - | unreachable: `finalize` for them is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
 
@@ -143,10 +143,10 @@ Normative notes, each pinned by an existing test:
 2. **The f64 collision stays.** `f64 add(2^53, 1) == 2^53` is CORRECT
    IEEE behavior and must not change
    (`precision_matrix.rs::f64_add_at_mantissa_boundary_is_correctly_lossy`).
-   The identical numbers at int64 trap or stay exact - never silently
+   The identical numbers at i64 trap or stay exact - never silently
    collapse.
 3. **Integer overflow traps at every width in every lane** ([#680]'s decided
-   contract). Today int8/16/32 wrap in eval and int64 saturates, and the
+   contract). Today i8/i16/i32 wrap in eval and i64 saturates, and the
    compiled lane does neither ([#718]) - all four behaviors are replaced by
    the trap. In-range arithmetic is exact and must not trap
    (negative-parity locks exist: `int8_add_just_below_overflow_does_not_trap`).
@@ -218,13 +218,13 @@ bug; the numbered spec wins.
   by construction: the completion wait IS the lane boundary, and traps
   remain values until it. The Metal spike ([#737] report) measured the
   detection as ~free for the memory-bound elementwise shape the backend
-  emits (worst +0.7% median, int64 mul included) and verified MSL int64
+  emits (worst +0.7% median, i64 mul included) and verified MSL i64
   bit-exact. Implementation rider from the same spike: the clang
   overflow builtins are BANNED in emitted MSL (reproducible backend
   compiler crashes on `__builtin_mul_overflow(long)`; at-scale
   vectorization miscompiles false-positive the add/sub forms) - the
-  hand-written checks (widening for int32, sign-bit XOR for add/sub,
-  `mulhi` for int64 mul; never the division-based form, which also
+  hand-written checks (widening for i32, sign-bit XOR for add/sub,
+  `mulhi` for i64 mul; never the division-based form, which also
   crashes the backend) are the implementation. Ratifying trap-everywhere
   for the GPU lanes stays with the [04-NUM-3] freeze decision once
   [#736] runs.
@@ -262,7 +262,7 @@ pub fn finalize_tensor(prim: Prim, raw: RawTensor) -> Result<TensorValue, Numeri
 
 This is the **storage decision** ([#684]/[#686]/[#685]): per-dtype buffers, not
 finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
-int64 above 2^53 regardless of write discipline, so it fails [#684] by
+i64 above 2^53 regardless of write discipline, so it fails [#684] by
 construction. The census has five declaration layers. Phase 1 lands the exact
 representation atomically at four of them - `chelis-ir/src/eval.rs`
 (`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema - tensor
@@ -302,7 +302,7 @@ in the repository.
 
 **The Pad fill is not an exemption ([#878]).** `Pad.fill` is finalized once at
 the padded tensor's dtype during lowering and remains tagged through eval,
-wire transport, proving, and every backend emitter. Exact int64 values above
+wire transport, proving, and every backend emitter. Exact i64 values above
 2^53 therefore never acquire an f64 image. The carrier replacement shrinks both guards:
 the IR payload census now requires the sealed `ScalarValue`, and §C6's typed
 wire manifest no longer carries the former FLAGGED `float-carrier` row. The
@@ -325,8 +325,8 @@ the layer list by enumerating every public channel that carries numeric values
 value ADTs, exported stdlib definitions, and published runtime-header exports
 - and the storage decision covers all of them in one change set. The final JSON
 surface has one public value identity: `io/json::Json` with tagged
-`JsonInt(int64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
-[05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-int64-range
+`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
+[05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-i64-range
 integer-form token's exact decimal spelling, so parse totality never buys a
 float image ([#1314] owns the implementation).
 [#1293] removes the duplicate prelude `Json`/`JInt`/`JNum` surface and moves CSV
@@ -376,13 +376,13 @@ ratified at spec/04 §5.2 in the same change set:
 - any source -> float target: finalize (IEEE RNE at the target width;
   overflow is the correctly signed infinity per [04-NUM-2]); total.
 - integer/bool source -> integer target: exact value; out of the
-  target range TRAPS `Overflow` (no wrap; int32 `300 -> int8` traps,
+  target range TRAPS `Overflow` (no wrap; i32 `300 -> i8` traps,
   formerly `44`).
 - float source -> integer target: finalize only if finite and integral;
   fractional values and NaN/inf TRAP `Domain`, and integral values outside
-  the target width TRAP `Overflow` (no saturation; `cast(300.0, int8)`
+  the target width TRAP `Overflow` (no saturation; `cast(300.0, i8)`
   traps, formerly `127`). The user spells a rounding choice first, e.g.
-  `cast(floor(x), int32)` or `cast(round(x), int32)`.
+  `cast(floor(x), i32)` or `cast(round(x), i32)`.
 - any source -> bool target: STRICT {0, 1} membership - exactly 0/1
   encodes false/true, anything else TRAPS `Domain` (`cast(2, bool)`
   traps, formerly `true`). Scalar->bool now WORKS under this rule
@@ -472,7 +472,7 @@ Frozen rules (Phase 1 freezes the Rust side; Phase 3 makes C emit the
 identical bytes):
 
 1. **Integers print as integers.** `data=[750]`, never `750.0` ([#723]'s
-   `.0` lie ends). int64 prints all 19 digits exactly (never via double).
+   `.0` lie ends). i64 prints all 19 digits exactly (never via double).
 2. **Floats print shortest-round-trip for their OWN width**: an f32
    element prints the shortest string that parses back to that f32 (Rust
    `{:?}` shortest-round-trip semantics - see [#732]'s §C1.3 for why this
@@ -543,8 +543,8 @@ dispatched, the semantics are right.
 **Signature note (2026-07-28, [04-NUM-8]).** The sketch above takes
 `a: f64, b: f64` and `a: i64` because it was written under the removed
 "compute in f64" clause. Those signatures now encode a non-conforming
-contract: under [04-NUM-8] an f32 op computes at f32 and an int32 op
-computes exactly at int32, so a kernel entry point that can only accept
+contract: under [04-NUM-8] an f32 op computes at f32 and an i32 op
+computes exactly at i32, so a kernel entry point that can only accept
 f64/i64 cannot express the rule it is meant to enforce. Phase 2 owns the
 replacement and SHALL design it against [04-NUM-8]; this doc deliberately
 does not pre-specify the form (monomorphized per width, a width-parameter,
@@ -1124,7 +1124,7 @@ Deliverables, with phase homes:
      an open issue. The final control instead rejects that addition because
      the new constructor identity has no exact operation registration; the
      paired integer and float mutations prove the rule uniformly. The
-     source-faithful `JsonInt(int64)` and `JsonFloat(f64)` variants are both
+     source-faithful `JsonInt(i64)` and `JsonFloat(f64)` variants are both
      wanted tagged numeric operations, not carrier seams.
      The def leg reads capacity off the DECLARED signature, so an
      exported `def` that declares none is public numeric surface the
@@ -1323,7 +1323,7 @@ Named non-goals, each with its owner, so coverage is never inferred:
   defend, and no checker can govern a conversion whose source type is
   not in the program. The fix is still type-system-shaped: TYPE THE
   BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
-  precedent (`JsonInt(int64)` beside `JsonFloat(f64)`; JSON syntax
+  precedent (`JsonInt(i64)` beside `JsonFloat(f64)`; JSON syntax
   distinguishes the two, so a parse that erases it discards
   information the source format carried) - after which the checker
   governs everything downstream and the [#759] discipline covers the
@@ -1430,7 +1430,7 @@ authority because they are compiler output.
 
 A numeric value is transported through §C3's exact dtype-tagged carrier or its
 recognized wire representation under [04-NUM-11] and the owning serialization
-contract. Integers and floats retain their source distinctions. An exact int64
+contract. Integers and floats retain their source distinctions. An exact i64
 does not pass through f64; dtype and payload must agree. Recognition reuses the
 closed dtype vocabulary and canonical carrier definitions, including spec/10
 §3.2's exact storage-width bit codec; it does not build another dtype table or assume that
@@ -2284,7 +2284,7 @@ remain loud instead of routing integer `abs` through float-only templates.
 The reduction follow-up routes ordinary, windowed, and argument reductions,
 plus the overlapping window adjoint, through the same sealed boundary:
 consumers retain only shape and ordered index-group planning. Declared-width
-float witnesses, exact int64 comparison, all four integer-width
+float witnesses, exact i64 comparison, all four integer-width
 intermediate-overflow rows, an overlap-add adjoint witness at every float
 arithmetic width, and structural no-bypass locks are part of the oracle.
 Implementing backend kernels remains Phase 3 / [#699].
@@ -2322,7 +2322,7 @@ runs the IR and host structural exclusivity locks; runs declared-width
 ordinary, windowed, and argument-reduction behavior including negative
 parity at every integer width and reverse-mode overlap accumulation at every
 float arithmetic width; runs the active eval matrices for [#680], precision,
-exact int64 values, and static-condition folding; and finishes with the exact
+exact i64 values, and static-condition folding; and finishes with the exact
 prover-carrier boundary. It never runs ignored rows or Phase 3 backend suites.
 The required Linux Integration job runs this command after the normal
 `scripts/gate.py integration` stage, so all three phase contracts are
@@ -2363,7 +2363,7 @@ this maintenance does not widen the HIP/Metal scope.
 
 1. Inherit [#730]'s completed
    `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary: exact narrow
-   scalar identity already survives host lowering, `int8`/`int16` already
+   scalar identity already survives host lowering, `i8`/`i16` already
    select their exact existing C integer ABIs, and the former
    `HostType::Unknown -> int64_t/void*` route is unrepresentable. This phase
    adds the per-dtype operation semantics and overflow traps for those integer
@@ -2470,7 +2470,7 @@ fallback. C DAG identity casts materialize logical row-major order from the
 source strides rather than copying a view's backing order.
 `issue_759_checked_cast_default.rs` generates the complete 9 x 9 x
 three-surface positive matrix for eval and compiled C, locks direct
-f64/int64-to-f16/bf16 rounding with midpoint witnesses on scalar, DAG tensor,
+f64/i64-to-f16/bf16 rounding with midpoint witnesses on scalar, DAG tensor,
 and host tensor surfaces, and runs both mixed-offender permutations at
 `OMP_NUM_THREADS=1,2,4,8`. The plan-level negative matrix covers every
 applicable fractional, non-finite, overflow, and strict-bool case. A
@@ -2717,7 +2717,7 @@ composite #1296 release exit; those remain their owning oracles' work.
 
 The generalized contracts retain that boundary. [05-OP-51] now owns one
 `conv` identity with a positive number of spatial axes and explicit per-axis
-int64 strides and padding pairs. The declaration and callable spelling are
+i64 strides and padding pairs. The declaration and callable spelling are
 migrated together; there is no public `conv2d` compatibility identity. The
 static lowering builds a window matrix in the contract's channel/kernel
 order and performs one contraction across its full reduction axis. Numerical
@@ -2754,7 +2754,7 @@ and the former stride-four cascade; odd-tail and signed-zero controls pin
 identity handling. Ordinary Sum now uses the existing adjacent-pair fold in
 the typed evaluator and one shared C tree for materialized and fused inputs,
 with native-width leaf loads, explicit accumulator width, and checked integer
-pairs. Paired int32/int64 controls require the canonical overflow to trap and
+pairs. Paired i32/i64 controls require the canonical overflow to trap and
 the cascade-only overflow to succeed. Window/product reduction and runtime
 SIMD entry points remain outside this repair's execution claims.
 C entry preparation retains primitive contractions while applying structural rewrites; it does
@@ -2848,7 +2848,7 @@ suites, which cover positional and named multi-axis Count, empty selected
 extents, odd and large leaf counts, and the runtime's `Bool8` write-boundary
 domain trap. The kernels' overflow and stack-limit status codes are
 unreachable for any representable tensor (fewer than 2^63 leaves cannot
-overflow `int64`, and 64 frames bound every such leaf count), so no hardware
+overflow `i64`, and 64 frames bound every such leaf count), so no hardware
 test claims them; the device carrier limits are locked structurally in the
 codegen suites. The two authoritative manual gates are
 `scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness count_ --

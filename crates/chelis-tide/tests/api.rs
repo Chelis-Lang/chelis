@@ -347,7 +347,7 @@ entries = dict_entries(vocab)
     assert_eq!(vocab["value"]["entries"][0]["value"]["type"], "scalar");
     assert_eq!(
         vocab["value"]["entries"][0]["value"]["value"]["dtype"],
-        "i64"
+        "int64"
     );
     let entries = roots
         .iter()
@@ -359,7 +359,7 @@ entries = dict_entries(vocab)
     assert_eq!(entries["value"]["value"][0]["value"][1]["type"], "scalar");
     assert_eq!(
         entries["value"]["value"][0]["value"][1]["value"]["dtype"],
-        "i64"
+        "int64"
     );
 }
 
