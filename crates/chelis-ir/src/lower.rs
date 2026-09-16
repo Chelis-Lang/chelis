@@ -2926,7 +2926,10 @@ fn authored_tensor_dim_binders(
                 binders
                     .extend((0..width).map(|axis| Some(rank_axis_binder_key(name.as_str(), axis))));
             }
-            DimSlot::Named(name) | DimSlot::DimVar(name) => binders.push(Some(name)),
+            DimSlot::Named(name) | DimSlot::DimVar(name) if !name.is_empty() && name != "*" => {
+                binders.push(Some(name));
+            }
+            DimSlot::Named(_) | DimSlot::DimVar(_) => binders.push(None),
             DimSlot::Other => binders.push(None),
         }
     }
@@ -3527,6 +3530,75 @@ fn tensor_rank_substitutions(
         }
     }
     subst
+}
+
+/// Bind rank spreads through the callable expression used for shape
+/// actualization, then alias those bindings onto the authored signature's
+/// alpha-renamed spread identities.
+///
+/// Imported/checked declarations may spell the same parameter contract with
+/// different generated rank-variable names in the callable expression and its
+/// preserved authored signature. The expression retains the named anchor
+/// needed to split an actual shape; the signature retains the binder identity
+/// that owns runtime extent obligations. Pairing spreads by their structural
+/// slot keeps both representations actualized without treating caller labels
+/// as authored binders.
+fn activation_rank_substitutions(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+) -> UnordMap<String, Vec<DimInfo>> {
+    let mut substitutions =
+        tensor_rank_substitutions(actualization_formals, actual_args, dim_axis_positions);
+    for (actualization, authored) in actualization_formals.iter().zip(authored_formals) {
+        let (Some(actualization), Some(authored)) = (actualization, authored) else {
+            continue;
+        };
+        let Some(actualization_slots) = tensor_formal_dim_slots(actualization) else {
+            continue;
+        };
+        let Some(authored_slots) = tensor_formal_dim_slots(authored) else {
+            continue;
+        };
+        let actualization_spreads = actualization_slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let authored_spreads = authored_slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if actualization_spreads.len() != authored_spreads.len() {
+            continue;
+        }
+        for (actualization_name, authored_name) in
+            actualization_spreads.into_iter().zip(authored_spreads)
+        {
+            let Some(run) = substitutions.get(&actualization_name).cloned() else {
+                continue;
+            };
+            match substitutions.entry(authored_name) {
+                chelis_unord::Entry::Occupied(existing) => {
+                    debug_assert_eq!(
+                        existing.get(),
+                        &run,
+                        "alpha-renamed authored rank binder resolved to two distinct shapes",
+                    );
+                }
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run);
+                }
+            }
+        }
+    }
+    substitutions
 }
 
 /// Bind each rank-var spread in a (possibly anchored, Tier-3) tensor-type
@@ -6091,6 +6163,12 @@ struct ResolvedFunction {
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
     signature: Option<std::sync::Arc<Expr>>,
+}
+
+struct VectorizedParameterInstantiation {
+    parameter_types: Vec<TensorType>,
+    rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+    dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
 }
 
 impl std::ops::Deref for ResolvedFunction {
@@ -10138,6 +10216,11 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
+        let authored_param_type_exprs = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
         let prec_subst_for_params = self.prec_substitutions.clone();
         let rank_subst_for_params = self.rank_substitutions.clone();
         let param_types: Vec<TensorType> = param_type_exprs
@@ -10160,6 +10243,7 @@ impl<'program> LowerCtx<'program> {
             .collect();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
+        let mut authored_formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
         // Prepare every actual in caller scope, in written order. Installing
         // a formal early can change the value or static fact of a later actual.
@@ -10172,11 +10256,15 @@ impl<'program> LowerCtx<'program> {
                 (static_size, callable, value)
             })
             .collect::<Vec<_>>();
-        for (((name, (static_size, callable, value)), param_ty), formal_expr) in param_names
+        for (
+            (((name, (static_size, callable, value)), param_ty), formal_expr),
+            authored_formal_expr,
+        ) in param_names
             .iter()
             .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
+            .zip(authored_param_type_exprs.iter())
         {
             // Preserve a caller-known integer through the inlined parameter
             // name. This is required by the [05-OP-35] wrappers: their public
@@ -10226,6 +10314,7 @@ impl<'program> LowerCtx<'program> {
                 {
                     formal_types.push(param_ty);
                     formal_type_exprs.push(formal_expr.clone());
+                    authored_formal_type_exprs.push(authored_formal_expr.clone());
                     actual_types.push(actual_ty);
                 }
                 self.bindings.insert(name.clone(), arg_id);
@@ -10285,8 +10374,12 @@ impl<'program> LowerCtx<'program> {
         // dim vector, so the inlined rank-poly body resolves its `..r`
         // tensors to concrete ranks before any backend sees them. The
         // rank analogue of the `prec_substitutions.extend(...)` above.
-        let rank_subst =
-            tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
+        let rank_subst = activation_rank_substitutions(
+            &formal_type_exprs,
+            &authored_formal_type_exprs,
+            &actual_types,
+            &self.dim_axis_positions,
+        );
         self.rank_substitutions.merge(rank_subst);
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
         // UNROLLING. Depth accounting installs *here*, after argument
@@ -10474,12 +10567,64 @@ impl<'program> LowerCtx<'program> {
         let saved_signature = self.signature_witnesses.clone();
         let saved_activation = self.activation_witnesses.clone();
         let saved_authored = self.signature_is_authored;
+        let saved_rank_substitutions = self.rank_substitutions.clone();
+        let saved_dim_axis_positions = self.dim_axis_positions.clone();
         let start = self.invocation_witnesses.len();
-        let formal_types = params
+        let authored_formal_type_exprs = params
             .iter()
             .enumerate()
-            .map(|(index, name)| {
-                extract_param_type(function, index)
+            .map(|(index, _)| function.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        let actualization_formal_type_exprs = params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| extract_param_type(function, index).cloned())
+            .collect::<Vec<_>>();
+        let bound_parameters = params
+            .iter()
+            .zip(
+                actualization_formal_type_exprs
+                    .iter()
+                    .zip(authored_formal_type_exprs.iter()),
+            )
+            .filter_map(|(name, (actualization, authored))| {
+                let actual = self
+                    .bindings
+                    .get(name)
+                    .and_then(LoweredValue::as_single_node)
+                    .and_then(|id| self.dag.get(id))
+                    .map(|node| node.output_type.clone())?;
+                Some((actualization.clone(), authored.clone(), actual))
+            })
+            .collect::<Vec<_>>();
+        let bound_actualization_formals = bound_parameters
+            .iter()
+            .map(|(actualization, _, _)| actualization.clone())
+            .collect::<Vec<_>>();
+        let bound_authored_formals = bound_parameters
+            .iter()
+            .map(|(_, authored, _)| authored.clone())
+            .collect::<Vec<_>>();
+        let bound_actual_types = bound_parameters
+            .into_iter()
+            .map(|(_, _, actual)| actual)
+            .collect::<Vec<_>>();
+        self.dim_axis_positions.merge(tensor_dim_axis_positions(
+            &bound_actualization_formals,
+            &bound_actual_types,
+        ));
+        self.rank_substitutions.merge(activation_rank_substitutions(
+            &bound_actualization_formals,
+            &bound_authored_formals,
+            &bound_actual_types,
+            &self.dim_axis_positions,
+        ));
+        let formal_types = params
+            .iter()
+            .zip(authored_formal_type_exprs.iter())
+            .map(|(name, formal)| {
+                formal
+                    .as_ref()
                     .map(|ty| {
                         Self::formal_param_type_for_call(
                             ty,
@@ -10497,15 +10642,10 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect::<Vec<_>>();
-        let formal_type_exprs = params
-            .iter()
-            .enumerate()
-            .map(|(index, _)| function.parameter_type(index).cloned())
-            .collect::<Vec<_>>();
         self.prepare_parameter_witnesses(
             params,
             &formal_types,
-            Some(&formal_type_exprs),
+            Some(&authored_formal_type_exprs),
             self.current_span_id.clone(),
             true,
         );
@@ -10542,6 +10682,8 @@ impl<'program> LowerCtx<'program> {
         self.signature_witnesses = saved_signature;
         self.activation_witnesses = saved_activation;
         self.signature_is_authored = saved_authored;
+        self.rank_substitutions = saved_rank_substitutions;
+        self.dim_axis_positions = saved_dim_axis_positions;
         result
     }
 
@@ -10591,6 +10733,72 @@ impl<'program> LowerCtx<'program> {
         result
     }
 
+    /// Instantiate a vectorized callable's authored parameter shapes from the
+    /// shapes each body invocation receives.
+    ///
+    /// The actual argument still includes `vmap`'s mapped axis, while the
+    /// callable body does not. Remove that axis before binding authored rank
+    /// spreads, then carry the resulting substitution into the transformed
+    /// lowering context. This preserves the exact split around named anchors
+    /// such as `[..pre, seq, ..post]`; reconstructing from the collapsed
+    /// formal `TensorType` loses both spread widths.
+    fn vectorized_parameter_instantiation(
+        &self,
+        function: &ResolvedFunction,
+        parameter_count: usize,
+        actual_types: &[TensorType],
+        axis: usize,
+    ) -> VectorizedParameterInstantiation {
+        let authored_formal_type_exprs = (0..parameter_count)
+            .map(|index| function.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        let actualization_formal_type_exprs = (0..parameter_count)
+            .map(|index| extract_param_type(function, index).cloned())
+            .collect::<Vec<_>>();
+        let invocation_types = actual_types
+            .iter()
+            .map(|actual| {
+                let mut invocation = actual.clone();
+                if axis < invocation.dims.len() {
+                    invocation.dims.remove(axis);
+                }
+                invocation
+            })
+            .collect::<Vec<_>>();
+        let mut dim_axis_positions = self.dim_axis_positions.clone();
+        dim_axis_positions.merge(tensor_dim_axis_positions(
+            &actualization_formal_type_exprs,
+            &invocation_types,
+        ));
+        let mut rank_substitutions = self.rank_substitutions.clone();
+        rank_substitutions.merge(activation_rank_substitutions(
+            &actualization_formal_type_exprs,
+            &authored_formal_type_exprs,
+            &invocation_types,
+            &dim_axis_positions,
+        ));
+        let parameter_types = authored_formal_type_exprs
+            .iter()
+            .map(|formal| {
+                formal
+                    .as_ref()
+                    .map(|expr| {
+                        Self::formal_param_type_for_call(
+                            expr,
+                            &self.prec_substitutions,
+                            &rank_substitutions,
+                        )
+                    })
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        VectorizedParameterInstantiation {
+            parameter_types,
+            rank_substitutions,
+            dim_axis_positions,
+        }
+    }
+
     fn lower_vmap_callable_app(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -10620,23 +10828,6 @@ impl<'program> LowerCtx<'program> {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
-        let prec_subst_for_params = self.prec_substitutions.clone();
-        let rank_subst_for_params = self.rank_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
-            })
-            .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
             .map(|id| {
@@ -10646,6 +10837,16 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
+        let VectorizedParameterInstantiation {
+            parameter_types: param_types,
+            rank_substitutions: vectorized_rank_substitutions,
+            dim_axis_positions: vectorized_dim_axis_positions,
+        } = self.vectorized_parameter_instantiation(
+            fn_expr,
+            param_names.len(),
+            &actual_types,
+            axis,
+        );
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
         // Actual argument types with the vmap `axis` permuted to the front
@@ -10699,6 +10900,8 @@ impl<'program> LowerCtx<'program> {
                 .map(|trace| trace.child(crate::lowering_trace::ContextKind::Vmap));
         }
         subctx.allow_host_list_ad_rewrites = true;
+        subctx.rank_substitutions = vectorized_rank_substitutions;
+        subctx.dim_axis_positions = vectorized_dim_axis_positions;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -10876,23 +11079,6 @@ impl<'program> LowerCtx<'program> {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
-        let prec_subst_for_params = self.prec_substitutions.clone();
-        let rank_subst_for_params = self.rank_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
-            })
-            .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
             .map(|id| {
@@ -10902,6 +11088,16 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
+        let VectorizedParameterInstantiation {
+            parameter_types: param_types,
+            rank_substitutions: vectorized_rank_substitutions,
+            dim_axis_positions: vectorized_dim_axis_positions,
+        } = self.vectorized_parameter_instantiation(
+            fn_expr,
+            param_names.len(),
+            &actual_types,
+            axis,
+        );
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
         let mut batch_dim = None;
@@ -10947,6 +11143,8 @@ impl<'program> LowerCtx<'program> {
                 .map(|trace| trace.child(crate::lowering_trace::ContextKind::VmapGradient));
         }
         subctx.allow_host_list_ad_rewrites = true;
+        subctx.rank_substitutions = vectorized_rank_substitutions;
+        subctx.dim_axis_positions = vectorized_dim_axis_positions;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap(grad)'s parameters carry the call's span.
         subctx.current_span_id = self.current_span_id.clone();

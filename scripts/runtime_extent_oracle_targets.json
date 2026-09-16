@@ -831,6 +831,7 @@
         "beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
         "beta_reduced_callbacks_preserve_signature_order",
         "beta_reduced_callbacks_run_failing_actual_before_entry",
+        "direct_vmap_two_spread_entry_enforces_shared_witnesses",
         "every_unused_repeated_witness_is_checked",
         "higher_order_app_and_pipe_accept_agreeing_entry_claim",
         "higher_order_app_and_pipe_preserve_actual_before_entry_failure",
@@ -851,7 +852,7 @@
         "mixed_literal_checks_survive_when_the_repeated_binder_agrees",
         "successive_higher_order_invocations_have_independent_signature_instances"
       ],
-      "note": "Complete signature obligations across mixed helpers and higher-order/callback entry, with exact precedence, argument/body effects, unused witnesses and agreeing controls. Beta-reduced direct, local and passed lambdas retain eager actuals and independent ordered signature guards. Indirect calls retain the formal callable contract across broader actuals, aliases, local callables, wrappers, transforms and repeated-binder signatures.",
+      "note": "Complete signature obligations across mixed helpers and higher-order/callback entry, with exact precedence, argument/body effects, unused witnesses and agreeing controls. Beta-reduced direct, local and passed lambdas retain eager actuals and independent ordered signature guards. Indirect and direct-vmap calls retain the authored formal contract across broader actuals, aliases, local callables, wrappers, transforms, rank spreads and repeated-binder signatures.",
       "phase": "b"
     },
     {

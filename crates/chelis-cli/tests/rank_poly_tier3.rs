@@ -724,6 +724,39 @@ fn named_expand_under_grad_and_vmap_evals_and_matches_backend() {
     assert_eval_agrees_with_backend(source, "named_expand_grad_vmap", &backend);
 }
 
+/// chelis#1889: direct `vmap` must instantiate both authored rank spreads
+/// from the unbatched argument shape before lowering the transformed body.
+/// The batch axis is not part of either spread.
+#[test]
+fn direct_vmap_actualizes_two_spread_signature_and_matches_backend() {
+    let source = "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = insert(x, c, 2i64, seq)\n\
+         def apply(x: &tensor[batch, left, seq, right, f32]) -> tensor[batch, left, c, seq, right, f32] = vmap(widen)(x)\n\
+         out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]))\n";
+    assert_clean(
+        &check_json(source),
+        "direct vmap over a two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "direct_vmap_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(name, _, _)| name == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2, 2, 2, 3, 1], "backend shape ({backend})");
+    let expected = [
+        1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 7.0, 8.0, 9.0,
+        10.0, 11.0, 12.0, 10.0, 11.0, 12.0,
+    ];
+    for (index, expected) in expected.iter().enumerate() {
+        assert!(
+            (out.2[index] - expected).abs() < 1e-6,
+            "out[{index}]: backend {} != {expected} ({backend})",
+            out.2[index]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "direct_vmap_two_spreads", &backend);
+}
+
 /// The anchored 4-arg sig survives `chelis fmt` (round-trip + idempotence +
 /// re-checks clean), mirroring the reduction round-trip invariant.
 #[test]
