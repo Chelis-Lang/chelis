@@ -2333,7 +2333,7 @@ pub(crate) fn try_lower_staged_host_region(
             }
         }
         // A staged host region's inputs are the partition's, not an author's.
-        ctx.prepare_parameter_witnesses(&names, &types, None, false);
+        ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
         ctx.binding_witnesses.clear();
         // Do not infer equality between repeated spellings in the machine-built
         // parameter list above. The returned result type is nevertheless the
@@ -2455,7 +2455,13 @@ fn lower_subexpr_program_inner_impl(
         );
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
-    ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None, authored_signature);
+    ctx.prepare_parameter_witnesses(
+        &parameter_names,
+        &parameter_types,
+        None,
+        None,
+        authored_signature,
+    );
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
@@ -2799,6 +2805,22 @@ enum DimSlot {
     Other,
 }
 
+const INTERNAL_RANK_AXIS_BINDER_PREFIX: &str = "\0rank-axis:";
+
+fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
+    format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
+}
+
+fn extent_binder_label(binder: &str) -> String {
+    let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
+        return binder.to_owned();
+    };
+    let Some((rank, axis)) = rest.rsplit_once(':') else {
+        return binder.to_owned();
+    };
+    format!("{rank}[{axis}]")
+}
+
 /// Strip a leading `(t-ref {} ...)` wrapper and classify a raw tensor-type
 /// formal's dim slots in order (Spread/Named/Other), excluding the trailing
 /// precision child. Returns `None` when the expr is not a `(t-tensor ...)` type
@@ -2838,6 +2860,103 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
             })
             .collect(),
     )
+}
+
+/// Recover the authored binder identity, if any, for every realized parameter
+/// axis.
+///
+/// A rank spread contributes axes after monomorphization, but those axes did
+/// not spell independent dimension binders in the authored signature. Give
+/// them activation-local identities derived from the authored rank binder and
+/// positional axis instead of importing caller-side names. Otherwise a view
+/// such as `tensor[fixed]` substituted through `tensor[..rest]` becomes an
+/// equality with an unrelated explicit `fixed` binder on a sibling parameter
+/// (chelis#1889). Reusing the internal identity across two parameters that
+/// explicitly share `..rest` still enforces one runtime witness per axis.
+fn authored_tensor_dim_binders(
+    expr: &Expr,
+    rank_substitutions: &UnordMap<String, Vec<DimInfo>>,
+    realized_rank: usize,
+) -> Result<Vec<Option<String>>, String> {
+    let Some(slots) = tensor_formal_dim_slots(expr) else {
+        return Ok(vec![None; realized_rank]);
+    };
+    let fixed = slots
+        .iter()
+        .filter(|slot| !matches!(slot, DimSlot::Spread(_)))
+        .count();
+    let known_spread_axes = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            DimSlot::Spread(name) => rank_substitutions.get(name).map(Vec::len),
+            _ => None,
+        })
+        .sum::<usize>();
+    let missing_spreads = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            DimSlot::Spread(name) if !rank_substitutions.contains_key(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let inferred_missing_width = match missing_spreads.len() {
+        0 => None,
+        1 if fixed + known_spread_axes <= realized_rank => {
+            Some(realized_rank - fixed - known_spread_axes)
+        }
+        _ => {
+            return Err(format!(
+                "could not recover authored binder provenance for rank \
+                 {realized_rank}: unresolved rank spreads {missing_spreads:?}"
+            ));
+        }
+    };
+
+    let mut binders = Vec::with_capacity(realized_rank);
+    for slot in slots {
+        match slot {
+            DimSlot::Spread(name) => {
+                let width = rank_substitutions
+                    .get(&name)
+                    .map(Vec::len)
+                    .or(inferred_missing_width)
+                    .ok_or_else(|| {
+                        format!("rank spread `{name}` has no realized parameter width")
+                    })?;
+                binders
+                    .extend((0..width).map(|axis| Some(rank_axis_binder_key(name.as_str(), axis))));
+            }
+            DimSlot::Named(name) | DimSlot::DimVar(name) => binders.push(Some(name)),
+            DimSlot::Other => binders.push(None),
+        }
+    }
+    if binders.len() != realized_rank {
+        return Err(format!(
+            "authored binder provenance has {} axes for a realized rank-{realized_rank} parameter",
+            binders.len()
+        ));
+    }
+    Ok(binders)
+}
+
+fn authored_tensor_claim_type(
+    expr: &Expr,
+    actualized: &TensorType,
+    rank_substitutions: &UnordMap<String, Vec<DimInfo>>,
+) -> Result<TensorType, String> {
+    let binders = authored_tensor_dim_binders(expr, rank_substitutions, actualized.dims.len())?;
+    Ok(TensorType {
+        dims: actualized
+            .dims
+            .iter()
+            .zip(binders)
+            .map(|(dim, binder)| match binder {
+                Some(binder) => DimInfo::Named(binder, None),
+                None => dim.clone(),
+            })
+            .collect(),
+        precision: actualized.precision,
+    })
 }
 
 fn tensor_dim_substitutions(
@@ -5982,6 +6101,22 @@ impl std::ops::Deref for ResolvedFunction {
 }
 
 impl ResolvedFunction {
+    /// The authored parameter contract for this callable.
+    ///
+    /// A checked function expression may carry caller-specialized metadata
+    /// whose axis names describe that particular view. Runtime entry
+    /// witnesses must instead come from the authored signature: only it can
+    /// assert that two parameter axes share one binder. Rank variables are
+    /// actualized later for the current call, without importing a caller-side
+    /// result label as a new signature equality.
+    fn parameter_type(&self, index: usize) -> Option<&Expr> {
+        self.signature
+            .as_deref()
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.get(index)).flatten())
+            .or_else(|| extract_param_type(&self.expression, index))
+    }
+
     fn result_type(&self) -> Option<&Expr> {
         self.signature
             .as_deref()
@@ -7704,7 +7839,7 @@ impl<'program> LowerCtx<'program> {
                 let required = self.required_extent_for_claim(dim)?;
                 let label = match dim {
                     DimInfo::Lit(n) => n.to_string(),
-                    DimInfo::Named(name, _) => name.clone(),
+                    DimInfo::Named(name, _) => extent_binder_label(name),
                 };
                 let required = if matches!(dim, DimInfo::Named(_, _)) {
                     self.capture_result_claim(required, label.clone(), axis)
@@ -10023,7 +10158,6 @@ impl<'program> LowerCtx<'program> {
                 None => Self::default_type(),
             })
             .collect();
-        let witness_param_types = param_types.clone();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
@@ -10203,24 +10337,66 @@ impl<'program> LowerCtx<'program> {
         // this particular application: the latter may refine a named axis for
         // a following query, but must not replace an authored named claim with
         // a literal (chelis#1782/#1889).
+        let authored_result_claim = fn_expr.signature.is_some();
         let declared_result = fn_expr
             .result_type()
             .map(|expr| {
-                Self::type_from_type_expr_with_subst(
+                let actualized = Self::type_from_type_expr_with_subst(
                     expr,
                     &self.prec_substitutions,
                     &self.rank_substitutions,
-                )
+                );
+                if authored_result_claim {
+                    authored_tensor_claim_type(expr, &actualized, &self.rank_substitutions)
+                        .unwrap_or_else(|message| {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "runtime result-extent construction lost its authored binder \
+                                     provenance: {message}"
+                                ),
+                                None,
+                                call_span.clone(),
+                            )
+                        })
+                } else {
+                    actualized
+                }
             })
             .unwrap_or_else(|| expected_return_ty.clone());
-        self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span, true);
+        let witness_param_types = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                fn_expr
+                    .parameter_type(index)
+                    .map(|expr| {
+                        Self::formal_param_type_for_call(
+                            expr,
+                            &self.prec_substitutions,
+                            &self.rank_substitutions,
+                        )
+                    })
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect::<Vec<_>>();
+        let witness_param_type_exprs = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(
+            &param_names,
+            &witness_param_types,
+            Some(&witness_param_type_exprs),
+            call_span,
+            true,
+        );
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let authored_result_claim = fn_expr.signature.is_some();
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
             self.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
         });
@@ -10321,15 +10497,42 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect::<Vec<_>>();
-        self.prepare_parameter_witnesses(params, &formal_types, self.current_span_id.clone(), true);
+        let formal_type_exprs = params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| function.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(
+            params,
+            &formal_types,
+            Some(&formal_type_exprs),
+            self.current_span_id.clone(),
+            true,
+        );
+        let authored_result_claim = function.signature.is_some();
         let claim = function.result_type().map(|ty| {
-            Self::type_from_type_expr_with_subst(
+            let actualized = Self::type_from_type_expr_with_subst(
                 ty,
                 &self.prec_substitutions,
                 &self.rank_substitutions,
-            )
+            );
+            if authored_result_claim {
+                authored_tensor_claim_type(ty, &actualized, &self.rank_substitutions)
+                    .unwrap_or_else(|message| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "runtime result-extent construction lost its authored binder \
+                                 provenance: {message}"
+                            ),
+                            None,
+                            self.current_span_id.clone(),
+                        )
+                    })
+            } else {
+                actualized
+            }
         });
-        let result = self.lower_expr_with_claim(body, claim.as_ref(), function.signature.is_some());
+        let result = self.lower_expr_with_claim(body, claim.as_ref(), authored_result_claim);
         if let Some(claim) = &claim {
             self.preserve_declared_result(&result, claim, None);
         }
@@ -14670,6 +14873,7 @@ impl<'program> LowerCtx<'program> {
         &mut self,
         params: &[String],
         formal_types: &[TensorType],
+        formal_type_exprs: Option<&[Option<Expr>]>,
         span: Option<String>,
         authored_signature: bool,
     ) {
@@ -14678,7 +14882,7 @@ impl<'program> LowerCtx<'program> {
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
         self.local_unit_refinements.clear();
-        for (name, formal_type) in params.iter().zip(formal_types) {
+        for (index, (name, formal_type)) in params.iter().zip(formal_types).enumerate() {
             let Some(input) = self
                 .bindings
                 .get(name)
@@ -14693,6 +14897,30 @@ impl<'program> LowerCtx<'program> {
                 .output_type
                 .dims
                 .len();
+            let authored_binders = match formal_type_exprs
+                .and_then(|types| types.get(index))
+                .and_then(Option::as_ref)
+            {
+                Some(expr) => authored_tensor_dim_binders(expr, &self.rank_substitutions, rank)
+                    .unwrap_or_else(|message| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "runtime extent witness construction for parameter `{name}` \
+                                 lost its authored binder provenance: {message}"
+                            ),
+                            None,
+                            span.clone(),
+                        )
+                    }),
+                None => (0..rank)
+                    .map(|axis| match formal_type.dims.get(axis) {
+                        Some(DimInfo::Named(binder, _)) if !binder.is_empty() && binder != "*" => {
+                            Some(binder.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            };
             let mut witnesses = Vec::new();
             for axis in 0..rank {
                 let witness = self.dag.add_node(
@@ -14710,10 +14938,7 @@ impl<'program> LowerCtx<'program> {
                     },
                     span.clone(),
                 );
-                if let Some(DimInfo::Named(binder, _)) = formal_type.dims.get(axis)
-                    && !binder.is_empty()
-                    && binder != "*"
-                {
+                if let Some(binder) = authored_binders.get(axis).and_then(Option::as_ref) {
                     match self
                         .signature_witnesses
                         .iter()
@@ -14735,9 +14960,12 @@ impl<'program> LowerCtx<'program> {
                         // synthesized multi-root kernel took `batch` and `seq`
                         // off the several definitions that produced its captured
                         // roots and trapped a correct program.
-                        Some(declared) if authored_signature => {
-                            self.add_named_extent_claim(witness, declared, binder.clone(), true)
-                        }
+                        Some(declared) if authored_signature => self.add_named_extent_claim(
+                            witness,
+                            declared,
+                            extent_binder_label(binder),
+                            true,
+                        ),
                         // The binder is already declared in this activation and
                         // the list is machine-built: record nothing and leave
                         // the first declaration standing.
@@ -14888,9 +15116,9 @@ impl<'program> LowerCtx<'program> {
     /// materializing a constant; a named claim needs the node itself, because
     /// its diagnostic reads the declaring parameter and axis off it.
     fn signature_witness(&self, binder: &str) -> Option<NodeId> {
-        self.signature_witnesses
-            .iter()
-            .find_map(|(name, witness)| (name == binder).then_some(*witness))
+        self.signature_witnesses.iter().find_map(|(name, witness)| {
+            (name == binder || extent_binder_label(name) == binder).then_some(*witness)
+        })
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -15300,7 +15528,7 @@ impl<'program> LowerCtx<'program> {
             None => "the signature".to_owned(),
         };
         let claim = match binder {
-            Some(binder) => format!("`{binder}` = {claimed}"),
+            Some(binder) => format!("`{}` = {claimed}", extent_binder_label(binder)),
             None => claimed.to_string(),
         };
         raise_fatal_lowering_error(
@@ -15632,7 +15860,7 @@ impl<'program> LowerCtx<'program> {
             self.add_named_extent_claim(
                 owner,
                 requirement,
-                binder.to_owned(),
+                extent_binder_label(binder),
                 requirement_declares,
             );
         }
@@ -16679,7 +16907,7 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         };
-        let (params, formal_types): (Vec<_>, Vec<_>) = params
+        let params_and_types = params
             .iter()
             .filter_map(param_name_and_type_expr)
             .filter_map(|(name, ty)| {
@@ -16692,10 +16920,28 @@ impl<'program> LowerCtx<'program> {
                     ),
                     None => self.dag.get(input).expect("parameter").output_type.clone(),
                 };
-                Some((name, formal))
+                Some((name, formal, ty.cloned()))
             })
-            .unzip();
-        self.prepare_parameter_witnesses(&params, &formal_types, call_span, true);
+            .collect::<Vec<_>>();
+        let params = params_and_types
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<Vec<_>>();
+        let formal_types = params_and_types
+            .iter()
+            .map(|(_, formal, _)| formal.clone())
+            .collect::<Vec<_>>();
+        let formal_type_exprs = params_and_types
+            .into_iter()
+            .map(|(_, _, ty)| ty)
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(
+            &params,
+            &formal_types,
+            Some(&formal_type_exprs),
+            call_span,
+            true,
+        );
         let result =
             self.lower_expr_with_claim(&elems[3], declared_result.as_ref(), authored_result_claim);
         if let Some(ty) = &declared_result {
