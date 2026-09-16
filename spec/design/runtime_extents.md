@@ -1132,10 +1132,10 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The phase-B corpus contains 190 rows. Completion requires `--phase b` to
+The phase-B corpus contains 206 rows. Completion requires `--phase b` to
 report `RUNTIME EXTENT ORACLE: PASS` without `--allow-shortfall`; enrollment
 and a hand count do not establish that execution result. The JSON's `phase_b`
-column contains 30 non-`executes_exactly` values against 160
+column contains 30 non-`executes_exactly` values against 176
 `executes_exactly`; the dispositions below account for the thirty.
 Twenty-nine rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the

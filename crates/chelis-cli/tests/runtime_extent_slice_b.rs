@@ -93,6 +93,7 @@
 mod common;
 
 use assert_cmd::Command;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -8984,8 +8985,8 @@ fn malformed_parameter_ranks_keep_the_existing_helper_diagnostic() {
 // The two disagreeing rows below are therefore regression tests, measured
 // silent on `6abca2406` by reverting `crates/chelis-ir/src/{lower,vmap}.rs` to
 // that head and rebuilding `chelis`. Their agreeing twins and the op-computed
-// and `vmap(grad(...))` rows are disposition locks: those already behaved and
-// the new shape dependency must not move them.
+// and the older `vmap(grad(...))` local-guard row is a disposition lock. The
+// exact entry-witness mapped reproducer is covered separately by chelis#1932.
 // ---------------------------------------------------------------------------
 
 /// chelis#1821's reproducer as a builder. `f`'s binder `n` is witnessed by `x`
@@ -9207,10 +9208,8 @@ fn grad_keeps_an_op_computed_local_guard_on_c() {
 /// claim still traps with the batched axis in the context line.
 ///
 /// EVIDENTIARY STATUS: disposition locks, both measured identical on
-/// `6abca2406`. No regression row exists on this path: the named-claim
-/// carrier's reproducer does not lower under `vmap(grad(...))` at that head
-/// either, failing with "`vmap(...)` lowering produced no roots", which is a
-/// separate defect this change does not touch.
+/// `6abca2406`. Chelis#1932 below owns the now-supported named entry-witness
+/// path and its exact recovered source.
 #[test]
 fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -9235,6 +9234,148 @@ fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
             && out.contains("extent `2`: claimed = 2, shrink axis 1 = 3"),
         "the batched guard names axis 1: {out}"
     );
+}
+
+/// The exact 290-byte chelis#1932 source recovered from PR #1912 round 3.
+///
+/// SHA-256:
+/// `30ca8685500d97796027d2b592eac2d8f59862c9ceebd6cb9845bbc24f966fd4`.
+const ISSUE_1932_EXACT_SOURCE: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
+def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+
+/// grad.mapped.entry_witness.
+/// {refuted,agree_zero,agree_nonzero,refuted_reordered}.{eval,c}.
+///
+/// Every source first passes `check`. Every C leg then builds, compiles,
+/// links, and runs: an exit-zero build command alone is not an artifact
+/// receipt. The controls distinguish entry-witness retention from ordinary
+/// mapped AD and from the already-correct direct-gradient path.
+#[test]
+fn issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "mapped-gradient artifact receipts require compiling and executing C"
+    );
+    assert_eq!(ISSUE_1932_EXACT_SOURCE.len(), 290);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(ISSUE_1932_EXACT_SOURCE.as_bytes())),
+        "30ca8685500d97796027d2b592eac2d8f59862c9ceebd6cb9845bbc24f966fd4"
+    );
+
+    let agreeing_zero =
+        ISSUE_1932_EXACT_SOURCE.replace("[1.0f32, 2.0f32, 3.0f32]", "[1.0f32, 2.0f32]");
+    let agreeing_nonzero = "def f(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n\
+         def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32])), 0i32)\n\
+         def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let no_witness = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+         def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let reordered_callable = "def f(y: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(to_tensor([1.0f32, 2.0f32, 3.0f32]), x), 0i32)\n\
+         def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let direct_grad = ISSUE_1932_EXACT_SOURCE.replace(
+        "vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))",
+        "grad(h)(to_tensor([1.0f32, 2.0f32]))",
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    for (stem, source) in [
+        ("mapped_refuted", ISSUE_1932_EXACT_SOURCE),
+        ("mapped_agree_zero", agreeing_zero.as_str()),
+        ("mapped_agree_nonzero", agreeing_nonzero),
+        ("mapped_no_witness", no_witness),
+        ("mapped_reordered_callable", reordered_callable),
+        ("direct_refuted", direct_grad.as_str()),
+    ] {
+        let checked = check(&fixture(&dir, &format!("{stem}_check.ch"), source));
+        assert!(
+            checked.status.success(),
+            "{stem}: check failed: {}{}",
+            String::from_utf8_lossy(&checked.stdout),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+    }
+
+    let (eval_ok, eval_out) = eval_result(&dir, "mapped_refuted_eval.ch", ISSUE_1932_EXACT_SOURCE);
+    assert!(
+        !eval_ok,
+        "the refuted mapped activation must trap: {eval_out}"
+    );
+    assert!(
+        eval_out.contains("extent `n`: x axis 1 = 2, y axis 1 = 3")
+            && eval_out.contains(&domain_trap_line("load")),
+        "eval keeps the authored witnesses on the shifted axis: {eval_out}"
+    );
+    assert!(!eval_out.contains("panicked at"), "{eval_out}");
+
+    let (c_ok, c_out, emitted) =
+        c_run_result_with_source(&dir, "mapped_refuted_c", ISSUE_1932_EXACT_SOURCE);
+    assert!(!c_ok, "the refuted compiled activation must trap: {c_out}");
+    assert!(
+        c_out.contains("extent `n`: x axis 1 = 2, y axis 1 = 3")
+            && c_out.contains(&domain_trap_line("load")),
+        "compiled C keeps the same shifted entry witnesses: {c_out}"
+    );
+    assert!(
+        !c_out.contains("numeric trap: domain in const_tensor"),
+        "a malformed cloned constant must not stand in for the entry guard: {c_out}"
+    );
+    assert!(
+        emitted.contains("chelis_tensor_expand_plan("),
+        "the authored constant is represented by a real batch broadcast: {emitted}"
+    );
+
+    for (stem, source, expected) in [
+        (
+            "mapped_agree_zero",
+            agreeing_zero.as_str(),
+            "main = tensor(shape=[2, 2], data=[0.0, 0.0, 0.0, 0.0])",
+        ),
+        (
+            "mapped_agree_nonzero",
+            agreeing_nonzero,
+            "main = tensor(shape=[2, 2], data=[2.0, 4.0, 6.0, 8.0])",
+        ),
+        (
+            "mapped_no_witness",
+            no_witness,
+            "main = tensor(shape=[2, 2], data=[2.0, 4.0, 6.0, 8.0])",
+        ),
+    ] {
+        both_lanes_execute(&dir, stem, source, expected);
+    }
+
+    let (eval_ok, eval_out) = eval_result(&dir, "direct_refuted_eval.ch", &direct_grad);
+    let (c_ok, c_out) = c_run_result(&dir, "direct_refuted_c", &direct_grad);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            !ok,
+            "{lane}: the direct rejected activation must trap: {out}"
+        );
+        assert!(
+            out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3")
+                && out.contains(&domain_trap_line("load")),
+            "{lane}: direct grad retains the unshifted entry witnesses: {out}"
+        );
+    }
+
+    let (eval_ok, eval_out) = eval_result(
+        &dir,
+        "mapped_reordered_callable_eval.ch",
+        reordered_callable,
+    );
+    let (c_ok, c_out) = c_run_result(&dir, "mapped_reordered_callable_c", reordered_callable);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            !ok,
+            "{lane}: the reordered mapped activation must trap: {out}"
+        );
+        assert!(
+            out.contains("extent `n`: x axis 1 = 2, y axis 1 = 3")
+                && out.contains(&domain_trap_line("load")),
+            "{lane}: callable reordering retains the shifted witnesses: {out}"
+        );
+    }
 }
 
 /// Both lanes retain the authored result claim under multi-target grad.

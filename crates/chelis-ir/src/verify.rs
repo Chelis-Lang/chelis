@@ -2524,6 +2524,19 @@ mod tests {
             .shape_deps
             .clear();
         assert!(verify_fixture(&fixture).unwrap_err().contains("cotangent"));
+
+        let mut fixture = mapped_fixture();
+        fixture
+            .spliced
+            .node_mut(fixture.cotangent)
+            .unwrap()
+            .output_type
+            .dims[0] = DimInfo::Named("lost_rendered_extent".into(), None);
+        assert!(
+            verify_fixture(&fixture)
+                .unwrap_err()
+                .contains("rendered dimension origin")
+        );
     }
 
     #[test]
