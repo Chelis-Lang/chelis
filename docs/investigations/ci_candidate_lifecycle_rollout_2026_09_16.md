@@ -15,10 +15,10 @@ lifecycle did not. In the fully post-change cohort #2105, #2106, and
 | --- | ---: |
 | CI candidates | 38 |
 | package-expansion dispatches | 10 |
-| all attributable Actions workflow runs | 629 |
-| observable workflow attempts | 631 |
-| accounted job slots | 1,543 |
-| started GitHub-hosted Linux jobs | 1,315 |
+| all attributable Actions workflow runs | 630 |
+| observable workflow attempts | 632 |
+| accounted job slots | 1,544 |
+| started GitHub-hosted Linux jobs | 1,316 |
 | skipped jobs | 219 |
 | cancelled attempts that never reached a runner | 7 |
 | non-VM synthetic check records | 2 |
@@ -26,9 +26,9 @@ lifecycle did not. In the fully post-change cohort #2105, #2106, and
 | sum of each PR's latest-candidate CI/Hull raw job-minutes | 645.267 |
 | lifecycle amplification | 4.97x |
 | package-expansion raw job-minutes | 282.033 |
-| all attributable started-job raw minutes | 3,630.267 |
-| per-job-rounded standard-Linux minutes | 4,462 |
-| estimated standard-Linux list price | $26.772 |
+| all attributable started-job raw minutes | 3,630.550 |
+| per-job-rounded standard-Linux minutes | 4,463 |
+| estimated standard-Linux list price | $26.778 |
 | explicit agent-wait minutes | 129.413 |
 
 Raw summed job-minutes remain finish time minus start time for every started
@@ -49,9 +49,14 @@ problem. Repeated candidates and repeated package expansions accumulated nearly
 five times the CI/Hull work represented by the cohort's latest candidates.
 
 The trace-backed ledger attributed all 38 implementation candidates. The full
-Actions inventory attributed all 629 workflow runs to a PR; 184 short
+Actions inventory attributed all 630 workflow runs to a PR; 184 short
 workflow-run or metadata records retained an `unknown` semantic cause rather
 than borrowing a nearby cause without enough evidence.
+
+The first independent inventory reported 629 runs and $26.772. A later exact
+receipt-log replay found one omitted started-and-cancelled candidate-receipt job
+for #2112. The corrected totals above include its 17 seconds of raw runner time,
+one rounded billable minute, and $0.006 list-price estimate.
 
 | Cause | Candidates | CI/Hull raw job-minutes | expansion raw job-minutes | explicit agent-wait minutes |
 | --- | ---: | ---: | ---: | ---: |
@@ -78,16 +83,16 @@ The all-Actions billing estimate by semantic cause is:
 | review repair | 123 | 340 | 29 | 0 | 1,264 | $7.584 |
 | ordinary content push | 20 | 54 | 5 | 0 | 129 | $0.774 |
 | non-conflicting rebase/base update | 0 | 0 | 0 | 0 | 0 | $0 |
-| trivial or hand-resolved conflict rebase | 37 | 106 | 16 | 1 | 405 | $2.430 |
+| trivial or hand-resolved conflict rebase | 38 | 107 | 16 | 1 | 406 | $2.436 |
 | base retarget/stack collapse | 19 | 48 | 26 | 0 | 145 | $0.870 |
 | CI-policy or CI repair | 162 | 419 | 31 | 0 | 1,637 | $9.822 |
 | pull-request metadata edit | 0 | 0 | 0 | 0 | 0 | $0 |
 | package-expansion rerun | 5 | 30 | 0 | 0 | 167 | $1.002 |
 | unknown | 184 | 121 | 86 | 6 | 121 | $0.726 |
 
-The prior CI/Hull/package-expansion-only estimate was $23.892. The 539 newly
+The prior CI/Hull/package-expansion-only estimate was $23.892. The 540 newly
 inventoried acknowledgement, changelog, candidate-receipt, retarget, and
-OpenSpec runs added 480 rounded minutes, or $2.88. They matter for complete
+OpenSpec runs added 481 rounded minutes, or $2.886. They matter for complete
 accounting, but they are not the dominant spend: CI and Hull still account for
 most of the billable minutes.
 
@@ -324,5 +329,5 @@ cumulative-lifecycle figures and retain the attribution ledger needed to
 explain their difference. They should also report explicit trace-backed
 agent-wait intervals separately from hosted execution and reviewer overhead.
 The all-Actions total should accompany those figures: this cohort's absolute
-$26.772 list-price estimate, or about $3.82 per PR, is not alarming by itself,
+$26.778 list-price estimate, or about $3.83 per PR, is not alarming by itself,
 but its distribution still identifies avoidable CI-policy and review churn.

@@ -242,17 +242,6 @@ def _attempt_windows(run: Mapping[str, Any]) -> dict[int, tuple[datetime, dateti
             windows[attempt] = (started, completed)
         else:
             windows[attempt] = (min(prior[0], started), max(prior[1], completed))
-    if windows or jobs:
-        return windows
-    if run.get("run_started_at") is not None and run.get("updated_at") is not None:
-        attempt = _positive_int(
-            run.get("run_attempt", 1), "workflow run_attempt"
-        )
-        started = _timestamp(run["run_started_at"], "workflow run_started_at")
-        completed = _timestamp(run["updated_at"], "workflow updated_at")
-        if completed < started:
-            raise ReportError("workflow run updated before it started")
-        windows[attempt] = (started, completed)
     return windows
 
 
@@ -2360,7 +2349,6 @@ def collect_github_data(
         row["run_id"]: row for row in ledger["run_attributions"]
     }
     pulls: list[dict[str, Any]] = []
-    pull_heads: dict[int, str] = {}
     cohort_head_keys: set[tuple[str, str]] = set()
     pull_windows: dict[
         tuple[str, str], list[tuple[int, datetime, datetime]]
@@ -2382,8 +2370,6 @@ def collect_github_data(
             f"pull request #{pr_number} head repository name",
         )
         head_ref = _text(head.get("ref"), f"pull request #{pr_number} head ref")
-        head_sha = _text(head.get("sha"), f"pull request #{pr_number} head SHA")
-        pull_heads[pr_number] = head_sha
         opened_at = _timestamp(
             raw_pull.get("created_at"), f"pull request #{pr_number} created_at"
         )
@@ -2397,7 +2383,7 @@ def collect_github_data(
                 "created_at": raw_pull.get("created_at"),
                 "updated_at": raw_pull.get("updated_at"),
                 "closed_at": raw_pull.get("closed_at"),
-                "head_sha": head_sha,
+                "head_sha": head.get("sha"),
                 "head_ref": head_ref,
                 "head_repository": head_repository_name,
                 "base_ref": base.get("ref"),
@@ -2496,12 +2482,6 @@ def collect_github_data(
             run_pr_numbers[run_id] = attribution["pr_number"]
             run_pr_bases[run_id] = "attribution ledger"
         head_sha = _pull_head(run)
-        if (
-            run.get("event") == "pull_request_target"
-            and run_pr_bases[run_id]
-            == "exact head repository/ref and non-overlapping PR lifetime"
-        ):
-            head_sha = pull_heads.get(run_pr_numbers[run_id])
         if (
             head_sha is None
             and run_pr_bases[run_id] != "attribution ledger"

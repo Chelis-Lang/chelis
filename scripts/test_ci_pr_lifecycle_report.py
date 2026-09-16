@@ -820,6 +820,7 @@ class LifecycleReportTests(unittest.TestCase):
         self.assertEqual(summary["non_vm_synthetic_check_count"], 1)
         self.assertEqual(summary["started_job_count"], 0)
         self.assertEqual(summary["all_measured_hosted_raw_job_minutes"], 0)
+        self.assertEqual(summary["summed_workflow_wall_minutes"], 0)
         self.assertEqual(summary["estimated_billable_linux_x64_minutes"], 0)
         self.assertEqual(summary["estimated_list_price_usd"], 0)
 
@@ -1115,7 +1116,7 @@ class LifecycleReportTests(unittest.TestCase):
             "path": ".github/workflows/pr-base-retarget.yml",
             "name": "PR Base Retarget Validation",
             "event": "pull_request_target",
-            "head_sha": "f" * 40,
+            "head_sha": HEAD_A,
             "created_at": "2026-09-16T13:00:00Z",
             "run_started_at": "2026-09-16T13:00:00Z",
             "updated_at": "2026-09-16T13:01:00Z",
@@ -1184,7 +1185,7 @@ class LifecycleReportTests(unittest.TestCase):
 
         attributed = payload["workflow_runs"][0]
         self.assertEqual(attributed["pr_number"], 7)
-        self.assertEqual(attributed["head_sha"], HEAD_B)
+        self.assertEqual(attributed["head_sha"], HEAD_A)
         self.assertEqual(
             attributed["pr_attribution"],
             "exact head repository/ref and non-overlapping PR lifetime",
