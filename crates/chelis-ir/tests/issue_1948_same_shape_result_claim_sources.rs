@@ -112,6 +112,136 @@ fn eval_named_claim(dag: &Dag, declared_extent: usize) -> Result<Vec<f64>, Strin
     Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
 }
 
+fn named_claim_identity_cast_dag() -> Dag {
+    let mut dag = Dag::new();
+    let declaration_input = dag.add_node(
+        RiscOp::Load {
+            name: "declared".into(),
+        },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let declaration = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "declared".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![declaration_input],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let claim = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::ResultClaim {
+                claim: "n".into(),
+                axis: RtAxis::Lit(0),
+            },
+            parameter: "declared".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        },
+        vec![declaration_input],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_shape_dep(claim, declaration);
+    let value = dag.add_node(
+        RiscOp::Load {
+            name: "value".into(),
+        },
+        vec![],
+        wildcard_f32(),
+        None,
+    );
+    let cast = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![value],
+        wildcard_f32(),
+        None,
+    );
+    dag.add_result_claim_dep(cast, claim);
+    dag.add_root(cast);
+    dag
+}
+
+fn eval_identity_claim(
+    dag: &Dag,
+    declared_extent: usize,
+    runtime_extent: usize,
+) -> Result<Vec<f64>, String> {
+    let values = eval_tensor_with(dag, |name| match name {
+        "declared" => Some(TensorValue::from_vec(
+            vec![declared_extent],
+            vec![0.0; declared_extent],
+        )),
+        "value" => Some(TensorValue::from_vec(
+            vec![runtime_extent],
+            (0..runtime_extent).map(|index| index as f64).collect(),
+        )),
+        _ => None,
+    })?;
+    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+}
+
+#[test]
+fn named_result_claim_traps_after_specialization_and_dce() {
+    let dag = named_claim_identity_cast_dag();
+    assert!(verify(&dag).is_empty());
+    assert_eq!(
+        eval_identity_claim(&dag, 2, 3).unwrap_err(),
+        "extent `n`: claimed = 2, cast axis 0 = 3\n\
+         numeric trap: domain in cast at int64"
+    );
+
+    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    assert!(verify(&specialized).is_empty());
+    let retained_cast = specialized
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::Cast { .. }))
+        .expect("specialization must not eliminate a named claimed producer");
+    assert_eq!(retained_cast.result_claim_deps.len(), 1);
+    assert_eq!(
+        eval_identity_claim(&specialized, 2, 3).unwrap_err(),
+        "extent `n`: claimed = 2, cast axis 0 = 3\n\
+         numeric trap: domain in cast at int64",
+        "specialization plus DCE must preserve the trap and cast attribution"
+    );
+}
+
+#[test]
+fn agreeing_named_result_claim_survives_specialization_and_dce() {
+    let dag = named_claim_identity_cast_dag();
+    let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
+    assert!(verify(&specialized).is_empty());
+    let retained_cast = specialized
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::Cast { .. }))
+        .expect("an agreeing named claim uses the same claimed-producer barrier");
+    assert_eq!(retained_cast.result_claim_deps.len(), 1);
+    assert_eq!(
+        eval_identity_claim(&specialized, 3, 3).unwrap(),
+        vec![0.0, 1.0, 2.0]
+    );
+}
+
 #[test]
 fn named_result_claim_traps_after_fusion_and_dce() {
     let (unclaimed, _) = named_claim_fusion_dag(false, false);

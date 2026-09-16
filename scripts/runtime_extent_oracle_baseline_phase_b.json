@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "89f08fcf0d30faf9ab057d452da8277e6842e4725e5e3a2927e939a84d16bc6a",
+  "corpus_sha256": "ffa53c9153d490ca1cd5bc4760181c467cf9708291ac4eecffa5736bd0f45b25",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -205,6 +205,18 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.specialization.named.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_specialization_and_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.named.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.named_result_claim_traps_after_specialization_and_dce"
     },
     {
       "id": "claim.same_shape.static_refutation",

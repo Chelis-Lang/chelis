@@ -357,6 +357,20 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         with self.assertRaisesRegex(ORACLE.OracleFailure, "test receipt drift"):
             ORACLE.validate_target_receipt(target, completed)
 
+    def test_claimed_producer_barrier_mutation_removes_only_the_named_form(
+        self,
+    ) -> None:
+        source = "before\n" + ORACLE._CLAIM_BARRIER_NAMED_AND_LITERAL + "after\n"
+        mutated = ORACLE.remove_named_claim_from_producer_barrier(source)
+        self.assertEqual(
+            mutated,
+            "before\n" + ORACLE._CLAIM_BARRIER_LITERAL_ONLY + "after\n",
+        )
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "mutation anchor is missing or ambiguous"
+        ):
+            ORACLE.remove_named_claim_from_producer_barrier("no barrier")
+
     def test_every_recorded_corpus_row_has_a_named_executable_receipt(self) -> None:
         for phase, targets in (
             ("a", ORACLE.phase_a_targets("python")),

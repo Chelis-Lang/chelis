@@ -53,12 +53,11 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
-        if let Some(source) = identity_source(node, dag, literal_result_claim_producers[node.id.0])
-        {
+        if let Some(source) = identity_source(node, dag, claimed_result_producers[node.id.0]) {
             let mapped = id_map[&source];
             id_map.insert(node.id, mapped);
             append_node_provenance(&mut out, mapped, node);
@@ -95,8 +94,8 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     out
 }
 
-fn identity_source(node: &DagNode, dag: &Dag, owns_literal_result_claim: bool) -> Option<NodeId> {
-    if owns_literal_result_claim {
+fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option<NodeId> {
+    if owns_result_claim {
         return None;
     }
     if node.inputs.len() != 1 {
@@ -946,6 +945,60 @@ mod tests {
             },
             None,
         )
+    }
+
+    #[test]
+    fn every_identity_noop_respects_the_shared_named_claim_barrier() {
+        for op in [
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Sym("n".into())],
+            },
+            RiscOp::Permute { axes: vec![0] },
+        ] {
+            let mut dag = Dag::new();
+            let tensor = TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            };
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            let claim = dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim: "n".into(),
+                        axis: RtAxis::Lit(0),
+                    },
+                    parameter: "x".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![input],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let producer = dag.add_node(op.clone(), vec![input], tensor, None);
+            dag.add_shape_dep(producer, claim);
+            dag.add_root(producer);
+
+            let specialized = eliminate_closed_list_noops(&dag);
+            let retained = specialized
+                .nodes()
+                .iter()
+                .find(|node| node.op == op)
+                .expect("a named claimed identity producer must not be eliminated");
+            assert_eq!(retained.shape_deps.len(), 1);
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub fn constant_fold(dag: &mut Dag) {
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
     let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
-    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     // Direct subtraction and value extrema fold through their exact typed
     // kernels below. The remaining legacy fold set computes on the f64 wide
@@ -46,7 +46,7 @@ pub fn constant_fold(dag: &mut Dag) {
     };
 
     for node in dag.nodes() {
-        if literal_result_claim_producers[node.id.0] {
+        if claimed_result_producers[node.id.0] {
             continue;
         }
         if node.inputs.len() == 2 {
@@ -240,6 +240,14 @@ fn dead_code_eliminate_impl(
             live[node.id.0] = true;
         }
     }
+    if implicit_observations {
+        for (id, claimed) in crate::axis_sources::claimed_result_producers(dag)
+            .into_iter()
+            .enumerate()
+        {
+            live[id] |= claimed;
+        }
+    }
 
     // Propagate liveness backward.
     for i in (0..n).rev() {
@@ -394,6 +402,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
     let mut seen: UnordMap<CseKey, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -428,12 +437,14 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             remapped_result_claims.clone(),
         );
 
-        if !matches!(
-            node.op,
-            RiscOp::ExtentWitness { .. }
-                | RiscOp::CheckedReshapeExtent { .. }
-                | RiscOp::CheckedUnitAxis { .. }
-        ) && !(matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2)
+        if !claimed_result_producers[node.id.0]
+            && !matches!(
+                node.op,
+                RiscOp::ExtentWitness { .. }
+                    | RiscOp::CheckedReshapeExtent { .. }
+                    | RiscOp::CheckedUnitAxis { .. }
+            )
+            && !(matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2)
             && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds
@@ -478,7 +489,9 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 new_dag.set_reusable_input(new_id, mapped_input);
             }
             id_map.insert(node.id.0, new_id);
-            seen.insert(cse_key, new_id);
+            if !claimed_result_producers[node.id.0] {
+                seen.insert(cse_key, new_id);
+            }
         }
     }
 
@@ -494,11 +507,122 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, RiscOp, TensorType};
+    use crate::dag::{Dag, DimInfo, ExtentWitnessSite, RiscOp, RtAxis, TensorType};
     use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    fn named_claim(dag: &mut Dag, input: NodeId) -> NodeId {
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::ResultClaim {
+                    claim: "n".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![input],
+            TensorType {
+                dims: Vec::new(),
+                precision: chelis_types::types::Prim::Int64,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn claimed_producers_are_neither_folded_merged_nor_dropped() {
+        let tensor = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: chelis_types::types::Prim::F32,
+        };
+
+        let mut folded = Dag::new();
+        let left = folded.add_node(
+            RiscOp::synth_const(tensor.precision, 1.0),
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let right = folded.add_node(
+            RiscOp::synth_const(tensor.precision, 2.0),
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let claim = named_claim(&mut folded, left);
+        let add = folded.add_node(RiscOp::Add, vec![left, right], tensor.clone(), None);
+        folded.add_result_claim_dep(add, claim);
+        constant_fold(&mut folded);
+        assert!(matches!(folded.get(add).unwrap().op, RiscOp::Add));
+
+        let mut duplicate = Dag::new();
+        let input = duplicate.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let claim = named_claim(&mut duplicate, input);
+        for _ in 0..2 {
+            let cast = duplicate.add_node(
+                RiscOp::Cast {
+                    new_precision: chelis_types::types::Prim::F32,
+                },
+                vec![input],
+                tensor.clone(),
+                None,
+            );
+            duplicate.add_result_claim_dep(cast, claim);
+            duplicate.add_root(cast);
+        }
+        let duplicate = common_subexpr_eliminate(&duplicate);
+        assert_eq!(
+            duplicate
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Cast { .. }))
+                .count(),
+            2,
+            "CSE cannot merge two potentially trapping claimed producers"
+        );
+
+        let mut dead = Dag::new();
+        let input = dead.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let claim = named_claim(&mut dead, input);
+        let cast = dead.add_node(
+            RiscOp::Cast {
+                new_precision: chelis_types::types::Prim::F32,
+            },
+            vec![input],
+            tensor,
+            None,
+        );
+        dead.add_result_claim_dep(cast, claim);
+        let root = dead.add_node(
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        dead.add_root(root);
+        let dead = dead_code_eliminate(&dead);
+        assert!(
+            dead.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Cast { .. })),
+            "full DCE must retain a potentially trapping claimed producer"
+        );
     }
 
     #[test]

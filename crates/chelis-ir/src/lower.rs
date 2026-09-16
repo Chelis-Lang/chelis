@@ -7752,15 +7752,41 @@ impl<'program> LowerCtx<'program> {
                         RiscOp::Const { value } => *value,
                         _ => unreachable!("literal requirements are freshly allocated constants"),
                     };
-                    self.dag.node_mut(required).expect("literal requirement").op =
-                        RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                            parameter: String::new(),
-                            axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
-                            requirements: vec![value],
-                            claims: Vec::new(),
-                        };
-                    if id.0 <= required.0 {
+                    let preserved_movement = authored_result_claim
+                        && self.preserve_single_member_movement_precondition(
+                            id,
+                            axis,
+                            label.clone(),
+                            required,
+                        );
+                    let result_requirement = if preserved_movement {
+                        self.dag.add_node(
+                            RiscOp::ExtentWitness {
+                                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                                parameter: String::new(),
+                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                                requirements: vec![value],
+                                claims: Vec::new(),
+                            },
+                            Vec::new(),
+                            TensorType {
+                                dims: Vec::new(),
+                                precision: Prim::Int64,
+                            },
+                            self.current_span_id.clone(),
+                        )
+                    } else {
+                        self.dag.node_mut(required).expect("literal requirement").op =
+                            RiscOp::ExtentWitness {
+                                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                                parameter: String::new(),
+                                axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                                requirements: vec![value],
+                                claims: Vec::new(),
+                            };
+                        required
+                    };
+                    if id.0 <= result_requirement.0 {
                         let ty = self
                             .dag
                             .get(id)
@@ -7776,7 +7802,7 @@ impl<'program> LowerCtx<'program> {
                         result = LoweredValue::Node(id);
                     }
                     if self.same_shape_result_owner_is_admitted(id, axis) {
-                        self.dag.add_result_claim_dep(id, required);
+                        self.dag.add_result_claim_dep(id, result_requirement);
                         // Ordinary grad lowering deliberately retains literal
                         // helper obligations even when their primal value has
                         // a zero or unused cotangent (#1771). Keep the
@@ -7788,7 +7814,7 @@ impl<'program> LowerCtx<'program> {
                             self.invocation_witnesses.push(id);
                         }
                     } else {
-                        self.dag.add_shape_dep(id, required);
+                        self.dag.add_shape_dep(id, result_requirement);
                         self.invocation_witnesses.push(id);
                     }
                 } else {
@@ -7850,6 +7876,36 @@ impl<'program> LowerCtx<'program> {
                     Ok(Some(_))
                 )
         })
+    }
+
+    /// Preserve an input movement operation's independent checked target
+    /// before installing the returned same-shape producer's own result claim.
+    ///
+    /// A unary shape-preserving result such as `dropout(reshape(...))` has two
+    /// ordered obligations: the reshape target is checked before `reshape`
+    /// runs, then the returned `dropout` owns the declared-result guard. The
+    /// old source-following representation installed the former while losing
+    /// the latter; producer ownership must retain both. Only a complete
+    /// one-member agreement relation is eligible here, so this never chooses
+    /// an arbitrary operand from a multi-operand same-shape operation.
+    fn preserve_single_member_movement_precondition(
+        &mut self,
+        producer: NodeId,
+        axis: usize,
+        label: String,
+        requirement: NodeId,
+    ) -> bool {
+        let Ok(Some(agreement)) =
+            crate::axis_sources::same_shape_result_agreement(&self.dag, producer)
+        else {
+            return false;
+        };
+        let [member] = agreement.members() else {
+            return false;
+        };
+        let witnesses_before = self.invocation_witnesses.len();
+        self.preserve_computed_result_axis(*member, axis, label, requirement, false);
+        self.invocation_witnesses.len() != witnesses_before
     }
 
     /// A literal result restates the already checked static surface when every

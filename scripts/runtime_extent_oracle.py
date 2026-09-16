@@ -860,6 +860,18 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
         ),
         _row(
+            "claim.same_shape.specialization.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_specialization_and_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_specialization_and_dce",
+        ),
+        _row(
             "claim.same_shape.static_refutation",
             TERMINAL_CONTROL,
             TERMINAL_CONTROL,
@@ -2457,6 +2469,67 @@ def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestT
         raise OracleFailure(f"corpus rows have no executable receipt: {missing}")
 
 
+_CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/axis_sources.rs"
+_CLAIM_BARRIER_NAMED_AND_LITERAL = """\
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+"""
+_CLAIM_BARRIER_LITERAL_ONLY = """\
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+"""
+
+
+def remove_named_claim_from_producer_barrier(source: str) -> str:
+    """Controlled mutation: regress the central barrier to literal-only."""
+
+    if source.count(_CLAIM_BARRIER_NAMED_AND_LITERAL) != 1:
+        raise OracleFailure(
+            "claimed-producer barrier mutation anchor is missing or ambiguous"
+        )
+    return source.replace(
+        _CLAIM_BARRIER_NAMED_AND_LITERAL,
+        _CLAIM_BARRIER_LITERAL_ONLY,
+        1,
+    )
+
+
+def validate_claimed_producer_barrier_mutation(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B detects a named-claim omission in the central barrier."""
+
+    original = _CLAIM_BARRIER_SOURCE.read_text()
+    mutated = remove_named_claim_from_producer_barrier(original)
+    command = (
+        "cargo",
+        "test",
+        "-p",
+        "chelis-ir",
+        "--test",
+        "issue_1948_same_shape_result_claim_sources",
+        "named_result_claim_traps_after_specialization_and_dce",
+        "--",
+        "--exact",
+        "--nocapture",
+    )
+    try:
+        _CLAIM_BARRIER_SOURCE.write_text(mutated)
+        completed = _run_text(runner, command)
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            raise OracleFailure(
+                "claimed-producer barrier mutation escaped the specialization receipt"
+            )
+        if "specialization must not eliminate a named claimed producer" not in output:
+            raise OracleFailure(
+                "claimed-producer barrier mutation failed for an unrelated reason"
+            )
+    finally:
+        _CLAIM_BARRIER_SOURCE.write_text(original)
+    if _CLAIM_BARRIER_SOURCE.read_text() != original:
+        raise OracleFailure("claimed-producer barrier mutation did not restore its source")
+
+
 def _run_text(
     runner: Callable[..., subprocess.CompletedProcess[str]], argv: Sequence[str]
 ) -> subprocess.CompletedProcess[str]:
@@ -2584,6 +2657,8 @@ def validate(
     for target in selected_targets:
         completed = _run_text(runner, target.argv)
         validate_target_receipt(target, completed)
+    if registry is None and targets is None and phase in ("b", "final"):
+        validate_claimed_producer_barrier_mutation(runner)
 
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)

@@ -151,10 +151,8 @@ struct Chain {
 fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     let mut chains = Vec::new();
     let mut in_chain: Vec<bool> = vec![false; dag.len()];
-    let literal_result_claim_producers = crate::axis_sources::literal_result_claim_producers(dag);
-    let is_result_claim_barrier = |node: &DagNode| {
-        literal_result_claim_producers[node.id.0] || !node.result_claim_deps.is_empty()
-    };
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let is_result_claim_barrier = |node: &DagNode| claimed_result_producers[node.id.0];
 
     // Walk in topological order.
     for node in dag.nodes() {
@@ -219,6 +217,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
 
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
+    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
 
     for node in dag.nodes() {
         let old_id = node.id.0;
@@ -234,10 +233,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             // This is the chain output node — emit a FusedElem.
             let chain = &chains[ci];
             assert!(
-                chain.nodes.iter().all(|id| {
-                    dag.get(*id)
-                        .is_some_and(|node| node.result_claim_deps.is_empty())
-                }),
+                chain.nodes.iter().all(|id| !claimed_result_producers[id.0]),
                 "fusion chain contains a producer-owned result claim"
             );
             let (fused_op, external_inputs) = build_fused_elem(dag, chain, &id_map);
