@@ -827,6 +827,36 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
         ),
+        # Red-team round 1 on PR #2111 found the cross-axis half of #1907:
+        # Eval compared axis 0's result claim before validating axis 1's
+        # runtime step, while C validated the complete vector first. The
+        # negative receipt crosses zero and negative axis-1 values with an
+        # earlier axis-0 mismatch; the positive receipt keeps runtime unit
+        # and non-unit multi-axis execution as non-vacuity controls.
+        _row(
+            "stride.multi_axis_nonpositive.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_nonpositive.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_positive.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_positive.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
+        ),
         # chelis#1931. A positive non-unit stride under a disagreeing declared
         # result returned the undeclared extent on Eval. C rejected only at
         # the movement target backstop, without [04-NUM-9]'s claim context.

@@ -2500,6 +2500,25 @@ where
             verify_bound_movement_node(&bound_dag, node)?;
         }
 
+        // `spec/05-risc-primitives.md` section 2.4.1 makes every stride step
+        // one operation-level precondition. Resolve the COMPLETE vector once
+        // before any per-axis `StrideSpan` claim can run: otherwise an early
+        // axis's claim mismatch can mask a zero or negative later step. The C
+        // movement plan validates this same vector before emitting any local
+        // extent site. Reuse the resolved vector for both the sites and the
+        // operation so Eval has one signed-validation boundary as well.
+        let resolved_stride_steps = if let RiscOp::Stride { strides } = &node.op {
+            let input = values.get(&node.inputs[0]).ok_or_else(|| {
+                format!(
+                    "stride at node {}: missing value for tensor operand",
+                    node.id.0
+                )
+            })?;
+            Some(resolve_eval_strides(strides, node, &values, &input.shape)?)
+        } else {
+            None
+        };
+
         // `spec/04-type-system.md` section 4.7: a guard comparing a locally
         // computed value "takes the source position of the operation that
         // introduces the guarded extent", so it runs BEFORE that operation,
@@ -2533,7 +2552,12 @@ where
                         resolve_eval_bound(carrier, node, &values, 0)?
                     }
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
-                        match computed_axis_extent_value(computed, node, &values)? {
+                        match computed_axis_extent_value(
+                            computed,
+                            node,
+                            &values,
+                            resolved_stride_steps.as_deref(),
+                        )? {
                             Some(extent) => extent,
                             // A span that selects nothing, or that runs past
                             // the operand's own extent, computes no extent to
@@ -3086,10 +3110,15 @@ where
                 }
                 shrink(input, &resolved)?
             }
-            RiscOp::Stride { strides } => {
+            RiscOp::Stride { .. } => {
                 let input = &values[&node.inputs[0]];
-                let resolved = resolve_eval_strides(strides, node, &values, &input.shape)?;
-                stride(input, &resolved)
+                let resolved = resolved_stride_steps.as_deref().ok_or_else(|| {
+                    format!(
+                        "stride at node {}: prevalidated step vector is missing",
+                        node.id.0
+                    )
+                })?;
+                stride(input, resolved)
             }
             RiscOp::FusedElem { ops } => {
                 // Collect external input TensorValues from the node's DAG inputs.
@@ -3589,6 +3618,7 @@ fn computed_axis_extent_value(
     computed: &crate::axis_sources::ComputedAxisExtent,
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
+    resolved_stride_steps: Option<&[std::num::NonZeroUsize]>,
 ) -> Result<Option<usize>, String> {
     match computed {
         crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
@@ -3654,9 +3684,24 @@ fn computed_axis_extent_value(
         }
         crate::axis_sources::ComputedAxisExtent::StrideSpan { step, operand_axis } => {
             // Preserve the operand-axis identity and the signed step carrier
-            // through the shared observation. The step-domain check happens
-            // in `resolve_eval_stride_step`, before this ceil division and
-            // before the stride operation allocates or reads any element.
+            // through the shared observation. The complete stride vector was
+            // resolved at the node boundary before ANY local claim, so a
+            // later invalid axis cannot be masked by this axis's mismatch.
+            let Some(carrier) = (match &node.op {
+                RiscOp::Stride { strides } => strides.get(*operand_axis),
+                _ => None,
+            }) else {
+                return Err(format!(
+                    "stride extent at node {}: carrier for axis {} is missing",
+                    node.id.0, operand_axis
+                ));
+            };
+            if carrier != step {
+                return Err(format!(
+                    "stride extent at node {}: carrier for axis {} disagrees with its site",
+                    node.id.0, operand_axis
+                ));
+            }
             let Some(extent) = node
                 .inputs
                 .first()
@@ -3665,7 +3710,14 @@ fn computed_axis_extent_value(
             else {
                 return Ok(None);
             };
-            let step = resolve_eval_stride_step(step, node, values, extent)?;
+            let step = resolved_stride_steps
+                .and_then(|steps| steps.get(*operand_axis))
+                .ok_or_else(|| {
+                    format!(
+                        "stride extent at node {}: prevalidated step for axis {} is missing",
+                        node.id.0, operand_axis
+                    )
+                })?;
             Ok(Some(extent.div_ceil(step.get())))
         }
     }

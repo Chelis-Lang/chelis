@@ -4213,6 +4213,110 @@ fn issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes
     }
 }
 
+/// chelis#1907 cross-axis positive controls: resolving the complete stride
+/// vector before any claim comparison preserves both runtime unit and
+/// non-unit steps, including their exact sampled values, on both host lanes.
+#[test]
+fn issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rows = [
+        (
+            "runtime_unit",
+            "sub(shape(x, 1i32), 4i64)",
+            "tensor[2, 5, f32]",
+            "out = tensor(shape=[2, 5], data=[1.0, 2.0, 3.0, 4.0, 5.0, 11.0, 12.0, 13.0, 14.0, 15.0])",
+        ),
+        (
+            "runtime_non_unit",
+            "sub(shape(x, 1i32), 3i64)",
+            "tensor[2, 3, f32]",
+            "out = tensor(shape=[2, 3], data=[1.0, 3.0, 5.0, 11.0, 13.0, 15.0])",
+        ),
+    ];
+    for (name, axis_one_step, result, expected) in rows {
+        let source = format!(
+            "def f(x: tensor[rows, cols, f32]) -> {result} = \
+             stride(x, 2i64, {axis_one_step})\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32], \
+                                [6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32], \
+                                [11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32], \
+                                [16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32]]))\n"
+        );
+        let (eval_ok, eval_out) =
+            eval_result(&dir, &format!("stride_multi_positive_{name}.ch"), &source);
+        assert!(eval_ok, "eval/{name}: positive steps execute: {eval_out}");
+        assert!(eval_out.contains(expected), "eval/{name}: {eval_out}");
+
+        let (c_ok, c_out) = c_run_result(&dir, &format!("stride_multi_positive_{name}_c"), &source);
+        assert!(c_ok, "c/{name}: positive steps execute: {c_out}");
+        assert!(c_out.contains(expected), "c/{name}: {c_out}");
+    }
+}
+
+/// chelis#1907 cross-axis ordering: spec/05 section 2.4.1 makes every
+/// non-positive step an operation precondition, so the complete step vector
+/// must be resolved before [04-NUM-9] compares any `StrideSpan` result claim.
+///
+/// Axis 0 has a valid positive step whose realized extent disagrees with the
+/// declaration. Axis 1 then carries the reporter's runtime zero/negative
+/// probes. The invalid axis-1 step must win on both lanes. A fully positive
+/// vector is the non-vacuity control and reaches the axis-0 claim instead.
+#[test]
+fn issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, axis_one_step, expected_claim) in [
+        (
+            "positive_claim_control",
+            "sub(shape(x, 1i32), 3i64)",
+            Some("extent `99`: claimed = 99, stride axis 0 = 2"),
+        ),
+        ("zero", "sub(shape(x, 1i32), 5i64)", None),
+        ("negative", "sub(shape(x, 1i32), 6i64)", None),
+    ] {
+        let source = format!(
+            "def f(x: tensor[rows, cols, f32]) -> tensor[99, 99, f32] = \
+             stride(x, 2i64, {axis_one_step})\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32], \
+                                [6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32], \
+                                [11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32], \
+                                [16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32]]))\n"
+        );
+        for (lane, ok, out) in {
+            let eval = eval_result(&dir, &format!("stride_multi_{name}.ch"), &source);
+            let c = c_run_result(&dir, &format!("stride_multi_{name}_c"), &source);
+            [("eval", eval.0, eval.1), ("c", c.0, c.1)]
+        } {
+            assert!(!ok, "{lane}/{name}: the row must trap: {out}");
+            match expected_claim {
+                Some(context) => assert_stride_failure(&out, context),
+                None => {
+                    assert!(
+                        out.contains("Domain: stride step must be positive"),
+                        "{lane}/{name}: operation-level stride context is present: {out}"
+                    );
+                    assert!(
+                        out.contains(&domain_trap_line("stride")),
+                        "{lane}/{name}: [04-NUM-9]'s exact line is present: {out}"
+                    );
+                    assert!(
+                        !out.contains("extent `99`")
+                            && !out.contains("Domain: movement target shape mismatch"),
+                        "{lane}/{name}: the invalid step wins over every claim: {out}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Literal non-positive steps are known before execution, so spec/04 §4.7's
 /// literal rule rejects them at check time while the runtime rows above prove
 /// the operation-level execution failure for values known only at run time.

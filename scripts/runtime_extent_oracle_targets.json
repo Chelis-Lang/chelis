@@ -476,6 +476,8 @@
         "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_c",
         "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_eval",
         "issue_1907_literal_non_positive_stride_steps_are_rejected_statically",
+        "issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        "issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
         "issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
         "issue_1931_positive_stride_controls_execute_exactly_on_both_lanes",
         "issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",

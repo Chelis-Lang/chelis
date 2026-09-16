@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "653d890f92cec55ce01db1af27b60a775d7584adfef8939b70d324a66a65bbba",
+  "corpus_sha256": "d473db58dd4edc45f6eab6560e786dd8e3bdeb10ab5a1d00c38618a0785f0231",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1141,6 +1141,30 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
     },
     {
       "id": "stride.nonunit_claim.c",
