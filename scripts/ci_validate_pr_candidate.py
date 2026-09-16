@@ -18,6 +18,7 @@ else:
 
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+CANDIDATE_DURATION_BASELINE = Path(".config/ci-change-owned-durations.json")
 
 
 def _nested_sha(payload: Mapping[str, Any], key: str) -> str:
@@ -93,7 +94,13 @@ def validate_candidate(
             )
 
     if plan is not None:
-        ci_change_owned.verify_plan_digest(plan)
+        duration_baseline = ci_change_owned.load_duration_baseline(
+            CANDIDATE_DURATION_BASELINE
+        )
+        ci_change_owned.verify_plan_digest(
+            plan,
+            duration_baseline=duration_baseline,
+        )
         if plan["mode"] != "pull_request":
             raise ValueError("final candidate validation requires a pull_request plan")
         if plan["event_pr_head"] != head:

@@ -29,6 +29,7 @@ class CiContractPathTests(unittest.TestCase):
         for path in (
             ".github/workflows/ci.yml",
             ".github/actions/free-disk-space/action.yml",
+            ".config/ci-change-owned-durations.json",
             ".config/ci-test-targets.toml",
             "AGENTS.md",
             "scripts/ci_candidate_receipt.py",

@@ -519,7 +519,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn(key, step)
         artifact = next(s for s in steps if s.get("with", {}).get("name") == "phase4b-contract-changes")
         self.assertTrue(artifact["uses"].startswith("actions/upload-artifact@"))
-        self.assertEqual(artifact["if"], "${{ always() }}")
+        self.assertEqual(
+            artifact["if"],
+            "${{ always() && hashFiles('target/phase4b-contract-changes.json') != '' }}",
+        )
         self.assertEqual(artifact["with"]["path"], "target/phase4b-contract-changes.json")
         self.assertEqual(artifact["with"]["if-no-files-found"], "error")
 
@@ -534,6 +537,15 @@ class WorkflowTests(unittest.TestCase):
                                       "PR_HEAD": "${{ github.event.pull_request.head.sha }}"})
         self.assertEqual(step["run"], '.venv/bin/python scripts/phase4b_change_report.py --pr-head "$PR_HEAD" --require-acknowledgement --acknowledgements-env PR_BODY --output target/phase4b-contract-changes.json')
         self.assertNotIn("continue-on-error", step)
+        artifact = next(
+            s
+            for s in workflow["jobs"]["acknowledgements"]["steps"]
+            if s.get("with", {}).get("name") == "phase4b-contract-changes"
+        )
+        self.assertEqual(
+            artifact["if"],
+            "always() && hashFiles('target/phase4b-contract-changes.json') != ''",
+        )
 
     def test_report_has_required_execution_and_publication(self):
         self.check(self.workflow())

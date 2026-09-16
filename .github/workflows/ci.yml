@@ -1447,7 +1447,7 @@ jobs:
         run: .venv/bin/python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
 
       - name: Publish Phase 3 required-test changes
-        if: ${{ always() }}
+        if: ${{ always() && hashFiles('target/phase3-test-changes.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: phase3-test-changes
@@ -1461,7 +1461,7 @@ jobs:
         run: .venv/bin/python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
 
       - name: Publish Phase 4B contract changes
-        if: ${{ always() }}
+        if: ${{ always() && hashFiles('target/phase4b-contract-changes.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: phase4b-contract-changes

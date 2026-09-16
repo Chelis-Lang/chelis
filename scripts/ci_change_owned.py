@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -43,9 +44,14 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 2
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 RECEIPT_VERSION = 1
 STANDING_COVERAGE_VERSION = 1
+DURATION_BASELINE_VERSION = 1
+DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
+DEFAULT_DURATION_MILLISECONDS = 30_000
+CHANGE_OWNED_SHARD_ALGORITHM = "duration-lpt-v1"
+PACKAGE_EXPANSION_SHARD_ALGORITHM = "sha256-modulo-v1"
 SHARDS = tuple(range(4))
 LANE_KEYS = {
     "change-owned": "change_owned",
@@ -124,6 +130,13 @@ class TestIdentity:
         ):
             raise ValueError(f"invalid exact test identity: {value!r}")
         return cls(*parts)
+
+
+@dataclass(frozen=True)
+class DurationBaseline:
+    default_milliseconds: int
+    targets: Mapping[Identity, int]
+    digest: str
 
 
 @dataclass(frozen=True)
@@ -883,9 +896,16 @@ def make_plan(
     event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
     targeted_packages: Sequence[str] = (),
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
     if mode not in {"pull_request", "push", "targeted_rebase"}:
         raise ValueError(f"unsupported planning mode: {mode}")
+    if duration_baseline is None:
+        duration_baseline = DurationBaseline(
+            default_milliseconds=DEFAULT_DURATION_MILLISECONDS,
+            targets={},
+            digest="0" * 64,
+        )
     validate_config(
         config,
         candidate_metadata,
@@ -1110,6 +1130,10 @@ def make_plan(
         change_owned_execution = change_owned - standing_coverage_reuse
 
     target_exclusions, test_exclusions = _exclusion_rows(config)
+    change_owned_shards, change_owned_planning = change_owned_shard_plan(
+        change_owned_execution,
+        duration_baseline,
+    )
     plan: dict[str, Any] = {
         "version": PLAN_VERSION,
         "mode": mode,
@@ -1140,8 +1164,14 @@ def make_plan(
         "manual_only_targets": _owned_target_rows(config.manual_only_targets),
         "target_exclusions": target_exclusions,
         "test_exclusions": test_exclusions,
+        "shard_planning": {
+            "change_owned": change_owned_planning,
+            "package_expansion": {
+                "algorithm": PACKAGE_EXPANSION_SHARD_ALGORITHM,
+            },
+        },
         "shards": {
-            "change_owned": shard_map(change_owned_execution),
+            "change_owned": change_owned_shards,
             "package_expansion": shard_map(expansion),
         },
     }
@@ -1162,6 +1192,114 @@ def sha256_bytes(data: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def _strict_json_object(path: Path) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key in {path}: {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(
+            path.read_text(),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value in {path}: {value}")
+            ),
+        )
+    except json.JSONDecodeError as error:
+        raise ValueError(f"malformed JSON {path}: {error}") from error
+    if not isinstance(data, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return data
+
+
+def _positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def load_duration_baseline(path: Path = DURATION_BASELINE_PATH) -> DurationBaseline:
+    data = _strict_json_object(path)
+    expected_keys = {
+        "version",
+        "default_milliseconds",
+        "sources",
+        "targets",
+    }
+    if set(data) != expected_keys:
+        raise ValueError(
+            "duration baseline schema keys mismatch: "
+            f"missing={sorted(expected_keys - set(data))}, "
+            f"extra={sorted(set(data) - expected_keys)}"
+        )
+    if (
+        type(data.get("version")) is not int
+        or data["version"] != DURATION_BASELINE_VERSION
+    ):
+        raise ValueError(
+            f"duration baseline version must be {DURATION_BASELINE_VERSION}"
+        )
+    default_milliseconds = _positive_int(
+        data.get("default_milliseconds"),
+        "duration baseline default_milliseconds",
+    )
+    if default_milliseconds != DEFAULT_DURATION_MILLISECONDS:
+        raise ValueError(
+            "duration baseline default_milliseconds must be "
+            f"{DEFAULT_DURATION_MILLISECONDS}"
+        )
+    sources = data.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("duration baseline requires at least one source")
+    source_keys: list[tuple[str, str]] = []
+    for row in sources:
+        if not isinstance(row, dict) or set(row) != {
+            "candidate_sha",
+            "plan_digest",
+        }:
+            raise ValueError("duration baseline source has the wrong shape")
+        candidate_sha = row["candidate_sha"]
+        plan_digest = row["plan_digest"]
+        if not isinstance(candidate_sha, str) or not SHA.fullmatch(candidate_sha):
+            raise ValueError("duration baseline source candidate_sha is malformed")
+        if not isinstance(plan_digest, str) or not DIGEST.fullmatch(plan_digest):
+            raise ValueError("duration baseline source plan_digest is malformed")
+        source_keys.append((candidate_sha, plan_digest))
+    if source_keys != sorted(set(source_keys)):
+        raise ValueError("duration baseline sources must be unique and sorted")
+
+    raw_targets = data.get("targets")
+    if not isinstance(raw_targets, dict) or not raw_targets:
+        raise ValueError("duration baseline requires at least one target")
+    targets: dict[Identity, int] = {}
+    for canonical, row in raw_targets.items():
+        if not isinstance(canonical, str):
+            raise ValueError("duration baseline target identity must be a string")
+        identity = Identity.parse(canonical)
+        if not isinstance(row, dict) or set(row) != {"milliseconds", "samples"}:
+            raise ValueError(
+                f"duration baseline target has the wrong shape: {canonical}"
+            )
+        milliseconds = _positive_int(
+            row["milliseconds"],
+            f"duration baseline {canonical} milliseconds",
+        )
+        _positive_int(
+            row["samples"],
+            f"duration baseline {canonical} samples",
+        )
+        targets[identity] = milliseconds
+    return DurationBaseline(
+        default_milliseconds=default_milliseconds,
+        targets=targets,
+        digest=sha256_file(path),
+    )
 
 
 def _utc_timestamp() -> str:
@@ -1215,6 +1353,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "manual_only_targets",
         "target_exclusions",
         "test_exclusions",
+        "shard_planning",
         "shards",
         "plan_digest",
     }
@@ -1314,6 +1453,69 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     }
     if manual_only & test_exclusion_targets:
         raise ValueError("plan manual-only targets cannot contain test exclusions")
+
+    expected_change_owned = change_owned - standing_reuse
+    shard_planning = plan.get("shard_planning")
+    if not isinstance(shard_planning, dict) or set(shard_planning) != {
+        "change_owned",
+        "package_expansion",
+    }:
+        raise ValueError("plan shard_planning must name both lanes")
+    change_owned_planning = shard_planning["change_owned"]
+    expected_change_owned_planning_keys = {
+        "algorithm",
+        "baseline_digest",
+        "default_milliseconds",
+        "weights_milliseconds",
+        "estimated_milliseconds",
+    }
+    if (
+        not isinstance(change_owned_planning, dict)
+        or set(change_owned_planning) != expected_change_owned_planning_keys
+    ):
+        raise ValueError("plan change-owned shard planning has the wrong shape")
+    if change_owned_planning["algorithm"] != CHANGE_OWNED_SHARD_ALGORITHM:
+        raise ValueError("plan change-owned shard algorithm is unsupported")
+    baseline_digest = change_owned_planning["baseline_digest"]
+    if not isinstance(baseline_digest, str) or not DIGEST.fullmatch(
+        baseline_digest
+    ):
+        raise ValueError("plan duration baseline digest is malformed")
+    _positive_int(
+        change_owned_planning["default_milliseconds"],
+        "plan duration default_milliseconds",
+    )
+    raw_weights = change_owned_planning["weights_milliseconds"]
+    if not isinstance(raw_weights, dict):
+        raise ValueError("plan duration weights must be an identity mapping")
+    expected_weight_keys = set(expected_change_owned)
+    if set(raw_weights) != expected_weight_keys:
+        raise ValueError(
+            "plan duration weights must exactly cover change-owned execution"
+        )
+    weights: dict[Identity, int] = {}
+    for canonical, milliseconds in raw_weights.items():
+        identity = Identity.parse(canonical)
+        weights[identity] = _positive_int(
+            milliseconds,
+            f"plan duration weight for {canonical}",
+        )
+    expected_duration_shards, expected_estimates = duration_shard_map(weights)
+    estimates = change_owned_planning["estimated_milliseconds"]
+    if (
+        not isinstance(estimates, dict)
+        or set(estimates) != {str(shard) for shard in SHARDS}
+        or any(type(value) is not int or value < 0 for value in estimates.values())
+    ):
+        raise ValueError("plan duration estimates must contain four nonnegative totals")
+    if estimates != expected_estimates:
+        raise ValueError("plan duration estimates do not match selected weights")
+    expansion_planning = shard_planning["package_expansion"]
+    if expansion_planning != {
+        "algorithm": PACKAGE_EXPANSION_SHARD_ALGORITHM,
+    }:
+        raise ValueError("plan package-expansion shard algorithm is unsupported")
+
     shards = plan.get("shards")
     if not isinstance(shards, dict) or set(shards) != set(LANE_KEYS.values()):
         raise ValueError("plan shards must name both lanes")
@@ -1330,31 +1532,74 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
                 raise ValueError(f"plan {lane_key} shard {shard} must be a list")
             for canonical in rows:
                 identity = Identity.parse(canonical)
-                if shard_for(identity) != shard:
+                if (
+                    lane_key == "package_expansion"
+                    and shard_for(identity) != shard
+                ):
                     raise ValueError(
                         f"plan {lane_key} identity is in the wrong shard: {canonical}"
                     )
             flattened.extend(rows)
-        expected_lane = (
-            change_owned - standing_reuse
-            if lane_key == "change_owned"
-            else expansion
-        )
+        expected_lane = expected_change_owned if lane_key == "change_owned" else expansion
         if sorted(flattened) != sorted(expected_lane):
             raise ValueError(f"plan {lane_key} shards do not exactly cover the lane")
+        if (
+            lane_key == "change_owned"
+            and lane_shards != expected_duration_shards
+        ):
+            raise ValueError(
+                "plan change-owned shard assignment does not match duration planning"
+            )
     if not isinstance(plan.get("plan_digest"), str) or not DIGEST.fullmatch(
         plan["plan_digest"]
     ):
         raise ValueError("plan_digest must be a SHA-256 digest")
 
 
-def verify_plan_digest(plan: Mapping[str, Any]) -> None:
+def verify_plan_duration_baseline(
+    plan: Mapping[str, Any],
+    duration_baseline: DurationBaseline,
+) -> None:
+    planning = plan["shard_planning"]["change_owned"]
+    if planning["baseline_digest"] != duration_baseline.digest:
+        raise ValueError(
+            "plan duration baseline digest does not match the checked-out baseline"
+        )
+    if (
+        planning["default_milliseconds"]
+        != duration_baseline.default_milliseconds
+    ):
+        raise ValueError(
+            "plan duration fallback does not match the checked-out baseline"
+        )
+    expected_weights = {
+        canonical: duration_baseline.targets.get(
+            Identity.parse(canonical),
+            duration_baseline.default_milliseconds,
+        )
+        for canonical in sorted(
+            set(plan["change_owned"]) - set(plan["standing_coverage_reuse"])
+        )
+    }
+    if planning["weights_milliseconds"] != expected_weights:
+        raise ValueError(
+            "plan duration weights do not match the checked-out baseline"
+        )
+
+
+def verify_plan_digest(
+    plan: Mapping[str, Any],
+    *,
+    duration_baseline: DurationBaseline | None = None,
+) -> None:
     _validate_plan_shape(plan)
     expected = _digest_without(plan, "plan_digest")
     if plan.get("plan_digest") != expected:
         raise ValueError(
             f"plan digest mismatch: expected {expected}, got {plan.get('plan_digest')}"
         )
+    if duration_baseline is not None:
+        verify_plan_duration_baseline(plan, duration_baseline)
 
 
 def attach_receipt_digest(receipt: dict[str, Any]) -> None:
@@ -1429,8 +1674,13 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         if not isinstance(receipt.get(key), str) or not receipt[key]:
             raise ValueError(f"receipt {key} must be a timestamp")
     elapsed = receipt.get("elapsed_seconds")
-    if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or elapsed < 0:
-        raise ValueError("receipt elapsed_seconds must be nonnegative")
+    if (
+        isinstance(elapsed, bool)
+        or not isinstance(elapsed, (int, float))
+        or not math.isfinite(elapsed)
+        or elapsed < 0
+    ):
+        raise ValueError("receipt elapsed_seconds must be finite and nonnegative")
     expected_budget = SOFT_BUDGET_SECONDS if lane == "package-expansion" else None
     if receipt.get("soft_budget_seconds") != expected_budget:
         raise ValueError("receipt soft_budget_seconds does not match its lane")
@@ -1640,6 +1890,59 @@ def shard_map(identities: Iterable[Identity]) -> dict[str, list[str]]:
     return result
 
 
+def duration_shard_map(
+    weights: Mapping[Identity, int],
+) -> tuple[dict[str, list[str]], dict[str, int]]:
+    for identity, milliseconds in weights.items():
+        _positive_int(
+            milliseconds,
+            f"duration weight for {identity.canonical}",
+        )
+    result = {str(shard): [] for shard in SHARDS}
+    estimates = {str(shard): 0 for shard in SHARDS}
+    counts = {str(shard): 0 for shard in SHARDS}
+    ordered = sorted(
+        weights,
+        key=lambda identity: (-weights[identity], identity.canonical),
+    )
+    for identity in ordered:
+        shard_key = min(
+            estimates,
+            key=lambda key: (estimates[key], counts[key], int(key)),
+        )
+        result[shard_key].append(identity.canonical)
+        estimates[shard_key] += weights[identity]
+        counts[shard_key] += 1
+    for rows in result.values():
+        rows.sort()
+    return result, estimates
+
+
+def change_owned_shard_plan(
+    identities: Iterable[Identity],
+    baseline: DurationBaseline,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    selected = sorted(set(identities))
+    weights = {
+        identity: baseline.targets.get(
+            identity,
+            baseline.default_milliseconds,
+        )
+        for identity in selected
+    }
+    shards, estimates = duration_shard_map(weights)
+    planning = {
+        "algorithm": CHANGE_OWNED_SHARD_ALGORITHM,
+        "baseline_digest": baseline.digest,
+        "default_milliseconds": baseline.default_milliseconds,
+        "weights_milliseconds": {
+            identity.canonical: weights[identity] for identity in selected
+        },
+        "estimated_milliseconds": estimates,
+    }
+    return shards, planning
+
+
 def git_output(repo: Path, args: Sequence[str]) -> bytes:
     return subprocess.run(
         ["git", *args],
@@ -1750,6 +2053,7 @@ def generate_plan(
     before: str,
     after: str,
     config_path: Path,
+    duration_baseline_path: Path = DURATION_BASELINE_PATH,
     targeted_packages: Sequence[str] = (),
 ) -> dict[str, Any]:
     head = _commit(repo, "HEAD")
@@ -1789,6 +2093,7 @@ def generate_plan(
         )
 
     config = read_config(config_path)
+    duration_baseline = load_duration_baseline(duration_baseline_path)
     base_metadata = metadata_at(repo, base)
     candidate_metadata = metadata_at(repo, candidate)
     records = diff_at(repo, base, candidate)
@@ -1807,6 +2112,7 @@ def generate_plan(
         base_tracked_paths=base_tracked,
         source_reader=lambda path: source_at(repo, candidate, path),
         targeted_packages=targeted_packages,
+        duration_baseline=duration_baseline,
     )
 
 
@@ -1954,6 +2260,7 @@ def _listing_tests_for_group(
     exclusions: Mapping[TestIdentity, Any],
     *,
     manual_only: bool = False,
+    allow_empty: bool = False,
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -1972,6 +2279,7 @@ def _listing_tests_for_group(
                 identity,
                 exclusions,
                 manual_only=manual_only,
+                allow_empty=allow_empty,
             )
         )
     if len(selected) != len(set(selected)):
@@ -2011,6 +2319,7 @@ def _listing_tests(
     exclusions: Mapping[TestIdentity, Any],
     *,
     manual_only: bool = False,
+    allow_empty: bool = False,
 ) -> list[str]:
     suites = data.get("rust-suites")
     if not isinstance(suites, dict):
@@ -2068,7 +2377,7 @@ def _listing_tests(
             f"configured={sorted(configured_nonmatching)}, "
             f"observed={sorted(nonmatching)}"
         )
-    if not selected:
+    if not selected and not allow_empty:
         raise ValueError(f"selected integration has no active tests: {expected}")
     return sorted(selected)
 
@@ -2153,8 +2462,11 @@ def execute_shard(
     output: Path,
     repo: Path = ROOT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = run_command,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     checked_out = _commit(repo, "HEAD")
     if checked_out != plan["candidate_sha"]:
         raise ValueError(
@@ -2189,6 +2501,7 @@ def execute_shard(
     selected_tests: list[str] = []
     executed_tests: list[str] = []
     executed_targets: list[str] = []
+    not_applicable_targets: list[str] = []
     failures: list[str] = []
 
     def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -2317,7 +2630,20 @@ def execute_shard(
                     identities,
                     exclusions,
                     manual_only=manual_only,
+                    allow_empty=(
+                        lane == "package-expansion" and not manual_only
+                    ),
                 )
+                group_not_applicable = [
+                    canonical
+                    for canonical in canonicals
+                    if not any(
+                        test.startswith(f"{canonical}::")
+                        for test in listed_tests
+                    )
+                ]
+                not_applicable_targets.extend(group_not_applicable)
+                executed_targets.extend(group_not_applicable)
                 selected_tests.extend(listed_tests)
                 commands.append(
                     {
@@ -2332,6 +2658,7 @@ def execute_shard(
                         "returncode": listed.returncode,
                         "stdout": listed.stdout,
                         "stderr": listed.stderr or "",
+                        "not_applicable_targets": group_not_applicable,
                     }
                 )
             except (
@@ -2369,6 +2696,18 @@ def execute_shard(
                 continue
             list_seconds = round(time.monotonic() - started, 3)
             list_finished_at = commands[-1]["finished_at"]
+            if not listed_tests:
+                for canonical in canonicals:
+                    target_timings[canonical] = {
+                        "command_group": canonicals,
+                        "list_started_at": list_started_at,
+                        "list_finished_at": list_finished_at,
+                        "list_seconds": list_seconds,
+                        "run_started_at": None,
+                        "run_finished_at": None,
+                        "run_seconds": 0.0,
+                    }
+                continue
 
             run_command = target_group_command(
                 identities,
@@ -2462,7 +2801,8 @@ def execute_shard(
                             if test.startswith(prefix)
                         )
                         if target_selected == target_executed:
-                            executed_targets.append(canonical)
+                            if canonical not in executed_targets:
+                                executed_targets.append(canonical)
                         else:
                             failures.append(
                                 f"{canonical}: incomplete test results: "
@@ -2504,6 +2844,7 @@ def execute_shard(
                 "selected_tests": sorted(selected_tests),
                 "executed_targets": sorted(executed_targets),
                 "executed_tests": sorted(executed_tests),
+                "not_applicable_targets": sorted(not_applicable_targets),
             }
         )
     )
@@ -2547,9 +2888,12 @@ def prepare_shard(
     output: Path,
     github_output: Path,
     repo: Path = ROOT,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any] | None:
     """Write an empty receipt or tell the hosted worker to prepare execution."""
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     if lane not in LANE_KEYS:
         raise ValueError(f"unsupported lane: {lane}")
     if shard not in SHARDS:
@@ -2568,6 +2912,7 @@ def prepare_shard(
         shard=shard,
         output=output,
         repo=repo,
+        duration_baseline=duration_baseline,
     )
 
 
@@ -2575,8 +2920,11 @@ def _report_findings(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     lane: str,
+    duration_baseline: DurationBaseline | None = None,
 ) -> list[str]:
-    verify_plan_digest(plan)
+    if duration_baseline is None:
+        duration_baseline = load_duration_baseline()
+    verify_plan_digest(plan, duration_baseline=duration_baseline)
     lane_key = LANE_KEYS[lane]
     findings: list[str] = []
     by_shard: dict[int, Mapping[str, Any]] = {}
@@ -2684,8 +3032,15 @@ def validate_change_owned_report(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
     standing_coverage: Mapping[str, Any] | None = None,
+    *,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    findings = _report_findings(plan, receipts, "change-owned")
+    findings = _report_findings(
+        plan,
+        receipts,
+        "change-owned",
+        duration_baseline,
+    )
     reused_targets = validate_standing_coverage(plan, standing_coverage)
     if findings:
         raise ValueError("; ".join(findings))
@@ -2698,15 +3053,56 @@ def validate_change_owned_report(
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["change_owned"]),
         "standing_reused_targets": reused_targets,
+        "shard_durations": change_owned_shard_durations(plan, receipts),
         "failures": [],
     }
+
+
+def change_owned_shard_durations(
+    plan: Mapping[str, Any],
+    receipts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, int | None]]:
+    estimates = plan["shard_planning"]["change_owned"]["estimated_milliseconds"]
+    actual: dict[int, int] = {}
+    for receipt in receipts:
+        if (
+            receipt.get("lane") != "change-owned"
+            or receipt.get("plan_digest") != plan.get("plan_digest")
+        ):
+            continue
+        shard = receipt.get("shard")
+        elapsed = receipt.get("elapsed_seconds")
+        if (
+            type(shard) is int
+            and shard in SHARDS
+            and not isinstance(elapsed, bool)
+            and isinstance(elapsed, (int, float))
+            and math.isfinite(elapsed)
+            and elapsed >= 0
+        ):
+            actual[shard] = math.ceil(float(elapsed) * 1000)
+    return [
+        {
+            "shard": shard,
+            "estimated_milliseconds": estimates[str(shard)],
+            "actual_milliseconds": actual.get(shard),
+        }
+        for shard in SHARDS
+    ]
 
 
 def summarize_package_expansion(
     plan: Mapping[str, Any],
     receipts: Sequence[Mapping[str, Any]],
+    *,
+    duration_baseline: DurationBaseline | None = None,
 ) -> dict[str, Any]:
-    findings = _report_findings(plan, receipts, "package-expansion")
+    findings = _report_findings(
+        plan,
+        receipts,
+        "package-expansion",
+        duration_baseline,
+    )
     return {
         "version": 1,
         "lane": "package-expansion",
@@ -2716,6 +3112,7 @@ def summarize_package_expansion(
         "plan_digest": plan["plan_digest"],
         "covered_targets": sorted(plan["package_expansion"]),
         "standing_reused_targets": [],
+        "shard_durations": [],
         "failures": findings,
     }
 
@@ -2727,24 +3124,209 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def _load_receipt_at(path: Path) -> dict[str, Any]:
+    receipt = load_json(path)
+    verify_receipt_digest(receipt)
+    for name, expected in receipt["sidecars"].items():
+        sidecar = path.parent / name
+        if not sidecar.is_file():
+            raise ValueError(f"missing receipt sidecar: {sidecar}")
+        observed = sha256_file(sidecar)
+        if observed != expected:
+            raise ValueError(
+                f"sidecar digest mismatch for {sidecar}: "
+                f"expected {expected}, got {observed}"
+            )
+    return receipt
+
+
 def load_receipts(root: Path) -> list[dict[str, Any]]:
     paths = sorted(root.rglob("receipt.json"))
-    receipts = []
-    for path in paths:
-        receipt = load_json(path)
-        verify_receipt_digest(receipt)
-        for name, expected in receipt["sidecars"].items():
-            sidecar = path.parent / name
-            if not sidecar.is_file():
-                raise ValueError(f"missing receipt sidecar: {sidecar}")
-            observed = sha256_file(sidecar)
-            if observed != expected:
+    return [_load_receipt_at(path) for path in paths]
+
+
+def _verify_duration_sample_plan(plan: Mapping[str, Any]) -> None:
+    version = plan.get("version")
+    if version == PLAN_VERSION:
+        verify_plan_digest(plan)
+        return
+    if version != 2:
+        raise ValueError(f"unsupported duration sample plan version: {version!r}")
+    candidate_sha = plan.get("candidate_sha")
+    if not isinstance(candidate_sha, str) or not SHA.fullmatch(candidate_sha):
+        raise ValueError("duration sample plan candidate_sha is malformed")
+    digest = plan.get("plan_digest")
+    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+        raise ValueError("duration sample plan digest is malformed")
+    if digest != _digest_without(plan, "plan_digest"):
+        raise ValueError("duration sample plan digest mismatch")
+    change_owned = set(_identity_list(plan, "change_owned"))
+    standing_reuse = set(_identity_list(plan, "standing_coverage_reuse"))
+    expected = change_owned - standing_reuse
+    shards = plan.get("shards")
+    if not isinstance(shards, dict):
+        raise ValueError("duration sample plan shards are malformed")
+    lane_shards = shards.get("change_owned")
+    if not isinstance(lane_shards, dict) or set(lane_shards) != {
+        str(shard) for shard in SHARDS
+    }:
+        raise ValueError("duration sample plan requires four change-owned shards")
+    flattened: list[str] = []
+    for shard in SHARDS:
+        rows = lane_shards[str(shard)]
+        if not isinstance(rows, list):
+            raise ValueError("duration sample shard target list is malformed")
+        for canonical in rows:
+            Identity.parse(canonical)
+        flattened.extend(rows)
+    if len(flattened) != len(set(flattened)):
+        raise ValueError("duration sample plan contains duplicate shard targets")
+    if set(flattened) != expected:
+        raise ValueError(
+            "duration sample plan shards do not exactly cover change-owned execution"
+        )
+
+
+def _duration_seconds(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(f"{label} must be a finite nonnegative number")
+    return float(value)
+
+
+def build_duration_baseline(
+    samples: Sequence[tuple[Path, Path]],
+) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("duration baseline generation requires at least one sample")
+    sources: list[dict[str, str]] = []
+    observations: dict[Identity, list[int]] = {}
+    seen_sources: set[tuple[str, str]] = set()
+
+    for plan_path, receipts_root in samples:
+        plan = _strict_json_object(plan_path)
+        _verify_duration_sample_plan(plan)
+        source_key = (plan["candidate_sha"], plan["plan_digest"])
+        if source_key in seen_sources:
+            raise ValueError(
+                "duplicate duration sample source: "
+                f"{source_key[0]} {source_key[1]}"
+            )
+        seen_sources.add(source_key)
+        sources.append(
+            {
+                "candidate_sha": source_key[0],
+                "plan_digest": source_key[1],
+            }
+        )
+
+        receipt_paths = sorted(receipts_root.rglob("receipt.json"))
+        if len(receipt_paths) != len(SHARDS):
+            raise ValueError(
+                "duration sample requires exactly four change-owned receipts"
+            )
+        by_shard: dict[int, tuple[Path, dict[str, Any]]] = {}
+        for receipt_path in receipt_paths:
+            receipt = _load_receipt_at(receipt_path)
+            if receipt["lane"] != "change-owned":
+                raise ValueError("duration sample contains a non-change-owned receipt")
+            if receipt["plan_digest"] != plan["plan_digest"]:
+                raise ValueError("duration sample receipt plan digest mismatch")
+            shard = receipt["shard"]
+            if shard in by_shard:
+                raise ValueError(f"duplicate duration sample shard: {shard}")
+            by_shard[shard] = (receipt_path, receipt)
+        if set(by_shard) != set(SHARDS):
+            raise ValueError("duration sample is missing a change-owned shard")
+
+        for shard in SHARDS:
+            receipt_path, receipt = by_shard[shard]
+            expected = plan["shards"]["change_owned"][str(shard)]
+            if receipt["selected_targets"] != expected:
                 raise ValueError(
-                    f"sidecar digest mismatch for {sidecar}: "
-                    f"expected {expected}, got {observed}"
+                    f"duration sample shard {shard} selected targets mismatch"
                 )
-        receipts.append(receipt)
-    return receipts
+            timings = _strict_json_object(receipt_path.parent / "timings.json")
+            if set(timings) != {
+                "started_at",
+                "finished_at",
+                "elapsed_seconds",
+                "workspace_products",
+                "targets",
+            }:
+                raise ValueError(
+                    f"duration sample shard {shard} timings have the wrong shape"
+                )
+            _duration_seconds(
+                timings["elapsed_seconds"],
+                f"duration sample shard {shard} elapsed_seconds",
+            )
+            raw_targets = timings["targets"]
+            if not isinstance(raw_targets, dict):
+                raise ValueError("duration sample targets must be an object")
+            unexpected = sorted(set(raw_targets) - set(receipt["selected_targets"]))
+            if unexpected:
+                raise ValueError(
+                    "duration sample timings contain unselected targets: "
+                    f"{unexpected}"
+                )
+            executed = set(receipt["executed_targets"])
+            for canonical, row in raw_targets.items():
+                identity = Identity.parse(canonical)
+                if not isinstance(row, dict) or set(row) != {
+                    "command_group",
+                    "list_started_at",
+                    "list_finished_at",
+                    "list_seconds",
+                    "run_started_at",
+                    "run_finished_at",
+                    "run_seconds",
+                }:
+                    raise ValueError(
+                        f"duration sample timing has the wrong shape: {canonical}"
+                    )
+                if row["command_group"] != [canonical]:
+                    raise ValueError(
+                        "change-owned duration samples require singleton commands: "
+                        f"{canonical}"
+                    )
+                list_seconds = _duration_seconds(
+                    row["list_seconds"],
+                    f"duration sample {canonical} list_seconds",
+                )
+                run_seconds = _duration_seconds(
+                    row["run_seconds"],
+                    f"duration sample {canonical} run_seconds",
+                )
+                if canonical not in executed:
+                    continue
+                milliseconds = max(
+                    1,
+                    math.ceil((list_seconds + run_seconds) * 1000),
+                )
+                observations.setdefault(identity, []).append(milliseconds)
+
+    if not observations:
+        raise ValueError("duration samples contain no completed target observations")
+    return {
+        "version": DURATION_BASELINE_VERSION,
+        "default_milliseconds": DEFAULT_DURATION_MILLISECONDS,
+        "sources": sorted(
+            sources,
+            key=lambda row: (row["candidate_sha"], row["plan_digest"]),
+        ),
+        "targets": {
+            identity.canonical: {
+                "milliseconds": max(values),
+                "samples": len(values),
+            }
+            for identity, values in sorted(observations.items())
+        },
+    }
 
 
 def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
@@ -2761,6 +3343,14 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
+    for row in report.get("shard_durations", []):
+        estimated = row["estimated_milliseconds"] / 1000
+        actual = row["actual_milliseconds"]
+        actual_text = "unavailable" if actual is None else f"{actual / 1000:.3f}s"
+        lines.append(
+            f"- Shard {row['shard']}: estimated {estimated:.3f}s, "
+            f"actual {actual_text}"
+        )
     for finding in report["failures"]:
         lines.append(f"  - {finding}")
     (output / "summary.md").write_text("\n".join(lines) + "\n")
@@ -2786,6 +3376,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=ROOT / ".config/ci-test-targets.toml",
     )
+    plan.add_argument(
+        "--duration-baseline",
+        type=Path,
+        default=DURATION_BASELINE_PATH,
+    )
+
+    duration_baseline = subparsers.add_parser(
+        "build-duration-baseline",
+        help="build a reviewed change-owned target-duration baseline",
+    )
+    duration_baseline.add_argument(
+        "--sample",
+        action="append",
+        nargs=2,
+        metavar=("PLAN", "RECEIPTS_ROOT"),
+        type=Path,
+        required=True,
+        help="authenticated plan and its four change-owned receipt directories",
+    )
+    duration_baseline.add_argument("--output", type=Path, required=True)
 
     run_shard = subparsers.add_parser("run-shard", help="execute one plan shard")
     run_shard.add_argument("--plan", type=Path, required=True)
@@ -2835,6 +3445,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             before=args.before,
             after=args.after,
             config_path=args.config,
+            duration_baseline_path=args.duration_baseline,
             targeted_packages=targeted_packages,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2843,6 +3454,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "CHANGE-OWNED PLAN: PASS: "
             f"{len(result['change_owned'])} required, "
             f"{len(result['package_expansion'])} informational"
+        )
+        return 0
+    if args.command == "build-duration-baseline":
+        result = build_duration_baseline(
+            [(plan, receipts) for plan, receipts in args.sample]
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(canonical_json(result))
+        print(
+            "CHANGE-OWNED DURATION BASELINE: PASS: "
+            f"{len(result['targets'])} targets from "
+            f"{len(result['sources'])} samples"
         )
         return 0
     if args.command == "run-shard":

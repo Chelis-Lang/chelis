@@ -35,6 +35,11 @@ def payload(
 
 
 def plan() -> dict:
+    baseline = owned.load_duration_baseline()
+    change_owned_shards, change_owned_planning = owned.change_owned_shard_plan(
+        [],
+        baseline,
+    )
     result = {
         "version": owned.PLAN_VERSION,
         "mode": "pull_request",
@@ -54,8 +59,14 @@ def plan() -> dict:
         "manual_only_targets": [],
         "target_exclusions": [],
         "test_exclusions": [],
+        "shard_planning": {
+            "change_owned": change_owned_planning,
+            "package_expansion": {
+                "algorithm": owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+            },
+        },
         "shards": {
-            "change_owned": owned.shard_map([]),
+            "change_owned": change_owned_shards,
             "package_expansion": owned.shard_map([]),
         },
     }
