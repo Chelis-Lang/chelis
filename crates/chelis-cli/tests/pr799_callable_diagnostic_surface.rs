@@ -142,8 +142,53 @@ fn unresolved_grad_positions_keep_the_ad_workaround_text() {
         "an actual grad position must keep the workaround guidance:\n{stderr}"
     );
     assert!(
+        !stderr.contains("ownership lowering") && !stderr.contains("unbound name `fold`"),
+        "an unsupported grad position must be rejected before ownership lowering:\n{stderr}"
+    );
+    assert!(
         emitted.is_empty(),
         "a rejected build must emit no artifacts"
+    );
+}
+
+/// Positive neighbor: a supported pure-scalar gradient remains on the
+/// scalar-host AD route rather than being rejected with the `fold` case.
+#[test]
+fn supported_pure_scalar_grad_still_builds() {
+    let (ok, stderr, emitted) = c_build(
+        "def square(x: f32) -> f32 = mul(x, x)\n\
+         def gradient(x: f32) -> f32 = grad(square)(x)\n\
+         out = print(gradient(3.0))\n",
+        "supported_scalar_grad",
+    );
+    assert!(ok, "supported scalar grad must keep building:\n{stderr}");
+    assert!(
+        emitted
+            .iter()
+            .any(|(name, _)| name == "supported_scalar_grad.c"),
+        "a supported scalar grad must emit its C translation unit"
+    );
+}
+
+/// #2078 preservation control: a primitive scalar target whose callable also
+/// has a tensor parameter/result stays on the reverse-DAG reconstruction path.
+#[test]
+fn tensor_bodied_primitive_scalar_grad_still_builds() {
+    let (ok, stderr, emitted) = c_build(
+        "def loss(scale: f32, x: tensor[2, f32]) -> tensor[f32] =\n\
+           mul(sum(x, 0i32), scalar_to_tensor(scale))\n\
+         out = grad(loss, wrt=scale)(3.0f32, to_tensor([1.0f32, 2.0f32]))\n",
+        "tensor_bodied_scalar_target",
+    );
+    assert!(
+        ok,
+        "#2078's primitive-scalar target must keep building:\n{stderr}"
+    );
+    assert!(
+        emitted
+            .iter()
+            .any(|(name, _)| name == "tensor_bodied_scalar_target.c"),
+        "the supported primitive-scalar target must emit its C translation unit"
     );
 }
 

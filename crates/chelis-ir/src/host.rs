@@ -10254,16 +10254,22 @@ fn try_lower_general_list_grad_app(
     let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
         return Ok(None);
     };
-    // Keep recursive pure-scalar callables at the existing scalar host
-    // boundary. Entering the tensor DAG for that previously rejected surface
-    // would replace its bounded scalar refusal with an inlining diagnostic.
-    // This applicability decision precedes lowering: entered extent failures
-    // and other deliberate DAG diagnostics still propagate without fallback.
+    // Keep every pure-scalar callable at the scalar host AD boundary. That
+    // route either lowers its supported scalar operators or deliberately
+    // declines to the unresolved-transform marker. The general reverse-DAG
+    // reconstruction below exists for selected scalar leaves in a callable
+    // that also has tensor/recursive structure; claiming an all-scalar
+    // signature here makes an unsupported host operator such as `fold`
+    // escape into ownership lowering as an unbound builtin name.
+    //
+    // This applicability decision precedes lowering: mixed/tensor callables
+    // still enter the #2078 path, so their forward extent failures and other
+    // deliberate DAG diagnostics continue to propagate without fallback.
     let pure_scalar_callable =
         lookup_declared_fn_type(program, fn_name).is_some_and(|(parameters, result)| {
             parameters.iter().all(is_dual_scalar_type) && is_dual_scalar_type(&result)
         });
-    if pure_scalar_callable && top_level_fn_needs_host_lane_tensor_lowering(program, fn_name) {
+    if pure_scalar_callable {
         return Ok(None);
     }
     let Some(Expr::List(fn_list, _)) = lookup_program_def(&defs, fn_name) else {
