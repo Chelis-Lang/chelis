@@ -2628,6 +2628,28 @@ that holds a spelling and declines to thread it through is not covered by it.
 (The borrow and cast diagnostics do not yet satisfy [04-FIT-9]; chelis#260
 owns that gap.)
 
+### 6.6 Textual Rendering Of Check Diagnostics
+
+A command that stops on a check rejection and reports it as text rather
+than as the §6.4 document -- `chelis build`, for example -- still reports
+the same diagnostics.
+
+> **[04-FIT-26]** A textual rendering of a check rejection -- type, effect,
+> or linearity diagnostics alike, the stages [04-FIT-15] names -- SHALL render
+> each diagnostic from the projection §6.4's `errors` elements carry: its
+> `kind` vocabulary member, its `message`, and its location as
+> [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
+> own line, in the order the checker reported it, so a rejection carrying
+> `N` diagnostics renders `N` lines. A debug rendering of a
+> producer-internal value is not a conforming rendering: it publishes
+> field names, absent-value markers, and variant spellings that
+> [04-FIT-14] keeps off the published interface. A diagnostic that cannot
+> be projected is a failure reported as such, never a debug rendering in
+> its place.
+
+(The effect and linearity renderings and `chelis reef build` do not yet
+satisfy [04-FIT-26]; chelis#2130 owns that gap.)
+
 ---
 
 ## 7. Effects

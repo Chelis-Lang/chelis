@@ -41,7 +41,7 @@ use std::io;
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
-use crate::schema::CheckResult;
+use crate::schema::{CheckResult, Diagnostic, DiagnosticSpan};
 
 impl CheckResult {
     /// Render the report as `chelis check` publishes it.
@@ -58,6 +58,55 @@ impl CheckResult {
         // cannot.
         Ok(String::from_utf8(bytes).expect("serde_json emits UTF-8"))
     }
+}
+
+impl Diagnostic {
+    /// Render one diagnostic as a single human-readable line (spec/04
+    /// [04-FIT-26], chelis#1853).
+    ///
+    /// Every part comes from the projection the report's `errors` elements
+    /// carry, so the line and the document cannot disagree about a kind, a
+    /// message, or a location. The location is written as the carrier holds
+    /// it: a point stays a point ([04-FIT-17]), and the producer identity is
+    /// transported verbatim rather than derived from the offset ([04-FIT-16]).
+    /// `at byte N` is the spelling Surf parse errors already use.
+    pub fn render_line(&self) -> String {
+        let mut line = format!("{}: {}", self.kind().as_str(), self.message);
+        match self.span {
+            Some(DiagnosticSpan::Point { offset }) => line.push_str(&format!(" at byte {offset}")),
+            Some(DiagnosticSpan::Range { offset, len }) => {
+                line.push_str(&format!(" at byte {offset} (length {len})"));
+            }
+            None => {}
+        }
+        if let Some(span_id) = &self.span_id {
+            line.push_str(&format!(" [{span_id}]"));
+        }
+        for suggestion in &self.suggestions {
+            line.push_str(&format!(" (suggestion: {suggestion})"));
+        }
+        line
+    }
+}
+
+/// Render a checker rejection's diagnostics for a textual surface, one
+/// indented line per diagnostic in the checker's order (spec/04
+/// [04-FIT-26]).
+///
+/// Each error is projected with [`Diagnostic::try_from_check_error`], the
+/// projection `chelis check` publishes. A projection failure is returned as
+/// the failure it is; there is no fallback rendering.
+pub fn render_check_errors(errors: &[chelis_types::errors::CheckError]) -> Result<String, String> {
+    errors
+        .iter()
+        .enumerate()
+        .map(|(index, error)| {
+            Diagnostic::try_from_check_error(error)
+                .map(|diagnostic| format!("  {}", diagnostic.render_line()))
+                .map_err(|reason| format!("diagnostic {index} cannot be rendered: {reason}"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| lines.join("\n"))
 }
 
 /// The report document's layout, as a `serde_json` formatter.
@@ -433,6 +482,174 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("inconsistent report counts")
+        );
+    }
+
+    fn check_error(
+        kind: chelis_types::errors::CheckErrorKind,
+        message: &str,
+        span_offset: Option<usize>,
+        span_id: Option<&str>,
+        suggestions: &[&str],
+    ) -> chelis_types::errors::CheckError {
+        chelis_types::errors::CheckError {
+            kind,
+            message: message.into(),
+            suggestions: suggestions.iter().map(|s| (*s).to_owned()).collect(),
+            severity: 0.6,
+            expected: None,
+            got: None,
+            span_offset,
+            span_id: span_id.map(str::to_owned),
+        }
+    }
+
+    /// [04-FIT-26]: kind, message, location and identity come from the
+    /// projection the report publishes, on one line.
+    #[test]
+    fn a_located_diagnostic_renders_its_projected_fields_on_one_line() {
+        let error = check_error(
+            chelis_types::errors::CheckErrorKind::UnboundVariable {
+                identifier: "missing".into(),
+            },
+            "unbound variable: missing",
+            Some(19),
+            Some("surf:19..26"),
+            &["Check spelling of 'missing'"],
+        );
+        let projected = Diagnostic::try_from_check_error(&error).unwrap();
+        let rendered = super::render_check_errors(&[error]).unwrap();
+        assert_eq!(
+            rendered,
+            "  UnboundVariable: unbound variable: missing at byte 19 [surf:19..26] \
+             (suggestion: Check spelling of 'missing')"
+        );
+        assert!(rendered.contains(projected.kind().as_str()));
+    }
+
+    /// [04-FIT-17]: a diagnostic without a location renders none, rather
+    /// than an invented one or an absent-value marker.
+    #[test]
+    fn an_unlocated_diagnostic_renders_no_location_and_no_debug_markers() {
+        let rendered = super::render_check_errors(&[check_error(
+            chelis_types::errors::CheckErrorKind::DimensionMismatch,
+            "body has type `tensor[3, f32]`",
+            None,
+            None,
+            &[],
+        )])
+        .unwrap();
+        assert_eq!(
+            rendered,
+            "  DimensionMismatch: body has type `tensor[3, f32]`"
+        );
+        for marker in ["CheckError", "None", "Some(", "span_offset", "severity"] {
+            assert!(!rendered.contains(marker), "{marker} leaked: {rendered}");
+        }
+    }
+
+    /// A range is written as the carrier holds it, not collapsed to a point.
+    #[test]
+    fn a_measured_range_renders_its_length() {
+        let mut diagnostic = Diagnostic::try_from_check_error(&check_error(
+            chelis_types::errors::CheckErrorKind::Other,
+            "m",
+            None,
+            None,
+            &[],
+        ))
+        .unwrap();
+        diagnostic.span = Some(crate::schema::DiagnosticSpan::Range { offset: 4, len: 3 });
+        assert!(diagnostic.render_line().ends_with("m at byte 4 (length 3)"));
+    }
+
+    /// N diagnostics render N lines, in the checker's order.
+    #[test]
+    fn each_diagnostic_occupies_its_own_line_in_order() {
+        let errors = [
+            check_error(
+                chelis_types::errors::CheckErrorKind::Other,
+                "first",
+                None,
+                None,
+                &[],
+            ),
+            check_error(
+                chelis_types::errors::CheckErrorKind::TypeMismatch,
+                "second",
+                Some(7),
+                None,
+                &[],
+            ),
+        ];
+        let rendered = super::render_check_errors(&errors).unwrap();
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 2, "{rendered}");
+        assert!(lines[0].ends_with(": first"), "{rendered}");
+        assert_eq!(lines[1], "  TypeMismatch: second at byte 7");
+    }
+
+    /// A diagnostic the report projection rejects is a reported failure,
+    /// never a fallback rendering of the raw value.
+    #[test]
+    fn an_unprojectable_diagnostic_is_a_failure_not_a_debug_rendering() {
+        let mut error = check_error(
+            chelis_types::errors::CheckErrorKind::Other,
+            "m",
+            None,
+            None,
+            &[],
+        );
+        error.severity = f64::NAN;
+        let failure = super::render_check_errors(&[
+            check_error(
+                chelis_types::errors::CheckErrorKind::Other,
+                "fine",
+                None,
+                None,
+                &[],
+            ),
+            error,
+        ])
+        .unwrap_err();
+        assert!(
+            failure.starts_with("diagnostic 1 cannot be rendered: "),
+            "{failure}"
+        );
+        assert!(!failure.contains("CheckError"), "{failure}");
+    }
+
+    /// The pipeline's own rejection text uses the same rendering.
+    #[test]
+    fn a_type_rejection_displays_through_the_shared_rendering() {
+        let mut fitness = chelis_types::FitnessReport {
+            score: 0.5,
+            components: chelis_types::fitness::FitnessComponents {
+                parse: 1.0,
+                structure: 1.0,
+                names: 1.0,
+                types: 0.0,
+            },
+            typed_nodes: 0,
+            untyped_nodes: 0,
+            total_nodes: 0,
+            unresolved_names: Vec::new(),
+            errors: Vec::new(),
+        };
+        fitness.errors.push(check_error(
+            chelis_types::errors::CheckErrorKind::DimensionMismatch,
+            "declared type is `tensor[4, f32]`",
+            None,
+            None,
+            &[],
+        ));
+        let expected = format!(
+            "Type errors:\n{}",
+            super::render_check_errors(&fitness.errors).unwrap()
+        );
+        assert_eq!(
+            crate::pipeline::PipelineRejection::Type { fitness }.to_string(),
+            expected
         );
     }
 }

@@ -1098,11 +1098,16 @@ fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::
         match chelis_types::check_ir_program(&deep_exprs) {
             Ok(checked) => checked.annotated_exprs().to_vec(),
             Err(result) => {
-                return Err(format!(
-                    "`chelis deep --annotate` requires a well-typed program; type errors: {:?}",
-                    result.errors
-                )
-                .into());
+                // [04-FIT-26]: the shared projected rendering, never `{:?}`.
+                const PREFIX: &str =
+                    "`chelis deep --annotate` requires a well-typed program; type errors:";
+                return Err(
+                    match chelis_compiler_api::check_report::render_check_errors(&result.errors) {
+                        Ok(lines) => format!("{PREFIX}\n{lines}"),
+                        Err(reason) => format!("{PREFIX} {reason}"),
+                    }
+                    .into(),
+                );
             }
         }
     } else {
@@ -10850,7 +10855,11 @@ fn checked_compilation_with_effects(
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
-            return Err(format!("Type errors: {:?}", fitness.errors));
+            // chelis#1853 [04-FIT-26]: the shared rejection rendering, one
+            // projected line per diagnostic.
+            return Err(
+                chelis_compiler_api::pipeline::PipelineRejection::Type { fitness }.to_string(),
+            );
         }
     };
     chelis_compiler_api::pipeline::complete_checks(
