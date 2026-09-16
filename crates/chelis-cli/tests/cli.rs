@@ -842,7 +842,7 @@ fn eval_supports_integer_mod_and_bitwise_helpers() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
-            r#"bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))"#,
+            r#"bitxor(bitand(cast(7, i64), cast(3, i64)), shl(cast(1, i64), cast(2, i64)))"#,
         ])
         .assert()
         .success()
@@ -881,10 +881,10 @@ fn run_eval_json_expr(expr: &str) -> Value {
 
 // Hull Phase 0a Packet B, commit 2: `chelis eval --json` emits the raw
 // EvalResult as JSON on stdout. A host scalar integer expression yields
-// a single root whose value is internally tagged `int64`.
+// a single root whose value is internally tagged `i64`.
 #[test]
 fn eval_json_emits_int64_scalar() {
-    let json = run_eval_json_expr("mod(cast(17, int64), cast(5, int64))");
+    let json = run_eval_json_expr("mod(cast(17, i64), cast(5, i64))");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0]["value"]["type"], "scalar");
@@ -915,13 +915,13 @@ fn eval_json_emits_tensor_shape_and_data() {
     );
 }
 
-// A tuple value (internally tagged `tuple`) with two int64 elements. A
+// A tuple value (internally tagged `tuple`) with two i64 elements. A
 // top-level `(a, b)` binding is split by the evaluator into per-element
 // roots, so a genuine `tuple` ExecutionValue is exercised by nesting the
 // tuple inside a host list, where it survives as a single value.
 #[test]
 fn eval_json_emits_tuple_of_int64() {
-    let json = run_eval_json_expr("[(cast(7, int64), cast(8, int64))]");
+    let json = run_eval_json_expr("[(cast(7, i64), cast(8, i64))]");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
     let list = &roots[0]["value"];
@@ -943,7 +943,7 @@ fn eval_json_emits_tuple_of_int64() {
 // bare `(a, b)` does NOT produce a single `tuple` root.
 #[test]
 fn eval_json_top_level_tuple_splits_into_roots() {
-    let json = run_eval_json_expr("(cast(7, int64), cast(8, int64))");
+    let json = run_eval_json_expr("(cast(7, i64), cast(8, i64))");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 2);
     // Both components are scalar tensors through the IR evaluator path.
@@ -957,7 +957,7 @@ fn eval_json_top_level_tuple_splits_into_roots() {
 fn eval_json_file_form_emits_json() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("scalar.ch");
-    write_file(&path, "answer = mod(cast(43, int64), cast(41, int64))\n");
+    write_file(&path, "answer = mod(cast(43, i64), cast(41, i64))\n");
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -984,10 +984,7 @@ fn eval_json_file_form_emits_json() {
 fn eval_json_def_only_emits_empty_roots_json() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("defonly.ch");
-    write_file(
-        &path,
-        "def helper(x: int64) -> int64 = add(x, cast(1, int64))\n",
-    );
+    write_file(&path, "def helper(x: i64) -> i64 = add(x, cast(1, i64))\n");
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -1039,7 +1036,7 @@ fn eval_text_mode_output_unchanged_alongside_json_flag() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "mod(cast(17, int64), cast(5, int64))"])
+        .args(["eval", "mod(cast(17, i64), cast(5, i64))"])
         .assert()
         .success()
         // Issue #912 [05-OBS-6]: single roots are now labelled.
@@ -1053,34 +1050,34 @@ fn check_collection_callback_errors_name_the_helper_contract() {
         (
             "filter_non_bool.ch",
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = filter(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
             vec!["filter", "callback", "bool"],
         ),
         (
             "partition_non_bool.ch",
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = partition(fn (x: i64) -> add(x, cast(1, i64)), xs)
 "#,
             vec!["partition", "callback", "bool"],
         ),
         (
             "fold_acc_mismatch.ch",
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = fold(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
-            vec!["fold", "accumulator", "string", "int64"],
+            vec!["fold", "accumulator", "string", "i64"],
         ),
         (
             "scan_acc_mismatch.ch",
             r#"
-xs: List[int64] = [cast(1, int64)]
-bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64)]
+bad = scan(fn (acc: string, x: i64) -> string_concat(acc, to_string(x)), cast(0, i64), xs)
 "#,
-            vec!["scan", "accumulator", "string", "int64"],
+            vec!["scan", "accumulator", "string", "i64"],
         ),
     ];
 
@@ -1205,7 +1202,7 @@ fn eval_supports_phase3h_tensor_structural_ops() {
         .stdout(predicate::str::contains(
             "contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])",
         ))
-        // chelis#732 P1: int64 sort indices print as integers.
+        // chelis#732 P1: i64 sort indices print as integers.
         .stdout(predicate::str::contains(
             "sorted_indices = tensor(shape=[2], data=[0, 1])",
         ));
@@ -3039,9 +3036,9 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
     let out_dir = dir.path().join("recursive-tensor-build-out");
     write_file(
         &path,
-        "def recur[n](x: tensor[n, f32], i: int64) -> tensor[n, f32] =\n\
-           if lte(i, cast(0, int64)) then x else recur(x, sub(i, cast(1, int64)))\n\
-         out = recur(to_tensor([1.0, 2.0]), cast(2, int64))\n",
+        "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
+           if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
+         out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3322,7 +3319,7 @@ chelis-std = {{ version = "0.4.0" }}
 export (main)
 
 def main(
-  ids: tensor[2, 3, int64],
+  ids: tensor[2, 3, i64],
   table: tensor[8, 4, f32]
 ) -> tensor[2, 3, 4, f32] =
   gather(table, ids, 0)
@@ -3372,7 +3369,7 @@ def main(
 /// the same source. `round` exercises ties-to-even (0.5 -> 0, 2.5 -> 2,
 /// distinguishing `rintf` from ties-away-from-zero `roundf`);
 /// `scatter_elements` exercises the ONNX element-wise contract with an
-/// int32-index tensor (the index-read path that a float-reinterpret bug
+/// i32-index tensor (the index-read path that a float-reinterpret bug
 /// would silently corrupt).
 #[test]
 fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
@@ -3383,8 +3380,8 @@ fn build_c_runs_round_and_scatter_elements_matches_eval_output() {
         &path,
         "data = to_tensor([[cast(0.0, f32), cast(0.0, f32)], \
          [cast(0.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(0.0, f32)]])\n\
-         indices = to_tensor([[cast(1, int32), cast(0, int32)], \
-         [cast(2, int32), cast(0, int32)]])\n\
+         indices = to_tensor([[cast(1, i32), cast(0, i32)], \
+         [cast(2, i32), cast(0, i32)]])\n\
          updates = to_tensor([[cast(5.0, f32), cast(6.0, f32)], \
          [cast(7.0, f32), cast(8.0, f32)]])\n\
          scattered = scatter_elements(data, indices, updates, 0)\n\
@@ -3575,7 +3572,7 @@ fn check_accepts_static_scatter_duplicate_replace_as_last_write_wins() {
         &path,
         r#"
 base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
-ids: List[int64] = [cast(1, int64), cast(1, int64)]
+ids: List[i64] = [cast(1, i64), cast(1, i64)]
 idx = to_tensor(ids)
 updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
 out = scatter(base, idx, updates, 0, "replace")
@@ -3601,7 +3598,7 @@ fn build_c_scatter_duplicate_replace_is_deterministic_last_write_wins() {
         r#"
 def apply(
   base: tensor[3, 2, f32],
-  idx: tensor[2, int64],
+  idx: tensor[2, i64],
   updates: tensor[2, 2, f32]
 ) -> tensor[3, 2, f32] =
   scatter(base, idx, updates, 0, "replace")
@@ -3903,11 +3900,11 @@ fn build_c_runs_recursive_adt_program_and_matches_eval_output() {
         &path,
         r#"type Jsonish =
   | JsonNull
-  | JsonInt(int64)
+  | JsonInt(i64)
   | JsonString(string)
   | JsonArray(List[Jsonish])
 
-sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+sample = JsonArray([JsonString("hi"), JsonInt(cast(3, i64))])
 result = match sample with {
   | JsonNull => "null"
   | JsonInt(n) => to_string(n)
@@ -4558,7 +4555,7 @@ fn fmt_check_fails_for_noncanonical_deep() {
 fn fmt_rejects_check_and_inplace_together() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("program.dp");
-    write_file(&path, "(def {} x (lit {type: (t-prim {} int32)} 1))\n");
+    write_file(&path, "(def {} x (lit {type: (t-prim {} i32)} 1))\n");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -4821,7 +4818,7 @@ def main(
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
 ) -> tensor[32, 10, f32] = {
-  bias = insert(&b, 0, shape(&x, cast(0, int32)))
+  bias = insert(&b, 0, shape(&x, cast(0, i32)))
   wx = matmul(&x, &w)
   add(wx, bias)
 }
@@ -5416,7 +5413,7 @@ fn build_hip_emits_sparse_gather_kernel() {
     let out_dir = dir.path().join("hip-gather-out");
     write_file(
         &path,
-        "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
+        "def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5445,7 +5442,7 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
     let out_dir = dir.path().join("c-gather-out");
     write_file(
         &path,
-        "def f(table: tensor[1000, 128, f32], indices: tensor[64, int32]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
+        "def f(table: tensor[1000, 128, f32], indices: tensor[64, i32]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5482,7 +5479,7 @@ fn build_hip_rejects_sparse_gather_with_non_load_cast_indices() {
     let path = dir.path().join("gather_cast.ch");
     write_file(
         &path,
-        "def f(table: tensor[1000, 128, f32], raw: tensor[64, f32]) -> tensor[64, 128, f32] = gather(table, cast(raw, int64), 0)\n",
+        "def f(table: tensor[1000, 128, f32], raw: tensor[64, f32]) -> tensor[64, 128, f32] = gather(table, cast(raw, i64), 0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5756,11 +5753,11 @@ fn check_reports_match_linearity_without_old_ir_rejection() {
     let path = dir.path().join("match_linearity.ch");
     write_file(
         &path,
-        r#"def bad(pair: (tensor[4, f32], int32)) -> int32 = {
-  n: int32 = match pair with {
+        r#"def bad(pair: (tensor[4, f32], i32)) -> i32 = {
+  n: i32 = match pair with {
     | (x, _) => 1
   }
-  again: (tensor[4, f32], int32) = pair
+  again: (tensor[4, f32], i32) = pair
   n
 }
 "#,
@@ -5896,7 +5893,7 @@ fn fmt_rejects_internal_macro_tags_in_deep_input() {
 fn build_rejects_gpu_device_region_for_c_target() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("device.ch");
-    write_file(&path, "x: int32 = with device(\"gpu:0\") { 1 }\n");
+    write_file(&path, "x: i32 = with device(\"gpu:0\") { 1 }\n");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6623,7 +6620,7 @@ fn target_metal_admits_i32_add() {
     let out_dir = dir.path().join("out");
     write_file(
         &path,
-        "def i32_add(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = add(x, y)\n",
+        "def i32_add(x: tensor[3, i32], y: tensor[3, i32]) -> tensor[3, i32] = add(x, y)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6653,7 +6650,7 @@ fn target_metal_admits_i64_add() {
     let out_dir = dir.path().join("out");
     write_file(
         &path,
-        "def i64_add(x: tensor[3, int64], y: tensor[3, int64]) -> tensor[3, int64] = add(x, y)\n",
+        "def i64_add(x: tensor[3, i64], y: tensor[3, i64]) -> tensor[3, i64] = add(x, y)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6715,7 +6712,7 @@ fn target_metal_link_line_includes_metal_performance_shaders() {
 fn target_metal_rejects_cpu_resource_region() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("cpu_region.ch");
-    write_file(&path, "x: int32 = with device(\"cpu\") { 1 }\n");
+    write_file(&path, "x: i32 = with device(\"cpu\") { 1 }\n");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -7066,11 +7063,11 @@ fn target_metal_accepts_gpu_resource_region() {
 #[test]
 fn check_directory_walks_ch_files_and_aggregates_json() {
     let dir = tempdir().expect("tempdir");
-    write_file(&dir.path().join("a.ch"), "def main() -> int32 = 0\n");
+    write_file(&dir.path().join("a.ch"), "def main() -> i32 = 0\n");
     fs::create_dir_all(dir.path().join("nested")).expect("mkdir nested");
     write_file(
         &dir.path().join("nested").join("b.ch"),
-        "def main() -> int32 = 1\n",
+        "def main() -> i32 = 1\n",
     );
     // dot-prefixed file should be skipped by the walker
     write_file(
@@ -7625,7 +7622,7 @@ fn lint_allow_suppresses_diagnostic_and_fix() {
 fn lint_fix_does_not_rewrite_list_drop_builtin() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("list_drop.ch");
-    let original = "def f(ys: list[int64]) -> list[int64] = drop(ys, cast(1, int64))\n";
+    let original = "def f(ys: list[i64]) -> list[i64] = drop(ys, cast(1, i64))\n";
     write_file(&path, original);
 
     Command::cargo_bin("chelis")
@@ -7975,7 +7972,7 @@ fn check_empty_directory_is_an_empty_corpus_error() {
 fn check_single_file_keeps_legacy_report_shape() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("solo.ch");
-    write_file(&path, "def main() -> int32 = 0\n");
+    write_file(&path, "def main() -> i32 = 0\n");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .args(["check", path.to_str().unwrap()])
@@ -8698,7 +8695,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
     let dir = tempdir().unwrap();
     for (stem, sibling, deep, pure) in [
         ("bare", "", false, false),
-        ("with_host", "def status() -> int64 = 7i64\n", false, false),
+        ("with_host", "def status() -> i64 = 7i64\n", false, false),
         ("deep_entry", "", true, false),
         ("seeded_helper", "", false, false),
         ("declared_random", "", false, false),
@@ -9924,7 +9921,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
              import Std.Io.Json (Json, JsonFloat, JsonString, JsonInt, JsonObject, write_json)\n\
              rows = [dict_of([(\"k\", \"a,b\"), (\"price\", \"7773.015187\")]), dict_of([(\"k\", \"he said \\\"hi\\\"\"), (\"price\", \"0.15110743269565682\")])]\n\
              done_csv = write_csv(\"{csv}\", rows)\n\
-             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64)), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, int64)))]))\n\
+             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64)), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, i64)))]))\n\
              done_json = write_json(\"{json}\", doc)\n\
              back = read_csv(\"{csv}\")\n\
              n = len(back)\n",
@@ -10139,11 +10136,11 @@ fn build_c_function_body_list_temp_has_zero_definitely_lost_under_valgrind() {
     // every refcounted host-value type, not just tuples.
     assert_built_c_has_zero_definitely_lost(
         "fn_body_list_temp",
-        "def mk(n: int64) -> int64 = {\n\
-         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+        "def mk(n: i64) -> i64 = {\n\
+         \x20 xs = [n, mul(n, cast(2, i64)), mul(n, cast(3, i64))]\n\
          \x20 len(xs)\n\
          }\n\
-         out = mk(cast(5, int64))\n",
+         out = mk(cast(5, i64))\n",
         &["out = 3"],
     );
 }
@@ -10229,12 +10226,12 @@ fn build_c_call_return_list_escape_has_zero_definitely_lost_under_valgrind() {
     // list case must be correct and definitely-lost-free too.
     assert_built_c_has_zero_definitely_lost(
         "call_return_list_escape",
-        "def id2(a: List[int64]) -> List[int64] = a\n\
-         def mk(n: int64) -> List[int64] = {\n\
-         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+        "def id2(a: List[i64]) -> List[i64] = a\n\
+         def mk(n: i64) -> List[i64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, i64)), mul(n, cast(3, i64))]\n\
          \x20 id2(xs)\n\
          }\n\
-         out = mk(cast(5, int64))\n",
+         out = mk(cast(5, i64))\n",
         &["out = [5, 10, 15]"],
     );
 }
@@ -10254,12 +10251,12 @@ fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
     // behavior so a later regression to over-retain is caught as a leak.
     assert_built_c_has_zero_definitely_lost(
         "call_fresh_result_no_over_retain",
-        "def dup(a: List[int64]) -> List[int64] = [len(a), len(a)]\n\
-         def mk(n: int64) -> List[int64] = {\n\
-         \x20 xs = [n, mul(n, cast(2, int64)), mul(n, cast(3, int64))]\n\
+        "def dup(a: List[i64]) -> List[i64] = [len(a), len(a)]\n\
+         def mk(n: i64) -> List[i64] = {\n\
+         \x20 xs = [n, mul(n, cast(2, i64)), mul(n, cast(3, i64))]\n\
          \x20 dup(xs)\n\
          }\n\
-         out = mk(cast(5, int64))\n",
+         out = mk(cast(5, i64))\n",
         &["out = [3, 3]"],
     );
 }

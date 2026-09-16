@@ -148,7 +148,7 @@ fn shape_a_broader_negative_control_real_mismatch_still_errors() {
     let source = r#"
 module Repro.ShapeABroaderNegative
 
-def bad[n](x: &tensor[n, f32], y: &tensor[n, int32]) -> tensor[n, f32] = {
+def bad[n](x: &tensor[n, f32], y: &tensor[n, i32]) -> tensor[n, f32] = {
   z = y
   z
 }
@@ -175,7 +175,7 @@ fn shape_a_broader_if_one_branch_genuinely_wrong_still_errors() {
     let source = r#"
 module Repro.ShapeABroaderIfMixed
 
-def bad[n](c: bool, x: &tensor[n, f32], y: &tensor[n, int32]) -> tensor[n, f32] = if c then x else y
+def bad[n](c: bool, x: &tensor[n, f32], y: &tensor[n, i32]) -> tensor[n, f32] = if c then x else y
 "#;
     let result = surf_to_dag(source);
     assert!(

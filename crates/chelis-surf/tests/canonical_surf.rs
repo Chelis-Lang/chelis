@@ -82,7 +82,7 @@ fn canonical_declaration_and_expression_spellings_parse() {
         "result = 1.0f32",
         "result = 42f32",
         "result = 8000000f64",
-        "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true",
+        "@property grouped_operand forall(x: i32, y: i32) where (x + 1) <= y: true",
         "tiny = 5e-324",
         "huge = 1.7976931348623157e308",
     ];
@@ -475,10 +475,10 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         "result = do { f(x); g(y); }",
         "result = Some(x,)",
         "result = match x with { | Some(v,) => v }",
-        "sig trailing_type: Option[int32,]",
+        "sig trailing_type: Option[i32,]",
         "type Trailing[a,] = | Trailing(a,)",
-        "type Trailing = | Trailing(int32,)",
-        "type TrailingRecord = | TrailingRecord { value: int32, }",
+        "type Trailing = | Trailing(i32,)",
+        "type TrailingRecord = | TrailingRecord { value: i32, }",
         "import Demo (value,)",
         "export (value,)",
         "result = grad(f,)",
@@ -487,7 +487,7 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         "result = vmap(f,)",
         "result = vmap(f, axis=1,)",
         "result = cast(x, f64,)",
-        "result = cast_trunc(x, int32,)",
+        "result = cast_trunc(x, i32,)",
         "result = jit(f,)",
         "result = realize(x,)",
         "result = copy(x,)",
@@ -564,7 +564,7 @@ fn semantic_ambiguous_and_non_reviewed_legacy_aliases_are_rejected() {
         "result = vmap(f, 1)",
         "result = vmap(f, axis=0)",
         "result = grad(f, wrt=(x))",
-        "@property grouped forall(x: int32) where (x <= 1): true",
+        "@property grouped forall(x: i32) where (x <= 1): true",
         "type EmptyAlias = | EmptyAlias()",
         "typed: Option[] = None",
         "def empty_quantifiers[](x) = x",
@@ -590,7 +590,7 @@ fn semantic_ambiguous_and_non_reviewed_legacy_aliases_are_rejected() {
 #[test]
 fn signed_minimum_magnitude_without_unary_minus_has_a_source_diagnostic() {
     let error = parse_str("value = 9223372036854775808i64")
-        .expect_err("the positive magnitude above int64::MAX must be rejected");
+        .expect_err("the positive magnitude above i64::MAX must be rejected");
     let message = error.to_string();
     assert!(
         message.contains("only valid after unary `-`") && !message.contains("IntMinMagnitude"),
@@ -652,8 +652,8 @@ fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form(
     let deep_source = concat!(
         "(def {} value (record {} Empty))\n",
         "(def {} matched (match {} (var {} value) ",
-        "(arm {} (pat-record {} Empty) () (lit {type: (t-prim {} int32)} 1)) ",
-        "(arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))\n",
+        "(arm {} (pat-record {} Empty) () (lit {type: (t-prim {} i32)} 1)) ",
+        "(arm {} (pat-wild {}) () (lit {type: (t-prim {} i32)} 0))))\n",
     );
     let deep = parse_deep(deep_source).expect("zero-field Deep records parse");
     let surf = format_program(&resugar_program(&deep).expect("zero-field records resugar"));
@@ -707,7 +707,7 @@ fn formatting_canonical_surf_is_idempotent() {
 
 #[test]
 fn property_preconditions_are_formatter_fixed_points() {
-    let source = "@property bounded forall(x: int32) where x <= 1:\n  true\n";
+    let source = "@property bounded forall(x: i32) where x <= 1:\n  true\n";
     let once = format_source(source).expect("canonical property parses");
     let twice = format_source(&once).expect("formatted property reparses");
 
@@ -819,15 +819,15 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
         "cast(1.1f32, f64)"
     );
     assert_eq!(
-        resugar_one("(cast {} (lit {type: (t-prim {} int32)} 42) (t-prim {} int64))"),
-        "cast(42i32, int64)"
+        resugar_one("(cast {} (lit {type: (t-prim {} i32)} 42) (t-prim {} i64))"),
+        "cast(42i32, i64)"
     );
 
     let source = concat!(
         "direct = cast(1.1, f64)\n",
-        "direct_i = cast(42, int64)\n",
+        "direct_i = cast(42, i64)\n",
         "widened = cast(1.1f32, f64)\n",
-        "widened_i = cast(42i32, int64)\n",
+        "widened_i = cast(42i32, i64)\n",
         "explicit_default_float = 1.0f32\n",
         "explicit_default_int = 42i32\n",
     );
@@ -845,8 +845,8 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
 #[test]
 fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
     let source = concat!(
-        "contextual = cast(-9223372036854775808, int64)\n",
-        "explicit = cast(-9223372036854775808i64, int64)\n",
+        "contextual = cast(-9223372036854775808, i64)\n",
+        "explicit = cast(-9223372036854775808i64, i64)\n",
     );
     let deep = desugar_program(&parse_str(source).expect("signed minima parse"));
     let surf = format_program(&resugar_program(&deep).expect("signed minima resugar"));
@@ -866,7 +866,7 @@ fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
 
 #[test]
 fn out_of_range_deep_integer_metadata_fails_closed_without_normalizer_panic() {
-    let mut deep = parse_deep("(lit {type: (t-prim {} int32)} -9223372036854775808)")
+    let mut deep = parse_deep("(lit {type: (t-prim {} i32)} -9223372036854775808)")
         .expect("structurally accepted Deep literal parses");
     let normalized = normalize_deep_for_surface_roundtrip(&deep)
         .expect("valid metadata for round-trip normalization");
@@ -899,7 +899,7 @@ fn inferred_block_literal_types_do_not_become_authored_annotations() {
 
     assert_eq!(surf, source);
 
-    let typed = "value = {\n  x: int32 = 1\n  x\n}\n";
+    let typed = "value = {\n  x: i32 = 1\n  x\n}\n";
     let deep = desugar_program(&parse_str(typed).expect("typed block parses"));
     assert_eq!(
         format_program(&resugar_program(&deep).expect("typed block resugars")),
@@ -955,14 +955,14 @@ fn empty_expression_and_type_tuples_normalize_to_unit_without_erasure() {
 #[test]
 fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
     for deep_source in [
-        "(lit {type: (t-prim {} int32)} -42)",
-        "(lit {type: (t-prim {} int8)} -128)",
-        "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+        "(lit {type: (t-prim {} i32)} -42)",
+        "(lit {type: (t-prim {} i8)} -128)",
+        "(lit {type: (t-prim {} i64)} -9223372036854775808)",
         "(lit {type: (t-prim {} f32)} -1.5)",
         "(lit {type: (t-prim {} f64), literal_source: integer} 42)",
         "(lit {type: (t-prim {} f64), literal_source: integer} -42)",
         "(lit {type: (t-prim {} f64)} -0.0)",
-        "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+        "(lit {type: (t-prim {} i64)} -9223372036854775808)",
         "(cast {} (lit {type: (t-prim {} f32)} -1.5) (t-prim {} f64))",
     ] {
         let deep = parse_deep(deep_source).expect("negative Deep literal parses");
@@ -991,7 +991,7 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
 fn negative_deep_literal_patterns_have_one_reparseable_surface_form() {
     for value in ["-42", "-1.5", "-0.0", "-9223372036854775808"] {
         let deep_source = format!(
-            "(def {{}} value (match {{}} (var {{}} x) (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} int32)}} 1)) (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} int32)}} 0))))"
+            "(def {{}} value (match {{}} (var {{}} x) (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} i32)}} 1)) (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} i32)}} 0))))"
         );
         let deep = parse_deep(&deep_source).expect("negative pattern fixture parses");
         let surf = format_program(&resugar_program(&deep).expect("negative pattern resugars"));
@@ -1058,11 +1058,10 @@ fn deep_application_callee_grouping_preserves_association_and_scope() {
 
 #[test]
 fn standalone_checked_definition_type_becomes_a_real_surf_signature() {
-    let deep =
-        parse_deep("(def {type: (t-prim {} int32)} value (lit {type: (t-prim {} int32)} 42))")
-            .expect("checked standalone definition parses");
+    let deep = parse_deep("(def {type: (t-prim {} i32)} value (lit {type: (t-prim {} i32)} 42))")
+        .expect("checked standalone definition parses");
     let surf = format_program(&resugar_program(&deep).expect("checked definition resugars"));
-    assert_eq!(surf, "value: int32 = 42\n");
+    assert_eq!(surf, "value: i32 = 42\n");
     let redesugared = desugar_program(&parse_str(&surf).expect("typed binding reparses"));
     assert_eq!(
         print_canonical(
@@ -1113,7 +1112,7 @@ fn canonical_program_round_trips_through_deep_and_the_shared_surf_ast() {
         "type Alias[a] = Option[a]\n",
         "sig standalone: f32 -> f32 ! { Diff }\n",
         "def identity(x: f32) -> f32 ! { Diff } = x\n",
-        "answer: int32 = 42\n",
+        "answer: i32 = 42\n",
     );
     let surf = parse_str(source).expect("canonical program parses");
     let deep = desugar_program(&surf);
@@ -1258,7 +1257,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "legacy_number = 0x10\n",
         "legacy_float = 42f32\n",
         "nullary_constructor = None()\n",
-        "@property grouped forall(x: int32) where (x <= 1): true\n",
+        "@property grouped forall(x: i32) where (x <= 1): true\n",
         "-- source footer\n",
     );
     let expected = concat!(
@@ -1276,7 +1275,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         // exact width-finalized form rather than migrating a legacy spelling.
         "legacy_float = 42f32\n",
         "nullary_constructor = None()\n",
-        "@property grouped forall(x: int32) where x <= 1:\n",
+        "@property grouped forall(x: i32) where x <= 1:\n",
         "  true\n",
         "-- source footer\n",
     );
@@ -1406,7 +1405,7 @@ fn migration_preserves_comments_attached_to_block_bindings() {
 #[test]
 fn migration_of_legacy_single_expression_function_blocks_is_a_fixed_point() {
     let legacy = concat!(
-        "def choose(x: Option[int32]): int32 = {\n",
+        "def choose(x: Option[i32]): i32 = {\n",
         "  match x with {\n",
         "    | Some(v) => v\n",
         "    | None => 0\n",
@@ -1419,7 +1418,7 @@ fn migration_of_legacy_single_expression_function_blocks_is_a_fixed_point() {
     assert_eq!(
         migrated,
         concat!(
-            "def choose(x: Option[int32]) -> int32 =\n",
+            "def choose(x: Option[i32]) -> i32 =\n",
             "  match x with {\n",
             "    | Some(v) => v\n",
             "    | None => 0\n",
@@ -1910,8 +1909,8 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
 #[test]
 fn deep_resugaring_recovers_dimension_and_precision_quantifiers() {
     let source = concat!(
-        "def sort_values[n, p](values: &tensor[n, p], axis: int32)",
-        " -> (tensor[n, p], tensor[n, int64]) = sort(values, axis)\n",
+        "def sort_values[n, p](values: &tensor[n, p], axis: i32)",
+        " -> (tensor[n, p], tensor[n, i64]) = sort(values, axis)\n",
     );
     let deep = desugar_program(&parse_str(source).expect("quantified definition parses"));
     let resugared = format_program(&resugar_program(&deep).expect("quantifiers resugar"));
@@ -1959,7 +1958,7 @@ fn tuple_destructuring_resugars_without_losing_linearity_markers() {
 #[test]
 fn synthesized_destructuring_temporaries_do_not_capture_authored_names() {
     let source = concat!(
-        "def keep_authored(a: int64) -> int64 = {\n",
+        "def keep_authored(a: i64) -> i64 = {\n",
         "  __chelis_tmp0 = a\n",
         "  _ = neg(a)\n",
         "  __chelis_tmp0\n",
@@ -2059,23 +2058,23 @@ fn normalization_uses_metadata_roles_for_syntax_and_expressions() {
 #[test]
 fn normalization_retains_property_parameter_types_with_a_signature() {
     let source = concat!(
-        "(defsig {} p (t-fn {} (t-prim {} int32) (t-prim {} bool))) ",
+        "(defsig {} p (t-fn {} (t-prim {} i32) (t-prim {} bool))) ",
         "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
-        "property_quantifiers: (params {} (x {type: (t-prim {} int32)})), ",
+        "property_quantifiers: (params {} (x {type: (t-prim {} i32)})), ",
         "property_preconditions: (tuple {})} p ",
-        "(fn {} (params {} (x {type: (t-prim {} int32)})) (lit {} true)))",
+        "(fn {} (params {} (x {type: (t-prim {} i32)})) (lit {} true)))",
     );
     let normalized = normalize_deep_for_surface_roundtrip(&parse_deep(source).unwrap()).unwrap();
     let printed = print_canonical(&normalized);
     assert_eq!(
-        printed.matches("x {type: (t-prim {} int32)}").count(),
+        printed.matches("x {type: (t-prim {} i32)}").count(),
         2,
         "{printed}"
     );
     chelis_deep::metadata::validate_metadata(&normalized).unwrap();
     resugar_program(&normalized).unwrap();
     let bad = source.replacen(
-        "property_quantifiers: (params {} (x {type: (t-prim {} int32)}))",
+        "property_quantifiers: (params {} (x {type: (t-prim {} i32)}))",
         "property_quantifiers: (params {} (x {type: (t-prim {} bool)}))",
         1,
     );

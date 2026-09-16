@@ -55,12 +55,12 @@ out = jac(
 
 TENSOR_FOLD_CANARY = """
 def builder[n](xs: tensor[n, f32]) -> tensor[n, f32] = {
-  idxs = range(cast(0, int64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
+  idxs = range(cast(0, i64), numel(copy(xs)))
+  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
   step = fn (state, i) -> {
     acc = state.0
     total = state.1
-    inner = fold(fn (inner_acc: tensor[n, f32], j: int64) -> add(inner_acc, xs), acc, idxs)
+    inner = fold(fn (inner_acc: tensor[n, f32], j: i64) -> add(inner_acc, xs), acc, idxs)
     (inner, add(total, i))
   }
   fold(step, state0, idxs).0

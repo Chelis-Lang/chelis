@@ -96,7 +96,7 @@ fn issue_207_check_exits_nonzero_on_type_mismatch() {
 /// errors array. Pins the other side of the iff invariant.
 #[test]
 fn issue_207_check_exits_zero_on_clean_program() {
-    let src = "def answer() -> int32 = cast(7, int32)\n";
+    let src = "def answer() -> i32 = cast(7, i32)\n";
     let tmp = write_tempfile("issue207-clean-", src);
     let (code, stdout) = run_check_capture(tmp.path());
     let errors = parse_errors_array(&stdout);
@@ -116,7 +116,7 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
     let fixtures = [
         (
             "clean",
-            "def answer() -> int32 = cast(7, int32)\n",
+            "def answer() -> i32 = cast(7, i32)\n",
             serde_json::json!({
                 "score": 1,
                 "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
@@ -273,7 +273,7 @@ fn issue_207_invariant_holds_across_error_categories() {
 /// one-sided implication.
 #[test]
 fn issue_207_invariant_holds_for_clean_program() {
-    let src = "def answer() -> int32 = cast(7, int32)\n";
+    let src = "def answer() -> i32 = cast(7, i32)\n";
     let tmp = write_tempfile("issue207-inv-clean-", src);
     let (code, stdout) = run_check_capture(tmp.path());
     let errors = parse_errors_array(&stdout);

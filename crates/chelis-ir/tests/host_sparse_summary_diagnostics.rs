@@ -141,7 +141,7 @@ fn multiple_roots_synthetic_helper_emits_structured_rejection() {
 
 #[test]
 fn indices_dtype_mismatch_gather_emits_structured_rejection() {
-    // Indices precision is f32 (not int32 / int64).
+    // Indices precision is f32 (not i32 / i64).
     let mut dag = Dag::new();
     let values_ty = t_f32(vec![1000, 128]);
     let bogus_indices_ty = t_f32(vec![64]);
@@ -188,7 +188,7 @@ fn indices_dtype_mismatch_gather_emits_structured_rejection() {
 
 #[test]
 fn indices_dtype_mismatch_scatter_add_emits_structured_rejection() {
-    // Indices precision is bool (not int32 / int64).
+    // Indices precision is bool (not i32 / i64).
     let mut dag = Dag::new();
     let target_ty = t_f32(vec![10, 4]);
     let bogus_indices_ty = TensorType {

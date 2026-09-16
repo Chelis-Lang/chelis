@@ -102,7 +102,7 @@ fn both_lanes(dir: &TempDir, stem: &str, source: &str) -> [(&'static str, LaneRe
 
 fn assert_add_result_claim(dir: &TempDir, stem: &str, source: &str) {
     let context = "extent `2`: claimed = 2, add axis 0 = 3";
-    let trap = "numeric trap: domain in add at int64";
+    let trap = "numeric trap: domain in add at i64";
     for (lane, result) in both_lanes(dir, stem, source) {
         assert!(
             !result.success,
@@ -122,7 +122,7 @@ fn assert_add_result_claim(dir: &TempDir, stem: &str, source: &str) {
         assert!(
             !result
                 .text
-                .contains("numeric trap: domain in shrink at int64"),
+                .contains("numeric trap: domain in shrink at i64"),
             "{lane}: operand order or origin traversal must not rename add's guard: {}",
             result.text
         );
@@ -211,7 +211,7 @@ fn runtime_operand_disagreement_precedes_the_result_claim() {
         );
         assert!(
             !result.text.contains("extent `2`")
-                && !result.text.contains("numeric trap: domain in add at int64"),
+                && !result.text.contains("numeric trap: domain in add at i64"),
             "{lane}: the later result claim must not pre-empt operand agreement: {}",
             result.text
         );

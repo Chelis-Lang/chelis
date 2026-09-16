@@ -64,7 +64,7 @@ fn staged_size_example_checks_exact_mask_and_rejects_a_false_result_claim() {
             assert!(
                 error.contains("claimed = 2")
                     && error.contains("reshape axis 0 = 3")
-                    && error.contains("numeric trap: domain in reshape at int64"),
+                    && error.contains("numeric trap: domain in reshape at i64"),
                 "{error}"
             );
         }

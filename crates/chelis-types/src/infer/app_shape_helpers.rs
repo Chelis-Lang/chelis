@@ -192,7 +192,7 @@ pub(super) enum SizeClass {
     /// the tensor's shape.
     ShapeSourced,
     /// A runtime value with no static value and no tensor source — a bare
-    /// `int32`/`int64` parameter, a `cast`/arithmetic over one, or a `let`
+    /// `i32`/`i64` parameter, a `cast`/arithmetic over one, or a `let`
     /// name bound to such. No backend representation; rejected at check
     /// (#469) so check↔build↔eval agree.
     Sourceless,
@@ -219,15 +219,15 @@ pub(super) fn sourceless_expand_size_error(
         CheckErrorKind::DimensionMismatch,
         format!(
             "`{builtin}` size resolves to {described}, but no tensor in scope carries \
-             it. Runtime extents use exact `int64`; source the value from an in-scope \
-             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime \
+             it. Runtime extents use exact `i64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, i32-axis)` read. A bare runtime \
              scalar has no shape identity to attach to the result yet. Tracked by \
              Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
         ),
         vec![
             "Source the extent from a tensor in scope with \
-             `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an \
-             exact `int64` literal extent."
+             `shape(x, cast(axis, i32))`, bind that read to a `let`, or use an \
+             exact `i64` literal extent."
                 .to_string(),
         ],
     )
@@ -415,7 +415,7 @@ fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
 /// (`fold_static_int_expr`), because the two decide one question about one
 /// category: whether an expression is checked integer arithmetic. They
 /// disagreed on the two integer division primitives, and `spec/05` section 2.1
-/// makes those the ONLY way to divide an int64 extent, `div` being float-only.
+/// makes those the ONLY way to divide an i64 extent, `div` being float-only.
 /// A static `floor_div(4i64, 2i64)` therefore folded and was admitted while a
 /// runtime `floor_div(shape(x, 0), 2i64)` was rejected as sourceless: the same
 /// operator on the same category, decided opposite ways by two enumerations
@@ -456,7 +456,7 @@ fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass 
 }
 
 /// Recognize a `shape(operand, axis)` application — possibly wrapped in one
-/// or more `cast(..., int32)` layers — and return its `operand` expr
+/// or more `cast(..., i32)` layers — and return its `operand` expr
 /// (chelis#397/#469). The check-layer analog of the IR layer's
 /// `shape_app_operand_axis`. The axis is not validated here (the operand's
 /// presence is what proves a tensor source); a runtime axis is fine.
@@ -561,7 +561,7 @@ fn type_is_tensor(ty: &Type) -> bool {
 /// Describe a non-literal axis argument for the issue #259 diagnostic.
 ///
 /// When the axis is a `(var name)` (the common case: a function-parameter
-/// `int32` such as `mean(&x, ax)`), name it so the user can see which
+/// `i32` such as `mean(&x, ax)`), name it so the user can see which
 /// binding is the runtime value. Otherwise fall back to a generic
 /// "non-constant expression" phrasing. Kept deliberately small: this only
 /// feeds a user-facing message, not a control-flow decision.

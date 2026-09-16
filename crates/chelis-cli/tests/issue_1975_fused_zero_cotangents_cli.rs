@@ -131,7 +131,7 @@ fn fused_constant_primal_trap_survives_successful_native_link() {
     let temp = tempfile::tempdir().unwrap();
     let binary = native(
         temp.path(),
-        "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, int32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n",
+        "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n",
     );
     for output in [
         cli(temp.path(), &["eval", "--file", "zero.ch"])

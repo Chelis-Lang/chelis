@@ -22,7 +22,7 @@
 //!
 //! `spec/04-type-system.md` section 4.7 makes a runtime extent guard a typed
 //! operation-precondition guard under [04-NUM-9], so the complete line is
-//! `numeric trap: domain in <op> at int64` with no prefix and no suffix, and
+//! `numeric trap: domain in <op> at i64` with no prefix and no suffix, and
 //! section 4.7's placement rule puts it "after every value it compares is
 //! available and before the first allocation or element access whose shape
 //! depends on the guarded extent".
@@ -57,7 +57,7 @@ fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
 
 /// The exact [04-NUM-9] line an extent guard renders.
 fn domain_trap_line(op: &str) -> String {
-    format!("numeric trap: domain in {op} at int64")
+    format!("numeric trap: domain in {op} at i64")
 }
 
 /// chelis#1374's shape, built directly so the inputs can be bound at the API
@@ -350,7 +350,7 @@ fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
 fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec![named("n")]);
-    // A movement bound source is extent-domain and therefore exactly `int64`
+    // A movement bound source is extent-domain and therefore exactly `i64`
     // ([05-DIM-1]); the f32 helper above is for tensor operands.
     let end = dag.add_node(
         RiscOp::Load { name: "end".into() },

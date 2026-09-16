@@ -259,7 +259,7 @@ fn eager_and_selected_initializer_errors_keep_the_entered_transcript() {
         assert_eq!(error.errors.len(), 1);
         assert_eq!(
             error.errors[0].message,
-            "numeric trap: division by zero in floor_div at int32"
+            "numeric trap: division by zero in floor_div at i32"
         );
     }
 }
@@ -277,7 +277,7 @@ fn a_caller_shadow_cannot_hide_the_selected_declarations_initializer_error() {
     assert_eq!(error.errors.len(), 1);
     assert_eq!(
         error.errors[0].message,
-        "numeric trap: division by zero in floor_div at int32"
+        "numeric trap: division by zero in floor_div at i32"
     );
 }
 
@@ -294,6 +294,6 @@ fn a_failing_actual_does_not_enter_the_selected_capture_initializer() {
     assert_eq!(error.errors.len(), 1);
     assert_eq!(
         error.errors[0].message,
-        "numeric trap: division by zero in floor_div at int32"
+        "numeric trap: division by zero in floor_div at i32"
     );
 }

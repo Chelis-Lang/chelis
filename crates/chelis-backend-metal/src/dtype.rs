@@ -9,7 +9,7 @@
 //! `spec/04-type-system.md` §1.1.3 + §5.7.1).
 //!
 //! Per `spec/04-type-system.md` §1.1.3 the active Metal dtype set is
-//! `{f32, f16, bf16, int8, int16, int32, int64, bool}` (everything
+//! `{f32, f16, bf16, i8, i16, i32, i64, bool}` (everything
 //! except `f64`, which Apple Silicon GPUs lack ALU support for).
 
 use chelis_types::types::Prim;
@@ -279,7 +279,7 @@ pub fn host_const_fill_body(prec: Prim, value: f64, buf: &str, n: usize) -> Stri
 ///
 /// Mirrors [`sum_accumulator`] but explicitly named for the matmul
 /// path so call sites read intent: `bf16/f16` operands accumulate in
-/// `f32`, narrow ints (`int8/int16`) accumulate in `int32`, and other
+/// `f32`, narrow ints (`i8/i16`) accumulate in `i32`, and other
 /// dtypes accumulate in their own precision. The kernel template
 /// downcasts the f32 accumulator back to operand precision at write-out
 /// time and casts both tile operands to f32 at the multiply (the spec

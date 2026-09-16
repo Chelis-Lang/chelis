@@ -12,7 +12,7 @@ fn split_if_after_def_gives_targeted_message() {
     // resulting in an empty body. If the body successfully parses (e.g.
     // there's some expression before the newline), this won't trigger.
     // We test the case where the body is literally empty — just `=` then newline then `if`.
-    let src = "def f(x: int32) =\ndef g(y: int32) = if y > 0 then y else 0\n";
+    let src = "def f(x: i32) =\ndef g(y: i32) = if y > 0 then y else 0\n";
     let result = parse_str(src);
     match result {
         Err(e) => {
@@ -33,7 +33,7 @@ fn split_if_after_def_gives_targeted_message() {
 fn split_if_after_eq_suggests_same_line_or_braces() {
     // Simulate a situation where after `=` there are no tokens before
     // the decl boundary (EOF).
-    let src = "def f(x: int32) =\n";
+    let src = "def f(x: i32) =\n";
     let result = parse_str(src);
     assert!(result.is_err(), "expected parse error for empty body");
     let msg = result.unwrap_err().to_string();
@@ -48,7 +48,7 @@ fn split_if_after_eq_suggests_same_line_or_braces() {
 
 #[test]
 fn match_without_with_keyword_gives_helpful_error() {
-    let src = "def f(x: int32) = match x { | 0 => 1 | _ => 2 }\n";
+    let src = "def f(x: i32) = match x { | 0 => 1 | _ => 2 }\n";
     let result = parse_str(src);
     assert!(
         result.is_err(),
@@ -63,7 +63,7 @@ fn match_without_with_keyword_gives_helpful_error() {
 
 #[test]
 fn match_without_braces_gives_helpful_error() {
-    let src = "def f(x: int32) = match x with | 0 => 1 | _ => 2\n";
+    let src = "def f(x: i32) = match x with | 0 => 1 | _ => 2\n";
     let result = parse_str(src);
     assert!(
         result.is_err(),
@@ -78,7 +78,7 @@ fn match_without_braces_gives_helpful_error() {
 
 #[test]
 fn match_with_braces_parses_correctly() {
-    let src = "def f(x: int32) = match x with { | 0 => 1 | _ => 2 }\n";
+    let src = "def f(x: i32) = match x with { | 0 => 1 | _ => 2 }\n";
     let result = parse_str(src);
     assert!(
         result.is_ok(),

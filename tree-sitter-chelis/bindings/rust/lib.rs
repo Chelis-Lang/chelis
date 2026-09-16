@@ -107,15 +107,15 @@ mod tests {
             "different_record_pattern = match p with { | Point { x: y } => y }\n",
             "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
-            "@property bounded forall(x: int32) where x <= 1: true\n",
-            "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true\n",
+            "@property bounded forall(x: i32) where x <= 1: true\n",
+            "@property grouped_operand forall(x: i32, y: i32) where (x + 1) <= y: true\n",
             "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
             "result = seed\n  |> f\n  |> g\n  |> h\n",
             "result = {\n  x =\n    seed\n    |> f\n    |> g\n    |> h\n  x\n}\n",
             // spec/02 §P4c dtype-family bounds (chelis#1417), on both
             // declaration forms and at every family.
             "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
-            "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]\n",
+            "sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]\n",
             "sig total[p: Numeric]: p -> p -> p\n",
             "def only_ints[p: Int](x: p) -> p = x\n",
             "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
@@ -176,7 +176,7 @@ mod tests {
     fn surf_v019_tree_sitter_keeps_the_permissive_declaration_boundary() {
         for source in [
             "type Point = | Point { x: f32 }\ndef update(p: Point) -> Point = p\n  with { x: 1.0f32 }\n",
-            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true\n",
+            "@property p forall(x: i32) where if lte(x, 1i32)\n  then true\n  else false: true\n",
         ] {
             assert_surf_parser_parity(source, true);
         }
@@ -203,9 +203,9 @@ mod tests {
     fn surf_v019_tree_sitter_rejects_newline_led_non_continuations() {
         for source in [
             // block binding value
-            "def f() -> int32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
             // block tail
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
             // `do` item
             "def f() -> bool = {\n  x = do {\n    true\n    == false\n  }\n  x\n}\n",
             // `par` item
@@ -223,8 +223,8 @@ mod tests {
     #[test]
     fn surf_v019_tree_sitter_keeps_the_exact_block_continuation_set() {
         for source in [
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
             "def f() -> bool = {\n  x = 1i32\n  x\n  == 2i32\n}\n",
             "def f() -> bool = {\n  x = true\n  x\n  && false\n}\n",
             "def f() -> bool = {\n  x = true\n  x\n  || false\n}\n",
@@ -262,15 +262,15 @@ mod tests {
             "result = do { f(x); g(y); }\n",
             "result = Some(x,)\n",
             "result = match x with { | Some(v,) => v }\n",
-            "sig trailing_type: Option[int32,]\n",
+            "sig trailing_type: Option[i32,]\n",
             "type Trailing[a,] = | Trailing(a,)\n",
-            "type TrailingRecord = | TrailingRecord { value: int32, }\n",
+            "type TrailingRecord = | TrailingRecord { value: i32, }\n",
             "import Demo (value,)\n",
             "export (value,)\n",
             "result = grad(f, wrt=(x, y,),)\n",
             "result = vmap(f, axis=1,)\n",
             "result = cast(x, f64,)\n",
-            "result = cast_trunc(x, int32,)\n",
+            "result = cast_trunc(x, i32,)\n",
             "result = with seed(1,) { x }\n",
             "def resource() ! { Resource(\"gpu:0\",), } = ()\n",
             "value = \"\\u{08}\\u{0}\\u{9}\\u{a}\\u{d}\\u{22}\\u{5c}\\u{41}\\u{B}\"\n",
@@ -332,7 +332,7 @@ mod tests {
             "value = match x with { | 9223372036854775808 => 0 }\n",
             "value: tensor[9223372036854775808, f32] = x\n",
             "@property bad forall():\n  true\n  with contract = contract_name\n",
-            "@property grouped forall(x: int32) where (x <= 1): true\n",
+            "@property grouped forall(x: i32) where (x <= 1): true\n",
             "value = \"raw\tcontrol\"\n",
             "value = \"raw\u{8}control\"\n",
             "value = \"raw\u{7f}control\"\n",

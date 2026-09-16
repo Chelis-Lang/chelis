@@ -151,7 +151,7 @@ fn spread_rank_library_capture_preserves_initializer_error() {
         assert_eq!(error.errors.len(), 1);
         assert_eq!(
             error.errors[0].message,
-            "numeric trap: division by zero in floor_div at int32"
+            "numeric trap: division by zero in floor_div at i32"
         );
         assert_eq!(error.transcript, ["entry", "initialize"]);
     }

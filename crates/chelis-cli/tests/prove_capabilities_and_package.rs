@@ -121,7 +121,7 @@ fn prove_package_flag_accepted() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("prop.ch"),
-        "@property trivial forall(x: int32):\n  x == x\n",
+        "@property trivial forall(x: i32):\n  x == x\n",
     )
     .unwrap();
     let output = Command::cargo_bin("chelis")
@@ -151,7 +151,7 @@ fn prove_package_auto_detects_reef_toml() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("prop.ch"),
-        "@property always_true forall(x: int32):\n  x == x\n",
+        "@property always_true forall(x: i32):\n  x == x\n",
     )
     .unwrap();
     let output = Command::cargo_bin("chelis")

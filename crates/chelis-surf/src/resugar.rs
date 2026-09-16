@@ -2404,14 +2404,14 @@ fn default_literal_suffix_is_semantic_in_cast(
     let suffix = literal_suffix(node.meta)?;
     let numeric_target = matches!(
         precision,
-        "f32" | "f64" | "bf16" | "f16" | "int8" | "int16" | "int32" | "int64"
+        "f32" | "f64" | "bf16" | "f16" | "i8" | "i16" | "i32" | "i64"
     );
     Ok(match (&node.children[0], suffix) {
         (DeepExpr::Atom(Atom::Float(_), _), Some(LiteralSuffix::F32)) => {
             matches!(precision, "f64" | "bf16" | "f16")
         }
         (DeepExpr::Atom(Atom::Int(_), _), Some(LiteralSuffix::I32)) => {
-            numeric_target && precision != "int32"
+            numeric_target && precision != "i32"
         }
         _ => false,
     })
@@ -2440,10 +2440,10 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
         }
         (DeepExpr::Atom(Atom::Int(value), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| match name {
-                "int8" => !integer_source && i8::try_from(*value).is_ok(),
-                "int16" => !integer_source && i16::try_from(*value).is_ok(),
-                "int32" => !integer_source && i32::try_from(*value).is_ok(),
-                "int64" => !integer_source,
+                "i8" => !integer_source && i8::try_from(*value).is_ok(),
+                "i16" => !integer_source && i16::try_from(*value).is_ok(),
+                "i32" => !integer_source && i32::try_from(*value).is_ok(),
+                "i64" => !integer_source,
                 "f16" | "bf16" | "f32" | "f64" => integer_source,
                 _ => false,
             }),
@@ -3675,10 +3675,10 @@ fn literal_suffix(meta: &Metadata) -> Result<Option<LiteralSuffix>, ResugarError
         "f64" => LiteralSuffix::F64,
         "bf16" => LiteralSuffix::Bf16,
         "f16" => LiteralSuffix::F16,
-        "int8" => LiteralSuffix::I8,
-        "int16" => LiteralSuffix::I16,
-        "int32" => LiteralSuffix::I32,
-        "int64" => LiteralSuffix::I64,
+        "i8" => LiteralSuffix::I8,
+        "i16" => LiteralSuffix::I16,
+        "i32" => LiteralSuffix::I32,
+        "i64" => LiteralSuffix::I64,
         _ => {
             return Err(ResugarError::InvalidChild {
                 tag: DeepTag::Lit.as_str(),

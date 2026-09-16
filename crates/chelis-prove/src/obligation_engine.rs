@@ -2071,9 +2071,9 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 
 /// Build a typed scalar literal Deep expr for a producer argument. Integer
 /// widths are recognized through the single-source `is_int_width` (review
-/// 5) and built width-appropriately: int32 is the literal default, the
-/// other widths cast an int32 literal to the target width (matching the
-/// generator's `int_lit`), so an int8/int16/int64 producer argument is a
+/// 5) and built width-appropriately: i32 is the literal default, the
+/// other widths cast an i32 literal to the target width (matching the
+/// generator's `int_lit`), so an i8/i16/i64 producer argument is a
 /// well-typed integer, not a silently-mistyped float.
 fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
     if crate::opaque::is_int_width(prim) {
@@ -2120,7 +2120,7 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
 
 fn sample_scalar(kind: &str, rng: &mut Lcg) -> ScalarValue {
     // Integer widths sample within the width's representable range via the
-    // single-source `int_sample_bounds` (review 5): an int8 producer arg
+    // single-source `int_sample_bounds` (review 5): an i8 producer arg
     // samples in [-128, 127], never an unrepresentable value.
     if let Some((lo, hi)) = crate::opaque::int_sample_bounds(kind) {
         return scalar_from_i64(
@@ -2188,12 +2188,12 @@ fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
         Span::new(0, 0),
     )
 }
-/// A width-appropriate integer literal Deep expr: an int32 literal for the
-/// default width, otherwise an int32 literal cast to the target width
+/// A width-appropriate integer literal Deep expr: an i32 literal for the
+/// default width, otherwise an i32 literal cast to the target width
 /// (review 5). `prim` must be an integer width (`is_int_width`).
 fn deep_int_lit_for(v: i64, prim: &str) -> Expr {
-    let lit = deep_typed_lit("int32", Expr::Atom(Atom::Int(v), Span::new(0, 0)));
-    if prim == "int32" {
+    let lit = deep_typed_lit("i32", Expr::Atom(Atom::Int(v), Span::new(0, 0)));
+    if prim == "i32" {
         lit
     } else {
         deep_node("cast", vec![lit, deep_node("t-prim", vec![deep_sym(prim)])])
@@ -2285,29 +2285,38 @@ mod finding_tests {
 
     #[test]
     fn scalar_flattening_moves_exact_bits_and_rejects_dtype_substitution() {
-        for wire in [
-            serde_json::json!({"dtype":"f16","bits":"7c01"}),
-            serde_json::json!({"dtype":"bf16","bits":"ff81"}),
-            serde_json::json!({"dtype":"f32","bits":"80000000"}),
-            serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
-            serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
-            serde_json::json!({"dtype":"int32","value":i32::MIN}),
-            serde_json::json!({"dtype":"int16","value":i16::MIN}),
-            serde_json::json!({"dtype":"int8","value":i8::MIN}),
+        for (wire, language_dtype) in [
+            (serde_json::json!({"dtype":"f16","bits":"7c01"}), "f16"),
+            (serde_json::json!({"dtype":"bf16","bits":"ff81"}), "bf16"),
+            (serde_json::json!({"dtype":"f32","bits":"80000000"}), "f32"),
+            (
+                serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
+                "f64",
+            ),
+            (
+                serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
+                "i64",
+            ),
+            (serde_json::json!({"dtype":"int32","value":i32::MIN}), "i32"),
+            (serde_json::json!({"dtype":"int16","value":i16::MIN}), "i16"),
+            (serde_json::json!({"dtype":"int8","value":i8::MIN}), "i8"),
         ] {
             let input: ExecutionValue =
                 serde_json::from_value(serde_json::json!({"type":"scalar","value":wire})).unwrap();
-            let dtype = wire["dtype"].as_str().unwrap();
             let mut env = BTreeMap::new();
             flatten_field_value(
                 &input,
-                &FieldType::Scalar(dtype.into()),
+                &FieldType::Scalar(language_dtype.into()),
                 "p.value",
                 &mut env,
             )
             .unwrap();
             assert_eq!(serde_json::to_value(env["p.value"]).unwrap(), wire);
-            let other = if dtype == "f32" { "f64" } else { "f32" };
+            let other = if language_dtype == "f32" {
+                "f64"
+            } else {
+                "f32"
+            };
             assert!(
                 flatten_field_value(
                     &input,
@@ -2438,7 +2447,7 @@ mod finding_tests {
 
     #[test]
     fn int64_scalar_field_flattens_without_crossing_f64() {
-        let fty = FieldType::Scalar("int64".to_string());
+        let fty = FieldType::Scalar("i64".to_string());
         let mut env = BTreeMap::new();
         flatten_field_value(
             &wire_values::scalar_integer(Prim::Int64, 9_007_199_254_740_993),
@@ -2446,13 +2455,13 @@ mod finding_tests {
             "p.value",
             &mut env,
         )
-        .expect("an int64 scalar field must flatten exactly");
+        .expect("an i64 scalar field must flatten exactly");
         assert_eq!(env["p.value"].as_i64_exact(), Some(9_007_199_254_740_993));
     }
 
     #[test]
     fn scalar_field_requires_the_exact_public_carrier_dtype() {
-        let fty = FieldType::Scalar("int64".to_string());
+        let fty = FieldType::Scalar("i64".to_string());
         let mut env = BTreeMap::new();
         let error = flatten_field_value(
             &wire_values::scalar_integer(Prim::Int32, 7),
@@ -2460,7 +2469,7 @@ mod finding_tests {
             "p.value",
             &mut env,
         )
-        .expect_err("an int32 carrier must not substitute for declared int64");
+        .expect_err("an i32 carrier must not substitute for declared i64");
         assert!(
             error.contains("not a scalar value"),
             "unexpected error: {error}"
@@ -2472,7 +2481,7 @@ mod finding_tests {
     fn int64_tensor_field_flattens_without_crossing_f64() {
         let fty = FieldType::Tensor {
             dims: vec![1],
-            precision: "int64".to_string(),
+            precision: "i64".to_string(),
         };
         let value = ExecutionValue::Tensor {
             value: TensorValue {
@@ -2482,7 +2491,7 @@ mod finding_tests {
         };
         let mut env = BTreeMap::new();
         flatten_field_value(&value, &fty, "p.ids", &mut env)
-            .expect("an int64 tensor field must flatten exactly");
+            .expect("an i64 tensor field must flatten exactly");
         assert_eq!(env["p.ids.0"].as_i64_exact(), Some(9_007_199_254_740_993));
     }
 
@@ -2490,7 +2499,7 @@ mod finding_tests {
     fn tensor_field_dtype_mismatch_fails_closed() {
         let fty = FieldType::Tensor {
             dims: vec![1],
-            precision: "int64".to_string(),
+            precision: "i64".to_string(),
         };
         let value = ExecutionValue::Tensor {
             value: TensorValue {
@@ -2516,7 +2525,7 @@ mod finding_tests {
         // representative width (and a couple of others for good measure).
         assert_eq!(prim_name(&Prim::Bf16), "bf16");
         assert_eq!(prim_name(&Prim::F32), "f32");
-        assert_eq!(prim_name(&Prim::Int64), "int64");
+        assert_eq!(prim_name(&Prim::Int64), "i64");
         // Every variant's canonical name must match `prim_name` exactly. This
         // list must enumerate the WHOLE `Prim` vocabulary (including the f8
         // widths) or the "every variant" claim is hollow.

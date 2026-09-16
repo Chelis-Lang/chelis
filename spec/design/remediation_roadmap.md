@@ -597,7 +597,7 @@ patch.
    with its final integer-capable form from the start - "if it lands before
    the break" is a fact pattern, not a hold; THIS sentence is the hold (PR
    #950 red team P2-5). The in-tree precedent is already final-from-the-start:
-   `packages/chelis-std/src/io/json.ch` carries `JsonInt(int64)` beside
+   `packages/chelis-std/src/io/json.ch` carries `JsonInt(i64)` beside
    `JsonFloat(f64)`.
 
    **v0.18.4 shipped an exported-signature change ahead of the 0.19 storage
@@ -696,7 +696,7 @@ Migration-note stubs (the breaking delta per cut):
   prints `1.2247449` where it printed `1.2247449159622192`; every op x dtype
   capability decision is now fixed (supported, or a cited stable rejection).
   Checked casts now trap instead of choosing an implicit conversion for
-  fractional float-to-integer values (`cast(3.5, int32)`) and non-member bool
+  fractional float-to-integer values (`cast(3.5, i32)`) and non-member bool
   values (`cast(2, bool)`); use the separately named `cast_trunc`,
   `cast_saturate`, or `cast_wrap` when that lossy rule is intended, and compose
   `round` with checked `cast` rather than expecting a `cast_round` mode.

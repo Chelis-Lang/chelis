@@ -227,7 +227,7 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
-    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, int32)
+    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, i32)
     Grad(Box<Expr>, Option<Vec<String>>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),
@@ -266,7 +266,7 @@ pub use chelis_deep::LiteralSuffix;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
-    /// Bare integer literal. Defaults to `int32` per spec §5.3 unless
+    /// Bare integer literal. Defaults to `i32` per spec §5.3 unless
     /// disambiguated by a suffix variant or surrounding context.
     Int(i64),
     /// Bare float literal. Defaults to `f32` per spec §5.3.

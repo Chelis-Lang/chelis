@@ -204,24 +204,24 @@ fn static_base_case_recursion_unrolls_within_cap() {
         (fn {}
           (params {}
             (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))})
-            (k {type: (t-prim {} int64)}))
+            (k {type: (t-prim {} i64)}))
           (if {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (app {} (var {} gte)
-              (var {type: (t-prim {} int64)} k)
-              (cast {} (lit {} 500) int64))
+              (var {type: (t-prim {} i64)} k)
+              (cast {} (lit {} 500) i64))
             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
               (var {} count_up)
               (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
               (app {} (var {} add)
-                (var {type: (t-prim {} int64)} k)
-                (cast {} (lit {} 1) int64)))))
+                (var {type: (t-prim {} i64)} k)
+                (cast {} (lit {} 1) i64)))))
     "#;
     let call_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
           (var {} count_up)
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed)
-          (cast {} (lit {} 0) int64))
+          (cast {} (lit {} 0) i64))
     "#;
 
     let mut program_defs = UnordMap::new();

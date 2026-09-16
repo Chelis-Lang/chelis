@@ -182,7 +182,7 @@ fn fused_default_single_and_reversed_subset_keep_their_target_identity() {
 fn non_differentiable_explicit_target_still_rejects() {
     let error = eval(EvalRequest {
         source_kind: SourceKind::Surf,
-        source: "def loss(count: int32, x: f32) -> f32 = mul(x, x)\nout = grad(loss, wrt=count)(2i32, 3.0f32)\n".into(),
+        source: "def loss(count: i32, x: f32) -> f32 = mul(x, x)\nout = grad(loss, wrt=count)(2i32, 3.0f32)\n".into(),
         bindings: Default::default(),
     }).expect_err("ordering must not admit a discrete cotangent target");
     assert!(

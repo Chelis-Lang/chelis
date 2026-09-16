@@ -1,4 +1,4 @@
-//! Sweep 3 of the numeric audit brief: bitwise ops beyond int64, the
+//! Sweep 3 of the numeric audit brief: bitwise ops beyond i64, the
 //! reduction family across dtypes, and the Bool dtype - eval vs compiled C.
 //!
 //! Findings (each confirmed by execution):
@@ -6,15 +6,15 @@
 //! | issue | one line |
 //! |---|---|
 //! | chelis#682 | bitand/shifts now agree across eval/C at every integer width, including boundary counts |
-//! | chelis#692 | max/min/prod/argmax/argmin reduce on an int64 tensor PANIC the compiler (emit.rs:4238/4406/4777) |
-//! | chelis#723 | the C print helper renders int64 elements through double, hiding an EXACT sum of 2^53 + 1 |
-//! | chelis#724 | mean of an int64 tensor: eval 187.5 (fractional in an int64 tensor), C 187.0 |
-//! | chelis#684 | eval's int64 tensor sum is genuinely lossy at 2^53 (Vec<f64> storage) |
+//! | chelis#692 | max/min/prod/argmax/argmin reduce on an i64 tensor PANIC the compiler (emit.rs:4238/4406/4777) |
+//! | chelis#723 | the C print helper renders i64 elements through double, hiding an EXACT sum of 2^53 + 1 |
+//! | chelis#724 | mean of an i64 tensor: eval 187.5 (fractional in an i64 tensor), C 187.0 |
+//! | chelis#684 | eval's i64 tensor sum is genuinely lossy at 2^53 (Vec<f64> storage) |
 //!
 //! And the clean surfaces, locked: the Bool dtype is correct end-to-end in
 //! both lanes (the lib.rs:144-152 "f32-encoded" comment notwithstanding -
 //! probed, not believed), all seven f32 reductions agree across lanes, and
-//! the C lane's int64 `sum` is EXACT at 2^53 + 1 (provable only through
+//! the C lane's i64 `sum` is EXACT at 2^53 + 1 (provable only through
 //! `to_list`, which is what #723 is about).
 //!
 //! Shift counts are explicitly width-bounded: bits shifted beyond the declared
@@ -188,7 +188,7 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    for ty in ["int8", "int16", "int32", "int64"] {
+    for ty in ["i8", "i16", "i32", "i64"] {
         for (label, expr, expected) in [
             (
                 "bitand",
@@ -229,29 +229,24 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
 #[test]
 fn eval_shift_width_semantics_are_locked() {
     assert_eq!(
-        eval_first_line(&scalar_program("shl(cast(1, int8), cast(7, int8))", "int8"))
-            .expect("eval"),
+        eval_first_line(&scalar_program("shl(cast(1, i8), cast(7, i8))", "i8")).expect("eval"),
         "-128"
     );
     assert_eq!(
-        eval_first_line(&scalar_program(
-            "shr(cast(-16, int64), cast(2, int64))",
-            "int64"
-        ))
-        .expect("eval"),
+        eval_first_line(&scalar_program("shr(cast(-16, i64), cast(2, i64))", "i64")).expect("eval"),
         "-4",
         "arithmetic (sign-preserving) right shift"
     );
 }
 
-/// Both lanes apply the declared int8 width after the shift.
+/// Both lanes apply the declared i8 width after the shift.
 #[test]
 fn shl_past_width_is_defined_as_fully_shifted_out() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    let program = scalar_program("shl(cast(1, int8), cast(9, int8))", "int8");
+    let program = scalar_program("shl(cast(1, i8), cast(9, i8))", "i8");
     assert_eq!(eval_first_line(&program).expect("eval"), "0");
     assert_eq!(c_first_line(&program, "shl_past_width"), "0");
 }
@@ -266,10 +261,10 @@ fn shift_boundaries_agree_across_lanes_and_are_ubsan_clean() {
         panic!("needs a host C toolchain with UBSan");
     }
     for (ty, width, min) in [
-        ("int8", 8, "-128"),
-        ("int16", 16, "-32768"),
-        ("int32", 32, "-2147483648"),
-        ("int64", 64, "-9223372036854775808"),
+        ("i8", 8, "-128"),
+        ("i16", 16, "-32768"),
+        ("i32", 32, "-2147483648"),
+        ("i64", 64, "-9223372036854775808"),
     ] {
         for (label, expr, expected) in [
             (
@@ -326,7 +321,7 @@ fn negative_shift_counts_trap_before_ubsan_at_every_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain with UBSan");
     }
-    for ty in ["int8", "int16", "int32", "int64"] {
+    for ty in ["i8", "i16", "i32", "i64"] {
         for op in ["shl", "shr"] {
             let program = scalar_program(&format!("{op}(cast(1, {ty}), cast(-1, {ty}))"), ty);
             let eval_err = eval_first_line(&program).expect_err("negative eval shift must fail");
@@ -360,9 +355,9 @@ fn integer_reduce_sum_overflow_traps_before_ubsan() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain with UBSan");
     }
-    for (ty, max) in [("int32", "2147483647"), ("int64", "9223372036854775807")] {
+    for (ty, max) in [("i32", "2147483647"), ("i64", "9223372036854775807")] {
         let program = format!(
-            "module M.Main\ndef run(x: tensor[2, {ty}]) -> tensor[{ty}] = sum(x, cast(0, int32))\n\
+            "module M.Main\ndef run(x: tensor[2, {ty}]) -> tensor[{ty}] = sum(x, cast(0, i32))\n\
              out = print(run(to_tensor([cast({max}, {ty}), cast(1, {ty})])))\n"
         );
         let expected = format!("numeric trap: overflow in sum at {ty}");
@@ -389,7 +384,7 @@ fn integer_reduce_sum_overflow_traps_before_ubsan() {
 }
 
 // ===========================================================================
-// chelis#692 - int64 reduce ops panic the compiler
+// chelis#692 - i64 reduce ops panic the compiler
 // ===========================================================================
 
 /// Before chelis#730 Phase 1, `chelis build` panicked instead of either
@@ -403,16 +398,16 @@ fn int64_max_reduce_does_not_panic_the_compiler() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[4, int64]) -> tensor[int64] = max_reduce(x, 0)\n\
-         out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
-         cast(200, int64), cast(50, int64)])))\n";
+         def f(x: tensor[4, i64]) -> tensor[i64] = max_reduce(x, 0)\n\
+         out = print(f(to_tensor([cast(100, i64), cast(400, i64), \
+         cast(200, i64), cast(50, i64)])))\n";
     let (ok, stderr, stdout) = c_build_outcome(program, "i64_maxred");
     assert!(
         !stderr.contains("panicked"),
         "the compiler must not panic; stderr: {stderr}"
     );
     if ok {
-        // chelis#732 Phase 2: rank-0 renders bare ([05-OBS-4]) and int64
+        // chelis#732 Phase 2: rank-0 renders bare ([05-OBS-4]) and i64
         // prints exact integers ([05-OBS-2]) in the compiled lane too.
         assert_eq!(
             stdout.as_deref(),
@@ -423,14 +418,14 @@ fn int64_max_reduce_does_not_panic_the_compiler() {
 }
 
 // ===========================================================================
-// chelis#723 / #684 - int64 sum exactness vs what gets printed
+// chelis#723 / #684 - i64 sum exactness vs what gets printed
 // ===========================================================================
 
 const I64_SUM_2P53: &str = "module M.Main\n\
-     def f(x: tensor[1, 2, int64]) -> tensor[1, int64] = sum(x, 1)\n\
-     out = print(to_list(f(to_tensor([[cast(9007199254740992, int64), cast(1, int64)]]))))\n";
+     def f(x: tensor[1, 2, i64]) -> tensor[1, i64] = sum(x, 1)\n\
+     out = print(to_list(f(to_tensor([[cast(9007199254740992, i64), cast(1, i64)]]))))\n";
 
-/// **The C lane's int64 tensor sum is EXACT at 2^53 + 1.** This `to_list`
+/// **The C lane's i64 tensor sum is EXACT at 2^53 + 1.** This `to_list`
 /// route originally proved that the computation was correct while the tensor
 /// printer still laundered the stored value through double (#723).
 #[test]
@@ -442,7 +437,7 @@ fn c_int64_tensor_sum_is_exact_via_to_list() {
     assert_eq!(
         c_first_line(I64_SUM_2P53, "i64_sum_exact"),
         "[9007199254740993]",
-        "the compiled int64 sum accumulates exactly"
+        "the compiled i64 sum accumulates exactly"
     );
 }
 
@@ -457,7 +452,7 @@ fn eval_int64_tensor_sum_is_exact_at_2p53() {
 }
 
 /// Green since chelis#732 Phase 2 (un-ignored per the plan's B2.3): the
-/// generated print helper prints int64 elements through `long long`
+/// generated print helper prints i64 elements through `long long`
 /// printf, so the direct tensor print carries the SAME exact sum `to_list`
 /// proved. (The pre-fix helper's `(double)` cast printed ...992.0,
 /// chelis#723.)
@@ -467,13 +462,13 @@ fn c_int64_tensor_print_is_exact_above_2p53() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[1, 2, int64]) -> tensor[1, int64] = sum(x, 1)\n\
-         out = print(f(to_tensor([[cast(9007199254740992, int64), cast(1, int64)]])))\n";
+         def f(x: tensor[1, 2, i64]) -> tensor[1, i64] = sum(x, 1)\n\
+         out = print(f(to_tensor([[cast(9007199254740992, i64), cast(1, i64)]])))\n";
     let line = c_first_line(program, "i64_sum_print");
-    common::assert_elements_in_domain("int64", &line, "i64_sum_print");
+    common::assert_elements_in_domain("i64", &line, "i64_sum_print");
     assert!(
         line.contains("9007199254740993"),
-        "the printed tensor must carry the exact int64 the runtime holds; got: {line}"
+        "the printed tensor must carry the exact i64 the runtime holds; got: {line}"
     );
 }
 
@@ -482,7 +477,7 @@ fn c_int64_tensor_print_is_exact_above_2p53() {
 // ===========================================================================
 
 /// Historical row (kept for the archaeology): eval printed 187.5 (a
-/// fractional value inside an int64-typed tensor) and compiled C printed
+/// fractional value inside an i64-typed tensor) and compiled C printed
 /// 187.0 - three stages, three answers. RE-AUTHORED at the chelis#729
 /// rework per the DECIDED chelis#724 disposition (reject integer mean):
 /// both lanes now agree by construction because `chelis check` rejects
@@ -495,9 +490,9 @@ fn int64_tensor_mean_lanes_agree() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[4, int64]) -> tensor[int64] = mean(x, 0)\n\
-         out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
-         cast(200, int64), cast(50, int64)])))\n";
+         def f(x: tensor[4, i64]) -> tensor[i64] = mean(x, 0)\n\
+         out = print(f(to_tensor([cast(100, i64), cast(400, i64), \
+         cast(200, i64), cast(50, i64)])))\n";
     let eval_err = eval_first_line(program)
         .expect_err("integer mean must be rejected by the checker (chelis#724)");
     assert!(
@@ -534,8 +529,8 @@ fn f32_reductions_agree_across_lanes() {
         ("max_reduce", "f32", "4.5"),
         ("min_reduce", "f32", "0.5"),
         ("prod_reduce", "f32", "8.4375"),
-        ("argmax_reduce", "int64", "1"),
-        ("argmin_reduce", "int64", "3"),
+        ("argmax_reduce", "i64", "1"),
+        ("argmin_reduce", "i64", "3"),
     ] {
         let program = format!(
             "module M.Main\n\
@@ -551,7 +546,7 @@ fn f32_reductions_agree_across_lanes() {
     }
 }
 
-/// int64 `sum` agrees across lanes on in-range values (the one int64
+/// i64 `sum` agrees across lanes on in-range values (the one i64
 /// reduction that neither panics nor diverges).
 #[test]
 fn int64_sum_agrees_across_lanes_in_range() {
@@ -560,10 +555,10 @@ fn int64_sum_agrees_across_lanes_in_range() {
         return;
     }
     let program = "module M.Main\n\
-         def f(x: tensor[4, int64]) -> tensor[int64] = sum(x, 0)\n\
-         out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
-         cast(200, int64), cast(50, int64)])))\n";
-    // chelis#732 Phase 2: BOTH lanes render the rank-0 int64 result bare
+         def f(x: tensor[4, i64]) -> tensor[i64] = sum(x, 0)\n\
+         out = print(f(to_tensor([cast(100, i64), cast(400, i64), \
+         cast(200, i64), cast(50, i64)])))\n";
+    // chelis#732 Phase 2: BOTH lanes render the rank-0 i64 result bare
     // ([05-OBS-4]) as an exact integer ([05-OBS-2]) - byte-identical.
     assert_eq!(eval_first_line(program).expect("eval"), "750");
     assert_eq!(c_first_line(program, "i64_sum_range"), "750");
@@ -596,7 +591,7 @@ fn bool_dtype_is_clean_in_both_lanes() {
             "tensor(shape=[3], data=[false, true, false])",
         ),
         (
-            "module M.Main\ndef run() -> int64 = cast(true, int64)\nout = print(run())\n",
+            "module M.Main\ndef run() -> i64 = cast(true, i64)\nout = print(run())\n",
             "1",
         ),
         (

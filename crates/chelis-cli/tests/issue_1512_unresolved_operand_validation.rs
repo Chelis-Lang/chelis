@@ -113,12 +113,12 @@ def main() -> tensor[1, 2, f32] = {\n  \
   g(x)\n}\n";
 
 const LEN_BAD: &str = "module Probe\n\
-def f(x: List[int32]) -> int64 = {\n  \
+def f(x: List[i32]) -> i64 = {\n  \
   g = fn (t) -> len(to_tensor(t))\n  \
   g(x)\n}\n";
 
 const LEN_GOOD: &str = "module Probe\n\
-def f(x: List[int32]) -> int64 = {\n  \
+def f(x: List[i32]) -> i64 = {\n  \
   g = fn (t) -> len(t)\n  \
   g(x)\n}\n";
 

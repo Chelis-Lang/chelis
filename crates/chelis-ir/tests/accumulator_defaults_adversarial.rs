@@ -4,7 +4,7 @@
 //!  - B. Accumulator-default resolution table (§5.7.1) — every row.
 //!  - B. Negative twins for accumulator narrowness rule (§5.7.1) for
 //!    EVERY operand precision the spec lists (the existing acceptance
-//!    file only covered int8, int16, bf16).
+//!    file only covered i8, i16, bf16).
 //!  - B. matmul rejection for bf16 with operand-narrower-than-default
 //!    accumulator (`accumulator=bf16` when default is f32).
 //!  - F. The accumulator field destructure-with-`..` pattern in the
@@ -23,11 +23,11 @@ use chelis_types::types::Prim;
 #[test]
 fn reduce_sum_int64_default_is_int64_self_matching() {
     let acc = RiscOp::default_reduce_sum_accumulator(Prim::Int64)
-        .expect("int64 reduce_sum default must succeed");
+        .expect("i64 reduce_sum default must succeed");
     assert_eq!(
         acc,
         Prim::Int64,
-        "spec §5.7.1: int64 reduce_sum default must be int64, not int32"
+        "spec §5.7.1: i64 reduce_sum default must be i64, not i32"
     );
 }
 
@@ -37,8 +37,8 @@ fn reduce_sum_default_bool_rejected_with_workaround_hint() {
     let err = RiscOp::default_reduce_sum_accumulator(Prim::Bool)
         .expect_err("bool reduce_sum has no defined default");
     assert!(
-        err.contains("cast to int32"),
-        "diagnostic must suggest the int32 cast workaround; got: {err}"
+        err.contains("cast to i32"),
+        "diagnostic must suggest the i32 cast workaround; got: {err}"
     );
 }
 
@@ -65,12 +65,12 @@ fn matmul_default_f8e4m3_rejected_with_spec_diagnostic() {
 }
 
 // ---------------------------------------------------------------
-// B. Per-row narrowness rule (negative-parity gap for f16, int32, int64)
+// B. Per-row narrowness rule (negative-parity gap for f16, i32, i64)
 // ---------------------------------------------------------------
 
 /// §5.7.1: f16 with explicit f16 accumulator (default is f32) must error.
 /// NEGATIVE PARITY: existing accumulator_defaults.rs only covers bf16
-/// and int8/int16. f16 is a separate row in the §5.7.1 table.
+/// and i8/i16. f16 is a separate row in the §5.7.1 table.
 #[test]
 fn reduce_sum_f16_with_explicit_f16_accumulator_is_rejected() {
     let err = RiscOp::sum_with_accumulator(0, Prim::F16, Prim::F16)
@@ -116,22 +116,22 @@ fn matmul_f16_with_explicit_f16_accumulator_is_rejected() {
     assert!(err.contains("§5.7.1"));
 }
 
-/// §5.7.1: cross-lane accumulator (f32 operand + int64 accumulator) must
+/// §5.7.1: cross-lane accumulator (f32 operand + i64 accumulator) must
 /// be rejected per `accumulator_at_least_as_wide`'s lane check.
 /// Existing tests don't pin lane crossing.
 #[test]
 fn reduce_sum_f32_operand_with_int64_accumulator_rejected_cross_lane() {
     let err = RiscOp::sum_with_accumulator(0, Prim::F32, Prim::Int64)
-        .expect_err("f32 operand + int64 accumulator must be rejected (cross-lane)");
+        .expect_err("f32 operand + i64 accumulator must be rejected (cross-lane)");
     assert!(err.contains("§5.7.1"));
 }
 
-/// §5.7.1: cross-lane the other way (int32 operand + f64 accumulator)
+/// §5.7.1: cross-lane the other way (i32 operand + f64 accumulator)
 /// must also be rejected.
 #[test]
 fn reduce_sum_int32_operand_with_f64_accumulator_rejected_cross_lane() {
     let err = RiscOp::sum_with_accumulator(0, Prim::Int32, Prim::F64)
-        .expect_err("int32 operand + f64 accumulator must be rejected (cross-lane)");
+        .expect_err("i32 operand + f64 accumulator must be rejected (cross-lane)");
     assert!(err.contains("§5.7.1"));
 }
 
@@ -148,12 +148,12 @@ fn reduce_sum_f32_operand_with_f64_accumulator_accepted() {
     }
 }
 
-/// §5.7.1: reduce_sum on int8 with int64 accumulator (wider than int32
+/// §5.7.1: reduce_sum on i8 with i64 accumulator (wider than i32
 /// default) must be accepted.
 #[test]
 fn reduce_sum_int8_operand_with_int64_accumulator_accepted() {
     let op = RiscOp::sum_with_accumulator(0, Prim::Int8, Prim::Int64)
-        .expect("int8 + int64 accumulator must be accepted (wider than int32 default)");
+        .expect("i8 + i64 accumulator must be accepted (wider than i32 default)");
     match op {
         RiscOp::Sum { accumulator, .. } => assert_eq!(accumulator, Prim::Int64),
         other => panic!("expected RiscOp::Sum, got {other:?}"),

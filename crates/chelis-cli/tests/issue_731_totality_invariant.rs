@@ -62,7 +62,7 @@ use chelis_types::{CheckedProgram, InferResult};
 
 const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
 /// Same ill-typed expression the chelis#709 canary uses.
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// Mirror of `should_attach_type_metadata`'s exclusion list
 /// (crates/chelis-types/src/infer.rs). A List node whose tag is NOT in
@@ -453,7 +453,7 @@ fn control_wellformed_dp_checks_clean_and_total() {
         ),
         (
             "def_with_body",
-            "(module {} m.main (def {} answer (lit {type: (t-prim {} int32)} 7)))",
+            "(module {} m.main (def {} answer (lit {type: (t-prim {} i32)} 7)))",
         ),
     ];
     for (name, program) in cases {

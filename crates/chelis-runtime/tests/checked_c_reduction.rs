@@ -288,7 +288,7 @@ fn malformed_and_overflowing_domains_fail_with_the_owning_numeric_trap() {
         assert!(
             stderr
                 .lines()
-                .any(|line| line == format!("numeric trap: {class} in count at int64")),
+                .any(|line| line == format!("numeric trap: {class} in count at i64")),
             "{case}: {stderr}"
         );
     }
@@ -316,7 +316,7 @@ fn every_reduction_preserves_its_canonical_diagnostic_identity() {
         assert!(
             stderr
                 .lines()
-                .any(|line| line == format!("numeric trap: domain in {name} at int64")),
+                .any(|line| line == format!("numeric trap: domain in {name} at i64")),
             "{name}: {stderr}"
         );
     }

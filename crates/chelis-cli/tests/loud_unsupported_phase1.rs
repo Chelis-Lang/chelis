@@ -171,7 +171,7 @@ fn stubbed_builtins_are_rejected_with_the_branded_shape() {
     let cases: &[(&str, &str, &str)] = &[(
         "tensor_scan_705",
         "def gen() -> tensor[5, f32] = \
-             tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+             tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
              out = gen()\n",
         "tensor_scan",
     )];
@@ -239,8 +239,8 @@ fn to_string_of_tensor_and_list_is_rejected_branded() {
     );
 
     let list_program = "module M.Main\n\
-         def f(xs: List[int64]) -> string = to_string(xs)\n\
-         out = print(f([cast(1, int64), cast(2, int64)]))\n";
+         def f(xs: List[i64]) -> string = to_string(xs)\n\
+         out = print(f([cast(1, i64), cast(2, i64)]))\n";
     assert_eq!(
         eval_first_line(list_program).expect("eval stringifies lists"),
         "[1, 2]"
@@ -258,10 +258,10 @@ fn to_string_scalar_arms_still_work() {
         return;
     }
     let got = c_run_first_line(
-        "module M.Main\ndef f() -> string = to_string(cast(7, int64))\nout = print(f())\n",
+        "module M.Main\ndef f() -> string = to_string(cast(7, i64))\nout = print(f())\n",
         "ts_ctl_p1",
     )
-    .expect("to_string of an int64 scalar must keep working");
+    .expect("to_string of an i64 scalar must keep working");
     assert_eq!(got, "7");
 }
 
@@ -306,7 +306,7 @@ fn narrow_scalar_arithmetic_computes_at_declared_width() {
     );
 }
 
-/// Control: f32/f64/int64 scalar arithmetic - the resolved host types -
+/// Control: f32/f64/i64 scalar arithmetic - the resolved host types -
 /// keeps building and running.
 #[test]
 fn resolved_scalar_arithmetic_still_works() {
@@ -322,7 +322,7 @@ fn resolved_scalar_arithmetic_still_works() {
             "ctl_f32_add_p1",
         ),
         (
-            "module M.Main\ndef f() -> int64 = add(cast(126, int64), cast(1, int64))\n\
+            "module M.Main\ndef f() -> i64 = add(cast(126, i64), cast(1, i64))\n\
              out = print(f())\n",
             "127",
             "ctl_i64_add_p1",

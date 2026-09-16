@@ -19,9 +19,9 @@ lowering stage MAY assume and SHALL NOT re-litigate.
 #### Scenario: Direct recursion at one instantiation
 
 - **WHEN** `chelis build` compiles a program where a recursive generic `loop` over
-  `Box[a]` is applied at `Box[int32]`
+  `Box[a]` is applied at `Box[i32]`
 - **THEN** the emitted C contains exactly one specialized `loop` definition for
-  `Box[int32]`, its recursive call targets that same symbol, and the compiled binary
+  `Box[i32]`, its recursive call targets that same symbol, and the compiled binary
   runs with the checked program's exact output
 
 #### Scenario: Distinct instantiations get distinct specializations

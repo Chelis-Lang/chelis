@@ -18,7 +18,12 @@ def run(reference_json):
         array = np.asarray(decoded.data, dtype=dtype).reshape(decoded.shape)
         assert chelis._tensor_value_payload(array) == wire, decoded.dtype
         dims = ", ".join(str(dim) for dim in decoded.shape)
-        signature = f"{dims}, {decoded.dtype}" if dims else decoded.dtype
+        language_dtype = (
+            decoded.dtype.replace("int", "i", 1)
+            if decoded.dtype.startswith("int")
+            else decoded.dtype
+        )
+        signature = f"{dims}, {language_dtype}" if dims else language_dtype
         result = chelis.eval(f"x = (x : tensor[{signature}])\n", {"x": array})
         root = next(root for root in result.roots if root.name == "x")
         assert isinstance(root.value, chelis.TensorValue)

@@ -1272,7 +1272,7 @@ fn resolve_transform_fn_for_formals<'a>(
 }
 
 /// Static non-negative int literal: a bare int atom, `(lit {} n)`, or a
-/// `cast(n, int32)` wrapper (mirrors the lowerer's
+/// `cast(n, i32)` wrapper (mirrors the lowerer's
 /// `extract_usize_value` shapes for the vmap axis argument).
 fn static_usize_value(expr: &Expr) -> Option<usize> {
     match expr {
@@ -1384,10 +1384,10 @@ pub(super) fn prim_from_name(name: &str) -> Option<Prim> {
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
              should have been rejected upstream"
         ),
-        "int8" => Prim::Int8,
-        "int16" => Prim::Int16,
-        "int32" => Prim::Int32,
-        "int64" => Prim::Int64,
+        "i8" => Prim::Int8,
+        "i16" => Prim::Int16,
+        "i32" => Prim::Int32,
+        "i64" => Prim::Int64,
         "bool" => Prim::Bool,
         "string" => Prim::String,
         _ => return None,
@@ -1413,10 +1413,10 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
             "f8e4m3 is deferred per spec/04-type-system.md §1.1.1 and \
              should have been rejected upstream"
         ),
-        Prim::Int8 => "int8",
-        Prim::Int16 => "int16",
-        Prim::Int32 => "int32",
-        Prim::Int64 => "int64",
+        Prim::Int8 => "i8",
+        Prim::Int16 => "i16",
+        Prim::Int32 => "i32",
+        Prim::Int64 => "i64",
         Prim::Bool => "bool",
         Prim::String => "string",
     };
@@ -1469,10 +1469,10 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
 /// visible while lowering a staged List spine.
 fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Expr {
     let prim_name = match precision {
-        Prim::Int8 => "int8",
-        Prim::Int16 => "int16",
-        Prim::Int32 => "int32",
-        Prim::Int64 => "int64",
+        Prim::Int8 => "i8",
+        Prim::Int16 => "i16",
+        Prim::Int32 => "i32",
+        Prim::Int64 => "i64",
         _ => panic!("integer transform argument unexpectedly declared with non-integer dtype"),
     };
     let prim_node = Expr::List(

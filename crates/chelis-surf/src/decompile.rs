@@ -216,7 +216,7 @@ mod tests {
         for malformed in [
             "(lit {type: (t-prim {} f32)} 7)",
             "(lit {type: (t-prim {} f32), literal_source: integer} 7.0)",
-            "(lit {type: (t-prim {} int32), literal_source: integer} 7)",
+            "(lit {type: (t-prim {} i32), literal_source: integer} 7)",
             "(lit {type: (t-prim {} f32), literal_source: float} 7)",
             "(lit {type: (t-prim {} f32), literal_source: integer, \
              literal_source: integer} 7)",

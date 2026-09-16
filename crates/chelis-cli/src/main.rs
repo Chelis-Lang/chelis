@@ -517,6 +517,20 @@ enum MigrateCommand {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
+    /// Rewrite canonical Deep v0.18 integer names to canonical Deep v0.19.
+    Deep {
+        /// Source grammar version. The only supported legacy version is 0.18.
+        #[arg(long)]
+        from: String,
+        /// Verify that every path is already migrated without writing.
+        #[arg(long)]
+        check: bool,
+        /// Rewrite every path after the complete batch passes preflight.
+        #[arg(long)]
+        inplace: bool,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -907,6 +921,12 @@ fn main() {
                 inplace,
                 paths,
             } => cmd_migrate_surf(&from, &paths, check, inplace),
+            MigrateCommand::Deep {
+                from,
+                check,
+                inplace,
+                paths,
+            } => cmd_migrate_deep(&from, &paths, check, inplace),
         },
         Some(Command::Eval {
             file,
@@ -1237,7 +1257,7 @@ fn cmd_migrate_surf(
         }
     }
     if !blocked.is_empty() {
-        return Err(describe_blocked_migrations(&blocked, paths.len(), inplace).into());
+        return Err(describe_blocked_migrations("Surf", &blocked, paths.len(), inplace).into());
     }
 
     if check {
@@ -1258,6 +1278,83 @@ fn cmd_migrate_surf(
         print!("{migrated}");
     }
     Ok(())
+}
+
+fn cmd_migrate_deep(
+    from: &str,
+    paths: &[PathBuf],
+    check: bool,
+    inplace: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if from != "0.18" {
+        return Err(format!(
+            "unsupported Deep migration source version `{from}`; expected `--from 0.18`"
+        )
+        .into());
+    }
+    if check && inplace {
+        return Err(
+            "`chelis migrate deep` does not allow `--check` and `--inplace` together".into(),
+        );
+    }
+    if !check && !inplace && paths.len() != 1 {
+        return Err(
+            "printing a migration requires exactly one path; use `--check` or `--inplace` for a batch"
+                .into(),
+        );
+    }
+
+    let mut migrations = Vec::with_capacity(paths.len());
+    let mut blocked = Vec::new();
+    for path in paths {
+        match preflight_deep_migration(path) {
+            Ok(migration) => migrations.push(migration),
+            Err(failure) => blocked.push(failure),
+        }
+    }
+    if !blocked.is_empty() {
+        return Err(describe_blocked_migrations("Deep", &blocked, paths.len(), inplace).into());
+    }
+
+    if check {
+        let stale = migrations
+            .iter()
+            .filter(|(_, source, migrated)| source != migrated)
+            .map(|(path, _, _)| path.display().to_string())
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        return Err(format!("Deep v0.18 migration required: {}", stale.join(", ")).into());
+    }
+
+    if inplace {
+        persist_migrations_atomically(&migrations)?;
+    } else if let Some((_, _, migrated)) = migrations.into_iter().next() {
+        print!("{migrated}");
+    }
+    Ok(())
+}
+
+fn preflight_deep_migration(path: &Path) -> Result<(PathBuf, String, String), String> {
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let migrated = chelis_deep::migration::migrate_source_v018(&source)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let parsed = chelis_deep::parser::parse_and_stamp_file(&migrated).map_err(|error| {
+        format!(
+            "{}: migrated output does not parse: {error}",
+            path.display()
+        )
+    })?;
+    let canonical = chelis_deep::printer::print_canonical(&parsed);
+    if canonical != migrated {
+        return Err(format!(
+            "{}: migration output was not a canonical Deep printer fixed point",
+            path.display()
+        ));
+    }
+    Ok((path.to_path_buf(), source, migrated))
 }
 
 /// Migrate one file and prove the result canonical, returning the staged
@@ -1334,7 +1431,12 @@ fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String>
 /// Only `--inplace` promises that nothing was written, so only `--inplace`
 /// says so. Reporting an untaken write on a read-only run would invite the
 /// reader to look for damage that was never possible.
-fn describe_blocked_migrations(blocked: &[String], total: usize, inplace: bool) -> String {
+fn describe_blocked_migrations(
+    carrier: &str,
+    blocked: &[String],
+    total: usize,
+    inplace: bool,
+) -> String {
     if let [only] = blocked {
         return only.clone();
     }
@@ -1344,7 +1446,7 @@ fn describe_blocked_migrations(blocked: &[String], total: usize, inplace: bool) 
         ""
     };
     format!(
-        "{} of {total} files blocked the Surf v0.18 migration{consequence}:\n  {}",
+        "{} of {total} files blocked the {carrier} v0.18 migration{consequence}:\n  {}",
         blocked.len(),
         blocked.join("\n  "),
     )
@@ -9769,7 +9871,7 @@ fn enumerate_test_fns(
         // Tests must be genuinely nullary functions with a `test_<name>` prefix
         // (not `test_` alone) and must return unit — either implicitly (no
         // annotation), via `-> unit`, or via `-> _`. Rejecting non-unit return
-        // types is what keeps typed-value bindings like `def test_x : int64 = 42`
+        // types is what keeps typed-value bindings like `def test_x : i64 = 42`
         // from being mis-enumerated as zero-arg tests and cascading compile
         // errors across every other test in the same file (RT3 H4).
         if !name.starts_with("test_") || name == "test_" {
@@ -12359,7 +12461,7 @@ mod eval_only_pruning_tests {
     #[test]
     fn drops_unreachable_eval_only_def_but_keeps_entry() {
         let full = desugar(
-            "def unused_runner(cmd: string, args: List[string]) -> (int64, string, string) = process_run(cmd, args)\n\
+            "def unused_runner(cmd: string, args: List[string]) -> (i64, string, string) = process_run(cmd, args)\n\
              def main(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] = matmul(&x, &w)\n",
         );
         let entry = desugar(
@@ -12383,7 +12485,7 @@ mod eval_only_pruning_tests {
     #[test]
     fn keeps_reachable_eval_only_def_for_the_gate() {
         let exprs =
-            desugar("def main() -> (int64, string, string) = process_run(\"echo\", [\"hi\"])\n");
+            desugar("def main() -> (i64, string, string) = process_run(\"echo\", [\"hi\"])\n");
         let entry = exprs.clone();
         let kept = drop_unreachable_eval_only_defs(exprs, &entry);
         let names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
@@ -12416,7 +12518,7 @@ mod runtime_dim_reject_tests {
             .collect()
     }
 
-    /// Load x: [4] f32 plus a rank-0 int32 Load scalar (not a `Shape` read;
+    /// Load x: [4] f32 plus a rank-0 i32 Load scalar (not a `Shape` read;
     /// the HIP seam blanket-rejects `Shape` first and these tests must
     /// exercise the movement/reshape arms).
     fn dag_with_scalar() -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {

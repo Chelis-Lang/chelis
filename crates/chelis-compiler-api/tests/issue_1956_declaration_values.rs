@@ -71,7 +71,7 @@ fn initializer_runs_once_eager_or_lazy_through_nested_calls() {
 
 #[test]
 fn nullary_calls_aliases_and_observation_roots_remain_distinct() {
-    let source = "def value() -> int32 = 5\nalias = value\ndef noisy() -> int32 ! { IO } = { _ = print(\"call\")\n 7 }\nout = add(noisy(), noisy())\nother = alias()\n";
+    let source = "def value() -> i32 = 5\nalias = value\ndef noisy() -> i32 ! { IO } = { _ = print(\"call\")\n 7 }\nout = add(noisy(), noisy())\nother = alias()\n";
     let result = eval(request(source)).unwrap();
     assert_eq!(result.transcript, ["call", "call"]);
     for (name, expected) in [("value", 5), ("out", 14), ("other", 5)] {
@@ -151,11 +151,11 @@ fn qualified_private_declarations_with_the_same_terminal_stay_distinct() {
     let context = linked_context(&[
         (
             "left.ch",
-            "module Probe.Left\nexport (left)\nvalue = { _ = print(\"left\")\n 3 }\ndef left(x: int32) -> int32 = add(value, x)\n",
+            "module Probe.Left\nexport (left)\nvalue = { _ = print(\"left\")\n 3 }\ndef left(x: i32) -> i32 = add(value, x)\n",
         ),
         (
             "right.ch",
-            "module Probe.Right\nexport (right)\nvalue = { _ = print(\"right\")\n 5 }\ndef right(x: int32) -> int32 = add(value, x)\n",
+            "module Probe.Right\nexport (right)\nvalue = { _ = print(\"right\")\n 5 }\ndef right(x: i32) -> i32 = add(value, x)\n",
         ),
     ]);
     let result = selected_context_out(
@@ -178,11 +178,11 @@ fn qualified_private_declarations_with_the_same_terminal_stay_distinct() {
 fn new_source_replaces_library_value_and_callable_without_cross_request_reuse() {
     let context = linked_context(&[(
         "values.ch",
-        "module Probe.Values\nexport (value, read)\nvalue = { _ = print(\"library\")\n 3 }\ndef read(x: int32) -> int32 = add(value, x)\n",
+        "module Probe.Values\nexport (value, read)\nvalue = { _ = print(\"library\")\n 3 }\ndef read(x: i32) -> i32 = add(value, x)\n",
     )]);
     for replacement in [7, 11, 7] {
         let source = format!(
-            "module Probe.Values\nvalue = {{ _ = print(\"source\")\n {replacement} }}\ndef read(x: int32) -> int32 = add(value, mul(x, 2))\nout = read(1)\n"
+            "module Probe.Values\nvalue = {{ _ = print(\"source\")\n {replacement} }}\ndef read(x: i32) -> i32 = add(value, mul(x, 2))\nout = read(1)\n"
         );
         let result = selected_context_out(&context, &source);
         let out = result
@@ -202,7 +202,7 @@ fn new_source_replaces_library_value_and_callable_without_cross_request_reuse() 
 fn reused_prepared_request_reinitializes_successful_library_values() {
     let context = linked_context(&[(
         "values.ch",
-        "module Probe.Values\nexport (read)\nvalue = { _ = print(\"initialize\")\n 3 }\ndef read(x: int32) -> int32 = add(value, x)\n",
+        "module Probe.Values\nexport (read)\nvalue = { _ = print(\"initialize\")\n 3 }\ndef read(x: i32) -> i32 = add(value, x)\n",
     )]);
     let prepared = chelis_compiler_api::compiler::prepare_eval_in_context(
         &context,

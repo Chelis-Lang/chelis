@@ -1,8 +1,8 @@
 module Std.Tests.Init.Kaiming
 import Std.Init.Kaiming (kaiming_normal, kaiming_uniform)
 import Std.Test (assert_close_tensor, assert_shape, assert_true)
-def template1024() -> tensor[1024, f32] = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(1024, int64))))
-def template8() -> tensor[8, f32] = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(8, int64))))
+def template1024() -> tensor[1024, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(1024, i64))))
+def template8() -> tensor[8, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(8, i64))))
 def sample_std[n](t: tensor[n, f32]) -> f32 = {
   xs = to_list(t)
   total = fold(fn (acc: f32, x: f32) -> add(acc, x), cast(0.0, f32), xs)
@@ -47,11 +47,11 @@ def test_kaiming_normal_distinct_seeds_produce_distinct_samples() -> unit ! { Te
 }
 def test_kaiming_uniform_preserves_template_shape() -> unit ! { Test } = {
   out = with seed(11i64) { kaiming_uniform(template8(), cast(4.0, f32)) }
-  assert_shape(out, [cast(8, int64)], "kaiming_uniform output rank-1 length matches template (8)")
+  assert_shape(out, [cast(8, i64)], "kaiming_uniform output rank-1 length matches template (8)")
 }
 def test_kaiming_normal_preserves_template_shape() -> unit ! { Test } = {
   out = with seed(12i64) { kaiming_normal(template8(), cast(4.0, f32)) }
-  assert_shape(out, [cast(8, int64)], "kaiming_normal output rank-1 length matches template (8)")
+  assert_shape(out, [cast(8, i64)], "kaiming_normal output rank-1 length matches template (8)")
 }
 def test_kaiming_uniform_respects_bound() -> unit ! { Test } = {
   out = with seed(13i64) { kaiming_uniform(template1024(), cast(4.0, f32)) }

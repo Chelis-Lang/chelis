@@ -2013,8 +2013,9 @@ impl Parser {
             TokenKind::Cast => Some(CastMode::Checked),
             TokenKind::CastTrunc => Some(CastMode::Trunc),
             _ => None,
-        } && let Some(precision) = self.peek_one_arg_cast_precision()
+        } && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
         {
+            self.reject_retired_integer_dtype_name(&precision, precision_span)?;
             let cast_tok = self.advance(); // consume Cast / CastTrunc
             let span = cast_tok.span;
             self.advance(); // consume LParen
@@ -2061,7 +2062,7 @@ impl Parser {
     /// the precision identifier (the type name). Otherwise `None`.
     /// Used by `parse_pipe_stage` to recognize the H3 one-arg
     /// `cast(type)` pipe-stage form without consuming tokens on miss.
-    fn peek_one_arg_cast_precision(&self) -> Option<String> {
+    fn peek_one_arg_cast_precision(&self) -> Option<(String, Span)> {
         // Caller has already verified `self.peek() == Cast`. We need to
         // look at the token after Cast (skipping newlines), then the
         // token after that, etc. Using `peek_after_current` would only
@@ -2103,8 +2104,11 @@ impl Parser {
             pos += 1;
         }
         // Expect Ident (the precision name).
-        let precision = match self.tokens.get(pos).map(|t| &t.kind) {
-            Some(TokenKind::Ident(name)) => name.clone(),
+        let (precision, precision_span) = match self.tokens.get(pos) {
+            Some(token) => match &token.kind {
+                TokenKind::Ident(name) => (name.clone(), token.span),
+                _ => return None,
+            },
             _ => return None,
         };
         pos += 1;
@@ -2121,7 +2125,7 @@ impl Parser {
         ) {
             return None;
         }
-        Some(precision)
+        Some((precision, precision_span))
     }
 
     /// Pick a fresh `__chelis_pipe[N]` parameter name. Mirrors the desugar
@@ -2549,7 +2553,8 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
-        let (precision, _) = self.expect_ident()?;
+        let (precision, precision_span) = self.expect_ident()?;
+        self.reject_retired_integer_dtype_name(&precision, precision_span)?;
         self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Cast(
@@ -3105,6 +3110,7 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
+                self.reject_retired_integer_dtype_name(&name, tok.span)?;
                 Ok(TypeExpr::Named(name, tok.span))
             }
             TokenKind::TypeIdent(name) => {
@@ -3707,6 +3713,22 @@ impl Parser {
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(Some(effects))
+    }
+
+    fn reject_retired_integer_dtype_name(&self, name: &str, span: Span) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical
+            && let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name)
+        {
+            return Err(ParseError::Expected {
+                expected: format!(
+                    "canonical integer dtype `{canonical}`; run \
+                     `chelis migrate surf --from 0.18` to rewrite v0.18 source"
+                ),
+                found: format!("retired v0.18 integer dtype `{name}`"),
+                offset: span.offset,
+            });
+        }
+        Ok(())
     }
 
     fn parse_effect_expr(&mut self) -> Result<EffectExpr, ParseError> {
@@ -4733,9 +4755,9 @@ mod tests {
         // Negative #14 (chelis#1267): canonical Surf v0.19 rejects `;` as a
         // block separator (spec/02-surf-syntax.md §P5, §P12), so the
         // diagnostic must not list `;` among the acceptable spellings. The
-        // issue's reproducer spelled the values `cast(1, int64)`; the suffix
+        // issue's reproducer spelled the values `cast(1, i64)`; the suffix
         // form fails identically and keeps the fixture free of type sugar.
-        let src = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }";
+        let src = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }";
         let err = parse_str(src).unwrap_err();
         let offset = match err {
             ParseError::SemicolonBlockSeparator { offset } => offset,
@@ -4771,7 +4793,7 @@ mod tests {
         // than being rewritten into a `;` lecture. In canonical mode the
         // generic wording names only the newline, because that is the only
         // separator the grammar accepts here.
-        let src = "def f() -> int64 = { a = 1i64";
+        let src = "def f() -> i64 = { a = 1i64";
         let err = parse_str(src).unwrap_err();
         match err {
             ParseError::Expected {
@@ -4814,7 +4836,7 @@ mod tests {
         // be bound ... move it to tail position", which is false twice for
         // this input: `add(a, 1i64)` IS the tail, and nothing is unbound.
         // Taking that advice (`_ = add(a, 1i64);`) just landed on the `;`.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
     }
 
     #[test]
@@ -4823,7 +4845,7 @@ mod tests {
         // preceding newline is consumed first and the old code still fell
         // through to the bare-statement message.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
             0,
         );
     }
@@ -4850,20 +4872,20 @@ mod tests {
         // is a legal v0.18 spelling the migrator rewrites to `a = 1i64`, so
         // migrated-era source reaches it. Unguarded it left the value's token
         // range empty and reported an offsetless "unexpected end of input".
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n", 0);
     }
 
     #[test]
     fn block_semicolon_on_its_own_line_before_a_binding_value_names_the_semicolon_rule() {
         // Negative #24: the same position reached across newlines, where the
         // separator count is already nonzero.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
     }
 
     #[test]
     fn block_semicolon_after_a_typed_binder_names_the_semicolon_rule() {
         // Negative #25: the type annotation moves the `=` but not the rule.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a: int64 = ;1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a: i64 = ;1i64\n  a\n}\n", 0);
     }
 
     #[test]
@@ -4871,7 +4893,7 @@ mod tests {
         // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
         // migrator accepts and rewrites, so the guard must stay canonical
         // only or the migration path stops working on real source.
-        let decls = parse_str_legacy_v018("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n")
+        let decls = parse_str_legacy_v018("def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n")
             .expect("v0.18 accepts a `;` before a binding value");
         assert_eq!(decls.len(), 1);
     }
@@ -4885,7 +4907,7 @@ mod tests {
         // end of input" with no offset at all, which the LSP then rendered
         // past the end of the file.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
             0,
         );
     }
@@ -4894,7 +4916,7 @@ mod tests {
     fn block_semicolon_leading_a_binding_line_names_the_semicolon_rule() {
         // Negative #21: the same shape with the next binding on the `;` line.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
             0,
         );
     }
@@ -4903,7 +4925,7 @@ mod tests {
     fn block_containing_only_a_semicolon_names_the_semicolon_rule() {
         // Negative #22: `;` at the leading separator position, before any
         // binding exists. Also previously "unexpected end of input".
-        assert_semicolon_rule_at("def f() -> int64 = { ; }\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = { ; }\n", 0);
     }
 
     #[test]
@@ -4912,7 +4934,7 @@ mod tests {
         // the v0.18 helpers, so nothing pinned that a canonical block parses
         // at all. Without this, every negative above could pass on a parser
         // that rejected every block.
-        let decls = parse_str("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
+        let decls = parse_str("def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
             .expect("a newline-separated canonical block parses");
         assert_eq!(decls.len(), 1);
     }
@@ -4925,7 +4947,7 @@ mod tests {
         // diagnostic into the chelis#1267 defect reborn inside its own fix:
         // advice that does not work. `migrate_source_v018` is the library
         // path behind that CLI command (`cmd_migrate` in chelis-cli).
-        let repro = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+        let repro = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }\n";
         parse_str(repro).expect_err("the reproducer must not parse canonically");
         let migrated = crate::format::migrate_source_v018(repro)
             .expect("the migrator rewrites the `;` block the diagnostic points at");
@@ -4942,7 +4964,7 @@ mod tests {
         // two grammars accept different separators. `;` is genuinely one of
         // v0.18's, so dropping it from the legacy message would be the
         // chelis#1267 defect pointed the other way.
-        let err = parse_str_legacy_v018("def f() -> int64 = { a = 1i64").unwrap_err();
+        let err = parse_str_legacy_v018("def f() -> i64 = { a = 1i64").unwrap_err();
         match err {
             ParseError::Expected {
                 ref expected,
@@ -4962,7 +4984,7 @@ mod tests {
         // `chelis migrate surf --from 0.18` still reads `;` as a block
         // separator, so the new wording is scoped to canonical Surf v0.19
         // rather than claiming `;` is never a block separator.
-        let decls = parse_str_legacy_v018("def main() -> int64 = { a = 1i64; add(a, 2i64) }")
+        let decls = parse_str_legacy_v018("def main() -> i64 = { a = 1i64; add(a, 2i64) }")
             .expect("v0.18 blocks accept `;` separators");
         assert_eq!(decls.len(), 1);
     }
@@ -5238,7 +5260,7 @@ mod tests {
 
     #[test]
     fn empty_list_literal_with_type() {
-        let decls = p("xs: List[int64] = []");
+        let decls = p("xs: List[i64] = []");
         match &decls[0] {
             Decl::LetDef {
                 ty: Some(TypeExpr::App(name, args, _)),
@@ -5247,7 +5269,7 @@ mod tests {
             } => {
                 assert_eq!(name, "List");
                 assert_eq!(args.len(), 1);
-                assert!(matches!(&args[0], TypeExpr::Named(inner, _) if inner == "int64"));
+                assert!(matches!(&args[0], TypeExpr::Named(inner, _) if inner == "i64"));
                 assert!(matches!(value, Expr::List(items, _) if items.is_empty()));
             }
             other => panic!("expected typed empty list let, got {other:?}"),
@@ -6285,7 +6307,7 @@ mod tests {
         // third boundary rule. It is not the property-OPTION path covered
         // above; confusing the two is what left that consumer untested.
         let property_predicate =
-            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true";
+            "@property p forall(x: i32) where if lte(x, 1i32)\n  then true\n  else false: true";
         assert!(
             parse_str(property_predicate).is_ok(),
             "a split `if` must survive a property predicate: {:?}",

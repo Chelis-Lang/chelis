@@ -28,13 +28,13 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 fn allocated_for(iterations: usize) -> usize {
     let mut source = String::new();
     for function in 0..12 {
-        writeln!(source, "def unused{function}(x: int64) -> int64 = {{").unwrap();
+        writeln!(source, "def unused{function}(x: i64) -> i64 = {{").unwrap();
         for binding in 0..48 {
             writeln!(source, "v{binding} = x + {binding}i64").unwrap();
         }
         source.push_str("v47\n}\n");
     }
-    source.push_str("def iterate_count(n: int64, acc: int64) -> int64 = if n <= 0i64 then acc else iterate_count(n - 1i64, acc + 1i64)\n");
+    source.push_str("def iterate_count(n: i64, acc: i64) -> i64 = if n <= 0i64 then acc else iterate_count(n - 1i64, acc + 1i64)\n");
     writeln!(source, "answer = iterate_count({iterations}i64, 0i64)").unwrap();
     let before = BYTES.load(Ordering::Relaxed);
     let result = eval_selected(

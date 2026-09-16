@@ -609,7 +609,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 {
                     if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
                         errors.push(format!(
-                            "gather at node {} requires int32/int64 indices, got {:?}",
+                            "gather at node {} requires i32/i64 indices, got {:?}",
                             node.id.0, indices.output_type.precision
                         ));
                     }
@@ -697,7 +697,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                     if node.output_type.precision != Prim::Int64 {
                         errors.push(format!(
-                            "count at node {} requires int64 output, got {:?}",
+                            "count at node {} requires i64 output, got {:?}",
                             node.id.0, node.output_type.precision
                         ));
                     }
@@ -924,7 +924,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         // Shape query (chelis#513/#558): the read axis must be in range
-        // of the input rank, and the output must be a rank-0 exact int64
+        // of the input rank, and the output must be a rank-0 exact i64
         // scalar (the runtime extent). A different output type would
         // misdeclare the value node to the backend or narrow its carrier.
         if let RiscOp::Shape { axis } = &node.op {
@@ -948,7 +948,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
             if node.output_type.precision != Prim::Int64 {
                 errors.push(format!(
-                    "shape read at node {} must produce an exact int64 scalar, got precision `{}`",
+                    "shape read at node {} must produce an exact i64 scalar, got precision `{}`",
                     node.id.0,
                     node.output_type.precision.name()
                 ));
@@ -995,7 +995,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || !node.output_type.dims.is_empty()
                     || node.output_type.precision != Prim::Int64
                 {
-                    errors.push(format!("literal result claim at node {} requires one nonnegative int64 literal, normalized axis, scalar output, and no observing or entry dependencies", node.id.0));
+                    errors.push(format!("literal result claim at node {} requires one nonnegative i64 literal, normalized axis, scalar output, and no observing or entry dependencies", node.id.0));
                 }
             } else {
                 if let crate::dag::ExtentWitnessSite::ResultClaim {
@@ -1026,7 +1026,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
                 // chelis#1374: a named claim's diagnostic reads the DECLARING
                 // parameter and axis off the requirement's own node, so the edge
-                // must be a witness and not merely an int64 scalar. The edge is
+                // must be a witness and not merely an i64 scalar. The edge is
                 // also strictly earlier, which is what keeps the check due "at
                 // the later of its two witnesses" (spec/04 §4.7) and the topology
                 // acyclic.
@@ -1040,7 +1040,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         });
                         if !earlier || !witness {
                             errors.push(format!(
-                            "extent witness at node {} requires each named claim to name an earlier rank-0 int64 extent witness",
+                            "extent witness at node {} requires each named claim to name an earlier rank-0 i64 extent witness",
                             node.id.0
                         ));
                         }
@@ -1064,7 +1064,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 }
                 if !node.output_type.dims.is_empty() || node.output_type.precision != Prim::Int64 {
                     errors.push(format!(
-                        "extent witness at node {} must produce a rank-0 int64 scalar",
+                        "extent witness at node {} must produce a rank-0 i64 scalar",
                         node.id.0
                     ));
                 }
@@ -1073,7 +1073,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         || value.as_i64_exact().is_none_or(|value| value < 0)
                 }) {
                     errors.push(format!(
-                        "extent witness at node {} requires nonnegative int64 literals",
+                        "extent witness at node {} requires nonnegative i64 literals",
                         node.id.0
                     ));
                 }
@@ -1174,7 +1174,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 })
             {
                 errors.push(format!(
-                    "checked reshape extent at node {} requires scalar int64 inputs and output",
+                    "checked reshape extent at node {} requires scalar i64 inputs and output",
                     node.id.0
                 ));
             }
@@ -1681,7 +1681,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     }
                     if !matches!(input.output_type.precision, Prim::Int32 | Prim::Int64) {
                         errors.push(format!(
-                            "one_hot at node {} requires int32/int64 indices, got {:?}",
+                            "one_hot at node {} requires i32/i64 indices, got {:?}",
                             node.id.0, input.output_type.precision
                         ));
                     }
@@ -2072,7 +2072,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
 /// Shared structural verification for replace-scatter and scatter-add.
 /// Inputs are `[target, indices, updates]`; output shape equals
 /// `target`; `updates` shape equals `target.dims[..axis] +
-/// indices.dims + target.dims[axis+1..]`. Indices must be int32/int64.
+/// indices.dims + target.dims[axis+1..]`. Indices must be i32/i64.
 fn verify_scatter_like(
     node: &crate::dag::DagNode,
     dag: &Dag,
@@ -2095,7 +2095,7 @@ fn verify_scatter_like(
     ) {
         if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
             errors.push(format!(
-                "{label} at node {} requires int32/int64 indices, got {:?}",
+                "{label} at node {} requires i32/i64 indices, got {:?}",
                 node.id.0, indices.output_type.precision
             ));
         }
@@ -2160,7 +2160,7 @@ fn verify_scatter_elements(
     ) {
         if !matches!(indices.output_type.precision, Prim::Int32 | Prim::Int64) {
             errors.push(format!(
-                "{label} at node {} requires int32/int64 indices, got {:?}",
+                "{label} at node {} requires i32/i64 indices, got {:?}",
                 node.id.0, indices.output_type.precision
             ));
         }
@@ -2224,7 +2224,7 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
 }
 
 /// chelis#616: validate a single movement `RtDim` against the owning node. A
-/// `RtDim::Node(i)` must reference a rank-0 int64 input; `InputAxis` must
+/// `RtDim::Node(i)` must reference a rank-0 i64 input; `InputAxis` must
 /// reference a tensor input and a normalized in-range axis.
 fn check_bound_source(
     dag: &Dag,
@@ -2254,7 +2254,7 @@ fn check_bound_source(
             }
             if src.output_type.precision != Prim::Int64 {
                 errors.push(format!(
-                    "{label}: node-valued bound source (input slot {i}) must be int64, got `{}`",
+                    "{label}: node-valued bound source (input slot {i}) must be i64, got `{}`",
                     src.output_type.precision.name()
                 ));
             }
@@ -2355,7 +2355,7 @@ pub fn validate_metal_admissible_precisions(dag: &Dag) -> Result<(), String> {
                     "IR validation rejects precision `{}` for `--target metal` \
                      (node {}). The Metal backend admits the active dtype set \
                      per spec/04-type-system.md §1.1.3 except f64; supported: \
-                     f32/f16/bf16/int8/int16/int32/int64/bool.",
+                     f32/f16/bf16/i8/i16/i32/i64/bool.",
                     other.name(),
                     node.id.0
                 ));
@@ -2650,8 +2650,8 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|error| error.contains("shape read") && error.contains("int64")),
-            "int32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+                .any(|error| error.contains("shape read") && error.contains("i64")),
+            "i32 shape output must fail the exact runtime-extent invariant: {errors:?}"
         );
     }
 
@@ -3749,8 +3749,7 @@ mod tests {
 
         let errs = verify(&dag);
         assert!(
-            errs.iter()
-                .any(|e| e.contains("requires int32/int64 indices")),
+            errs.iter().any(|e| e.contains("requires i32/i64 indices")),
             "expected integer-index diagnostic, got {errs:?}"
         );
         assert!(
@@ -3791,8 +3790,7 @@ mod tests {
 
         let errs = verify(&dag);
         assert!(
-            errs.iter()
-                .any(|e| e.contains("requires int32/int64 indices")),
+            errs.iter().any(|e| e.contains("requires i32/i64 indices")),
             "expected integer-index diagnostic, got {errs:?}"
         );
         assert!(

@@ -634,15 +634,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !discharged.contains("numeric trap: domain in load at int64"),
+            !discharged.contains("numeric trap: domain in load at i64"),
             "{discharged}"
         );
         let full =
             CEmitter::emit_verified_dag_with_options(dag.emission(), "unguarded", options, &[])
                 .unwrap();
         assert_eq!(
-            full.matches("numeric trap: domain in load at int64")
-                .count(),
+            full.matches("numeric trap: domain in load at i64").count(),
             1,
             "{full}"
         );
@@ -650,7 +649,7 @@ mod tests {
         assert_eq!(
             standalone
                 .c_source
-                .matches("numeric trap: domain in load at int64")
+                .matches("numeric trap: domain in load at i64")
                 .count(),
             1,
             "{}",

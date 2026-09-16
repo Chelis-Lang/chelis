@@ -135,7 +135,7 @@ fn pipe_grad_stage_matches_non_pipe_application() {
               (var {} mul)
               (copy {} (var {} x))
               (copy {} (var {} x)))
-            (lit {type: (t-prim {} int32)} 0)))
+            (lit {type: (t-prim {} i32)} 0)))
     "#;
     // `x |> grad(f)` -- the seed is the input tensor, the stage is the
     // bare `(grad {} (var {} f))` callable (no lambda wrap; Surf does not
@@ -224,18 +224,18 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
               (var {} mul)
               (copy {} (var {} x))
               (copy {} (var {} x)))
-            (lit {type: (t-prim {} int32)} 0)))
+            (lit {type: (t-prim {} i32)} 0)))
     "#;
     // `xs |> vmap(grad(f))` -- the seed is the batched input, the stage is the
     // bare `(vmap {} (grad {} f) axis=0)` callable.
     let pipe_src = r#"
         (pipe {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs)
-          (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))
+          (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0)))
     "#;
     let app_src = r#"
         (app {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))}
-          (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0))
+          (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} i32)} 0))
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
     "#;
 
@@ -322,7 +322,7 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
     let pipe_src = r#"
         (pipe {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
           (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs)
-          (vmap {} (var {} relu_row) (lit {type: (t-prim {} int32)} 0)))
+          (vmap {} (var {} relu_row) (lit {type: (t-prim {} i32)} 0)))
     "#;
     let mut program_defs = UnordMap::new();
     program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));

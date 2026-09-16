@@ -181,7 +181,7 @@ fn integer_overflow_traps_are_branded_for_every_runtime_op_and_width() {
         ("einsum", "einsum"),
         ("einsum_add", "einsum"),
     ] {
-        for (suffix, dtype) in [("", "int32"), ("_i64", "int64")] {
+        for (suffix, dtype) in [("", "i32"), ("_i64", "i64")] {
             let case = format!("{case_op}{suffix}");
             let output = Command::new(&test_binary)
                 .args(["--exact", "integer_overflow_child", "--nocapture"])
@@ -201,11 +201,11 @@ fn integer_overflow_traps_are_branded_for_every_runtime_op_and_width() {
         }
     }
     for (case, diagnostic) in [
-        ("scatter_i8", "numeric trap: overflow in scatter at int8"),
-        ("scatter_i16", "numeric trap: overflow in scatter at int16"),
+        ("scatter_i8", "numeric trap: overflow in scatter at i8"),
+        ("scatter_i16", "numeric trap: overflow in scatter at i16"),
         (
             "einsum_i16_acc_i32",
-            "numeric trap: overflow in einsum at int32",
+            "numeric trap: overflow in einsum at i32",
         ),
     ] {
         let output = Command::new(&test_binary)

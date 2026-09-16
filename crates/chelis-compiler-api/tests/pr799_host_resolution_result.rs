@@ -120,8 +120,8 @@ fn compile_for_execution_returns_nested_empty_list_error_instead_of_panicking() 
 
 #[test]
 fn generic_adt_int8_specialization_reaches_exact_host_abi() {
-    let result = compile(c_request(&generic_record_source("int8", "7")))
-        .expect("ReviewBox[int8] must specialize its field before host resolution");
+    let result = compile(c_request(&generic_record_source("i8", "7")))
+        .expect("ReviewBox[i8] must specialize its field before host resolution");
     let generated_c = result
         .files
         .iter()
@@ -129,7 +129,7 @@ fn generic_adt_int8_specialization_reaches_exact_host_abi() {
         .expect("C compilation must emit a translation unit");
     assert!(
         generated_c.contents.contains("int8_t"),
-        "the specialized field must retain its exact int8 ABI:\n{}",
+        "the specialized field must retain its exact i8 ABI:\n{}",
         generated_c.contents
     );
 }
@@ -173,7 +173,7 @@ fn bf16_callback_uses_exact_typed_carrier_without_placeholder() {
 fn returned_anonymous_function_rejects_before_codegen() {
     assert_unrepresentable_function_value(compile(c_request(
         "module M.Main\n\
-         def make() -> int8 -> int8 = fn (x: int8) -> add(x, cast(1, int8))\n\
+         def make() -> i8 -> i8 = fn (x: i8) -> add(x, cast(1, i8))\n\
          out = print(\"ok\")\n",
     )));
 }
@@ -182,7 +182,7 @@ fn returned_anonymous_function_rejects_before_codegen() {
 fn nested_capturing_function_rejects_before_codegen() {
     assert_unrepresentable_function_value(compile(c_request(
         "module M.Main\n\
-         def make(x: int8) -> int8 -> int8 = fn (y: int8) -> add(x, y)\n\
+         def make(x: i8) -> i8 -> i8 = fn (y: i8) -> add(x, y)\n\
          out = print(\"ok\")\n",
     )));
 }
@@ -192,8 +192,8 @@ fn function_value_stored_in_adt_rejects_before_codegen() {
     assert_unrepresentable_function_value(compile(c_request(
         "module M.Main\n\
          type FnBox =\n\
-           | FnBox { callback: int8 -> int8 }\n\
-         saved = FnBox { callback: fn (x: int8) -> add(x, cast(1, int8)) }\n\
+           | FnBox { callback: i8 -> i8 }\n\
+         saved = FnBox { callback: fn (x: i8) -> add(x, cast(1, i8)) }\n\
          out = print(\"ok\")\n",
     )));
 }
@@ -201,8 +201,8 @@ fn function_value_stored_in_adt_rejects_before_codegen() {
 #[test]
 fn returned_named_function_rejects_across_both_public_compiler_apis() {
     let source = "module M.ReturnedNamed\n\
-                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-                  def choose() -> int8 -> int8 = increment\n\
+                  def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+                  def choose() -> i8 -> i8 = increment\n\
                   out = print(\"ok\")\n";
     assert_named_function_value_has_no_c_abi(compile(c_request(source)));
     assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
@@ -211,10 +211,10 @@ fn returned_named_function_rejects_across_both_public_compiler_apis() {
 #[test]
 fn used_returned_named_function_rejects_before_an_unresolved_c_call_is_emitted() {
     let source = "module M.ReturnedNamedUsed\n\
-                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-                  def choose() -> int8 -> int8 = increment\n\
+                  def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+                  def choose() -> i8 -> i8 = increment\n\
                   chosen = choose()\n\
-                  out = print(chosen(cast(6, int8)))\n";
+                  out = print(chosen(cast(6, i8)))\n";
     assert_named_function_value_has_no_c_abi(compile(c_request(source)));
     assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
 }
@@ -222,12 +222,12 @@ fn used_returned_named_function_rejects_before_an_unresolved_c_call_is_emitted()
 #[test]
 fn exact_named_callbacks_keep_typed_int8_and_int16_function_pointer_abis() {
     let source = "module M.ExactCallbacks\n\
-                  def apply8(callback: int8 -> int8, value: int8) -> int8 = callback(value)\n\
-                  def apply16(callback: int16 -> int16, value: int16) -> int16 = callback(value)\n\
-                  def increment8(value: int8) -> int8 = add(value, cast(1, int8))\n\
-                  def increment16(value: int16) -> int16 = add(value, cast(2, int16))\n\
-                  out8 = print(apply8(increment8, cast(6, int8)))\n\
-                  out16 = print(apply16(increment16, cast(300, int16)))\n";
+                  def apply8(callback: i8 -> i8, value: i8) -> i8 = callback(value)\n\
+                  def apply16(callback: i16 -> i16, value: i16) -> i16 = callback(value)\n\
+                  def increment8(value: i8) -> i8 = add(value, cast(1, i8))\n\
+                  def increment16(value: i16) -> i16 = add(value, cast(2, i16))\n\
+                  out8 = print(apply8(increment8, cast(6, i8)))\n\
+                  out16 = print(apply16(increment16, cast(300, i16)))\n";
     let output = compile(c_request(source)).expect("statically known callbacks have a typed C ABI");
     let generated_c = output
         .files
@@ -252,10 +252,10 @@ fn exact_named_callbacks_keep_typed_int8_and_int16_function_pointer_abis() {
 #[test]
 fn direct_inline_callback_specialization_remains_supported() {
     let source = "module M.InlineCallback\n\
-                  def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
+                  def apply(f: i8 -> i8, x: i8) -> i8 = f(x)\n\
                   out = print(apply(\
-                    fn (x: int8) -> add(x, cast(1, int8)),\
-                    cast(6, int8)\
+                    fn (x: i8) -> add(x, cast(1, i8)),\
+                    cast(6, i8)\
                   ))\n";
     compile(c_request(source)).expect("a direct inline callback is specialized before codegen");
 }
@@ -263,10 +263,10 @@ fn direct_inline_callback_specialization_remains_supported() {
 #[test]
 fn typed_callback_parameter_can_be_forwarded_without_becoming_a_function_value() {
     let source = "module M.ForwardedCallback\n\
-                  def apply(f: int8 -> int8, x: int8) -> int8 = f(x)\n\
-                  def forward(f: int8 -> int8, x: int8) -> int8 = apply(f, x)\n\
-                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-                  out = print(forward(increment, cast(6, int8)))\n";
+                  def apply(f: i8 -> i8, x: i8) -> i8 = f(x)\n\
+                  def forward(f: i8 -> i8, x: i8) -> i8 = apply(f, x)\n\
+                  def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+                  out = print(forward(increment, cast(6, i8)))\n";
     compile(c_request(source))
         .expect("an in-scope typed callback parameter may cross another callback position");
 }
@@ -274,10 +274,10 @@ fn typed_callback_parameter_can_be_forwarded_without_becoming_a_function_value()
 #[test]
 fn dynamically_selected_named_callback_has_no_c_host_value_abi() {
     let source = "module M.SelectedCallback\n\
-                  def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-                  def decrement(x: int8) -> int8 = sub(x, cast(1, int8))\n\
+                  def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+                  def decrement(x: i8) -> i8 = sub(x, cast(1, i8))\n\
                   selected = if true then increment else decrement\n\
-                  out = print(selected(cast(6, int8)))\n";
+                  out = print(selected(cast(6, i8)))\n";
     assert_named_function_value_has_no_c_abi(compile(c_request(source)));
     assert_named_function_value_has_no_c_abi(compile_for_execution(c_request(source)));
 }
@@ -298,7 +298,7 @@ fn generic_access_source(dtype: &str, literal: &str) -> String {
 
 #[test]
 fn nested_generic_adt_access_substitutes_int8_through_every_field() {
-    let result = compile(c_request(&generic_access_source("int8", "7")))
+    let result = compile(c_request(&generic_access_source("i8", "7")))
         .expect("nested generic fields must instantiate before host resolution");
     let generated_c = result
         .files

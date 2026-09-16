@@ -453,8 +453,8 @@ cargo test -p chelis-backend-metal --test codegen_adversarial
 - MPS integration for f32 and f16 matmul is the wrapper-helper plan from
   WS-M1; `chelis_metal_runtime.h` exposes the helpers under the ARC
   ownership model pinned in `spec/04-type-system.md` §1.1.3 ("Metal runtime
-  header: ARC vs MRC and MPS wrapper ownership model"). bf16, int8, int16,
-  int32, and int64 matmul (where admitted by §5.7.2) routes through the
+  header: ARC vs MRC and MPS wrapper ownership model"). bf16, i8, i16,
+  i32, and i64 matmul (where admitted by §5.7.2) routes through the
   parameterized 16x16 tiled MSL kernel rather than MPS.
 - Async dispatch deferred; M-phase uses `waitUntilCompleted` for synchronous launches
 - `peak_device_bytes_formula` semantically reports peak system RAM for tensor

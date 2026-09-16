@@ -1678,7 +1678,7 @@ fn append_helper(
         out.push("    (void)__chelis_rng;".to_string());
         #[cfg(feature = "native-random-observer")]
         out.push("    (void)__chelis_observer;".to_string());
-        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at int64\");".to_string());
+        out.push("    __chelis_check_host_result_claims(__chelis_caller_result_claims, inputs[0], \"load\", \"numeric trap: domain in load at i64\");".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -1950,7 +1950,7 @@ impl HostResultClaim {
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Lit(required)
                     if !function.helper_result_claim_axes.contains(
-                        &chelis_ir::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits int32")),
+                        &chelis_ir::dag::RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                     ) =>
                 {
                     Some((axis, *required))
@@ -2109,7 +2109,7 @@ fn signature_entry_lines(
         lines.push(format!("{indent}if ({right} != {left}) {{"));
         lines.push(format!("{indent}    {context}"));
         lines.push(format!(
-            "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at int64\");"
+            "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at i64\");"
         ));
         lines.push(format!("{indent}}}"));
     }
@@ -4363,7 +4363,7 @@ impl<'a> HostEmitter<'a> {
             && matches!(ty, HostType::Tensor(_))
         {
             let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
-            self.lines.push(format!("{}__chelis_check_host_result_claims({claims}, {target}, \"{op}\", \"numeric trap: domain in {op} at int64\");", self.indent));
+            self.lines.push(format!("{}__chelis_check_host_result_claims({claims}, {target}, \"{op}\", \"numeric trap: domain in {op} at i64\");", self.indent));
         }
     }
 

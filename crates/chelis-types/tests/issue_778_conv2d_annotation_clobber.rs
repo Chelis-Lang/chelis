@@ -26,7 +26,7 @@ const CONV2D_SRC: &str = r#"
     (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
     (def {} y
       (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-           (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
+           (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
 "#;
 
 fn list_tag(expr: &Expr) -> Option<&str> {

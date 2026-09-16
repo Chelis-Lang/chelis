@@ -150,7 +150,7 @@ module_prefix = "{module_prefix}"
     .expect("write reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        format!("module {module_prefix}.Main\n\ndef id(x: int32) -> int32 = x\n"),
+        format!("module {module_prefix}.Main\n\ndef id(x: i32) -> i32 = x\n"),
     )
     .expect("write main.ch");
 }
@@ -175,7 +175,7 @@ chelis-std = {{ version = "{std_version}" }}
     .expect("write reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        format!("module {module_prefix}.Main\n\ndef id(x: int32) -> int32 = x\n"),
+        format!("module {module_prefix}.Main\n\ndef id(x: i32) -> i32 = x\n"),
     )
     .expect("write main.ch");
 }

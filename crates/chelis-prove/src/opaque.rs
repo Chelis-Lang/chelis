@@ -60,7 +60,7 @@ pub fn prim_to_smt_sort(prim: &str) -> SmtSort {
 
 /// Fuzz-sampling bounds for an integer width (F3, sampling axis): the
 /// `[-1000, 1000]` convenience range clamped to the width's representable
-/// range, so an `int8` field samples in `[-128, 127]` (never an
+/// range, so an `i8` field samples in `[-128, 127]` (never an
 /// unrepresentable value that would yield a spurious counterexample) while
 /// wider widths keep the convenience range. Single source for every
 /// opaque-field integer sampling site. Returns `None` for a non-integer
@@ -78,7 +78,7 @@ pub fn int_sample_bounds(prim: &str) -> Option<(i64, i64)> {
 /// nested single-variant record of those.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
-    /// A scalar primitive: `f32`/`f64`/`int32`/`int64`/`bool`.
+    /// A scalar primitive: `f32`/`f64`/`i32`/`i64`/`bool`.
     Scalar(String),
     /// A fixed-shape numeric tensor: literal dims + precision.
     Tensor { dims: Vec<usize>, precision: String },
@@ -538,7 +538,7 @@ pub(crate) enum ConstNumericType {
 /// The ONE type-aware constant lowering (U2 review-3 unification): lower an
 /// in-module constant reference `name` (resolved to `value`) to an
 /// [`SmtExpr`], preserving its declared numeric type. An integer-typed
-/// constant (int8/int16/int32/int64) lowers to `IntLit`; an f32/f64 (or an
+/// constant (i8/i16/i32/i64) lowers to `IntLit`; an f32/f64 (or an
 /// unresolvable declared type) lowers to `RealLit`. Both the producer-body
 /// path and the invariant/precondition path call this, so the SAME constant
 /// can never lower as `IntLit` on one and `RealLit` on the other (the cvc5
@@ -551,7 +551,7 @@ pub(crate) fn lower_const_ref(exprs: &[Expr], name: &str, value: f64) -> SmtExpr
 }
 
 /// The numeric sort class (Int vs Real) of an in-module constant `name`.
-/// `Int` for any declared integer width (int8/int16/int32/int64), `Real`
+/// `Int` for any declared integer width (i8/i16/i32/i64), `Real`
 /// otherwise. The single source both [`lower_const_ref`] and the
 /// producer-body `const_lit_node` consult.
 pub(crate) fn const_declared_numeric_type(exprs: &[Expr], name: &str) -> ConstNumericType {
@@ -561,11 +561,11 @@ pub(crate) fn const_declared_numeric_type(exprs: &[Expr], name: &str) -> ConstNu
     }
 }
 
-/// The declared integer primitive type (int8/int16/int32/int64) of an
+/// The declared integer primitive type (i8/i16/i32/i64) of an
 /// in-module constant `name`, or `None` if it is not declared with an
 /// integer type. Reads the DECLARED return type from a sibling `(defsig
-/// name <type>)` (authoritative -- a typed `def a() -> int8 = 1` carries
-/// int8 in the defsig but the default int32 on the body literal), then the
+/// name <type>)` (authoritative -- a typed `def a() -> i8 = 1` carries
+/// i8 in the defsig but the default i32 on the body literal), then the
 /// body literal's own type tag, following a const -> const reference chain
 /// transitively (depth-bounded) to the literal that carries the type tag.
 pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<String> {
@@ -1835,8 +1835,8 @@ fn float_lit(v: f64, prim: &str) -> Expr {
 }
 /// A width-appropriate integer literal for an internal Deep value. This is
 /// already below Surf's unsuffixed-literal defaulting boundary, so stamp the
-/// declared dtype directly; routing an int64 payload through an int32 literal
-/// would reject exact values outside the int32 range before the cast ran.
+/// declared dtype directly; routing an i64 payload through an i32 literal
+/// would reject exact values outside the i32 range before the cast ran.
 fn int_lit(v: i64, prim: &str) -> Expr {
     typed_lit(prim, Expr::Atom(Atom::Int(v), span0()))
 }

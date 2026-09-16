@@ -19,7 +19,7 @@ fn concrete_evaluator_and_tier_c_have_no_bare_f64_environment() {
     );
     assert!(
         !concrete.contains("UnordMap<String, f64>"),
-        "a bare f64 environment reopens the int64-collapse class"
+        "a bare f64 environment reopens the i64-collapse class"
     );
 
     let tier_c = include_str!("../src/tier_c.rs");

@@ -1439,9 +1439,9 @@ fn int32_lit(value: i64) -> Expr {
             Metadata::from(MetadataValue::Type(
                 chelis_deep::annotations::TypeSyntax::try_new(node(
                     DeepTag::TPrim,
-                    vec![Expr::Atom(Atom::Name("int32".to_string()), zero_span())],
+                    vec![Expr::Atom(Atom::Name("i32".to_string()), zero_span())],
                 ))
-                .expect("int32 type syntax"),
+                .expect("i32 type syntax"),
             )),
             zero_span(),
         ),

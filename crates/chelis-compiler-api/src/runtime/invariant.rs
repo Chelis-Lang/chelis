@@ -443,7 +443,7 @@ fn is_constant_grammar_op(op: &str) -> bool {
 /// numeric tensors, and nested single-variant records of those.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DecodeFieldType {
-    /// A scalar primitive (`f32`, `int64`, `bool`, ...).
+    /// A scalar primitive (`f32`, `i64`, `bool`, ...).
     Prim(Prim),
     /// A fixed-shape numeric tensor with the given element precision.
     Tensor(Prim),

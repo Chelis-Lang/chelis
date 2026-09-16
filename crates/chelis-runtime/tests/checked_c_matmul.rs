@@ -147,7 +147,7 @@ fn invalid_matmul_domains_keep_canonical_failure_classes() {
         assert!(
             stderr
                 .lines()
-                .any(|line| line == format!("numeric trap: {class} in matmul at int64")),
+                .any(|line| line == format!("numeric trap: {class} in matmul at i64")),
             "{case}: {stderr}"
         );
     }

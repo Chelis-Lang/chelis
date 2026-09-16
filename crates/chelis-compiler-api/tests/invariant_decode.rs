@@ -75,7 +75,7 @@ fn eval_result_value(source: &str) -> ExecutionValue {
 /// Structural equality over `ExecutionValue` with EXACT scalar comparison
 /// (bit-identical floats; no tolerance). `ExecutionValue` does not derive
 /// `PartialEq`; its canonical stored-bit codec makes the comparison exact
-/// even for signed zero, NaN payloads and int64 values above 2^53.
+/// even for signed zero, NaN payloads and i64 values above 2^53.
 fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
     use ExecutionValue::*;
     match (a, b) {

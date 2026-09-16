@@ -182,7 +182,7 @@ mod tests {
         if !mode.starts_with("empty") {
             let result = chelis_compiler_api::compiler::eval(chelis_compiler_api::schema::EvalRequest {
                 source_kind: chelis_compiler_api::schema::SourceKind::Surf,
-                source: "def run() -> int64 ! { IO } = {\n_ = print(\"before-timeout\")\n7i64\n}\nout = run()\n".into(),
+                source: "def run() -> i64 ! { IO } = {\n_ = print(\"before-timeout\")\n7i64\n}\nout = run()\n".into(),
                 bindings: Default::default(),
             }).unwrap();
             assert_eq!(result.transcript, ["before-timeout"]);

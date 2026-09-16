@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn whole_module_rejections_return_no_validation_proof() {
         let fixtures = [
-            ("module M\ndef broken() -> int32 = missing\n", "check"),
+            ("module M\ndef broken() -> i32 = missing\n", "check"),
             (
                 "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
                 "effects",
@@ -478,7 +478,7 @@ mod tests {
     /// A `ping`/`pong` mutually-recursive pair where `ping` holds the sole base
     /// case. Splicing `ping`'s body to call `pong` unconditionally removes that
     /// base case while preserving one uniform recursive instantiation.
-    const PINGPONG: &str = "module Frag.PingPong\nexport (ping, pong)\ndef ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))\ndef pong(n: int32) -> int32 = ping(sub(n, 1))\n";
+    const PINGPONG: &str = "module Frag.PingPong\nexport (ping, pong)\ndef ping(n: i32) -> i32 = if eq(n, 0) then 0 else pong(sub(n, 1))\ndef pong(n: i32) -> i32 = ping(sub(n, 1))\n";
 
     #[test]
     fn cross_def_base_case_drop_is_accepted_promptly() {
@@ -486,10 +486,7 @@ mod tests {
         // the old syntactic-base-case checker restriction, so fragment
         // replacement must agree with full check by accepting it promptly.
         let module = render_deep(PINGPONG);
-        let new_body = render_body(
-            "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
-            "f",
-        );
+        let new_body = render_body("module M\ndef f(n: i32) -> i32 = pong(sub(n, 1))\n", "f");
         let start = std::time::Instant::now();
         let report = check_body_replacement(&module, "ping", &new_body)
             .expect("uniform base-case-free recursion is checker-legal");

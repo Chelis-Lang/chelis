@@ -13,7 +13,7 @@ fn lower(source: &str) -> Vec<Expr> {
 
 #[test]
 fn an_inline_parameter_has_one_type_owner() {
-    let program = lower("def classify(x: f8e4m3) -> int32 = 0i32");
+    let program = lower("def classify(x: f8e4m3) -> i32 = 0i32");
     let text = print_canonical_flat(&program);
     assert_eq!(text.matches("f8e4m3").count(), 1, "{text}");
     assert!(
@@ -21,7 +21,7 @@ fn an_inline_parameter_has_one_type_owner() {
         "{text}"
     );
     assert!(
-        text.contains("(t-fn {} (t-prim {} f8e4m3) (t-prim {} int32))"),
+        text.contains("(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32))"),
         "{text}"
     );
 }
@@ -29,7 +29,7 @@ fn an_inline_parameter_has_one_type_owner() {
 #[test]
 fn a_standalone_signature_keeps_the_independent_parameter_annotation() {
     let text = print_canonical_flat(&lower(
-        "sig classify: f8e4m3 -> int32\ndef classify(x: f8e4m3) -> int32 = 0i32",
+        "sig classify: f8e4m3 -> i32\ndef classify(x: f8e4m3) -> i32 = 0i32",
     ));
     assert_eq!(text.matches("f8e4m3").count(), 2, "{text}");
     assert!(
@@ -51,7 +51,7 @@ fn a_lambda_keeps_its_own_type_annotation() {
 
 #[test]
 fn explicit_holes_and_omitted_annotations_remain_distinct() {
-    let text = print_canonical_flat(&lower("def choose(x: _, y, z: int32) -> int32 = z"));
+    let text = print_canonical_flat(&lower("def choose(x: _, y, z: i32) -> i32 = z"));
     assert!(
         text.contains("(params {} (x {type: (t-var {} _)}) y (z {type: (t-var {} _)}))"),
         "{text}"
@@ -60,21 +60,21 @@ fn explicit_holes_and_omitted_annotations_remain_distinct() {
 
 #[test]
 fn a_no_clause_inline_parameter_uses_the_synthesized_signatures_implicit_scope() {
-    let text = print_canonical_flat(&lower("def inspect(x: tensor[3, p]) -> int32 = 0i32"));
+    let text = print_canonical_flat(&lower("def inspect(x: tensor[3, p]) -> i32 = 0i32"));
     assert!(
         text.contains("(t-tensor {} (d-lit {} 3) (t-var {} p))"),
         "{text}"
     );
     assert!(!text.contains("(t-prim {} p)"), "{text}");
 
-    let text = print_canonical_flat(&lower("def inspect[p](x: tensor[3, p]) -> int32 = 0i32"));
+    let text = print_canonical_flat(&lower("def inspect[p](x: tensor[3, p]) -> i32 = 0i32"));
     assert!(
         text.contains("(t-tensor {} (d-lit {} 3) (t-var {} p))"),
         "{text}"
     );
     assert!(!text.contains("(t-prim {} p)"), "{text}");
 
-    let text = print_canonical_flat(&lower("def inspect[q](x: tensor[3, p]) -> int32 = 0i32"));
+    let text = print_canonical_flat(&lower("def inspect[q](x: tensor[3, p]) -> i32 = 0i32"));
     assert!(
         text.contains("(t-tensor {} (d-lit {} 3) (t-prim {} p))"),
         "{text}"
@@ -88,7 +88,7 @@ fn implicit_or_explicit_clauses_never_rebind_reserved_precisions() {
         for binders in ["", name] {
             let binder_clause = (!binders.is_empty()).then(|| format!("[{binders}]"));
             let text = print_canonical_flat(&lower(&format!(
-                "def inspect{}(x: tensor[3, {name}]) -> int32 = 0i32",
+                "def inspect{}(x: tensor[3, {name}]) -> i32 = 0i32",
                 binder_clause.as_deref().unwrap_or_default()
             )));
             assert!(

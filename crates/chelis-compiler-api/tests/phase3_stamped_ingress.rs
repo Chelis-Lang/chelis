@@ -452,7 +452,7 @@ const ADMITTED_TOP_LEVEL_FORMS: &[(&str, &str)] = &[
     ("def", "(def {} f (lit {} 1))"),
     (
         "defsig",
-        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} int32)))",
+        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} i32)))",
     ),
     ("deftype", "(deftype {} Color () (variant {} Red))"),
     ("typealias", "(typealias {} Scalar () (t-prim {} f32))"),

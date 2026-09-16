@@ -5,7 +5,7 @@ use chelis_compiler_api::{
 };
 
 const DTYPES: [&str; 9] = [
-    "f16", "bf16", "f32", "f64", "int8", "int16", "int32", "int64", "bool",
+    "f16", "bf16", "f32", "f64", "i8", "i16", "i32", "i64", "bool",
 ];
 
 fn evaluate(source: &str) -> chelis_compiler_api::schema::EvalResult {
@@ -66,8 +66,8 @@ fn nested_empty_lists_preserve_dtype_and_observable_shape() {
 
 #[test]
 fn generic_empty_calls_use_their_independent_checked_precision() {
-    let source = "def make[p: Numeric](xs: List[p]) -> tensor[0, p] = to_tensor(xs)\na: List[f64] = []\nb: List[int64] = []\nfirst = make(a)\nout = make(b)\n";
-    tensor(source, "int64", &[0], &[]);
+    let source = "def make[p: Numeric](xs: List[p]) -> tensor[0, p] = to_tensor(xs)\na: List[f64] = []\nb: List[i64] = []\nfirst = make(a)\nout = make(b)\n";
+    tensor(source, "i64", &[0], &[]);
     tensor(
         &source
             .replace("first =", "out =")
@@ -127,7 +127,7 @@ fn malformed_heterogeneous_and_unresolved_nested_shapes_reject() {
 /// annotated parameters, even when the List is computed in the body.
 #[test]
 fn separate_signatures_preserve_computed_list_element_dtypes() {
-    for dtype in ["int32", "int64", "f32", "f64"] {
+    for dtype in ["i32", "i64", "f32", "f64"] {
         let definitions =
             "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\n";
         tensor(
@@ -152,7 +152,7 @@ fn separate_signatures_preserve_computed_list_element_dtypes() {
 fn separate_signature_calls_keep_declared_and_checked_binders_independent() {
     tensor(
         "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([add(x, cast(1, p))])\nfirst = make(1.0f64)\nout = make(1i64)\n",
-        "int64",
+        "i64",
         &[1],
         &[2.0],
     );

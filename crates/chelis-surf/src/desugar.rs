@@ -823,38 +823,35 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
 // `f8e4m3` is reserved, not active. DEFERRED_DTYPE_NAMES below keeps it
 // out of implicit quantification so the checker reports [04-DTYPE-1].
 const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
+    "f32", "f64", "f16", "bf16", "i8", "i16", "i32", "i64", "bool", "string", "unit",
 ];
 
 /// The canonical primitive spelling for a type-position name, or `None` when
 /// the name is not a primitive at all.
 ///
-/// `spec/04-type-system.md` §5.8.1 lists the integer primitives by their SHORT
-/// spellings (`i8`..`i64`) while `spec/02-surf-syntax.md`'s grammar and
-/// `chelis_types::Prim::parse_name` spell them `int8`..`int64`. The short forms
-/// are accepted INPUT spellings that normalise here to the canonical long name,
-/// so canonical Deep carries one spelling per primitive and the
-/// implicit-quantifier collector never sees a primitive as a candidate.
-///
-/// Before this existed, `-> i64` failed the primitive test, fell through to the
-/// lexical case-split, and became an implicitly quantified `(t-var {} i64)`:
-/// `def ident(x: i64) -> i64 = x` accepted `ident(1.5f64)` and returned f64
-/// (chelis#1587).
-///
-/// `Prim::parse_name` deliberately gains no alias row. Deep is canonical, so a
-/// hand-written `(t-prim {} i64)` stays an unknown primitive and is rejected;
-/// the alias is a Surf input-spelling rule only. Whether one spelling should
-/// serve both the type and suffix roles is chelis#1592, not decided here.
+/// chelis#1592 makes the literal-suffix spellings (`i8`..`i64`) the sole
+/// canonical signed-integer names in Surf and Deep. Retired `int*` source is
+/// handled only by the versioned migration command below.
 pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
+    PRIMITIVES
+        .iter()
+        .copied()
+        .find(|primitive| *primitive == name)
+}
+
+const RETIRED_INTEGER_DTYPE_NAMES: &[&str] = &["int8", "int16", "int32", "int64"];
+
+pub(crate) fn is_retired_integer_dtype_name(name: &str) -> bool {
+    RETIRED_INTEGER_DTYPE_NAMES.contains(&name)
+}
+
+pub(crate) fn migrated_integer_dtype_name(name: &str) -> Option<&'static str> {
     match name {
-        "i8" => Some("int8"),
-        "i16" => Some("int16"),
-        "i32" => Some("int32"),
-        "i64" => Some("int64"),
-        _ => PRIMITIVES
-            .iter()
-            .copied()
-            .find(|primitive| *primitive == name),
+        "int8" => Some("i8"),
+        "int16" => Some("i16"),
+        "int32" => Some("i32"),
+        "int64" => Some("i64"),
+        _ => None,
     }
 }
 
@@ -899,7 +896,9 @@ const DEFERRED_DTYPE_NAMES: &[&str] = &[
 /// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
 /// (chelis#1593).
 pub(crate) fn is_reserved_dtype_name(name: &str) -> bool {
-    UNSIGNED_DTYPE_NAMES.contains(&name) || DEFERRED_DTYPE_NAMES.contains(&name)
+    UNSIGNED_DTYPE_NAMES.contains(&name)
+        || DEFERRED_DTYPE_NAMES.contains(&name)
+        || is_retired_integer_dtype_name(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,7 +1030,7 @@ fn collect_top_level_fn_tensor_param_prec(
     }
 }
 
-/// Return the precision name (e.g. `"f64"`, `"int32"`) for a tensor type
+/// Return the precision name (e.g. `"f64"`, `"i32"`) for a tensor type
 /// expression, or `None` for any other shape. Tensor type expressions in
 /// Surf carry the spelling and exact token span in `TensorPrecision`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
@@ -1644,7 +1643,7 @@ impl DesugarCtx {
         let index_expr = if indices.len() == 1 {
             node_meta(
                 DeepTag::Lit,
-                meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+                meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
                 vec![int(indices[0])],
             )
         } else {
@@ -1655,7 +1654,7 @@ impl DesugarCtx {
                     .map(|index| {
                         node_meta(
                             DeepTag::Lit,
-                            meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+                            meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
                             vec![int(index)],
                         )
                     })
@@ -1720,7 +1719,7 @@ impl DesugarCtx {
                     self.desugar_expr_with_scope(target, local_fn_params),
                     node_meta(
                         DeepTag::Lit,
-                        meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+                        meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
                         vec![deep::Expr::Atom(deep::Atom::Int(*index), sp())],
                     ),
                 ],
@@ -1864,7 +1863,7 @@ impl DesugarCtx {
                 // The [05-OP-6] truncating rung takes NONE of this: its
                 // target is an integer width and its source must stay a
                 // float, so adopting a literal at the target would turn
-                // `cast_trunc([1.9], int32)` into an int32 tensor and
+                // `cast_trunc([1.9], i32)` into an i32 tensor and
                 // make the truncating cast a type error on its own
                 // argument.
                 let binder = self.current_type_binder(prec);
@@ -1933,7 +1932,7 @@ impl DesugarCtx {
             Expr::Vmap(f, axis, _) => {
                 let axis_node = node_meta(
                     DeepTag::Lit,
-                    meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+                    meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
                     vec![deep::Expr::Atom(deep::Atom::Int(axis.unwrap_or(0)), sp())],
                 );
                 node(
@@ -2030,7 +2029,7 @@ fn tuple_index_expr(target: deep::Expr, index: i64) -> deep::Expr {
             target,
             node_meta(
                 DeepTag::Lit,
-                meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+                meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
                 vec![deep::Expr::Atom(deep::Atom::Int(index), sp())],
             ),
         ],
@@ -2186,7 +2185,7 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
     match lit {
         Literal::Int(n) => node_meta(
             DeepTag::Lit,
-            meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
+            meta_with_type(node(DeepTag::TPrim, vec![sym("i32")])),
             vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
         ),
         Literal::Float(f) => node_meta(
@@ -2274,10 +2273,10 @@ fn is_unsuffixed_surf_numeric_literal(expr: &Expr) -> bool {
 ///   * float literal + float target (`f32`/`f64`/`bf16`/`f16`) — the
 ///     decimal binds at `p` (single rounding, no round-trip through the
 ///     §5.3 f32 default);
-///   * int literal + integer target (`int8`..`int64`) — the value binds
-///     at `p`, which is what makes the documented out-of-int32-range
-///     escape hatch `cast(N, int64)` actually work (and routes the
-///     int8/int16 forms through `infer_lit`'s contextual range check);
+///   * int literal + integer target (`i8`..`i64`) — the value binds
+///     at `p`, which is what makes the documented out-of-i32-range
+///     escape hatch `cast(N, i64)` actually work (and routes the
+///     i8/i16 forms through `infer_lit`'s contextual range check);
 ///   * int literal + float target — the integer binds at `p` exactly.
 ///
 /// Everything else keeps the §5.3 default-then-convert behavior:
@@ -2310,7 +2309,7 @@ fn scalar_literal_source_adopts_cast_target(
         return false;
     }
     let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
-    let int_target = matches!(prec, "int8" | "int16" | "int32" | "int64");
+    let int_target = matches!(prec, "i8" | "i16" | "i32" | "i64");
     match source.numeric_atom() {
         Some(DeepAtom::Float(_)) => float_target,
         Some(DeepAtom::Int(_)) => float_target || int_target,
@@ -2366,7 +2365,7 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
 //
 // When a tensor literal `[e1, e2, ...]` appears in a position with a known
 // element type, the numeric literals in the body adopt that element type
-// instead of the §5.3 / §P10 literal default (int32 for integer literals,
+// instead of the §5.3 / §P10 literal default (i32 for integer literals,
 // f32 for float literals).
 //
 // The closed set of "known-element-type" positions is exactly four,
@@ -2400,9 +2399,9 @@ fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
 impl DesugarCtx {
     /// Desugar `items` as the body of a contextual tensor literal whose
     /// element type is `prec_name` (a precision name like `"f64"` or
-    /// `"int32"`). Numeric literals in `items` are emitted with
+    /// `"i32"`). Numeric literals in `items` are emitted with
     /// `(lit {type: (t-prim {} <prec_name>)} value)` instead of the
-    /// default int32/f32. Non-literal entries are desugared normally.
+    /// default i32/f32. Non-literal entries are desugared normally.
     /// The chain is wrapped in `to_tensor` so type inference resolves
     /// the result as a tensor.
     fn desugar_list_as_tensor_literal(
@@ -2458,8 +2457,8 @@ impl DesugarCtx {
             // `Unary(Neg, Lit(Int(128)))`. In a contextual tensor
             // literal position we fold the sign into the literal so
             // the WS-A0 D1 / WS-A0 D1-extension range checks see the
-            // user-facing value (`-128` for int8) rather than the
-            // raw inner literal (`128`, which overflows int8 max).
+            // user-facing value (`-128` for i8) rather than the
+            // raw inner literal (`128`, which overflows i8 max).
             // The same applies to negative float literals.
             Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
                 Expr::Lit(Literal::Int(n), _) => {
@@ -2704,7 +2703,7 @@ fn desugar_sig_type(ty: &TypeExpr, declared: &UnordSet<String>) -> deep::Expr {
 /// introduced) quantified type variables. The contextual rule for the
 /// tensor precision slot lives here:
 ///
-/// - A primitive name (`f32`, `int32`, ...) becomes `(t-prim {} <name>)`.
+/// - A primitive name (`f32`, `i32`, ...) becomes `(t-prim {} <name>)`.
 /// - A name found in `tvar_set` becomes `(t-var {} <name>)`.
 /// - Any other name in the precision slot is encoded as `(t-prim {} <name>)`
 ///   so the type checker can surface a precise diagnostic
@@ -2729,7 +2728,7 @@ fn desugar_type_with_scope_mode(
         TypeExpr::Named(name, _) => {
             // The contextual rule for type-name positions:
             //
-            // - A primitive name (`f32`, `int32`, ...) is a `t-prim`.
+            // - A primitive name (`f32`, `i32`, ...) is a `t-prim`.
             // - A name that appears in the enclosing quantifier set
             //   (`tvar_set` — a def's explicit `[..]` clause or a sig's
             //   implicit quantifiers) is a quantified type variable and
@@ -3004,7 +3003,7 @@ mod tests {
     #[test]
     fn test_int_literal() {
         let result = print_expr(&desugar_expr(&int_lit(42)));
-        assert_eq!(result, "(lit {type: (t-prim {} int32)} 42)");
+        assert_eq!(result, "(lit {type: (t-prim {} i32)} 42)");
     }
 
     #[test]
@@ -3213,7 +3212,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(match {}\n  (var {} x)\n  (arm {} (pat-ctor {} Some (pat-var {} y)) () (var {} y))\n  (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int32)} 0)))"
+            "(match {}\n  (var {} x)\n  (arm {} (pat-ctor {} Some (pat-var {} y)) () (var {} y))\n  (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} i32)} 0)))"
         );
     }
 
@@ -3233,7 +3232,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(let {}\n  (bind {}\n    x\n    (lit {surf_binding_type: \"inferred\", type: (t-prim {} int32)} 1))\n  (var {} x))"
+            "(let {}\n  (bind {}\n    x\n    (lit {surf_binding_type: \"inferred\", type: (t-prim {} i32)} 1))\n  (var {} x))"
         );
     }
 
@@ -3258,9 +3257,9 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert!(result.contains("__chelis_tmp0"));
         assert!(result.contains("(var {} triple)"));
-        assert!(result.contains("(lit {type: (t-prim {} int32)} 0)"));
-        assert!(result.contains("(lit {type: (t-prim {} int32)} 1)"));
-        assert!(result.contains("(lit {type: (t-prim {} int32)} 2)"));
+        assert!(result.contains("(lit {type: (t-prim {} i32)} 0)"));
+        assert!(result.contains("(lit {type: (t-prim {} i32)} 1)"));
+        assert!(result.contains("(lit {type: (t-prim {} i32)} 2)"));
         assert_eq!(result.matches("(tuple-get {}").count(), 3);
         assert!(result.contains("(var {} __chelis_tmp0)"));
         assert!(result.contains("(var {} c)"));
@@ -3531,7 +3530,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(def {} x (lit {type: (t-prim {} int32)} 42))");
+        assert_eq!(nodes[0], "(def {} x (lit {type: (t-prim {} i32)} 42))");
     }
 
     // --- Annotate preserves type in metadata ---
@@ -3577,7 +3576,7 @@ mod tests {
             .join(" ");
         assert_eq!(
             actual,
-            "(grad {wrt: (tuple {} (var {} w) (var {} b))} (var {} loss) (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))"
+            "(grad {wrt: (tuple {} (var {} w) (var {} b))} (var {} loss) (tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} i32)} 2)))"
         );
     }
 
@@ -3636,18 +3635,18 @@ mod tests {
 
     #[test]
     fn cast_of_int_literal_adopts_integer_target() {
-        // The documented §5.3 escape hatch for out-of-int32-range
-        // literals: `cast(3000000000, int64)` must bind the literal at
-        // int64 so `infer_lit` does not range-check it against int32.
+        // The documented §5.3 escape hatch for out-of-i32-range
+        // literals: `cast(3000000000, i64)` must bind the literal at
+        // i64 so `infer_lit` does not range-check it against i32.
         let expr = Expr::Cast(
             Box::new(int_lit(3_000_000_000)),
-            "int64".to_string(),
+            "i64".to_string(),
             CastMode::Checked,
             s(),
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int64)} 3000000000)\n  (t-prim {} int64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i64)} 3000000000)\n  (t-prim {} i64))"
         );
     }
 
@@ -3668,17 +3667,17 @@ mod tests {
     #[test]
     fn cast_of_float_literal_to_integer_does_not_adopt() {
         // Negative parity: a float literal cannot "adopt" an integer
-        // type — `cast(1.9, int32)` keeps the §5.3 f32 default on the
+        // type — `cast(1.9, i32)` keeps the §5.3 f32 default on the
         // literal, so the checked cast Domain-traps on the fractional value.
         let expr = Expr::Cast(
             Box::new(float_lit(1.9)),
-            "int32".to_string(),
+            "i32".to_string(),
             CastMode::Checked,
             s(),
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f32)} 1.9) (t-prim {} int32))"
+            "(cast {} (lit {type: (t-prim {} f32)} 1.9) (t-prim {} i32))"
         );
     }
 
@@ -3711,7 +3710,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} bool))"
+            "(cast {} (lit {type: (t-prim {} i32)} 1) (t-prim {} bool))"
         );
     }
 

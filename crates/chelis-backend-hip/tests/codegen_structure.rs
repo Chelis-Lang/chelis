@@ -421,7 +421,7 @@ fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
                 .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
             && source
                 .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
-        "host output shapes must use the generated int64 metadata alias: {source}"
+        "host output shapes must use the generated i64 metadata alias: {source}"
     );
     assert!(
         !source.contains("(int64_t[])"),
@@ -523,7 +523,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let trunc_src = codegen_hip(&dag, "test_trunc_div").unwrap().c_source;
     assert!(
         trunc_src.contains("kernel_trunc_div_i32"),
-        "trunc_div(int32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
+        "trunc_div(i32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
     );
 
     // floor_div (int): sign-correction kernel (contains the remainder
@@ -536,7 +536,7 @@ fn s3_floor_trunc_div_emit_typed_int_kernels() {
     let floor_src = codegen_hip(&dag, "test_floor_div").unwrap().c_source;
     assert!(
         floor_src.contains("kernel_floor_div_i32") && floor_src.contains("q -= 1"),
-        "floor_div(int32) must emit a sign-corrected kernel; got:\n{floor_src}"
+        "floor_div(i32) must emit a sign-corrected kernel; got:\n{floor_src}"
     );
 
     // floor_div (float): `floorf(a / b)`.
@@ -2453,7 +2453,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
 /// `spec/05-risc-primitives.md` section 2.4.1 sends a symbolic operand extent
 /// other than 1 to "that claim's runtime extent guard", and
 /// `spec/04-type-system.md` section 4.7 places it at entry and renders it
-/// `numeric trap: domain in load at int64` when the operand is an input
+/// `numeric trap: domain in load at i64` when the operand is an input
 /// tensor's axis.
 ///
 /// The `<op>` is `load`, not `expand`, by section 4.7's operand-class rule.
@@ -2495,7 +2495,7 @@ fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
         "the prologue compares the operand's axis against the claimed 1:\n{host}"
     );
     assert!(
-        host.contains("numeric trap: domain in load at int64"),
+        host.contains("numeric trap: domain in load at i64"),
         "and renders [04-NUM-9] rather than this lane's legacy abort:\n{host}"
     );
     assert!(

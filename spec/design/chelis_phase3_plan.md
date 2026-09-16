@@ -571,7 +571,7 @@ tok = load_tokenizer("tokenizer.json")
 
 tokens = encode(tok, "Hello, world!")
 
-inputs = batch_encode(tok, ["Hello, world!"], cast(512, int64), cast(0, int64))
+inputs = batch_encode(tok, ["Hello, world!"], cast(512, i64), cast(0, i64))
 ```
 
 Implementation: the tokenizer is a Chelis program, not a C library wrapper. BPE merge
@@ -596,13 +596,13 @@ Compose the above into a training data loader:
 import Std.Tokenizer
 
 def load_training_data(data_path: string, tok_path: string,
-                       max_len: int64, batch_size: int64) -> List[tensor[batch, max_len, int64]] = {
+                       max_len: i64, batch_size: i64) -> List[tensor[batch, max_len, i64]] = {
   tok = load_tokenizer(tok_path)
   lines = read_lines(data_path)
   encoded = map(fn (line: string) -> encode(tok, line), lines)
   batches = chunk(encoded, batch_size)
   map(
-    fn (batch: List[List[int64]]) -> pad_sequences_to(batch, max_len, cast(0, int64)),
+    fn (batch: List[List[i64]]) -> pad_sequences_to(batch, max_len, cast(0, i64)),
     batches
   )
 }
@@ -669,9 +669,9 @@ with KV caching, optimizer variants, and learning rate scheduling.
 Pure Chelis standard library module for dates and durations.
 
 - `Date` type: year, month, day. Constructed via
-  `date(cast(2024, int64), cast(1, int64), cast(15, int64))`.
+  `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
 - `Duration` type: days, hours, minutes, seconds. Constructed via
-  `duration(cast(1, int64), cast(2, int64), cast(3, int64), cast(4, int64))`.
+  `duration(cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64))`.
 - Arithmetic: `add_days(date, n)`, `sub_days(date, n)`, `days_between(date1, date2)`.
 - Comparison and ordering on dates.
 - Formatting: `date_to_string(date)` → ISO 8601 (`"2024-01-15"`).
@@ -684,7 +684,7 @@ Pure Chelis standard library module for dates and durations.
 Pure Chelis standard library module for fixed-point exact arithmetic.
 
 - `Decimal` type: exact representation with configurable scale.
-- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, int64))`.
+- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, i64))`.
 - Arithmetic: `decimal_add`, `decimal_sub`, `decimal_mul`, `decimal_div` with explicit
   rounding mode.
 - Rounding modes: `round_half_up`, `round_half_even` (banker's rounding), `round_down`,
@@ -707,13 +707,13 @@ but verbose.
 import Std.Nn.Generate
 
 -- Simple greedy generation
-generated = generate(model_fn, context, cast(512, int64))
+generated = generate(model_fn, context, cast(512, i64))
 
 -- With sampling controls
 generated = generate_with(model_fn, context, GenerateConfig {
-  max_tokens: cast(512, int64),
+  max_tokens: cast(512, i64),
   temperature: 0.8,
-  top_k: cast(50, int64),
+  top_k: cast(50, i64),
   top_p: 0.95
 })
 ```
@@ -728,7 +728,7 @@ Internals:
   scaling, top-k filtering (via `sort`), top-p (nucleus) filtering (via suffix-mass on
   sorted probabilities), and categorical sampling (`Random` effect).
 - The model function signature:
-  `(input_ids: tensor[batch, seq, int64], cache: Option[KVCache[p]]) -> (logits: tensor[batch, vocab, f32], new_cache: KVCache[p])`.
+  `(input_ids: tensor[batch, seq, i64], cache: Option[KVCache[p]]) -> (logits: tensor[batch, vocab, f32], new_cache: KVCache[p])`.
 
 Effects: the shipped `generate` helper is the pure greedy surface. The more general
 `generate_with` helper currently carries `Random` because effect tracking is static at
@@ -764,8 +764,8 @@ import Std.Schedule
 lr = cosine_with_warmup(
   step,
   CosineWarmupConfig {
-    warmup_steps: cast(1000, int64),
-    total_steps: cast(100000, int64),
+    warmup_steps: cast(1000, i64),
+    total_steps: cast(100000, i64),
     min_lr: 1e-6,
     max_lr: 3e-4
   }
@@ -775,7 +775,7 @@ lr = cosine_with_warmup(
 lr = linear_warmup(
   step,
   LinearWarmupConfig {
-    warmup_steps: cast(1000, int64),
+    warmup_steps: cast(1000, i64),
     target_lr: 3e-4
   }
 )
@@ -786,7 +786,7 @@ lr = step_decay(
   StepDecayConfig {
     initial_lr: 3e-4,
     decay_factor: 0.1,
-    decay_steps: [cast(30000, int64), cast(60000, int64)]
+    decay_steps: [cast(30000, i64), cast(60000, i64)]
   }
 )
 ```
@@ -998,7 +998,7 @@ tag push. Release history:
         emit real C definitions and link cleanly.
         (Superseded — the four `Std.Tensor.Reduce` wrappers were later
         REMOVED in chelis#333: they were bodyless sigs taking a runtime
-        `int32` axis but the `*_reduce` builtins require a const axis, so
+        `i32` axis but the `*_reduce` builtins require a const axis, so
         they were unimplementable as declared and never had a runtime
         function. Consumers call `min_reduce`/`prod_reduce`/`argmax_reduce`/
         `argmin_reduce` directly with a const axis. `Std.Nn.Linear.forward`
@@ -1202,7 +1202,7 @@ A DataFrame is `Dict[String, Column]` where:
 
 ```chelis
 type Column =
-  | IntCol(tensor[n, int64])
+  | IntCol(tensor[n, i64])
   | FloatCol(tensor[n, f32])
   | StringCol(List[String])
   | BoolCol(tensor[n, bool])

@@ -540,11 +540,12 @@ pub(super) fn walk_for_tensor_precision(
                     // value-position metadata. The reserved-name exclusions
                     // keep those spellings from acquiring a second owner.
                     if Prim::parse_name(name).is_none()
+                        && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {
-                        let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+                        let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
                         // WS-A5 RT-3a F3: an identifier in a `t-prim`
                         // precision slot that is neither a known active
                         // primitive nor a §1.1.1 deferred dtype name
@@ -1438,7 +1439,7 @@ pub(super) fn validate_conv_semantic_requirements(
 }
 
 /// [05-OP-51]: positive kernel, nonnegative padding, positive stride, and
-/// checked int64 arithmetic. A kernel that does not fit is never an empty
+/// checked i64 arithmetic. A kernel that does not fit is never an empty
 /// result or a truncating-division special case.
 pub(super) fn conv_output_extent(
     input: i64,

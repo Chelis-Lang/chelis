@@ -2025,7 +2025,7 @@ mod tests {
     fn evaluator_profile_still_declines_resource_scopes() {
         let source = "(handle-effect {effect: resource} (lit {} \"cpu:author-device\") \
                       (handle-effect {effect: random} \
-                      (lit {type: (t-prim {} int64)} 42) \
+                      (lit {type: (t-prim {} i64)} 42) \
                       (app {} (var {} dropout) (var {} x) \
                       (lit {type: (t-prim {} f32)} 0.5))))";
         let expression = chelis_deep::parser::parse_str(source)
@@ -2196,7 +2196,7 @@ mod tests {
                     occurrences_before: Some(if nested { 3 } else { 1 }),
                     value: StageValue::Host(HostValueId(0)),
                     ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-                    expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
+                    expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 0)")
                         .unwrap()
                         .remove(0),
                     captures: vec![(
@@ -2569,11 +2569,11 @@ mod tests {
             for count in [0, 4] {
                 for nested in [false, true] {
                     let body = format!(
-                        "(let {{}} (bind {{}} gradient (app {{}} (grad {{}} (fn {{}} (params {{}} (t {{type: (t-tensor {{}} (d-lit {{}} {count}) (t-prim {{}} f32))}})) (app {{type: (t-tensor {{}} (t-prim {{}} f32))}} (var {{}} sum) (app {{}} (var {{}} dropout) (var {{}} t) (lit {{type: (t-prim {{}} f32)}} 0.5)) (lit {{type: (t-prim {{}} int32)}} 0)))) (var {{}} x))) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.5)))"
+                        "(let {{}} (bind {{}} gradient (app {{}} (grad {{}} (fn {{}} (params {{}} (t {{type: (t-tensor {{}} (d-lit {{}} {count}) (t-prim {{}} f32))}})) (app {{type: (t-tensor {{}} (t-prim {{}} f32))}} (var {{}} sum) (app {{}} (var {{}} dropout) (var {{}} t) (lit {{type: (t-prim {{}} f32)}} 0.5)) (lit {{type: (t-prim {{}} i32)}} 0)))) (var {{}} x))) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.5)))"
                     );
                     let source = if nested {
                         format!(
-                            "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) {body})"
+                            "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} i64)}} 42) {body})"
                         )
                     } else {
                         body
@@ -2782,7 +2782,7 @@ mod tests {
     #[test]
     fn value_free_equal_seed_scopes_survive_and_do_not_enter_draws() {
         let plan = lower_source(
-            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))",
+            "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x)))",
         );
         assert_eq!(plan.source_for_inspection().len(), 4);
         assert!(matches!(
@@ -2821,7 +2821,7 @@ mod tests {
     #[test]
     fn joint_control_and_runtime_scope_deletion_does_not_delete_source_evidence() {
         let mut plan = lower_source(
-            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))",
+            "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x))",
         );
         plan.metadata
             .spine
@@ -2837,7 +2837,7 @@ mod tests {
         use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         use std::collections::BTreeMap;
         let logical = lower_source(
-            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))",
+            "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x))",
         );
         for cut in [Some(2), None, Some(3)] {
             let mut companion =
@@ -2847,7 +2847,7 @@ mod tests {
                 occurrences_before: cut,
                 value: StageValue::Host(HostValueId(0)),
                 ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
-                expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
+                expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 0)")
                     .unwrap()
                     .remove(0),
                 captures: Vec::new(),
@@ -2895,8 +2895,7 @@ mod tests {
 
     #[test]
     fn control_corruption_is_rejected_against_the_source_and_stack() {
-        let source =
-            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))";
+        let source = "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x))";
         let original = lower_source(source);
         let controls = original
             .metadata
@@ -2948,7 +2947,7 @@ mod tests {
     #[test]
     fn same_seed_balanced_scope_identity_substitution_is_rejected() {
         let mut plan = lower_source(
-            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))",
+            "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x)))",
         );
         for step in &mut plan.metadata.spine.steps {
             if let Step::Control { control, .. } = step {
@@ -3000,7 +2999,7 @@ mod tests {
                 .unwrap()
         };
         let mut definitions = UnordMap::new();
-        definitions.insert("loss".into(), parse("(fn {} (params {} (t {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))})) (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum) (app {} (var {} dropout) (var {} t) (lit {type: (t-prim {} f32)} 0.5)) (lit {type: (t-prim {} int32)} 0)))"));
+        definitions.insert("loss".into(), parse("(fn {} (params {} (t {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))})) (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum) (app {} (var {} dropout) (var {} t) (lit {type: (t-prim {} f32)} 0.5)) (lit {type: (t-prim {} i32)} 0)))"));
         let expression = parse(
             "(let {} (bind {} gradient (app {} (grad {} (var {} loss)) (var {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} x))) (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         );

@@ -14,11 +14,11 @@
 
 namespace {
 [[noreturn]] void domain() {
-    chelis_numeric_trap("numeric trap: domain in metadata_plan at int64");
+    chelis_numeric_trap("numeric trap: domain in metadata_plan at i64");
     std::abort();
 }
 [[noreturn]] void overflow() {
-    chelis_numeric_trap("numeric trap: overflow in metadata_plan at int64");
+    chelis_numeric_trap("numeric trap: overflow in metadata_plan at i64");
     std::abort();
 }
 void hip_checked(hipError_t status) {

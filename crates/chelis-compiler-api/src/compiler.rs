@@ -4579,10 +4579,10 @@ fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
 }
 
 fn execution_tensor_spec(name: String, ty: &TensorType) -> WireResult<ExecutionTensorSpec> {
-    i32::try_from(ty.dims.len()).map_err(|_| "execution tensor rank exceeds int32".to_string())?;
+    i32::try_from(ty.dims.len()).map_err(|_| "execution tensor rank exceeds i32".to_string())?;
     Ok(ExecutionTensorSpec {
         name,
-        dtype: ty.precision.name().to_string(),
+        dtype: ty.precision.interchange_name().to_string(),
         dims: ty
             .dims
             .iter()
@@ -5239,7 +5239,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     "metal",
                     chelis_types::unimplemented_rejection!(
                         729,
-                        "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/int8/int16/int32/int64/bool (spec/04-type-system.md §1.1.3)"
+                        "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/i8/i16/i32/i64/bool (spec/04-type-system.md §1.1.3)"
                     ),
                 ));
             }
@@ -5763,7 +5763,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
-                            "`chelis build --target hip` sparse gather requires int32/int64 indices; \
+                            "`chelis build --target hip` sparse gather requires i32/i64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
@@ -5771,7 +5771,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         "hip",
                         chelis_types::deliberate_rejection!(
                             "[05-SPARSE-1]",
-                            "sparse indices must use the specified int32 or int64 dtype"
+                            "sparse indices must use the specified i32 or i64 dtype"
                         ),
                     ));
                 }
@@ -5851,7 +5851,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
-                            "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
+                            "`chelis build --target hip` sparse {label} requires i32/i64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
@@ -5859,7 +5859,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         "hip",
                         chelis_types::deliberate_rejection!(
                             "[05-SPARSE-1]",
-                            "sparse indices must use the specified int32 or int64 dtype"
+                            "sparse indices must use the specified i32 or i64 dtype"
                         ),
                     ));
                 }
@@ -5980,7 +5980,7 @@ fn eval_stage_error(message: String) -> CompilerError {
         observed.parse::<usize>().ok()?;
         Some(
             claim == required
-                && lines.next() == Some("numeric trap: domain in cast at int64")
+                && lines.next() == Some("numeric trap: domain in cast at i64")
                 && lines.next().is_none(),
         )
     })()
@@ -6689,7 +6689,7 @@ fn wire_extent(value: usize) -> WireResult<NonnegativeExtent> {
 }
 
 fn wire_axis(value: usize) -> WireResult<i32> {
-    i32::try_from(value).map_err(|_| "wire axis exceeds int32".to_string())
+    i32::try_from(value).map_err(|_| "wire axis exceeds i32".to_string())
 }
 
 fn wire_float_parameter(value: f64, precision: Prim) -> WireResult<chelis_types::ScalarValue> {
@@ -6751,7 +6751,7 @@ fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
 fn wire_tensor_type(ty: &TensorType) -> WireResult<WireTensorType> {
     Ok(WireTensorType {
         dims: ty.dims.iter().map(wire_dim).collect::<WireResult<_>>()?,
-        precision: ty.precision.name().to_string(),
+        precision: ty.precision.interchange_name().to_string(),
     })
 }
 
@@ -7023,10 +7023,10 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
         RiscOp::CastTrunc { new_precision } => WireRiscOp::CastTrunc {
-            new_precision: new_precision.name().to_string(),
+            new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
-            new_precision: new_precision.name().to_string(),
+            new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::FusedElem { ops } => WireRiscOp::FusedElem {
             ops: ops
@@ -7155,12 +7155,12 @@ mod tests {
                 "-> &tensor[f32] -> tensor[s, d, f32]",
             )
             .replace("scalar_to_tensor(sink)", "copy(sink)");
-        source.push_str("def entry(q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> int32 = 7i32\n");
+        source.push_str("def entry(q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
         let compiled = compile_source(SourceKind::Surf, &source).unwrap();
         let parameters = ["q", "k", "v", "scale", "mask", "sink"]
             .map(str::to_owned)
             .into();
-        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:946..952`";
+        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:934..940`";
         assert_eq!(
             selected_host_input_demand(&compiled, "bad", &parameters)
                 .unwrap_err()
@@ -7568,7 +7568,7 @@ mod tests {
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -8371,7 +8371,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     fn compile_source_arrow_form_def_appears_in_manifest() {
         // Issue #947: arrow-form `def n() -> T = body` must appear in
         // the production manifest so eval_compiled can surface it.
-        let source = "def n() -> int32 = add(cast(20, int32), cast(22, int32))\n";
+        let source = "def n() -> i32 = add(cast(20, i32), cast(22, i32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
             compiled
@@ -9020,12 +9020,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_source_accepts_typed_param_named_let() {
         let source = r#"
-def id(let: int64) -> int64 = let
+def id(let: i64) -> i64 = let
 "#;
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         let deep = chelis_deep::printer::print_canonical(compiled.checked().exprs());
-        assert!(deep.contains("^{:type (t-prim {} int64)} let"));
+        assert!(deep.contains("^{:type (t-prim {} i64)} let"));
     }
 
     #[test]
@@ -9055,7 +9055,7 @@ def id(let: int64) -> int64 = let
         let source = r#"
 type Jsonish =
   | JsonNull
-  | JsonInt(int64)
+  | JsonInt(i64)
   | JsonString(string)
   | JsonArray(List[Jsonish])
 
@@ -9067,7 +9067,7 @@ def describe(value: Jsonish) -> string =
     | JsonArray(items) => to_string(len(items))
   }
 
-sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+sample = JsonArray([JsonString("hi"), JsonInt(cast(3, i64))])
 result = describe(sample)
 "#;
 
@@ -9185,7 +9185,7 @@ dims = (rank(x), shape(x, 1), numel(x))
             source: r#"
 parsed = match to_int(" 42 ") with {
   | Some(n) => n
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 
 cleaned = string_trim("  ckpt-42.safetensors  ")
@@ -9194,7 +9194,7 @@ matches_path = and(
   string_starts_with(cleaned, "ckpt-"),
   string_contains(cleaned, "42")
 )
-result = if matches_path then parsed else cast(0, int64)
+result = if matches_path then parsed else cast(0, i64)
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -9216,9 +9216,9 @@ result = if matches_path then parsed else cast(0, int64)
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
-rem = mod(cast(17, int64), cast(5, int64))
-shifted = shr(cast(8, int64), cast(1, int64))
+bits = bitxor(bitand(cast(7, i64), cast(3, i64)), shl(cast(1, i64), cast(2, i64)))
+rem = mod(cast(17, i64), cast(5, i64))
+shifted = shr(cast(8, i64), cast(1, i64))
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -9253,10 +9253,10 @@ shifted = shr(cast(8, int64), cast(1, int64))
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-def sum_to(n: int64) -> int64 =
-  if lte(n, cast(0, int64)) then cast(0, int64) else add(n, sum_to(sub(n, cast(1, int64))))
+def sum_to(n: i64) -> i64 =
+  if lte(n, cast(0, i64)) then cast(0, i64) else add(n, sum_to(sub(n, cast(1, i64))))
 
-value = sum_to(cast(3, int64))
+value = sum_to(cast(3, i64))
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -9281,9 +9281,9 @@ module Demo.Main
 
 parsed = match to_int("7") with {
   | Some(value) => value
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
-label = if gt(parsed, cast(0, int64)) then "ready" else "waiting"
+label = if gt(parsed, cast(0, i64)) then "ready" else "waiting"
 view = print(label)
 "#
             .to_string(),
@@ -9307,11 +9307,11 @@ view = print(label)
             source_kind: SourceKind::Surf,
             source: r#"
 type Date =
-  | Date { year: int64, month: int64, day: int64 }
+  | Date { year: i64, month: i64, day: i64 }
 
-mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+mk_date = Date { year: cast(2024, i64), month: cast(2, i64), day: cast(29, i64) }
 year = mk_date.year
-label = if eq(year, cast(2024, int64)) then "leap" else "plain"
+label = if eq(year, cast(2024, i64)) then "leap" else "plain"
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -9340,9 +9340,9 @@ label = if eq(year, cast(2024, int64)) then "leap" else "plain"
             source_kind: SourceKind::Surf,
             source: r#"
 type Date =
-  | Date { year: int64, month: int64, day: int64 }
+  | Date { year: i64, month: i64, day: i64 }
 
-mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+mk_date = Date { year: cast(2024, i64), month: cast(2, i64), day: cast(29, i64) }
 year = mk_date.year
 "#
             .to_string(),
@@ -9383,7 +9383,7 @@ type Jsonish =
   | JsonObject(Dict[string, Jsonish])
 
 type Tokenizer =
-  | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
+  | BpeTokenizer(Dict[string, i64], Dict[string, i64], Dict[i64, string], i64)
 
 def parse_line(line: string) -> Option[List[string]] =
   Some([])
@@ -9399,7 +9399,7 @@ def json_string(value: Option[Jsonish]) -> Option[string] =
   }
 
 def load_tokenizer(path: string) -> Option[Tokenizer] =
-  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, int64)))
+  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, i64)))
 "#,
         )
         .expect("compile");
@@ -9577,7 +9577,7 @@ b: tensor[2, f32] = b
 
     #[test]
     fn unavailable_owed_root_fails_with_named_lane_and_authority() {
-        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, int32)\n")
+        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, i32)\n")
             .expect("compile fault-injection fixture");
         let mut manifest = compiled.manifest().clone();
         let mut unavailable = manifest.entries[0].clone();
@@ -9670,17 +9670,17 @@ b: tensor[2, f32] = b
     fn eval_rejects_negative_shape_axis_with_signed_diagnostic() {
         // The -1 is laundered through runtime arithmetic (`0 - 1`) so
         // the checker cannot see it and the runtime `shape` arm owns
-        // the rejection. The original form `cast(-1, int32)` stopped
+        // the rejection. The original form `cast(-1, i32)` stopped
         // exercising this path with issue #308: the desugarer now
         // folds the sign into the literal (spec §5.6 position 4), so
         // the binding takes the same tensor lane the positive-literal
-        // form `cast(1, int32)` always took, and the axis arrives as a
+        // form `cast(1, i32)` always took, and the axis arrives as a
         // rank-0 tensor rather than a host int scalar.
         let error = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, int32)))
-bad = shape(scalar_to_tensor(cast(3, int64)), axis)
+axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, i32)))
+bad = shape(scalar_to_tensor(cast(3, i64)), axis)
 "#
             .to_string(),
             bindings: BTreeMap::new(),

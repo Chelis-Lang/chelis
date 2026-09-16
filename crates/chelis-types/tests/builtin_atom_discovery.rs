@@ -276,7 +276,7 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
         "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
         "result = map(fn(x) -> len(x), [1.0])",
-        "sig size[p: Int]: p -> int64\ndef size(x) = len(x)\nresult = size(1i64)",
+        "sig size[p: Int]: p -> i64\ndef size(x) = len(x)\nresult = size(1i64)",
         "def equal(x,y) = eq(x,y)\nresult = equal(1,[1])",
     ] {
         let deep = desugar_program(&parse_str(source).unwrap());

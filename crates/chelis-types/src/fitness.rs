@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn accepted_analysis_uses_one_type_session() {
         let exprs =
-            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} int32)} 42))")
+            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} i32)} 42))")
                 .unwrap();
         crate::session::reset_type_analysis_session_count();
 
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn correct_program_scores_1() {
-        let r = score("(def {} x (lit {type: (t-prim {} int32)} 42))");
+        let r = score("(def {} x (lit {type: (t-prim {} i32)} 42))");
         assert!(
             (r.score - 1.0).abs() < 1e-9,
             "expected score 1.0, got {}",
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn partial_errors_give_intermediate_score() {
         let r = score(
-            "(def {} good (lit {type: (t-prim {} int32)} 42)) \
+            "(def {} good (lit {type: (t-prim {} i32)} 42)) \
              (def {} bad (var {} nope))",
         );
         assert!(
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn typed_and_total_nodes_tracked() {
-        let r = score("(def {} x (lit {type: (t-prim {} int32)} 42))");
+        let r = score("(def {} x (lit {type: (t-prim {} i32)} 42))");
         assert!(r.total_nodes > 0, "should have visited some nodes");
         assert_eq!(
             r.typed_nodes, r.total_nodes,
@@ -478,8 +478,8 @@ mod tests {
 
     #[test]
     fn check_program_fn_works() {
-        let exprs = chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} int32)} 42))")
-            .unwrap();
+        let exprs =
+            chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
         let r = check_program(&exprs);
         assert!((r.score - 1.0).abs() < 1e-9);
     }
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn ir_check_never_reports_perfect_score_with_errors() {
         let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
         let r = check_ir_program(&exprs);
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn honesty_cap_leaves_coverage_scored_failures_untouched() {
         let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
         let r = check_ir_program(&exprs);

@@ -110,7 +110,7 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
                 let value = match sort {
                     crate::solver::SmtSort::Int => {
                         scalar_from_i64("prove-fuzz-sample", Prim::Int64, rng.next_i64(-10, 10))
-                            .expect("the int64 fuzz bounds are representable")
+                            .expect("the i64 fuzz bounds are representable")
                     }
                     crate::solver::SmtSort::Real => {
                         scalar_from_f64("prove-fuzz-sample", Prim::F64, rng.next_f64(-10.0, 10.0))

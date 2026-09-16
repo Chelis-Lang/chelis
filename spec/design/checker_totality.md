@@ -291,7 +291,7 @@ Normative, for every node the checker visits:
    disposition.
 5. **`handle-effect` gets a real case** (the instance fix): check the
    handler expression against its effect kind's signature (`random`: an
-   int64-SUFFIXED signed integer literal seed - `42i64` or `-1i64` per spec/02 §P5/§P10a; an
+   i64-SUFFIXED signed integer literal seed - `42i64` or `-1i64` per spec/02 §P5/§P10a; an
    unsuffixed literal is a type error naming the required suffix -
    explicit over implicit, the width is visible in the source;
    `resource`: a string-LITERAL device, literal-ness checked, name
@@ -308,7 +308,7 @@ Normative, for every node the checker visits:
    shape; the literal-form rules above are ours (LaCaDiLE does not model
    seed values).
    Signed seed admission follows [05-RNG-1]'s two's-complement bits,
-   including `int64::MIN`. Surf's single unary-minus literal encoding and
+   including `i64::MIN`. Surf's single unary-minus literal encoding and
    equivalent Deep literals use the same typed static evaluator as lowering.
    The source form check still rejects casts, nested arithmetic, runtime
    variables, and a lexically shadowed `neg` callable. The executable regression
@@ -319,7 +319,7 @@ Normative, for every node the checker visits:
    algorithm; its exact-bit controls prove seed transport, not adoption of the
    full [05-RNG-1] algorithm. The same suite checks canonical Dropout evaluator
    masks and the next draw for signed seeds.
-   The three executed escalations become impossible: an int64 body in an
+   The three executed escalations become impossible: an i64 body in an
    `-> f32` def is a type error; the tensor variant is a type error; both
    are caught before any backend sees them.
 
@@ -1132,7 +1132,7 @@ claim.
 |---|---|---|
 | Authored dtype binder | Float-bound wrapper around a float-only operation | Unbounded or Numeric-bound wrapper, even with only float callers |
 | Omitted signature | Unconstrained identity | Newly inferred constrained generic `def size(x) = len(x)` |
-| Collection constructor | `List[a]` length wrapper at independent element types | Arbitrary `a -> int64` length signature, or scalar argument to the list wrapper |
+| Collection constructor | `List[a]` length wrapper at independent element types | Arbitrary `a -> i64` length signature, or scalar argument to the list wrapper |
 | Local inference | Unannotated lambda bound to a valid concrete operand within its enclosing declaration | Invalid first binding, or unresolved obligation at that boundary |
 | Function values | Alias or aggregate field retains an existing checked contract | Newly authored generic wrapper or escaping lambda needs undeclared requirements |
 | Higher-order and transitive calls | Valid instantiation through a checked function parameter or wrapper chain | Inadmissible instantiation on each same route without a callee-body lookup |
@@ -2104,7 +2104,7 @@ Test dispositions, each stated for the `check` ingress and, in the new
 - New: `the_expand_built_reproducer_is_loud_at_run_time` builds and runs the
   `expand`-built reproducer with a refuted unit-extent claim on the evaluator
   and C lanes, and asserts section 2.4.1's `Domain` trap, `numeric trap:
-  domain in load at int64` with `claimed = 1` and `axis 0 = 2`, beside a
+  domain in load at i64` with `claimed = 1` and `axis 0 = 2`, beside a
   satisfied-claim control that executes exactly. Both lanes trap.
 
 The six D2/D3 escapes in both operand orders are *not* checker negatives in
@@ -2240,7 +2240,7 @@ reference will run while a value is being initialized. Each was confirmed
 from the code and, where the prebuilt binary predating [#1457] could reach
 it, by execution; the PP6 pull request body carries the probe transcript.
 
-- [#1486], a compiled wrong answer. `def f(n: int32) = add(1, n)` desugars
+- [#1486], a compiled wrong answer. `def f(n: i32) = add(1, n)` desugars
   to a `defsig` whose result slot is `(t-var {} _)`
   (`crates/chelis-surf/src/desugar.rs`, the `None => node(DeepTag::TVar,
   vec![sym("_")])` arms of the synthesized signature). At
@@ -2251,10 +2251,10 @@ it, by execution; the PP6 pull request body carries the probe transcript.
   resolves the signature inside `subst.enter_level`, leaves the level, and
   calls `env.generalize(&ty, subst)`, which quantifies every variable minted
   above the current level, the hole included: the header becomes
-  `forall a. (int32) -> a`. `infer_top_level` later instantiates that scheme
+  `forall a. (i32) -> a`. `infer_top_level` later instantiates that scheme
   for the body, unifies the body against the instance, and rebinds the name
   to the narrowed, regeneralized result, so the environment scheme is
-  `(int32) -> int32` only after the body is inferred. A reader scheduled
+  `(i32) -> i32` only after the body is inferred. A reader scheduled
   before the body (`infer_var`, `crates/chelis-types/src/infer/expr.rs`,
   `env.instantiate(&scheme, vg, subst)`) instantiates the quantified hole at
   a fresh variable, accepts `r: f32 = f(2)`, and is never revisited. The
@@ -2266,8 +2266,8 @@ it, by execution; the PP6 pull request body carries the probe transcript.
   `TypeMismatch`. The issue's diagnosis is exact. Its second half is the
   same mechanism through an authored binder: `def f[a](x: a) -> a =
   add(x, 1)` and the implicit `def f(x: a) -> a = add(x, v)` both check
-  clean, the body instance of `a` is bound to `int32`, and the registered
-  scheme is the narrowed `(int32) -> int32`; the only rigidity check today is
+  clean, the body instance of `a` is bound to `i32`, and the registered
+  scheme is the narrowed `(i32) -> i32`; the only rigidity check today is
   `check_declared_dvars_rigid`, for dimensions. Measured: a reader after the
   function sees the narrowed scheme (`s = f(1.5f64)` rejects with
   `PrecisionMismatch`), a reader before it is accepted and evaluates to a
@@ -2282,7 +2282,7 @@ it, by execution; the PP6 pull request body carries the probe transcript.
   disagree about the same reference. The detector is also asymmetric in a
   second way, measured on the prebuilt binary: `carried = pick(f)` with
   `f` reading `carried` is `CycleDetected` (a bare function reference is
-  followed into the function's body), while `carried = pick(fn (x: int32)
+  followed into the function's body), while `carried = pick(fn (x: i32)
   -> f(x))` with the same `f` is not. A third blind spot is in the DFS: a
   `call_edges` step onto a value that is on the value stack is skipped as
   recursion rather than reported, so a value that applies a closure held
@@ -2334,7 +2334,7 @@ carry the language rules; this section only implements them.
   lambda in argument position of an eager application, or only for callees
   that apply their argument) is not sound: a closure stored in a list or
   returned from a helper and applied by a later value's initializer
-  (measured: `def mk() = fn (x: int32) -> f(x)`, `b: int32 = (mk())(1)`,
+  (measured: `def mk() = fn (x: i32) -> f(x)`, `b: i32 = (mk())(1)`,
   `f` reading `b` checks clean and fails under `eval` with a runtime cycle)
   escapes it, and deciding whether a user-defined callee applies its
   parameter is a higher-order flow question the checker cannot answer at
@@ -2344,7 +2344,7 @@ carry the language rules; this section only implements them.
   asymmetry rather than introducing a policy. The escape hatch is to pass
   the value as an argument.
 - [#1485]'s three spellings under these rules: `carried = wrap(f)` with a
-  signed `f` that applies `carried`, `carried = pick(fn (x: int32) -> f(x))`
+  signed `f` that applies `carried`, `carried = pick(fn (x: i32) -> f(x))`
   with `f` reading `carried`, and `carried = wrap(g)` with a `defsig`-less
   `g` that applies `carried` are each an eager value cycle under [04-INF-7]
   (the value's initializer names the function, the function's body reads or
@@ -2449,7 +2449,7 @@ it is honest**, where a complete or authored-binder header is honest by
    from the issue, annotated and unannotated, each `CycleDetected`
    identically; a CLI test rejects them at `check`, `eval`, and `build`; the
    returned-lambda shape and a closure applied by a later value are
-   negatives; the stored lambda `carried = fn (x: int32) -> f(x)` (a
+   negatives; the stored lambda `carried = fn (x: i32) -> f(x)` (a
    function `def` to the planner), a lambda reading an earlier value
    through a callee, and every program in `examples/iter_foundation.ch` are
    positive controls.
@@ -2505,7 +2505,7 @@ it is honest**, where a complete or authored-binder header is honest by
    tests and the stdlib repair, Slice B 120-180, Slice C 200-300. Land as
    one pull request with one commit per slice in the order A, B, C. A
    shrinks C's cyclic class to two-cycles through a `defsig`-less mirror
-   edge or through a hole edge (`r = f(2)` with `def f(n: int32) =
+   edge or through a hole edge (`r = f(2)` with `def f(n: i32) =
    add(r, n)`), and C is still needed for those; C is only sound after A,
    because a mixed group lets a value instantiate a partial header before
    the function's body. If A lands alone, the two signed [#1485] spellings
@@ -2618,8 +2618,8 @@ is off.
 
 | program | `check` | `prove` | direction |
 |---|---|---|---|
-| `(lit {type: (t-prim {} int8)} 200)` | rejects, exit 2 | accepts, exit 0 | fail-open |
-| `(lit {type: (t-prim {} int8)} 100)` (control) | exit 0 | exit 0 | agree |
+| `(lit {type: (t-prim {} i8)} 200)` | rejects, exit 2 | accepts, exit 0 | fail-open |
+| `(lit {type: (t-prim {} i8)} 100)` (control) | exit 0 | exit 0 | agree |
 | `(var {} nope)` (control) | exit 2 | exit 3 | agree |
 | `deftype` with `invariant:` and no `opaque:` | rejects, exit 2 | accepts, exit 0 | fail-open |
 | `(t-tensor {} (d-lit {} 2) (t-prim {} f8e4m3))` | rejects, exit 2 | accepts, exit 0 | fail-open |
@@ -2942,8 +2942,8 @@ child, so each pair isolates the extraction failure rather than the form.
 | R1 | same | `(lit {type: (t-prim {} f32)} 1.5)` | **vacuous**, score 1.0 |
 | R1 | same | `(t-prim {} f32)`, a type node in a value slot | **vacuous**, score 1.0 |
 | R1 | same | `(app {} (var {} missing_fn_qqq) (var {} missing_arg_www))` | **vacuous**, score 1.0 |
-| R1 control | same | `(lit {type: (t-prim {} int32)} 2)`, rank-1 operand | loud: `vmap axis 2 is out of bounds for rank 1 tensor` |
-| R1 control | same | `(lit {type: (t-prim {} int32)} -7)` | loud: `vmap axis must be non-negative, got -7` |
+| R1 control | same | `(lit {type: (t-prim {} i32)} 2)`, rank-1 operand | loud: `vmap axis 2 is out of bounds for rank 1 tensor` |
+| R1 control | same | `(lit {type: (t-prim {} i32)} -7)` | loud: `vmap axis must be non-negative, got -7` |
 | R2 | `pat-ctor` head, `child_stamp_role(PatCtor, 0) = Selector` | `(app {} (var {} missing_fn_qqq) (var {} missing_arg_www))` | **vacuous**, score 1.0 |
 | R2 control | same | `NoSuchCtorZZZ`, a bare symbol | loud: `unknown constructor: NoSuchCtorZZZ` |
 | R3 | `pat-record` head, `child_stamp_role(PatRecord, 0) = Selector` | `(var {} nonexistent_name_zzz)` | **vacuous**, score 1.0 |
@@ -3336,10 +3336,10 @@ image is closed and its row agrees.
 
 | row | program | `check_ir_program` | `check_typed_program` |
 |---|---|---|---|
-| trivial non-termination, five spellings | `def a(x: int32) -> int32 = a(x)` and its mutual, `sig`-carrying, module-wrapped, stamped-`.dp` and round-tripped forms | REJECT `CycleDetected` | **ACCEPT** |
-| conv2d zero stride | `conv2d(&x, &k, cast(0, int32), 0)` | REJECT "requires a positive stride, got 0" | **ACCEPT** |
-| conv2d negative padding | `conv2d(&x, &k, 1, cast(-1, int32))` | REJECT "requires non-negative padding, got -1" | **ACCEPT** |
-| conv2d non-literal stride or padding, each in both carriers | `conv2d(&x, &k, s, 0)` with `s: int32` a parameter | REJECT "requires a literal integer stride" (respectively "padding") | **ACCEPT** |
+| trivial non-termination, five spellings | `def a(x: i32) -> i32 = a(x)` and its mutual, `sig`-carrying, module-wrapped, stamped-`.dp` and round-tripped forms | REJECT `CycleDetected` | **ACCEPT** |
+| conv2d zero stride | `conv2d(&x, &k, cast(0, i32), 0)` | REJECT "requires a positive stride, got 0" | **ACCEPT** |
+| conv2d negative padding | `conv2d(&x, &k, 1, cast(-1, i32))` | REJECT "requires non-negative padding, got -1" | **ACCEPT** |
+| conv2d non-literal stride or padding, each in both carriers | `conv2d(&x, &k, s, 0)` with `s: i32` a parameter | REJECT "requires a literal integer stride" (respectively "padding") | **ACCEPT** |
 | vmap batch-varying extent | a `shrink` bound read from batched elements | REJECT `batch_varying_extent` | **ACCEPT** |
 | `mean` over a symbolic axis | `mean(x, 0)` on `tensor[n, f32]` | REJECT, 2 diagnostics | REJECT, 1 |
 | `layer_norm` symbolic final axis | | REJECT, 2 | REJECT, 1 |
@@ -3442,7 +3442,7 @@ move, and one added sentence would close the recurring argument:
 > capability it describes.
 
 The convolution constraint is now owned by [05-OP-51] and spec/05 §4.5.
-The canonical `conv` takes explicit per-axis int64 strides and `(low,high)`
+The canonical `conv` takes explicit per-axis i64 strides and `(low,high)`
 padding pairs at every positive spatial rank. That numbered contract owns
 the shape relation, domain checks, and static-versus-runtime split; PP9
 must consume it rather than author another operation rule. The historical
@@ -3750,15 +3750,15 @@ is closed.
   dimension-unification policy rather than diagonal's extent rule.
 - **[#1494].** A literal pattern is now a typing constraint on the scrutinee.
   `pattern_bindings` did nothing at `pat-lit`, so an `f32` pattern against an
-  `int32` scrutinee scored 1.0 and `chelis eval` printed a result from an arm
+  `i32` scrutinee scored 1.0 and `chelis eval` printed a result from an arm
   that can never match. The numbered spec had not decided the rule: §3's Match
   rule never defined `bindings` for `pat-lit`, and [04-LIT-1]'s closed
   atom-to-primitive matrix is scoped to a literal's declared `lit` metadata,
   which a `pat-lit` structurally cannot carry. [04-PAT-1] and a `bindings`
   definition at the Match rule were authored first, then implemented. The rule
   is family agreement rather than unification, because a `pat-lit` admits no
-  suffix: unifying with §5.3's `int32` default would reject a `| 1 =>` arm over
-  an `int64` scrutinee and leave no spelling for an `int64` literal pattern.
+  suffix: unifying with §5.3's `i32` default would reject a `| 1 =>` arm over
+  an `i64` scrutinee and leave no spelling for an `i64` literal pattern.
   Two sub-clauses are errors because each arm is provably dead: a non-primitive
   scrutinee admits no literal pattern, and an integer pattern outside the
   scrutinee width's range is rejected under §5.3's and §5.6's range rule. The
@@ -3768,7 +3768,7 @@ is closed.
   `crates/chelis-types/tests/issue_1494_literal_pattern_scrutinee.rs` and
   `crates/chelis-cli/tests/issue_1494_literal_pattern_cli.rs`, whose rejections
   were proved red on the pre-fix tree, with the score-1 inputs also in §C4.4 as
-  the float-versus-`int32` and out-of-range-`int8` members beside a
+  the float-versus-`i32` and out-of-range-`i8` members beside a
   matching-family positive control. One boundary is recorded rather than moved:
   a `pat-lit` whose child is not a scalar atom still scores 1.0, because that is
   Deep well-formedness rather than typing, and it is tracked as [#1525].
@@ -3779,7 +3779,7 @@ is closed.
 
 [04-INF-9] controls this slice. A newly authored generic wrapper may not publish
 a collection admission predicate inferred from its body: `def size(x) = len(x)`
-and an authored `a -> int64` signature both fail at their declaration boundary.
+and an authored `a -> i64` signature both fail at their declaration boundary.
 An explicit `List[a]` or `Dict[k, v]` parameter supplies the constructor
 information the operation requires. [04-INF-1] still permits a local
 unannotated lambda to settle monomorphically at its first application.
@@ -3957,7 +3957,7 @@ is also separate.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17 (revised same day, explicit over implicit: this code is agent-written, so there is no ergonomic case for contextual binding). Phase 1 checks FORM, [#735] authors meaning. Seed = an EXPLICITLY int64-suffixed signed integer literal (`42i64` or `-1i64`, spec/02 §P5/§P10a); [05-RNG-1] governs its signed seed bits; an unsuffixed literal is a type error whose diagnostic names the requirement and the suffix spelling; non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory). No spec/02 §P10 change needed - the width is visible in the source itself. Existing `with seed(n)` fixtures/examples migrate to the suffixed form in P1's change set (Public-Surface Change Rule) | §C1.5 + spec/04 effect section |
+| 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17 (revised same day, explicit over implicit: this code is agent-written, so there is no ergonomic case for contextual binding). Phase 1 checks FORM, [#735] authors meaning. Seed = an EXPLICITLY i64-suffixed signed integer literal (`42i64` or `-1i64`, spec/02 §P5/§P10a); [05-RNG-1] governs its signed seed bits; an unsuffixed literal is a type error whose diagnostic names the requirement and the suffix spelling; non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory). No spec/02 §P10 change needed - the width is visible in the source itself. Existing `with seed(n)` fixtures/examples migrate to the suffixed form in P1's change set (Public-Surface Change Rule) | §C1.5 + spec/04 effect section |
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |

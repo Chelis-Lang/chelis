@@ -48,7 +48,7 @@ def _render_nested(operations: int, width: int) -> str:
     lines = _header("Nested", operations, width)
     lines.extend(
         [
-            f"def st(s: tensor[{width}, f32], i: int64) -> tensor[{width}, f32] = "
+            f"def st(s: tensor[{width}, f32], i: i64) -> tensor[{width}, f32] = "
             f"if gte(i, 5i64) then s else st({body}, add(i, 1i64))",
             "r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)",
         ]
@@ -59,7 +59,7 @@ def _render_nested(operations: int, width: int) -> str:
 def _render_flat(operations: int, width: int) -> str:
     lines = _header("Flat", operations, width)
     lines.append(
-        f"def st(s: tensor[{width}, f32], i: int64) -> tensor[{width}, f32] = "
+        f"def st(s: tensor[{width}, f32], i: i64) -> tensor[{width}, f32] = "
         "if gte(i, 5i64) then s else {"
     )
     previous = "s"

@@ -208,7 +208,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
                     "{error}"
                 );
                 assert!(
-                    error.ends_with("numeric trap: domain in insert at int64"),
+                    error.ends_with("numeric trap: domain in insert at i64"),
                     "{error}"
                 );
             }
@@ -263,7 +263,7 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
                 "{error}"
             );
             assert!(
-                error.ends_with("numeric trap: domain in insert at int64"),
+                error.ends_with("numeric trap: domain in insert at i64"),
                 "{error}"
             );
         }
@@ -327,7 +327,7 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
             assert!(
                 error
                     .lines()
-                    .any(|line| line == "numeric trap: domain in reshape at int64"),
+                    .any(|line| line == "numeric trap: domain in reshape at i64"),
                 "{error}"
             );
         }
@@ -369,7 +369,7 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
                     "{error}"
                 );
                 assert!(
-                    error.contains("numeric trap: domain in reshape at int64"),
+                    error.contains("numeric trap: domain in reshape at i64"),
                     "{error}"
                 );
             }
@@ -407,7 +407,7 @@ fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
             assert!(
                 error
                     .lines()
-                    .any(|line| line == "numeric trap: domain in load at int64"),
+                    .any(|line| line == "numeric trap: domain in load at i64"),
                 "{error}"
             );
         }
@@ -576,7 +576,7 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
             let error = result.unwrap_err();
             assert!(error.contains("claimed = 2, reshape axis 1 = 3"), "{error}");
             assert!(
-                error.contains("numeric trap: domain in reshape at int64"),
+                error.contains("numeric trap: domain in reshape at i64"),
                 "{error}"
             );
         }
@@ -624,7 +624,7 @@ fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
                 "{error}"
             );
             assert!(
-                error.contains("numeric trap: domain in expand at int64"),
+                error.contains("numeric trap: domain in expand at i64"),
                 "{error}"
             );
         }
@@ -808,7 +808,7 @@ fn an_entry_result_claim_keeps_its_later_declaring_witness() {
         .expect_err("later declaration must reject an earlier foreign extent");
     assert_eq!(
         error,
-        "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64"
+        "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at i64"
     );
     let output = eval_tensor_with(&dag, |name| inputs(2).get(name).cloned())
         .expect("agreeing claim executes");

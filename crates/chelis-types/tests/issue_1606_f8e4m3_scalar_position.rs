@@ -316,7 +316,7 @@ fn surf_with_legacy_tensor_precision(source: &str, name: &str) -> Vec<chelis_dee
 #[test]
 fn a_reserved_parameter_site_reports_once_at_both_entries() {
     for name in ["f8e4m3", "f8e5m2"] {
-        assert_one_report_per_site(&format!("def classify(x: {name}) -> int32 = 0i32"), &[name]);
+        assert_one_report_per_site(&format!("def classify(x: {name}) -> i32 = 0i32"), &[name]);
     }
 }
 
@@ -533,7 +533,7 @@ fn property_copy_ownership_keeps_mixed_slot_dispositions_independent() {
             scalar.clone(),
             "(t-prim {} f64)".to_string(),
             tensor.clone(),
-            "(t-prim {} int64)".to_string(),
+            "(t-prim {} i64)".to_string(),
         ];
         let parameter = vec![
             scalar,
@@ -790,7 +790,7 @@ fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
 #[test]
 fn separate_reserved_sites_keep_separate_diagnostics() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e5m2) -> int32 = 0i32",
+        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e5m2) -> i32 = 0i32",
         &["f8e4m3", "f8e5m2"],
     );
 }
@@ -798,7 +798,7 @@ fn separate_reserved_sites_keep_separate_diagnostics() {
 #[test]
 fn repeated_reserved_spelling_at_distinct_sites_is_not_deduplicated() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e4m3) -> int32 = 0i32",
+        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e4m3) -> i32 = 0i32",
         &["f8e4m3"],
     );
 }
@@ -806,7 +806,7 @@ fn repeated_reserved_spelling_at_distinct_sites_is_not_deduplicated() {
 #[test]
 fn calls_propagate_the_failed_signature_without_a_second_report() {
     assert_one_report_per_site(
-        "def classify(x: f8e4m3) -> int32 = 0i32\nresult = classify(1i32)",
+        "def classify(x: f8e4m3) -> i32 = 0i32\nresult = classify(1i32)",
         &["f8e4m3"],
     );
 }
@@ -814,11 +814,11 @@ fn calls_propagate_the_failed_signature_without_a_second_report() {
 #[test]
 fn distinct_parameter_sites_in_one_signature_each_report_once() {
     assert_one_report_per_site(
-        "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32",
+        "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
         &["f8e4m3", "f8e5m2"],
     );
     assert_one_report_per_site(
-        "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32",
+        "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
         &["f8e4m3"],
     );
 }
@@ -834,9 +834,9 @@ fn parameter_and_return_sites_each_report_once() {
 #[test]
 fn nested_type_components_each_report_once() {
     for source in [
-        "def classify(x: (f8e4m3, f8e5m2)) -> int32 = 0i32",
-        "def classify(x: (f8e4m3) -> f8e5m2) -> int32 = 0i32",
-        "def classify(x: Dict[f8e4m3, f8e5m2]) -> int32 = 0i32",
+        "def classify(x: (f8e4m3, f8e5m2)) -> i32 = 0i32",
+        "def classify(x: (f8e4m3) -> f8e5m2) -> i32 = 0i32",
+        "def classify(x: Dict[f8e4m3, f8e5m2]) -> i32 = 0i32",
     ] {
         assert_one_report_per_site(source, &["f8e4m3", "f8e5m2"]);
     }
@@ -844,7 +844,7 @@ fn nested_type_components_each_report_once() {
 
 #[test]
 fn a_failed_signature_does_not_hide_an_independent_body_site() {
-    let source = "def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)";
+    let source = "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)";
     let program = surf_to_deep(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("both reserved sites must reject");
@@ -872,7 +872,7 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
     use chelis_types::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = format!("def inspect(x: tensor[3, {name}]) -> int64 = shape(x, 1i32)");
+        let source = format!("def inspect(x: tensor[3, {name}]) -> i64 = shape(x, 1i32)");
         let program = surf_to_deep(&source);
         let offset = source.find(name).expect("reserved precision site");
         let span = format!("source:{offset}..{}", offset + name.len());
@@ -927,8 +927,8 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
 fn a_tensor_element_reserved_site_has_one_located_owner() {
     for name in ["f8e4m3", "f8e5m2"] {
         for source in [
-            format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32"),
-            format!("def classify(x: tensor[3,   {name}  ]) -> int32 = 0i32"),
+            format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32"),
+            format!("def classify(x: tensor[3,   {name}  ]) -> i32 = 0i32"),
         ] {
             assert_one_report_per_site(&source, &[name]);
         }
@@ -938,7 +938,7 @@ fn a_tensor_element_reserved_site_has_one_located_owner() {
 #[test]
 fn deep_surf_deep_roundtrip_preserves_tensor_precision_diagnostic_span() {
     for name in ["f8e4m3", "f8e5m2"] {
-        let source = format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32");
+        let source = format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32");
         let original = desugar_program(&parse_str(&source).expect("parse source"));
         let restored =
             desugar_program(&resugar_program(&original).expect("resugar direct Deep program"));
@@ -988,11 +988,11 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
     use chelis_types::errors::CheckErrorKind;
     for (source, expected_kind) in [
         (
-            "def classify(x: f8e4m3) -> int32 = true",
+            "def classify(x: f8e4m3) -> i32 = true",
             CheckErrorKind::TypeMismatch,
         ),
         (
-            "def classify(x: f8e4m3, y: int32) -> int32 = add(y, true)",
+            "def classify(x: f8e4m3, y: i32) -> i32 = add(y, true)",
             CheckErrorKind::PrecisionMismatch,
         ),
     ] {
@@ -1032,8 +1032,8 @@ fn a_failed_signature_preserves_its_other_binder_bounds() {
 fn independent_deep_annotations_do_not_share_a_display_span_identity() {
     for display_span in ["same", "source:16..22"] {
         let source = format!(
-            "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} int32)))\n\
-             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{span: \"{display_span}\"}} f8e4m3)}})) (lit {{type: (t-prim {{}} int32)}} 0)))"
+            "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} i32)))\n\
+             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{span: \"{display_span}\"}} f8e4m3)}})) (lit {{type: (t-prim {{}} i32)}} 0)))"
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
@@ -1052,15 +1052,15 @@ fn independent_deep_annotations_do_not_share_a_display_span_identity() {
 #[test]
 fn failed_recursive_signatures_keep_each_members_diagnostics() {
     assert_one_report_per_site(
-        "def left(x: f8e4m3, n: int32) -> int32 = if n == 0 then 0i32 else right(x, n - 1)\n\
-         def right(x: f8e5m2, n: int32) -> int32 = if n == 0 then 0i32 else left(x, n - 1)",
+        "def left(x: f8e4m3, n: i32) -> i32 = if n == 0 then 0i32 else right(x, n - 1)\n\
+         def right(x: f8e5m2, n: i32) -> i32 = if n == 0 then 0i32 else left(x, n - 1)",
         &["f8e4m3", "f8e5m2"],
     );
 }
 
 #[test]
 fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
-    let program = surf_to_deep("def classify(x: f8e4m3) -> int32 = cast(x, f8e5m2)");
+    let program = surf_to_deep("def classify(x: f8e4m3) -> i32 = cast(x, f8e5m2)");
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -1073,8 +1073,8 @@ fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
 fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
     for extra in ["", " y"] {
         let program = chelis_deep::parse_and_stamp_file(&format!(
-            "(defsig {{}} classify (t-fn {{}} (t-prim {{}} f8e4m3) (t-prim {{}} int32)))\n\
-             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} int32)}} 0)))"
+            "(defsig {{}} classify (t-fn {{}} (t-prim {{}} f8e4m3) (t-prim {{}} i32)))\n\
+             (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} i32)}} 0)))"
         )).expect("parse independent annotations");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             let report = result.expect_err("both reserved sites reject");
@@ -1179,7 +1179,7 @@ fn source_annotation_presence_and_read_only_inference_survive_transport() {
 fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
     for (body, accepted) in [("0i32", true), ("true", false)] {
         let program = surf_to_deep(&format!(
-            "sig classify: int32 -> int32\ndef classify(x: _) = {body}"
+            "sig classify: i32 -> i32\ndef classify(x: _) = {body}"
         ));
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             if accepted {
@@ -1203,11 +1203,11 @@ fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
 fn multiple_reserved_sites_survive_printing_and_serialization() {
     for (source, expected) in [
         (
-            "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32",
+            "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
             ["f8e4m3", "f8e5m2"],
         ),
         (
-            "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32",
+            "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
             ["f8e4m3", "f8e4m3"],
         ),
         (
@@ -1215,7 +1215,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
             ["f8e4m3", "f8e5m2"],
         ),
         (
-            "def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)",
+            "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)",
             ["f8e4m3", "f8e5m2"],
         ),
     ] {
@@ -1258,7 +1258,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
 fn signature_ownership_respects_implicit_fallback_and_explicit_authority() {
     for (binders, accepted) in [("", true), ("[p]", true), ("[q]", false)] {
         let program = surf_to_deep(&format!(
-            "def inspect{binders}(x: tensor[3, p]) -> int32 = 0i32"
+            "def inspect{binders}(x: tensor[3, p]) -> i32 = 0i32"
         ));
         for result in [check_ir_program(&program), check_typed_program(&program)] {
             if accepted {
@@ -1282,7 +1282,7 @@ fn signature_ownership_respects_implicit_fallback_and_explicit_authority() {
 
 #[test]
 fn a_printed_program_preserves_its_diagnostic_count() {
-    let program = surf_to_deep("def classify(x: f8e4m3) -> int32 = 0i32");
+    let program = surf_to_deep("def classify(x: f8e4m3) -> i32 = 0i32");
     let text = chelis_deep::printer::print_canonical_flat(&program);
     let reparsed = chelis_deep::parse_and_stamp_file(&text).expect("parse printed Deep");
     let saved = serde_json::to_vec(&program).expect("encode Deep");
@@ -1316,7 +1316,7 @@ fn a_printed_program_preserves_its_diagnostic_count() {
 
 #[test]
 fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
-    let program = surf_to_deep("def classify(x: (tensor[3, p], f8e4m3)) -> int32 = 0i32");
+    let program = surf_to_deep("def classify(x: (tensor[3, p], f8e4m3)) -> i32 = 0i32");
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("the reserved site must reject");
         let reserved = report
@@ -1421,28 +1421,25 @@ fn explicit_binder_tensor_rejected() {
 
 #[test]
 fn reference_type_rejected() {
-    assert_rejected("def f(x: &f8e4m3) -> int32 = 0i32", "a reference type");
+    assert_rejected("def f(x: &f8e4m3) -> i32 = 0i32", "a reference type");
 }
 
 #[test]
 fn tuple_element_rejected() {
-    assert_rejected(
-        "def f(x: (f8e4m3, int32)) -> int32 = 0i32",
-        "a tuple element",
-    );
+    assert_rejected("def f(x: (f8e4m3, i32)) -> i32 = 0i32", "a tuple element");
 }
 
 #[test]
 fn arrow_parameter_rejected() {
     assert_rejected(
-        "def f(g: (f8e4m3) -> int32) -> int32 = 0i32",
+        "def f(g: (f8e4m3) -> i32) -> i32 = 0i32",
         "an arrow parameter",
     );
 }
 
 #[test]
 fn list_element_rejected() {
-    assert_rejected("def f(x: List[f8e4m3]) -> int32 = 0i32", "a List element");
+    assert_rejected("def f(x: List[f8e4m3]) -> i32 = 0i32", "a List element");
 }
 
 /// DISPOSITION LOCK. The pre-existing locks (`f8e4m3_rejection.rs`) must

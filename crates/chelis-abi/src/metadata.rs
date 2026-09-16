@@ -91,14 +91,14 @@ impl StridedMetadata {
             for (&extent, &stride) in shape.iter().zip(strides) {
                 let part = (extent - 1)
                     .checked_mul(stride)
-                    .ok_or(MetadataError::Overflow("view offset product exceeds int64"))?;
+                    .ok_or(MetadataError::Overflow("view offset product exceeds i64"))?;
                 largest = largest
                     .checked_add(part)
-                    .ok_or(MetadataError::Overflow("view offset sum exceeds int64"))?;
+                    .ok_or(MetadataError::Overflow("view offset sum exceeds i64"))?;
             }
             let span = largest
                 .checked_add(1)
-                .ok_or(MetadataError::Overflow("view element span exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("view element span exceeds i64"))?;
             ElementCount::from_extents(&[span])?
         };
         let required_span = span.bytes(dtype)?;
@@ -149,7 +149,7 @@ impl StridedMetadata {
         )?;
         // Immutable checked extents and strides prove this location is within
         // required_span. Width and target projection use the existing authority.
-        let offset = offset.ok_or(MetadataError::Overflow("view index offset exceeds int64"))?;
+        let offset = offset.ok_or(MetadataError::Overflow("view index offset exceeds i64"))?;
         ElementCount(offset).bytes(self.domain.dtype)?.allocation()
     }
     pub fn require_capacity(&self, capacity: ByteCount) -> Result<(), MetadataError> {
@@ -361,7 +361,7 @@ impl MovementMetadata {
                 .and_then(|n| n.checked_add(axis.offset))
                 .and_then(|n| n.checked_mul(axis.stride))
                 .and_then(|n| flat.checked_add(n))
-                .ok_or(MetadataError::Overflow("movement projection exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("movement projection exceeds i64"))?;
             flat = coordinate;
         }
         target.require_index(flat)?;
@@ -404,7 +404,7 @@ impl WindowMetadata {
                 .checked_sub(w)
                 .and_then(|n| n.checked_div(step))
                 .and_then(|n| n.checked_add(1))
-                .ok_or(MetadataError::Overflow("window extent exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("window extent exceeds i64"))?;
         }
         let result = ShapeMetadata::contiguous(&shape, input.dtype())?;
         result.bytes().allocation()?;
@@ -453,7 +453,7 @@ impl WindowMetadata {
                 coordinate
                     .checked_mul(self.steps[window_axis])
                     .and_then(|n| n.checked_add(offset))
-                    .ok_or(MetadataError::Overflow("window coordinate exceeds int64"))?
+                    .ok_or(MetadataError::Overflow("window coordinate exceeds i64"))?
             };
             if coordinate >= self.input.shape()[axis] {
                 return Err(MetadataError::Domain(
@@ -463,7 +463,7 @@ impl WindowMetadata {
             source_index = coordinate
                 .checked_mul(self.input.strides()[axis])
                 .and_then(|n| source_index.checked_add(n))
-                .ok_or(MetadataError::Overflow("window index exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("window index exceeds i64"))?;
         }
         self.input.require_index(source_index)?;
         Ok(source_index)
@@ -569,7 +569,7 @@ impl MatmulMetadata {
         let index = batch
             .checked_mul(matrix)
             .and_then(|n| n.checked_add(element))
-            .ok_or(MetadataError::Overflow("matmul index exceeds int64"))?;
+            .ok_or(MetadataError::Overflow("matmul index exceeds i64"))?;
         if index >= self.totals[Self::part_index(part)].get() {
             return Err(MetadataError::Domain("matmul index outside operand".into()));
         }
@@ -694,7 +694,7 @@ impl SparseMetadata {
                 offset = coordinate
                     .checked_mul(self.base.strides[axis])
                     .and_then(|n| offset.checked_add(n))
-                    .ok_or(MetadataError::Overflow("sparse offset exceeds int64"))?;
+                    .ok_or(MetadataError::Overflow("sparse offset exceeds i64"))?;
             }
             self.base.require_index(offset)?;
             Ok(offset)
@@ -709,8 +709,7 @@ impl SparseMetadata {
                 usize::try_from(inner)
                     .map_err(|_| MetadataError::Overflow("sparse inner exceeds target"))?,
             )?;
-            i64::try_from(offset)
-                .map_err(|_| MetadataError::Overflow("sparse offset exceeds int64"))
+            i64::try_from(offset).map_err(|_| MetadataError::Overflow("sparse offset exceeds i64"))
         }
     }
 }
@@ -808,10 +807,10 @@ impl ReductionMetadata {
             index = coordinate
                 .checked_mul(stride)
                 .and_then(|n| index.checked_add(n))
-                .ok_or(MetadataError::Overflow("reduction offset exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("reduction offset exceeds i64"))?;
             stride = stride
                 .checked_mul(extent)
-                .ok_or(MetadataError::Overflow("reduction stride exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("reduction stride exceeds i64"))?;
         }
         Ok(index)
     }
@@ -844,7 +843,7 @@ impl ElementCount {
             .ok_or(MetadataError::Overflow("scratch entry count exceeds usize"))?;
         i64::try_from(length)
             .map(Self)
-            .map_err(|_| MetadataError::Overflow("scratch entry count exceeds int64"))
+            .map_err(|_| MetadataError::Overflow("scratch entry count exceeds i64"))
     }
 
     pub fn from_extents(extents: &[i64]) -> Result<Self, MetadataError> {
@@ -863,7 +862,7 @@ impl ElementCount {
                 .0
                 .checked_mul(extent)
                 .map(Self)
-                .ok_or(MetadataError::Overflow("extent product exceeds int64"))
+                .ok_or(MetadataError::Overflow("extent product exceeds i64"))
         })
     }
     pub fn get(self) -> i64 {
@@ -883,11 +882,11 @@ impl ElementCount {
     }
     fn layout_bytes(self, width: usize) -> Result<ByteCount, MetadataError> {
         let width = i64::try_from(width)
-            .map_err(|_| MetadataError::Overflow("representation width exceeds int64"))?;
+            .map_err(|_| MetadataError::Overflow("representation width exceeds i64"))?;
         self.0
             .checked_mul(width)
             .map(ByteCount)
-            .ok_or(MetadataError::Overflow("byte size exceeds int64"))
+            .ok_or(MetadataError::Overflow("byte size exceeds i64"))
     }
 }
 
@@ -933,7 +932,7 @@ impl AllocationBytes {
 
 impl ShapeMetadata {
     pub fn checked_rank(rank: usize) -> Result<i32, MetadataError> {
-        i32::try_from(rank).map_err(|_| MetadataError::Overflow("rank exceeds int32"))
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("rank exceeds i32"))
     }
     pub fn contiguous(shape: &[i64], dtype: RuntimeDType) -> Result<Self, MetadataError> {
         let domain = CheckedDomain::new(shape, dtype)?;
@@ -944,7 +943,7 @@ impl ShapeMetadata {
             strides[axis] = stride;
             stride = stride
                 .checked_mul(shape[axis])
-                .ok_or(MetadataError::Overflow("stride product exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("stride product exceeds i64"))?;
         }
         Ok(Self {
             domain,
@@ -1017,7 +1016,7 @@ impl ShapeMetadata {
             flat = index
                 .checked_mul(stride)
                 .and_then(|part| flat.checked_add(part))
-                .ok_or(MetadataError::Overflow("tensor index offset exceeds int64"))?;
+                .ok_or(MetadataError::Overflow("tensor index offset exceeds i64"))?;
         }
         self.require_index(flat)?;
         usize::try_from(flat).map_err(|_| MetadataError::Overflow("tensor index exceeds usize"))
@@ -1036,7 +1035,7 @@ impl ShapeMetadata {
             coordinate
                 .checked_mul(step)
                 .and_then(|n| n.checked_add(offset))
-                .ok_or(MetadataError::Overflow("affine coordinate exceeds int64"))
+                .ok_or(MetadataError::Overflow("affine coordinate exceeds i64"))
         })
     }
     fn movement_shape(
@@ -1061,7 +1060,7 @@ impl ShapeMetadata {
             input
                 .checked_add(before[axis])
                 .and_then(|n| n.checked_add(after[axis]))
-                .ok_or(MetadataError::Overflow("padded extent exceeds int64"))
+                .ok_or(MetadataError::Overflow("padded extent exceeds i64"))
         })
     }
     pub fn shrunk(&self, start: &[i64], end: &[i64]) -> Result<Self, MetadataError> {
@@ -1083,7 +1082,7 @@ impl ShapeMetadata {
             if step <= 0 {
                 return Err(MetadataError::Domain("stride step must be positive".into()));
             }
-            // Unlike (input + step - 1) / step, this is valid at int64::MAX.
+            // Unlike (input + step - 1) / step, this is valid at i64::MAX.
             Ok(input / step + i64::from(input % step != 0))
         })
     }

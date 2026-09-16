@@ -114,7 +114,7 @@ Shoals documentation and examples should demonstrate the manifest workflow:
 ```chelis
 import Nautilus.Distributions (normal_sample)
 
-def mc_price(spot: f32, vol: f32, rate: f32, T: f32, strike: f32, n_paths: int64) -> f32 ! { Random } = {
+def mc_price(spot: f32, vol: f32, rate: f32, T: f32, strike: f32, n_paths: i64) -> f32 ! { Random } = {
   -- generate paths
   template = const(0.0, [n_paths])
   z = normal_sample(template, 0.0, 1.0)

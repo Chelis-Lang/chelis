@@ -93,7 +93,7 @@ fn explicit_generic_shapes_execute_at_each_instantiation() {
         ),
         (
             "generic_int64",
-            "def f[p: Int](xs: tensor[1, p]) -> tensor[1, p] = add(xs, insert(scalar_to_tensor(cast(1, p)), 0i32, shape(xs, 0i32)))\ndef main() -> tensor[1, int64] = f(to_tensor([9007199254740993i64]))\n",
+            "def f[p: Int](xs: tensor[1, p]) -> tensor[1, p] = add(xs, insert(scalar_to_tensor(cast(1, p)), 0i32, shape(xs, 0i32)))\ndef main() -> tensor[1, i64] = f(to_tensor([9007199254740993i64]))\n",
             "9007199254740994",
         ),
     ] {

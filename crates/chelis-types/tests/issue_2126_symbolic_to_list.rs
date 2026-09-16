@@ -74,10 +74,10 @@ fn assert_rejects(label: &str, source: &str, expected: &str) {
 fn symbolic_to_list_preserves_the_list_constructor_and_leaf_type() {
     for (label, source) in [
         (
-            "int16 leaf",
+            "i16 leaf",
             "def first[n, p](values: tensor[n, p]) -> p = \
              index(to_list(values), 0i64)\n\
-             out: int16 = first(to_tensor([cast(321, int16), cast(7, int16)]))\n",
+             out: i16 = first(to_tensor([cast(321, i16), cast(7, i16)]))\n",
         ),
         (
             "bool leaf",
@@ -98,7 +98,7 @@ fn explicit_list_annotation_remains_a_positive_control() {
          xs: List[p] = to_list(values)\n\
          index(xs, 0i64)\n\
          }\n\
-         out: int16 = first(to_tensor([cast(321, int16), cast(7, int16)]))\n",
+         out: i16 = first(to_tensor([cast(321, i16), cast(7, i16)]))\n",
     );
 }
 
@@ -115,7 +115,7 @@ fn symbolic_to_list_cannot_narrow_a_rigid_dtype_binder_to_string() {
 fn a_genuinely_unknown_collection_constructor_still_rejects() {
     assert_rejects(
         "unknown index operand",
-        "def at(xs, i: int64) = index(xs, i)\n",
+        "def at(xs, i: i64) = index(xs, i)\n",
         "unresolved `index` shape obligation",
     );
 }

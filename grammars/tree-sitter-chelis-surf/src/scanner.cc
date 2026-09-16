@@ -694,7 +694,7 @@ bool scan_number(TSLexer *lexer, const bool *valid_symbols) {
       // The body binds at the suffix width, so a magnitude that rounds to
       // infinity there is not a literal of that type. f16 is the only width an
       // integer body can overflow: the rest have finite ranges above
-      // `int64::max`, which the bound above already refuses. 65520 is the
+      // `i64::max`, which the bound above already refuses. 65520 is the
       // round-half-to-even boundary above f16's largest finite value, 65504.
       if (suffix == "f16" && value >= 65520) {
         return false;

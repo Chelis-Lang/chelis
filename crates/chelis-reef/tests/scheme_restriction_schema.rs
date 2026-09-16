@@ -39,7 +39,7 @@ module_prefix = "Restriction"
 export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded, measure)
 def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[p](value: &tensor[n, p]) -> &tensor[n, p] = value
-def integer_identity(value: int32) -> int32 = value
+def integer_identity(value: i32) -> i32 = value
 def int_bounded[q: Int](value: q) -> q = value
 def numeric_bounded[q: Numeric](value: q) -> q = value
 measure = len

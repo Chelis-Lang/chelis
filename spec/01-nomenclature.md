@@ -651,7 +651,7 @@ when the function name benefits from being explicit about the type
 it operates on.
 
 ```chelis
-def parse_int(s: string) -> Option[int64] = ...
+def parse_int(s: string) -> Option[i64] = ...
 def parse_string(s: string) -> string = ...
 def parse_bool(s: string) -> Option[bool] = ...
 ```
@@ -713,8 +713,8 @@ argument is typically a string (or another carrier of the encoded
 data).
 
 ```chelis
-def parse_int(s: string) -> Option[int64] = ...    // tests/produces int
-def unwrap_int(s: string) -> int64 = ...           // produces int (panicking)
+def parse_int(s: string) -> Option[i64] = ...    // tests/produces int
+def unwrap_int(s: string) -> i64 = ...           // produces int (panicking)
 def is_some_int(s: string) -> bool = ...           // tests for int
 def is_some_float(s: string) -> bool = ...         // tests for float
 def from_string_to_bool(s: string) -> bool = ...   // converter

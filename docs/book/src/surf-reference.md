@@ -118,7 +118,7 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 
 ## Literals
 
-- Integers: canonical decimal such as `42` and `1000000`. Default type `int32`.
+- Integers: canonical decimal such as `42` and `1000000`. Default type `i32`.
 - Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
   `31400000000.0`. Default type `f32`. You may write a longer body that decodes
   to the same value — a constant transcribed from a reference at published
@@ -152,7 +152,7 @@ integer body, invalid escapes, and semantic suffix/adoption changes remain error
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or
 the first argument of `cast`), bracket-literal elements adopt that element type. So
-`[1, 2, 3]` is `tensor[3, int32]` on its own, but takes the surrounding element type where
+`[1, 2, 3]` is `tensor[3, i32]` on its own, but takes the surrounding element type where
 one is imposed.
 
 ## Operators
@@ -329,7 +329,7 @@ with seed(42i64) {
 }
 ```
 
-`with seed(...)` takes an int64-suffixed integer literal (`42i64`; an unsuffixed literal is a
+`with seed(...)` takes an i64-suffixed integer literal (`42i64`; an unsuffixed literal is a
 type error) and `with device("...")` takes a string literal. See
 [Effects and Handlers](effects.md) for the full model.
 

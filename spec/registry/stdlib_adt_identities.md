@@ -8,8 +8,8 @@ identity; row order is not semantic and no ordinal is part of any identity.
 
 | identity | exact variants and fields |
 |---|---|
-| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-| `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-| `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-| `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
+| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
+| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
+| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,i64], Dict[string,i64], Dict[i64,string], i64)` |

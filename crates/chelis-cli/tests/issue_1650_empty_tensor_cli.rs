@@ -6,8 +6,16 @@ use std::{fs, process::Command};
 fn empty_tensor_eval_json_retains_all_checked_leaf_dtypes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.ch");
-    for dtype in [
-        "f16", "bf16", "f32", "f64", "int8", "int16", "int32", "int64", "bool",
+    for (dtype, wire_dtype) in [
+        ("f16", "f16"),
+        ("bf16", "bf16"),
+        ("f32", "f32"),
+        ("f64", "f64"),
+        ("i8", "int8"),
+        ("i16", "int16"),
+        ("i32", "int32"),
+        ("i64", "int64"),
+        ("bool", "bool"),
     ] {
         for (ty, input, shape) in [
             (format!("List[{dtype}]"), "[]", json!([0])),
@@ -32,7 +40,10 @@ fn empty_tensor_eval_json_retains_all_checked_leaf_dtypes() {
                 .find(|r| r["name"] == "out")
                 .unwrap();
             assert_eq!(root["value"]["value"]["shape"], shape, "{result}");
-            assert_eq!(root["value"]["value"]["data"]["dtype"], dtype, "{result}");
+            assert_eq!(
+                root["value"]["value"]["data"]["dtype"], wire_dtype,
+                "{result}"
+            );
             let payload: chelis_compiler_api::schema::TensorElements =
                 serde_json::from_value(root["value"]["value"]["data"].clone()).unwrap();
             assert_eq!(payload.len(), 0, "{result}");
@@ -160,10 +171,10 @@ fn generated_c_empty_tensor_metadata_matches_every_checked_dtype() {
         ("bf16", "CHELIS_DTYPE_BF16"),
         ("f32", "CHELIS_DTYPE_F32"),
         ("f64", "CHELIS_DTYPE_F64"),
-        ("int8", "CHELIS_DTYPE_I8"),
-        ("int16", "CHELIS_DTYPE_I16"),
-        ("int32", "CHELIS_DTYPE_I32"),
-        ("int64", "CHELIS_DTYPE_I64"),
+        ("i8", "CHELIS_DTYPE_I8"),
+        ("i16", "CHELIS_DTYPE_I16"),
+        ("i32", "CHELIS_DTYPE_I32"),
+        ("i64", "CHELIS_DTYPE_I64"),
         ("bool", "CHELIS_DTYPE_BOOL"),
     ] {
         for nested in [false, true] {

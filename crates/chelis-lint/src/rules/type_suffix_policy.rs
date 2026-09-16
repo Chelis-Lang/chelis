@@ -59,7 +59,7 @@ struct Suffix {
 const SUFFIXES: &[Suffix] = &[
     Suffix {
         name: "_int",
-        matches: &["int", "i32", "i64", "int32", "int64"],
+        matches: &["int", "i32", "i64", "i32", "i64"],
     },
     Suffix {
         name: "_f32",
@@ -202,7 +202,7 @@ fn has_parser_verb_prefix(func_name: &str) -> bool {
 
 /// Word-boundary check: does `haystack` contain any of `needles` as a
 /// distinct token (not as a substring of a longer identifier)? This
-/// distinguishes `int` in `int64` (matches) from `int` in `print` (no match).
+/// distinguishes `int` in `i64` (matches) from `int` in `print` (no match).
 fn type_contains_any(haystack: &str, needles: &[&str]) -> bool {
     for needle in needles {
         if has_word(haystack, needle) {
@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn accepts_parse_int_string_to_int() {
         // parse_int is a canonical string→int parser. The return type
-        // `Option[int64]` contains `int64`, which matches `_int`.
-        let src = "def parse_int(s: string) -> Option[int64] = todo\n";
+        // `Option[i64]` contains `i64`, which matches `_int`.
+        let src = "def parse_int(s: string) -> Option[i64] = todo\n";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
     }
@@ -306,14 +306,14 @@ mod tests {
 
     #[test]
     fn accepts_unwrap_int_parser_idiom() {
-        let src = "def unwrap_int(s: string) -> int64 = todo\n";
+        let src = "def unwrap_int(s: string) -> i64 = todo\n";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
     }
 
     #[test]
     fn accepts_to_int_converter_idiom() {
-        let src = "def to_int(s: string) -> Option[int64] = todo\n";
+        let src = "def to_int(s: string) -> Option[i64] = todo\n";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
     }
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn accepts_int_consuming_function() {
         // First arg is int → suffix matches.
-        let src = "def double_int(x: int64) -> int64 = todo\n";
+        let src = "def double_int(x: i64) -> i64 = todo\n";
         let v = run(src);
         assert!(v.is_empty());
     }
@@ -357,10 +357,10 @@ mod tests {
 
     #[test]
     fn flags_count_nan_int_first_arg_frame() {
-        let src = "def count_nan_int(f: Frame, name: string) -> int64 = todo\n";
+        let src = "def count_nan_int(f: Frame, name: string) -> i64 = todo\n";
         // count_nan_int has first arg `Frame` — the `_int` suffix is being
         // used for dispatch form even though the return type happens to be
-        // int64. This is the C1 violation pattern from the brief: five
+        // i64. This is the C1 violation pattern from the brief: five
         // Coral Frame-taking functions all using _int as dispatch form.
         let v = run(src);
         assert_eq!(v.len(), 1);
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn flags_generic_fill_nan_int() {
-        let src = "def fill_nan_int[n](df: Frame[n], col_name: string, fill_val: int64) -> Frame[n] = todo\n";
+        let src = "def fill_nan_int[n](df: Frame[n], col_name: string, fill_val: i64) -> Frame[n] = todo\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
     }
@@ -430,9 +430,9 @@ mod tests {
 
     #[test]
     fn word_boundary_int_in_int64() {
-        // `int` appears as a sub-substring of `int64`; the word-boundary
-        // check should still match because `int64` is the surrounding token.
-        assert!(has_word("Option[int64]", "int64"));
+        // `int` appears as a sub-substring of `i64`; the word-boundary
+        // check should still match because `i64` is the surrounding token.
+        assert!(has_word("Option[i64]", "i64"));
         assert!(!has_word("Option[print]", "int"));
     }
 

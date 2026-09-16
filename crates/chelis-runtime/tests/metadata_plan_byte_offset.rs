@@ -78,7 +78,7 @@ fn c_plan_rejects_invalid_index_carriers_and_empty_access() {
         assert!(!output.status.success(), "{case} returned success");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("numeric trap: domain in metadata_plan at int64"),
+            stderr.contains("numeric trap: domain in metadata_plan at i64"),
             "{case}: {stderr}"
         );
         assert!(!stderr.contains("panicked at"), "{case}: {stderr}");

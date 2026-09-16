@@ -296,8 +296,8 @@ def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: x } }
         let src = "module M.Plain
 @opaque
 type Token =
-  | Token { id: int32 }
-def make(i: int32) -> Token = Token { id: i }
+  | Token { id: i32 }
+def make(i: i32) -> Token = Token { id: i }
 ";
         assert!(run(src).is_empty());
     }

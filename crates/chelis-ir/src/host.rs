@@ -1006,7 +1006,7 @@ pub struct HostSparseOpSummary {
 //   2. `MultipleReturnPaths`         — helper body branches via if/then/else
 //   3. `NonLoadOperand`              — sparse-op operand is not a direct Load
 //   4. `PostProcessingAfterSparseOp` — helper post-processes the sparse result
-//   5. `IndicesDTypeMismatch`        — indices precision not int32/int64
+//   5. `IndicesDTypeMismatch`        — indices precision not i32/i64
 //   6. `PayloadDTypeMismatch`        — values/target/updates/output disagree
 //   7. `WildcardDim`                 — `Named("*", None)` placeholder in input/output
 //
@@ -1147,7 +1147,7 @@ pub enum SummaryRejectionClass {
     /// The helper body has an extra op on top of the sparse op (e.g.
     /// `add(gather(...), zero)`). The sparse op is not the DAG root.
     PostProcessingAfterSparseOp,
-    /// The indices operand's precision is neither `int32` nor `int64`.
+    /// The indices operand's precision is neither `i32` nor `i64`.
     IndicesDTypeMismatch,
     /// One of the payload precisions (values, target, updates, output)
     /// disagrees with the others.
@@ -1210,7 +1210,7 @@ pub enum SummaryRejectionClass {
     BlasNonLoadOperand,
     /// At least one of the helper's input tensors has precision other
     /// than `f32`. Today the recognizer requires every helper input to
-    /// be `f32`; mixed-precision inputs (e.g. an `f32 @ int8` quantized
+    /// be `f32`; mixed-precision inputs (e.g. an `f32 @ i8` quantized
     /// matmul helper) silently skipped before W6.
     BlasInputPrecisionMismatch,
     /// One of `batch_dims`, `m`, `n`, `k` could not be bound to any
@@ -1308,7 +1308,7 @@ pub enum SummaryRejectionDetail {
     // Each variant mirrors a `SummaryRejectionClass::Blas*` variant.
     // The payloads name the observed-precision / failing-dim values
     // so tooling can distinguish e.g. "f64 helper rejected" from
-    // "int32 helper rejected" without re-running the recognizer.
+    // "i32 helper rejected" without re-running the recognizer.
     // ---------------------------------------------------------------
     BlasMultipleRoots {
         /// Number of DAG roots observed in the helper's
@@ -1393,7 +1393,7 @@ impl fmt::Display for SummaryRejectionDetail {
                 )
             }
             SummaryRejectionDetail::IndicesDTypeMismatch { op, observed } => {
-                write!(f, "{op} indices dtype {observed:?} is not int32 / int64")
+                write!(f, "{op} indices dtype {observed:?} is not i32 / i64")
             }
             SummaryRejectionDetail::PayloadDTypeMismatch {
                 op,
@@ -2683,7 +2683,7 @@ fn lower_host_program_with_execution(
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
         let has_callable_params = lookup_declared_fn_type(program, name)
             .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
-        // Non-F32/Bool tensor precisions (e.g. int32, int64) aren't
+        // Non-F32/Bool tensor precisions (e.g. i32, i64) aren't
         // representable in the Phase 0f DAG-only codegen path — it still
         // hard-asserts f32/bool. Force a host-lane wrapper for any fn whose
         // signature carries such a tensor so the program stays on the
@@ -2749,7 +2749,7 @@ fn lower_host_program_with_execution(
                         HostTypeTerm::Dict(k, v) => {
                             ty_is_scalar_or_callable_scalar(k) && ty_is_scalar_or_callable_scalar(v)
                         }
-                        // Primitive (f32/int32/bool/...), Unit -- scalar OK.
+                        // Primitive (f32/i32/bool/...), Unit -- scalar OK.
                         _ => true,
                     }
                 }
@@ -5267,7 +5267,7 @@ fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut Tenso
         .flat_map(|ty| ty.dims.into_iter().enumerate())
         .filter_map(|(axis, dim)| {
             matches!(dim, crate::dag::DimInfo::Lit(_)).then(|| {
-                crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits int32"))
+                crate::dag::RtAxis::Lit(i32::try_from(axis).expect("declared rank fits i32"))
             })
         })
         .collect();
@@ -6053,7 +6053,7 @@ fn var_expr_node(name: &str, span: chelis_deep::span::Span) -> Expr {
 ///
 /// The test is on the VALUE, not on the slot. Exempting the whole slot left
 /// every projection NESTED inside a bind value unhoisted -- including
-/// `a_dim = cast(shape(inp.q, cast(0, int32)), int64)`, which is the spelling
+/// `a_dim = cast(shape(inp.q, cast(0, i32)), i64)`, which is the spelling
 /// the section 4.7.2 diagnostic's own suggestion text asks for -- so the
 /// checker admitted sizes the C lane then refused, which is the check-clean /
 /// build-red divergence the whole provenance walk exists to prevent.
@@ -7013,7 +7013,7 @@ fn literal_result_claim_owner_input<'a>(
 /// * `NonLoadOperand` — a sparse-op operand is not a direct `RiscOp::Load`, or
 ///   its `Load` does not match a helper input by name + type (rank / type
 ///   mismatch surfaces here until a dedicated `RankMismatch` check is added).
-/// * `IndicesDTypeMismatch` — indices precision is not int32 / int64.
+/// * `IndicesDTypeMismatch` — indices precision is not i32 / i64.
 /// * `PayloadDTypeMismatch` — values / target / updates precision disagrees
 ///   with output precision.
 fn try_summarize_sparse_helper(
@@ -7619,8 +7619,8 @@ fn lower_host_expr_kind(
 
             // The lexical carriers are i64/f64, but the checked `lit` owns
             // the value's width ([04-LIT-1]). Finalize before any return,
-            // binding or enclosing cast: otherwise ownership sees an int64
-            // return from an int32 function (#1732), or widening observes an
+            // binding or enclosing cast: otherwise ownership sees an i64
+            // return from an i32 function (#1732), or widening observes an
             // unfinalized decimal (#1110). A marked integer-source float
             // likewise casts directly from the exact integer, never via f64.
             let lexical_precision = match &value.kind {
@@ -15710,7 +15710,7 @@ fn infer_app_expr_host_type(
     // chelis#340: the whole named-axis reduction family is type-inferred
     // here (the positional/int-literal axis form), not only `sum`/`mean`.
     // Each drops the reduced axis; `argmax_reduce`/`argmin_reduce` return an
-    // int64 index tensor while the value reductions keep the operand
+    // i64 index tensor while the value reductions keep the operand
     // precision. Recovering the tensor type lets the host lane route the
     // call through `try_lower_tensor_helper_call` (the tensor-DAG kernel
     // lane the C backend uses) instead of falling through to the
@@ -15934,9 +15934,9 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
             stamped_parts(expr)?.2.first().and_then(expr_int_literal)
         }
         // Movement-op axis/size args are routinely written as
-        // `cast(0, int32)` / `cast(2, int32)` (the canonical integer-
-        // literal form, since bare int literals default to int32 and the
-        // axis/size parameters are int32). A `cast` whose operand is an
+        // `cast(0, i32)` / `cast(2, i32)` (the canonical integer-
+        // literal form, since bare int literals default to i32 and the
+        // axis/size parameters are i32). A `cast` whose operand is an
         // integer literal carries the same compile-time value, so see
         // through it: otherwise `infer_app_expr_host_type`'s `expand`
         // shape handler bails and the result type degrades to a
@@ -15950,7 +15950,7 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
 }
 
 /// chelis#631: an integer literal reaching this HostExpr position,
-/// seeing through the canonical `cast(N, int32)` spelling (the HostExpr
+/// seeing through the canonical `cast(N, i32)` spelling (the HostExpr
 /// analog of [`expr_int_literal`]'s cast peel).
 fn host_expr_int_literal(expr: &HostExpr) -> Option<i64> {
     match &expr.kind {
@@ -17066,7 +17066,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
                 Some(HostTypeTerm::Float32)
             } else if arg_tys.iter().any(HostTypeTerm::is_unresolved) {
                 // chelis#730 Phase 1 (census row 7, chelis#714/#718): an
-                // Unknown-typed operand (an f16/bf16/int8/int16 scalar with
+                // Unknown-typed operand (an f16/bf16/i8/i16 scalar with
                 // no host representation) must not silently type the result
                 // as Int64 - propagate the Unknown so the C emitter's
                 // baking-point guard rejects loudly instead of emitting
@@ -17082,7 +17082,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         // DAG; this coarse type only needs to keep the result classified as
         // a Tensor so the call routes through the tensor-DAG kernel lane).
         // `max_reduce`/`min_reduce`/`prod_reduce` keep the operand
-        // precision; `argmax_reduce`/`argmin_reduce` return an int64 index
+        // precision; `argmax_reduce`/`argmin_reduce` return an i64 index
         // tensor.
         "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
@@ -17203,17 +17203,17 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             Some(init_ty) => Some(HostTypeTerm::List(Box::new(init_ty.clone()))),
             None => Some(fresh_host_inference()),
         },
-        // Issue #257: `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+        // Issue #257: `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
         //
         // We deliberately do NOT synthesize a concrete `HostTypeTerm::Tensor`
         // precision here. `HostTypeTerm` is a *coarse* host-IR class: every
         // integer width collapses to `Int64` and every float width to
         // `Float64` (see `host_type_from_tensor_input`), so by the time
         // the initial value's type reaches this arm its real dtype
-        // (`int8`..`int64`, `f16`..`f64`) is already gone. Any concrete
+        // (`i8`..`i64`, `f16`..`f64`) is already gone. Any concrete
         // precision we picked would be a guess — e.g. an earlier version
         // mapped `Float64 -> F32`, which is wrong for an `f64` initial,
-        // and `Int64` for an `int32` initial. The authoritative element
+        // and `Int64` for an `i32` initial. The authoritative element
         // type lives in the real type checker (`chelis-types`
         // `infer.rs::infer_app` "tensor_scan" arm) and in the runtime,
         // which reads the precision straight off the initial value.
@@ -18759,7 +18759,7 @@ mod tests {
     #[test]
     fn concat_admission_completed_callee_does_not_capture_caller_bindings() {
         let program = surf_check(
-            "def global(x: tensor[2, f32]) -> int32 = rank(x)\ndef call(x: tensor[2, f32]) -> int32 = global(x)\n",
+            "def global(x: tensor[2, f32]) -> i32 = rank(x)\ndef call(x: tensor[2, f32]) -> i32 = global(x)\n",
         );
         let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
@@ -18949,12 +18949,9 @@ mod tests {
                 Prim::Int32,
             ))],
         );
-        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
-        let key = mono_specialization_key("depth", &[box_int32, int32.clone()], &int32);
-        assert_eq!(
-            key,
-            "depth\u{1}adt:Box[s:int32,]\u{1}s:int32\u{1}\u{1}s:int32"
-        );
+        let i32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let key = mono_specialization_key("depth", &[box_int32, i32.clone()], &i32);
+        assert_eq!(key, "depth\u{1}adt:Box[s:i32,]\u{1}s:i32\u{1}\u{1}s:i32");
         let tensor = HostTypeTerm::Tensor(TensorType {
             dims: vec![DimInfo::Lit(4), DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
@@ -19016,7 +19013,7 @@ def bad[b](box: Box[b]) -> bool =
   }
 "#,
         );
-        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let i32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
         let seeded = MonoSpecializationState {
             memo: UnordMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
             symbol_keys: UnordMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
@@ -19036,8 +19033,8 @@ def bad[b](box: Box[b]) -> bool =
             }],
             in_progress: vec![InProgressMonoSpecialization {
                 def_name: "seeded".to_string(),
-                param_tys: vec![int32.clone()],
-                ret_ty: int32,
+                param_tys: vec![i32.clone()],
+                ret_ty: i32,
             }],
         };
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = seeded.clone());
@@ -19127,9 +19124,9 @@ def bad[b](box: Box[b]) -> bool =
                 assert!(error.fatal, "{error:?}");
                 assert_eq!(
                     error.message,
-                    "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                    "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469"
                 );
-                assert_eq!(error.span_id.as_deref(), Some("surf:467..507"));
+                assert_eq!(error.span_id.as_deref(), Some("surf:465..503"));
             } else {
                 assert_eq!(
                     result,
@@ -19322,11 +19319,11 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         let mut lines = vec!["module Demo.Fanout".to_string(), String::new()];
         for level in 0..depth {
             lines.push(format!(
-                "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))",
+                "def f{level}(x: i64) -> i64 = add(f{next}(x), f{next}(x))",
                 next = level + 1
             ));
         }
-        lines.push(format!("def f{depth}(x: int64) -> int64 = x"));
+        lines.push(format!("def f{depth}(x: i64) -> i64 = x"));
         lines.push(String::new());
         lines.join("\n")
     }
@@ -19409,8 +19406,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     /// whose flag and refcount no longer exist.
     #[test]
     fn issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one() {
-        let outer = surf_check("module Demo.Outer\n\ndef outer_fn(x: int64) -> int64 = x\n");
-        let inner = surf_check("module Demo.Inner\n\ndef inner_fn(x: int64) -> int64 = x\n");
+        let outer = surf_check("module Demo.Outer\n\ndef outer_fn(x: i64) -> i64 = x\n");
+        let inner = surf_check("module Demo.Inner\n\ndef inner_fn(x: i64) -> i64 = x\n");
         let outer_session = HostLoweringSession::new(&outer);
 
         assert!(
@@ -19455,7 +19452,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         let (module, ty, leaf) = if tensor_result {
             ("Demo.KernelFanout", "tensor[4, f32]", "mul(x, x)")
         } else {
-            ("Demo.ScalarFanout", "int64", "mul(x, x)")
+            ("Demo.ScalarFanout", "i64", "mul(x, x)")
         };
         let mut lines = vec![format!("module {module}"), String::new()];
         for level in 0..depth {
@@ -19591,7 +19588,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         // construction, one definition per documented class, so the
         // comparison has something to disagree about.
         let mixed = surf_check(
-            "module Demo.MixedLanes\n\n             def k(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n             def loud(x: tensor[4, f32]) -> tensor[4, f32] ! {IO} = {\n               _ = print(x)\n  x\n}\n             def s(x: int64) -> int64 = add(x, x)\n             def k2(x: tensor[4, f32]) -> tensor[4, f32] = add(k(x), k(x))\n",
+            "module Demo.MixedLanes\n\n             def k(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n             def loud(x: tensor[4, f32]) -> tensor[4, f32] ! {IO} = {\n               _ = print(x)\n  x\n}\n             def s(x: i64) -> i64 = add(x, x)\n             def k2(x: tensor[4, f32]) -> tensor[4, f32] = add(k(x), k(x))\n",
         );
         let mixed = chelis_types::check_linearity(
             &chelis_effects::check_program(&mixed).expect("mixed effect check"),
@@ -19638,7 +19635,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         ];
         if flat {
             lines.push(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else {"
                     .to_string(),
             );
@@ -19657,7 +19654,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
             }
             lines.push(format!(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
             ));
         }
@@ -20085,10 +20082,10 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     #[test]
     fn mono_interning_identity_is_the_definitions_own_name() {
         let checked = parse_and_check(
-            "(defsig {} Demo.depth (t-fn {} (t-var {} a) (t-prim {} int32)))\n\
+            "(defsig {} Demo.depth (t-fn {} (t-var {} a) (t-prim {} i32)))\n\
              (def {} Demo.depth\n\
                (fn {} (params {} (x {type: (t-var {} a)}))\n\
-                 (lit {type: (t-prim {} int32)} 1)))\n",
+                 (lit {type: (t-prim {} i32)} 1)))\n",
         );
         let (canonical_short, _) = find_top_level_def_named(checked.exprs(), "depth")
             .expect("short spelling resolves to the def");
@@ -20096,11 +20093,11 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .expect("qualified spelling resolves to the def");
         assert_eq!(canonical_short, "Demo.depth");
         assert_eq!(canonical_qualified, "Demo.depth");
-        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
-        let key = mono_specialization_key(canonical_short, std::slice::from_ref(&int32), &int32);
+        let i32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let key = mono_specialization_key(canonical_short, std::slice::from_ref(&i32), &i32);
         assert_eq!(
             key,
-            mono_specialization_key(canonical_qualified, std::slice::from_ref(&int32), &int32)
+            mono_specialization_key(canonical_qualified, std::slice::from_ref(&i32), &i32)
         );
         let symbol = mono_specialization_symbol(canonical_short, &key);
         assert!(symbol.starts_with("Demo.depth__mono_"));
@@ -20172,8 +20169,8 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn generalized_unannotated_callback_is_not_classified_as_authored_polymorphism() {
         let checked = surf_check(
             "def apply(callback, value) = callback(value)\n\
-             def increment(value: int32) -> int32 = add(value, 1)\n\
-             def use_callback() -> int32 = apply(increment, 1)\n",
+             def increment(value: i32) -> i32 = add(value, 1)\n\
+             def use_callback() -> i32 = apply(increment, 1)\n",
         );
         let apply = checked
             .signature_inference()
@@ -20405,7 +20402,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // lowered operand and the `infer_builtin_host_type_from_arg_tys`
         // Int64 arm.
         let inferred = infer_scalar_to_tensor_host_type(
-            "(cast {} (lit {type: (t-prim {} int32)} 3) (t-prim {} int32))",
+            "(cast {} (lit {type: (t-prim {} i32)} 3) (t-prim {} i32))",
         );
         assert_eq!(
             inferred, None,
@@ -20455,7 +20452,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn concat_app_expr_host_type_wildcards_concat_axis_only() {
         // Literal axis 0 (bare and cast-wrapped, the canonical spelling):
         // the concat axis is anon, the trailing element extent survives.
-        for axis_src in ["(lit {} 0)", "(cast {} (lit {} 0) (t-prim {} int32))"] {
+        for axis_src in ["(lit {} 0)", "(cast {} (lit {} 0) (t-prim {} i32))"] {
             let inferred = infer_concat_host_type(axis_src);
             assert_eq!(
                 inferred,
@@ -20946,7 +20943,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                       (app {}
                         (grad {wrt: (var {} theta_local)}
                           (var {} target)
-                          (lit {type: (t-prim {} int32)} 0))
+                          (lit {type: (t-prim {} i32)} 0))
                         (var {} theta)))))
                 (defsig {}
                   lm_model
@@ -20975,7 +20972,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                             (app {}
                               (var {} sum)
                               (copy {} (var {} theta))
-                              (lit {type: (t-prim {} int32)} 0)))
+                              (lit {type: (t-prim {} i32)} 0)))
                           (app {}
                             (var {} add)
                             (app {}
@@ -20983,7 +20980,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                               (app {}
                                 (var {} sum)
                                 (copy {} (var {} theta))
-                                (lit {type: (t-prim {} int32)} 0)))
+                                (lit {type: (t-prim {} i32)} 0)))
                             (var {} x))))
                       (app {} (var {} sub) (var {} y) (var {} y_hat)))))
                 (def {}
@@ -22165,7 +22162,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                fresh = Held { key, value }\n\
                unwrap(fresh, value)\n\
              }\n\
-             def read() -> int64 = put(Vacant, \"a\", cast(1, int64))\n",
+             def read() -> i64 = put(Vacant, \"a\", cast(1, i64))\n",
         );
         try_lower_compiled_program(&checked).expect(
             "a generic ADT built in a block-local binding must resolve from the specialization",
@@ -22192,7 +22189,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                | Held { key: k, value: v } => v\n\
              }\n\
              def seed[a](value: a) -> a = unwrap(fresh_store(), value)\n\
-             def read() -> int64 = seed(cast(7, int64))\n",
+             def read() -> i64 = seed(cast(7, i64))\n",
         );
         try_lower_compiled_program(&checked)
             .expect("a nullary generic constructor in argument position must lower");
@@ -22247,17 +22244,17 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let checked = surf_check(
             "type Col[n] =\n\
                | FloatCol(tensor[n, f32])\n\
-             def zero_i64() -> int64 = cast(0, int64)\n\
-             def one_i64() -> int64 = cast(1, int64)\n\
-             def col_len[n](col: Col[n]) -> int64 = match col with {\n\
+             def zero_i64() -> i64 = cast(0, i64)\n\
+             def one_i64() -> i64 = cast(1, i64)\n\
+             def col_len[n](col: Col[n]) -> i64 = match col with {\n\
                | FloatCol(xs) => numel(xs)\n\
              }\n\
-             def all_eq_len[n](pairs: List[(string, Col[n])], expected: int64) -> bool =\n\
+             def all_eq_len[n](pairs: List[(string, Col[n])], expected: i64) -> bool =\n\
                if eq(len(pairs), zero_i64()) then true else {\n\
                  entry = index(pairs, zero_i64())\n\
                  if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)\n\
                }\n\
-             def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, int64))\n",
+             def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, i64))\n",
         );
         let lowered = try_lower_compiled_program(&checked)
             .expect("a recursive dimension-generic call must lower through monomorphization");

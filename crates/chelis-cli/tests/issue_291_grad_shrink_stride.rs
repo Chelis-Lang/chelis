@@ -5,20 +5,20 @@
 //! Headline reproducers (verbatim from the issue):
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))
+//!   tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))
+//!   tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //!
 //! Before the fix:
 //!   * `chelis check` -> clean (type-checks) for both.
 //!   * `chelis build --target c` -> for `shrink`: "shrink at node ...:
-//!     bounds len 0 != input rank 1" (the `[[cast(0,int32),cast(2,
-//!     int32)]]` bound literal lost its `cast`-wrapped pair elements in
+//!     bounds len 0 != input rank 1" (the `[[cast(0,i32),cast(2,
+//!     i32)]]` bound literal lost its `cast`-wrapped pair elements in
 //!     lowering, producing `RiscOp::Shrink { bounds: [] }`); for
 //!     `stride`: "no reverse-mode adjoint is defined for `stride`".
 //!
@@ -41,20 +41,20 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 const SHRINK_DF: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const SHRINK_EVAL: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 
 const STRIDE_DF: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const STRIDE_EVAL: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 

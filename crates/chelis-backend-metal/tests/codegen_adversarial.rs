@@ -341,8 +341,8 @@ fn m7_bool_load_without_where_emits_real_output() {
 
 #[test]
 fn wsm1_int32_unary_neg_emits_typed_kernel() {
-    // WS-M1: int32 is now in the active Metal dtype set
-    // (spec/04-type-system.md §1.1.3). Unary Neg on int32 should
+    // WS-M1: i32 is now in the active Metal dtype set
+    // (spec/04-type-system.md §1.1.3). Unary Neg on i32 should
     // emit a properly typed kernel (`device const int*`), not the
     // stub and not the f32 kernel that would silently misinterpret
     // the buffer's bytes.
@@ -364,15 +364,15 @@ fn wsm1_int32_unary_neg_emits_typed_kernel() {
     let src = &result.mm_source;
     assert!(
         src.contains("device const int* a"),
-        "int32 unary neg must emit an int-typed input parameter: {src}"
+        "i32 unary neg must emit an int-typed input parameter: {src}"
     );
     assert!(
         src.contains("device int* out"),
-        "int32 unary neg must emit an int-typed output parameter: {src}"
+        "i32 unary neg must emit an int-typed output parameter: {src}"
     );
     assert!(
         src.contains("CHELIS_DTYPE_I32"),
-        "int32 root output should declare CHELIS_DTYPE_I32 dtype: {src}"
+        "i32 root output should declare CHELIS_DTYPE_I32 dtype: {src}"
     );
 }
 

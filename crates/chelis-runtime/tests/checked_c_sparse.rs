@@ -199,7 +199,7 @@ fn sparse_shape_and_index_failures_keep_the_owning_diagnostic() {
         assert!(
             stderr
                 .lines()
-                .any(|l| l == "numeric trap: domain in scatter_replace at int64"),
+                .any(|l| l == "numeric trap: domain in scatter_replace at i64"),
             "{case}: {stderr}"
         );
     }
@@ -217,6 +217,6 @@ fn sparse_shape_and_index_failures_keep_the_owning_diagnostic() {
         assert_eq!(result.status.code(), Some(1), "{name}: {result:?}");
         assert!(String::from_utf8_lossy(&result.stderr)
             .lines()
-            .any(|l| l == format!("numeric trap: domain in {name} at int64")));
+            .any(|l| l == format!("numeric trap: domain in {name} at i64")));
     }
 }

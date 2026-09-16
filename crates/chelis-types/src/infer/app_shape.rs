@@ -47,7 +47,7 @@ pub(super) fn infer_reduction_app(
         .iter()
         .enumerate()
         .map(|(index, arg)| {
-            // Axis slots carry dimension names, typed as axes (`int32`)
+            // Axis slots carry dimension names, typed as axes (`i32`)
             // rather than inferred as values — the named-reduction exemption
             // from the generic path.
             if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
@@ -63,7 +63,7 @@ pub(super) fn infer_reduction_app(
 
     // [05-DIM-3] / [05-OP-29]: this early variadic route bypasses the
     // generic application's registered axis-dtype gate. Apply the same
-    // registry here so every Count axis is int32, including concrete
+    // registry here so every Count axis is i32, including concrete
     // multi-axis calls whose constant values are otherwise extractable.
     if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors) {
         return rejected;
@@ -78,7 +78,7 @@ pub(super) fn infer_reduction_app(
 /// builtin scheme is arity-3, so this form bypasses the generic HM arity
 /// check (the `infer_permute_app` pattern). The `new` and `anchor` slots
 /// carry dimension *names*, not bound values — like a named reduction
-/// axis they are typed as `int32` axes rather than inferred, and
+/// axis they are typed as `i32` axes rather than inferred, and
 /// `check_expand_signature` reads the actual names back from the arg
 /// exprs.
 #[allow(clippy::too_many_arguments)]
@@ -117,7 +117,7 @@ pub(super) fn infer_expand_app(
             // the value environment is a runtime value instead (issue #259
             // scope discrimination, as in the generic-path exemption). A dim
             // name in the size slot is an extent-domain value ([05-DIM-1]),
-            // so it types int64; the name/anchor slots are axis-domain.
+            // so it types i64; the name/anchor slots are axis-domain.
             if index >= 1
                 && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
             {
@@ -146,9 +146,9 @@ pub(super) fn infer_expand_app(
     ) {
         return err;
     }
-    // The size slot must be an int64 (a literal, a symbolic dim, or a
-    // runtime int64 expression; extent-domain under [05-DIM-1], §4.7.2);
-    // a non-int64 size is a type error the arity-3 scheme would otherwise
+    // The size slot must be an i64 (a literal, a symbolic dim, or a
+    // runtime i64 expression; extent-domain under [05-DIM-1], §4.7.2);
+    // a non-i64 size is a type error the arity-3 scheme would otherwise
     // have caught.
     let size_ty = subst.apply(&arg_tys[2]);
     match size_ty {
@@ -161,7 +161,7 @@ pub(super) fn infer_expand_app(
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "{callee} expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                            "{callee} expects an i64 size (write Ni64 or cast(N, i64)), got {other}"
                         ),
                     ),
                     vec![],
@@ -273,7 +273,7 @@ pub(super) fn check_permute_signature(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
-                            format!("permute expects int32 axis indices, got {other}"),
+                            format!("permute expects i32 axis indices, got {other}"),
                         ),
                         vec![],
                     ),
@@ -297,7 +297,7 @@ pub(super) fn check_permute_signature(
         );
     };
 
-    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // Uses `extract_int_for_dim` so `cast(N, i32)`-wrapped literal
     // axes reach the OOB-axis check and the unique-axis check at infer
     // time instead of silently falling back to original-dim order (red
     // team round 3 sibling sweep within the spec section 2.4 movement
@@ -401,8 +401,8 @@ pub(super) fn infer_reshape_app(
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
                                 format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    "reshape expects an i64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
                                     subst.apply(&shape_ty)
                                 ),
                             ),
@@ -435,8 +435,8 @@ pub(super) fn infer_reshape_app(
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
                                 format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    "reshape expects an i64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
                                     subst.apply(&shape_ty)
                                 ),
                             ),
@@ -472,8 +472,8 @@ pub(super) fn infer_reshape_app(
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
                                 format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    "reshape expects an i64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., i64)), got {}",
                                     subst.apply(&shape_ty)
                                 ),
                             ),
@@ -615,7 +615,7 @@ pub(super) fn check_reshape_signature(
 ///
 /// Per spec/05-risc-primitives.md §2.4, `shrink` slices a sub-tensor whose
 /// rank matches the input and whose i-th axis dim is `end_i - start_i`.
-/// The second argument is a list-of-pair-of-int32 with one entry per input
+/// The second argument is a list-of-pair-of-i32 with one entry per input
 /// axis. Each pair is `[start, end]` with `0 <= start < end <= input_dim[i]`.
 ///
 /// Closes issue Chelis-Lang/chelis#187 on the type-system side: before this
@@ -691,8 +691,8 @@ pub(super) fn check_shrink_signature(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "shrink expects a list of [start, end] int64 bounds pairs \
-                         (write 0i64 or cast(..., int64) on each bound), got {}",
+                        "shrink expects a list of [start, end] i64 bounds pairs \
+                         (write 0i64 or cast(..., i64) on each bound), got {}",
                         subst.apply(&bounds_ty)
                     ),
                 ),
@@ -840,7 +840,7 @@ pub(super) fn check_shrink_signature(
 ///
 /// Per spec/05-risc-primitives.md §2.4, `stride` takes every `s_i`-th
 /// element along axis i; the i-th output dim is `ceil(input_dim[i] /
-/// s_i)`. The strides are passed as variadic int32 args, one per input
+/// s_i)`. The strides are passed as variadic i32 args, one per input
 /// axis. Zero or negative strides are rejected.
 ///
 /// Closes issue Chelis-Lang/chelis#187 on the type-system side -- before
@@ -863,8 +863,7 @@ pub(super) fn infer_stride_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                "stride expects a tensor followed by one positive int32 stride per axis"
-                    .to_string(),
+                "stride expects a tensor followed by one positive i32 stride per axis".to_string(),
                 vec![],
             ),
         );
@@ -913,7 +912,7 @@ pub(super) fn check_stride_signature(
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
-            // Stride steps are extent-domain ([05-DIM-1]): int64.
+            // Stride steps are extent-domain ([05-DIM-1]): i64.
             Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
             other => {
                 return report(
@@ -922,7 +921,7 @@ pub(super) fn check_stride_signature(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
-                            format!("stride expects int64 strides (write 2i64), got {other}"),
+                            format!("stride expects i64 strides (write 2i64), got {other}"),
                         ),
                         vec![],
                     ),
@@ -955,7 +954,7 @@ pub(super) fn check_stride_signature(
     // RUNTIME step's own axis becomes a wildcard. Collapsing every axis to
     // a wildcard let unification fill a runtime axis's extent from a
     // sibling literal axis (see the shrink arm). Uses
-    // `extract_int_for_dim` so `cast(N, int32)`-wrapped literal strides
+    // `extract_int_for_dim` so `cast(N, i32)`-wrapped literal strides
     // reach the positive-stride check at infer time instead of falling
     // back to host runtime (red team round 3 finding R3-HIGH1).
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
@@ -1102,8 +1101,8 @@ pub(super) fn check_pad_signature(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "pad expects a list of [lo, hi] int64 padding pairs \
-                         (write 1i64 or cast(..., int64) on each amount), got {}",
+                        "pad expects a list of [lo, hi] i64 padding pairs \
+                         (write 1i64 or cast(..., i64) on each amount), got {}",
                         subst.apply(&padding_ty)
                     ),
                 ),
@@ -1248,11 +1247,11 @@ pub(super) fn check_pad_signature(
 /// `reduce_window_*(&x, window_shape, strides)` infer.
 ///
 /// Per `spec/05-risc-primitives.md` §2.3.1:
-/// - `window_shape` and `strides` are `List[int32]` of equal length
+/// - `window_shape` and `strides` are `List[i32]` of equal length
 ///   `n >= 1`.
 /// - The trailing `n` axes of the input are the windowed axes; leading
 ///   `rank - n` axes pass through.
-/// - Each window/stride entry must be a positive int32 literal at
+/// - Each window/stride entry must be a positive i32 literal at
 ///   check time (non-literal arguments fall back to a wildcard output
 ///   shape so runtime checks can still apply).
 /// - Output rank equals input rank. Trailing dim i is
@@ -1349,7 +1348,7 @@ pub(super) fn check_reduce_window_signature(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "{name} expects window_shape to be List[int64], got {}",
+                        "{name} expects window_shape to be List[i64], got {}",
                         subst.apply(&window_ty)
                     ),
                 ),
@@ -1365,7 +1364,7 @@ pub(super) fn check_reduce_window_signature(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "{name} expects strides to be List[int64], got {}",
+                        "{name} expects strides to be List[i64], got {}",
                         subst.apply(&stride_ty)
                     ),
                 ),
@@ -1394,7 +1393,7 @@ pub(super) fn check_reduce_window_signature(
     };
 
     // Extract literal window / stride entries. Non-literal arguments
-    // are accepted at infer time (the type is still `List[int64]`) but
+    // are accepted at infer time (the type is still `List[i64]`) but
     // the output shape collapses to wildcards so the host runtime can
     // do the final shape check.
     let window_lit = cons_chain_int_list(&kids[2]);
@@ -1661,7 +1660,7 @@ pub(super) enum InnerPairShape {
 /// constrained; those still defer to runtime via `NonLiteral`.
 ///
 /// Inner head values are extracted via [`extract_int_for_dim`], which
-/// peels `cast(N, int32)` / `cast(N, int64)` -- so cast-wrapped int
+/// peels `cast(N, i32)` / `cast(N, i64)` -- so cast-wrapped int
 /// literals participate in the infer-time bounds check rather than
 /// silently falling back to `NonLiteral` (red team round 2 finding
 /// R2-L1; mirrors how reshape extracts dim literals).
@@ -1785,7 +1784,7 @@ pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
 /// recognizer that matches wins:
 ///
 /// 1. concrete int literal (or `cast(N, int{32,64})`) → `Dim::Lit(N)`;
-/// 2. `cast(shape(input, lit_axis), int64)` where the inner var matches
+/// 2. `cast(shape(input, lit_axis), i64)` where the inner var matches
 ///    the reshape input by name and `lit_axis` is a valid axis of the
 ///    input → the input's dim at that axis (resolved through `subst`);
 /// 3. fallback → `Dim::Wildcard`.
@@ -1804,7 +1803,7 @@ pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
 /// Pre-fix the body of `infer_reshape_app` ran a literal-only
 /// recognizer (the now-removed `list_literal_dims`) and fell back to
 /// `vec![Wildcard; rank]` for anything else, including the common
-/// runtime-batch pattern `cast(shape(x, axis), int64)`. That blind spot
+/// runtime-batch pattern `cast(shape(x, axis), i64)`. That blind spot
 /// is chelis#206; this helper closes it. The earlier `Dim::Lit`-only
 /// behavior is also still covered (see the RT-A1W1 CRIT root cause for
 /// chelis#35: `reshape(t, [2, 1, 3])` must yield
@@ -1919,7 +1918,7 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
 
 /// If `expr` has one of the spec/04 §4.7.3 recognized forms
 /// `shape(<var named input_var_name>, <concrete int axis>)` or
-/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`
+/// `cast(shape(<var named input_var_name>, <concrete int axis>), i64)`
 /// (the second is an identity cast under [05-DIM-2], kept so the
 /// pre-[05-DIM-2] spelling retains its propagation), return the axis.
 /// Both `cast` and `shape` may surface either as the dedicated tag
@@ -1928,7 +1927,7 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
 /// and `cast(N, int{32,64})`.
 ///
 /// Returns `None` when:
-/// - a cast wrapper is present but its target is not `int64`,
+/// - a cast wrapper is present but its target is not `i64`,
 /// - the candidate expression is not a `shape(...)` call,
 /// - the shape's tensor arg is not a `var` matching `input_var_name`,
 /// - the axis is not a concrete non-negative int.
@@ -1983,7 +1982,7 @@ pub(super) fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)>
 }
 
 /// Treat `(t-prim {} <name>)` as the target type marker emitted by
-/// `cast(..., int64)` etc. Returns true iff the marker matches `prim`.
+/// `cast(..., i64)` etc. Returns true iff the marker matches `prim`.
 pub(super) fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {
     // chelis#1107 amendment: carrier-preserving read.
     let Some((DeepTag::TPrim, _, kids)) = stamped_parts(expr) else {
@@ -2010,21 +2009,21 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
     }
 }
 
-/// Extract an int literal from a Deep expr, looking through `cast(N, int64)`
-/// and `cast(N, int32)` — both are common in Chelis dim lists since integer
-/// literals default to int32 and require an explicit cast for int64 contexts.
+/// Extract an int literal from a Deep expr, looking through `cast(N, i64)`
+/// and `cast(N, i32)` — both are common in Chelis dim lists since integer
+/// literals default to i32 and require an explicit cast for i64 contexts.
 /// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
 /// of the `cast` var, depending on how far desugaring has progressed.
 ///
 /// Note: callers in the spec section 2.4 movement family (shrink, pad,
 /// stride, permute, expand) typically unify the surrounding bounds /
-/// strides argument against an `int32`-pinned expected type before
-/// reaching this extractor, so a `cast(N, int64)` endpoint is rejected
+/// strides argument against an `i32`-pinned expected type before
+/// reaching this extractor, so a `cast(N, i64)` endpoint is rejected
 /// at the outer unification step rather than slipping through to here
 /// (red team round 3 HIGH-2 contract note).
 ///
 /// The cast arm recurses through `extract_int_for_dim` so that
-/// `cast(cast(N, int32), int32)` and other doubly-nested forms peel to
+/// `cast(cast(N, i32), i32)` and other doubly-nested forms peel to
 /// their literal at any depth (red team round 3 finding R3-MED2).
 /// Termination is bounded: each recursive call strictly reduces the
 /// expression depth (peels one wrapper layer).

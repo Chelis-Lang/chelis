@@ -140,21 +140,21 @@ const SOURCE_PERMUTATIONS: [[usize; 3]; 6] = [
 const SOURCES: [(&str, &str); 3] = [
     (
         "main.ch",
-        "module HashOrderCache.Main\n\ndef main_value() -> int32 = cast(1, int32)\n",
+        "module HashOrderCache.Main\n\ndef main_value() -> i32 = cast(1, i32)\n",
     ),
     (
         "alpha.ch",
-        "module HashOrderCache.Alpha\n\ndef alpha_value() -> int32 = cast(2, int32)\n",
+        "module HashOrderCache.Alpha\n\ndef alpha_value() -> i32 = cast(2, i32)\n",
     ),
     (
         "beta.ch",
-        "module HashOrderCache.Beta\n\ndef beta_value() -> int32 = cast(3, int32)\n",
+        "module HashOrderCache.Beta\n\ndef beta_value() -> i32 = cast(3, i32)\n",
     ),
 ];
 
 fn parse_decls(module: &str, name: &str, value: i32) -> Vec<chelis_surf::ast::Decl> {
     chelis_surf::parser::parse_str(&format!(
-        "module {module}\nexport ({name})\ndef {name}() -> int32 = cast({value}, int32)\n"
+        "module {module}\nexport ({name})\ndef {name}() -> i32 = cast({value}, i32)\n"
     ))
     .expect("cache fixture declarations must parse")
 }

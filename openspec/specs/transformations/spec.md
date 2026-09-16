@@ -136,7 +136,7 @@ legal and preserve discrete fields as `unit`.
 ### Requirement: Symbolic-dim adjoint construction
 
 Adjoint construction SHALL preserve proven symbolic identities and otherwise
-carry exact runtime int64 extent nodes. `ProdReduce` SHALL reverse its executed
+carry exact runtime i64 extent nodes. `ProdReduce` SHALL reverse its executed
 balanced tree, runtime stride SHALL use its exact inverse sampling map, and
 runtime-window reductions SHALL reverse the executed window graph. No runtime
 axis, step, window, loop extent, or target shape is rejected merely because it

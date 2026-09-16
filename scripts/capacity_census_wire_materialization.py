@@ -126,7 +126,7 @@ def source_parameter_cases():
                 _node(
                     "lit",
                     _atom("int", value),
-                    type=_node("t-prim", _atom("symbol", "int32")),
+                    type=_node("t-prim", _atom("symbol", "i32")),
                 ),
                 span=_atom("str", f"surf:8..{len(source)}"),
             )
@@ -144,7 +144,7 @@ def source_parameter_cases():
                 _node(
                     "lit",
                     _atom("int", 0 if value is None else value),
-                    type=_node("t-prim", _atom("symbol", "int32")),
+                    type=_node("t-prim", _atom("symbol", "i32")),
                 ),
                 span=_atom("str", f"surf:8..{len(source)}"),
             )
@@ -296,7 +296,7 @@ def materialization_cases():
         None,
     )
 
-    integer_types = {"i8": "int8", "i16": "int16", "i32": "int32", "i64": "int64"}
+    integer_types = {suffix: suffix for suffix in ["i8", "i16", "i32", "i64"]}
     float_types = {suffix: suffix for suffix in ["f16", "bf16", "f32", "f64"]}
     for suffix, prim in (integer_types | float_types).items():
         # Large source values must remain exact even when this target dtype
@@ -354,7 +354,7 @@ def materialization_cases():
         _node(
             "lit",
             _atom("int", 9007199254740993),
-            type=_node("t-prim", _atom("symbol", "int64")),
+            type=_node("t-prim", _atom("symbol", "i64")),
             span=_atom("str", "surf:8..27"),
         )
     )
@@ -478,7 +478,7 @@ def materialization_cases():
         ("unmarked-integer-float", "(lit {type: (t-prim {} f64)} 1)", "literal"),
         (
             "integer-marker-integer-type",
-            "(lit {type: (t-prim {} int64), literal_source: integer} 1)",
+            "(lit {type: (t-prim {} i64), literal_source: integer} 1)",
             "literal_source",
         ),
         (
@@ -486,7 +486,7 @@ def materialization_cases():
             "(lit {type: (t-prim {} f64), literal_source: integer} 1.0)",
             "literal_source",
         ),
-        ("out-of-range-integer", "(lit {} 128i8)", "int8"),
+        ("out-of-range-integer", "(lit {} 128i8)", "i8"),
     ]:
         for codec in ["check-deep", "eval-deep"]:
             add("SourceProgram", codec, name, f"(def {{}} value {body})", None, reason)
@@ -506,7 +506,7 @@ def materialization_cases():
             ("unknown-tag", "(future_form {} 1)", "future_form"),
             (
                 "nested-duplicate",
-                "(lit {type: (t-prim {} int32), type: (t-prim {} int32)} 1)",
+                "(lit {type: (t-prim {} i32), type: (t-prim {} i32)} 1)",
                 "type",
             ),
         ]:
@@ -607,7 +607,7 @@ def materialization_cases():
         ("invalid-live-type", "(def {type: false} value (lit {} 7))", "type"),
         (
             "duplicate-type",
-            "(def {type: (t-prim {} int32), type: (t-prim {} int32)} value (lit {} 7))",
+            "(def {type: (t-prim {} i32), type: (t-prim {} i32)} value (lit {} 7))",
             "type",
         ),
         (
@@ -665,10 +665,10 @@ def materialization_cases():
 
     for payload, valid, reason in [
         ("(lit {} 7)", True, None),
-        ("(lit {type: (t-prim {} int64)} 9007199254740993)", True, None),
+        ("(lit {type: (t-prim {} i64)} 9007199254740993)", True, None),
         ("bare_name", False, "property_seed"),
         ("(lit {type: false} 1)", False, "type"),
-        ("(lit {type: (t-prim {} int32), type: (t-prim {} int32)} 1)", False, "type"),
+        ("(lit {type: (t-prim {} i32), type: (t-prim {} i32)} 1)", False, "type"),
         ('(var {surf_path: "X"} x)', False, "surf_path"),
         ("(future_form {} 1)", False, "future_form"),
     ]:

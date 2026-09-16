@@ -113,10 +113,10 @@ fn find_rejection<'a>(
 
 #[test]
 fn post_processing_after_gather_emits_structured_rejection() {
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let rejections = rejections_for_source(source);
@@ -151,10 +151,10 @@ fn post_processing_after_gather_emits_structured_rejection() {
 #[test]
 fn non_load_operand_on_gather_emits_structured_rejection() {
     let source = "def bad(table: tensor[1000, 128, f32], zero: tensor[1000, 128, f32], \
-                  indices: tensor[64, int64]) -> tensor[64, 128, f32] = \
+                  indices: tensor[64, i64]) -> tensor[64, 128, f32] = \
                   gather(add(table, zero), indices, 0)\n\
                   def f(table: tensor[1000, 128, f32], zero: tensor[1000, 128, f32], \
-                  indices: tensor[64, int64]) -> tensor[64, 128, f32] = \
+                  indices: tensor[64, i64]) -> tensor[64, 128, f32] = \
                   bad(table, zero, indices)\n";
     let rejections = rejections_for_source(source);
     let rejection = find_rejection(&rejections, "bad");
@@ -185,12 +185,12 @@ fn non_load_operand_on_gather_emits_structured_rejection() {
 #[test]
 fn multiple_return_paths_emits_structured_rejection() {
     let source = "def bad(flag: bool, table: tensor[1000, 128, f32], \
-                  ind_a: tensor[64, int64], ind_b: tensor[64, int64]) \
+                  ind_a: tensor[64, i64], ind_b: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = \
                   if flag then gather(table, ind_a, 0) \
                   else gather(table, ind_b, 0)\n\
                   def f(flag: bool, table: tensor[1000, 128, f32], \
-                  ind_a: tensor[64, int64], ind_b: tensor[64, int64]) \
+                  ind_a: tensor[64, i64], ind_b: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = bad(flag, table, ind_a, ind_b)\n";
     let rejections = rejections_for_source(source);
     let rejection = find_rejection(&rejections, "bad");
@@ -222,7 +222,7 @@ fn multiple_return_paths_emits_structured_rejection() {
 #[test]
 fn wildcard_dim_top_level_gather_emits_structured_rejection() {
     let source = "lhs = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)\n\
-                  ids_list: List[int64] = [cast(0, int64), cast(1, int64)]\n\
+                  ids_list: List[i64] = [cast(0, i64), cast(1, i64)]\n\
                   token_ids = to_tensor(ids_list)\n\
                   result = gather(lhs, token_ids, 0)\n";
     let rejections = rejections_for_source(source);
@@ -275,10 +275,10 @@ fn surface_sources_do_not_emit_multiple_roots_rejection() {
     // Reuse one of the surface sources that *does* produce a
     // structured rejection to confirm `MultipleRoots` isn't fired in
     // the same compilation.
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let rejections = rejections_for_source(source);
@@ -293,26 +293,26 @@ fn surface_sources_do_not_emit_multiple_roots_rejection() {
 // =========================================================================
 // Category 5: IndicesDTypeMismatch
 //
-// Indices precision is f32 instead of int32 / int64. Today the
+// Indices precision is f32 instead of i32 / i64. Today the
 // chelis type system rejects this at the parse/check stage (the Surf
-// signature `tensor[64, int64]` is required for the indices operand);
+// signature `tensor[64, i64]` is required for the indices operand);
 // the IR-level companion test drives a synthetic helper with bogus
 // indices precision and locks the structured rejection mechanically
 // (`crates/chelis-ir/tests/host_sparse_summary_diagnostics.rs`).
 //
 // At the CLI level we assert the negative companion: a well-typed
 // Surf source must NOT produce an `IndicesDTypeMismatch` rejection
-// (any int32/int64 indices is accepted).
+// (any i32/i64 indices is accepted).
 #[test]
 fn well_typed_surface_does_not_emit_indices_dtype_mismatch() {
-    let source = "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n";
     let rejections = rejections_for_source(source);
     assert!(
         !rejections
             .iter()
             .any(|r| r.rejection_class == SummaryRejectionClass::IndicesDTypeMismatch),
-        "well-typed gather over int64 indices must not emit IndicesDTypeMismatch; rejections: {rejections:#?}",
+        "well-typed gather over i64 indices must not emit IndicesDTypeMismatch; rejections: {rejections:#?}",
     );
 }
 
@@ -330,7 +330,7 @@ fn well_typed_surface_does_not_emit_indices_dtype_mismatch() {
 // not emit PayloadDTypeMismatch.
 #[test]
 fn well_typed_surface_does_not_emit_payload_dtype_mismatch() {
-    let source = "def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n";
     let rejections = rejections_for_source(source);
@@ -352,10 +352,10 @@ fn well_typed_surface_does_not_emit_payload_dtype_mismatch() {
 
 #[test]
 fn rejection_carries_helper_def_name() {
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let rejections = rejections_for_source(source);
@@ -375,10 +375,10 @@ fn rejection_carries_surf_spans_when_available() {
     // rejected callsite + helper body must carry surf-prefixed span
     // IDs. We assert presence + prefix, not pattern-match on byte
     // offsets (those are fragile under source-formatting changes).
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let rejections = rejections_for_source(source);
@@ -414,9 +414,9 @@ fn rejection_carries_surf_spans_when_available() {
 
 #[test]
 fn summarized_gather_emits_no_rejections() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let rejections = rejections_for_source(source);
     assert!(
@@ -427,10 +427,10 @@ fn summarized_gather_emits_no_rejections() {
 
 #[test]
 fn summarized_scatter_replace_emits_no_rejections() {
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
     let rejections = rejections_for_source(source);
@@ -442,11 +442,11 @@ fn summarized_scatter_replace_emits_no_rejections() {
 
 #[test]
 fn summarized_nested_gather_wrapper_emits_no_rejections() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = wrap_g(table, indices)\n";
     let rejections = rejections_for_source(source);
     assert!(
@@ -470,9 +470,9 @@ fn summarized_gather_helper_has_specialization() {
     // `user_def_gather_helper_emits_inline_sparse_gather_loop`) must
     // have a `SparseGather` specialization on both `my_g` and `f`
     // *and* no rejection.
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let decls = parse_str(source).expect("parse_str");
     let deep = desugar_program(&decls);
@@ -516,10 +516,10 @@ fn summarized_gather_helper_has_specialization() {
 
 #[test]
 fn rejection_display_mentions_helper_and_class() {
-    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def bad(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
     let rejections = rejections_for_source(source);
@@ -641,7 +641,7 @@ fn reserved_rejection_classes_have_display() {
 
 #[test]
 fn well_typed_surface_does_not_emit_reserved_classes() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n";
     let rejections = rejections_for_source(source);
     for r in &rejections {

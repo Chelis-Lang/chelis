@@ -2252,7 +2252,7 @@ fn type_expr_is_ref(expr: &Expr) -> bool {
 /// not linearity -- surfaces the type mismatch.
 ///
 /// Negative parity: a borrow whose inner is genuinely not a tensor
-/// or carrier (e.g. `&int32` against a non-borrow consumer) is
+/// or carrier (e.g. `&i32` against a non-borrow consumer) is
 /// rejected by the inference-layer `borrow` arm before reaching
 /// linearity (the `_ => TypeMismatch` arm fires for `Type::Prim`,
 /// `Type::Unit`, `Type::Fn`, etc.), so this leniency cannot leak.

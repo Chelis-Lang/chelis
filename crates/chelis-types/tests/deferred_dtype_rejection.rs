@@ -79,7 +79,7 @@ fn parse_name_rejects_every_deferred_name() {
 #[test]
 fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
-        assert_deferred_rejection(&format!("def main() -> int32 = cast(1, {name})"), name);
+        assert_deferred_rejection(&format!("def main() -> i32 = cast(1, {name})"), name);
     }
 }
 
@@ -128,12 +128,12 @@ fn sig_precision_ordinary_tvar_still_quantifies() {
 }
 
 /// Negative-parity twin: active dtypes sharing a prefix with reserved
-/// names (`int32` vs `int4`, `f16` vs `f8e5m2`) must not trip the
+/// names (`i32` vs `int4`, `f16` vs `f8e5m2`) must not trip the
 /// deferred rejection path.
 #[test]
 fn active_dtypes_do_not_match_deferred_family() {
     for (src, what) in [
-        ("def main() -> int32 = cast(1, int32)", "int32"),
+        ("def main() -> i32 = cast(1, i32)", "i32"),
         ("def main() -> f16 = cast(1.0, f16)", "f16"),
     ] {
         let deep = surf_to_deep(src);

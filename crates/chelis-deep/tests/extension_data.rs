@@ -152,8 +152,8 @@ fn metadata_replacements_retain_expression_and_binder_owners() {
 
 #[test]
 fn authoring_preserves_replaced_declaration_owners_and_conflicts_fail() {
-    let original = chelis_deep::parse_and_stamp_file("(module {} m (defsig {sig_data: 1} f (t-fn {} (t-prim {} int32))) (def {def_data: 2} f (fn {} (params {params_data: 3}) (lit {} 1))))").unwrap();
-    let replacement = chelis_deep::parse_and_stamp_file("(defsig {} f (t-fn {} (t-prim {} int32))) (def {new_data: 4} f (fn {} (params {}) (lit {} 2)))").unwrap();
+    let original = chelis_deep::parse_and_stamp_file("(module {} m (defsig {sig_data: 1} f (t-fn {} (t-prim {} i32))) (def {def_data: 2} f (fn {} (params {params_data: 3}) (lit {} 1))))").unwrap();
+    let replacement = chelis_deep::parse_and_stamp_file("(defsig {} f (t-fn {} (t-prim {} i32))) (def {new_data: 4} f (fn {} (params {}) (lit {} 2)))").unwrap();
     let replaced =
         chelis_deep::authoring::replace_function(&original, "m.f", &replacement).unwrap();
     let text = replaced

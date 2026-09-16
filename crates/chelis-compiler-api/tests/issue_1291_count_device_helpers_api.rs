@@ -8,8 +8,8 @@ const COUNT_DEVICE_ENTRY: &str = include_str!("../../../examples/count_bool_devi
 const TWO_COUNT_HELPERS: &str = "\
 module Example.TwoCounts\n\
 mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-rows: tensor[2, int64] = count(&mask, 1)\n\
-columns: tensor[3, int64] = count(&mask, 0)\n";
+rows: tensor[2, i64] = count(&mask, 1)\n\
+columns: tensor[3, i64] = count(&mask, 0)\n";
 
 #[test]
 fn hip_compile_api_emits_host_helper_count_on_the_device() {

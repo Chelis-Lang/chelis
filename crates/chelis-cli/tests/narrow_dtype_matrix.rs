@@ -345,7 +345,7 @@ fn eval_scalar_f16_comparison_rounds_before_compare() {
 
 /// **HIP rejects unsupported f16/bf16 elementwise `Add` with a clean
 /// diagnostic** - the correct row-three behavior from chelis#703's response
-/// table, and the control that bounds chelis#689 (whose int64 siblings DO slip
+/// table, and the control that bounds chelis#689 (whose i64 siblings DO slip
 /// through to F32 kernels).
 /// Emission-only: no hipcc needed.
 #[test]

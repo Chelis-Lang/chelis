@@ -91,7 +91,7 @@ fn number<T: FixedNumber>(request: &Request) -> Result<Value, String> {
     };
     let scalar = value.scalar();
     Ok(
-        json!({"dtype": scalar.prim().name(), "elements": [element(scalar.element_ref())],
+        json!({"dtype": scalar.prim().interchange_name(), "elements": [element(scalar.element_ref())],
         "json": serde_json::to_value(&value).expect("encode observed number"),
         "binary": hex(&bincode::serialize(&value).expect("encode observed binary number"))}),
     )
@@ -118,7 +118,7 @@ fn tensor(request: &Request) -> Result<Value, String> {
         .map(|i| element(value.data.element_ref(i)))
         .collect();
     Ok(
-        json!({"dtype": value.data.prim().name(), "elements": elements, "shape": value.shape,
+        json!({"dtype": value.data.prim().interchange_name(), "elements": elements, "shape": value.shape,
         "json": serde_json::to_value(&value).expect("encode observed tensor"),
         "binary": hex(&bincode::serialize(&value).expect("encode observed binary tensor"))}),
     )
@@ -380,7 +380,7 @@ fn diagnostic_projection(request: &Request) -> Result<Value, String> {
     )?;
     let error = chelis_compiler_api::compiler::compile(CompileRequest {
         source_kind: SourceKind::Surf,
-        source: "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+        source: "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
                  reduce_window_max(x, [w], [s])\n\
                  out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n"
             .into(),

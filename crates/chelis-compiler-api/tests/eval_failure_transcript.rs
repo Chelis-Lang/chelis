@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 fn request(body: &str) -> EvalRequest {
     EvalRequest {
         source_kind: SourceKind::Surf,
-        source: format!("def run() -> int64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n"),
+        source: format!("def run() -> i64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n"),
         bindings: BTreeMap::new(),
     }
 }
@@ -55,7 +55,10 @@ fn compile_failure_does_not_claim_effects_ran() {
 #[test]
 fn nested_authored_failure_retains_debug_output_and_exact_message() {
     let mut request = request("value = nested()\nvalue");
-    request.source.insert_str(0, "def nested() -> int64 ! { IO } = {\n_ = debug(\"nested\")\nfail(\"authored failure\")\n}\n");
+    request.source.insert_str(
+        0,
+        "def nested() -> i64 ! { IO } = {\n_ = debug(\"nested\")\nfail(\"authored failure\")\n}\n",
+    );
     let error = eval(request).expect_err("authored failure");
     assert_eq!(error.transcript, ["nested"], "{error:?}");
     assert_eq!(error.errors.len(), 1);
@@ -64,7 +67,7 @@ fn nested_authored_failure_retains_debug_output_and_exact_message() {
 
 #[test]
 fn selected_evaluations_do_not_leak_transcripts_between_roots() {
-    let source = "def bad() -> int64 ! { IO } = {\n_ = print(\"bad\")\nfail(\"stop\")\n}\ndef good() -> int64 ! { IO } = {\n_ = print(\"good\")\n7i64\n}\na = bad()\nb = good()\n";
+    let source = "def bad() -> i64 ! { IO } = {\n_ = print(\"bad\")\nfail(\"stop\")\n}\ndef good() -> i64 ! { IO } = {\n_ = print(\"good\")\n7i64\n}\na = bad()\nb = good()\n";
     let request = || EvalRequest {
         source_kind: SourceKind::Surf,
         source: source.to_string(),

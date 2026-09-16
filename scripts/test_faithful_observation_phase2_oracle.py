@@ -373,7 +373,7 @@ class CrossLaneCorpusTests(unittest.TestCase):
         assert entries is not None
         source = self._harness().replace(
             entries["bool-exits"],
-            '("bool-exits", exits_program("tensor[1, int8]", "to_tensor([1])")),\n        ',
+            '("bool-exits", exits_program("tensor[1, i8]", "to_tensor([1])")),\n        ',
             1,
         )
         violations = oracle.cross_lane_corpus_violations(source)
@@ -395,17 +395,17 @@ class CrossLaneCorpusTests(unittest.TestCase):
         self.assertTrue(any("assert_eq!" in v for v in violations), violations)
 
     def test_a_shrunk_corpus_is_a_violation(self) -> None:
-        source = self._harness().replace('("int64-exits"', '("int64-exits-renamed"', 1)
+        source = self._harness().replace('("i64-exits"', '("i64-exits-renamed"', 1)
         violations = oracle.cross_lane_corpus_violations(source)
         self.assertTrue(
-            any("int64-exits" in violation for violation in violations), violations
+            any("i64-exits" in violation for violation in violations), violations
         )
 
     def test_a_grown_corpus_is_allowed(self) -> None:
         source = self._harness().replace(
-            '("int8-exits", int_table_program("int8", INT_ROWS[0].1)),',
-            '("int8-exits", int_table_program("int8", INT_ROWS[0].1)),\n'
-            '        ("int16-exits", int_table_program("int16", INT_ROWS[1].1)),',
+            '("i8-exits", int_table_program("i8", INT_ROWS[0].1)),',
+            '("i8-exits", int_table_program("i8", INT_ROWS[0].1)),\n'
+            '        ("i16-exits", int_table_program("i16", INT_ROWS[1].1)),',
             1,
         )
         self.assertEqual(oracle.cross_lane_corpus_violations(source), [])

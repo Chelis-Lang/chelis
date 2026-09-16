@@ -342,7 +342,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
 ///
 /// Re-authored by chelis#730 Phase 1 (census row 5, chelis#689): the
 /// former `elem_kind` F32 wildcard let this mixed-precision fused
-/// fan-in EMIT (reading the int32 operand through the f32 kernel - the
+/// fan-in EMIT (reading the i32 operand through the f32 kernel - the
 /// corruption class chelis#689 runtime-confirmed), and the old
 /// assertion only checked the alias line was absent in that corrupt
 /// emission. There is no typed mixed-precision fused kernel, so HIP
@@ -360,10 +360,10 @@ fn fan_in_different_precision_does_not_alias() {
     );
     let err = codegen_hip(&dag, "test_fan_in_different_precision")
         .map(|_| ())
-        .expect_err("a mixed int32/f32 fused fan-in has no typed HIP kernel");
+        .expect_err("a mixed i32/f32 fused fan-in has no typed HIP kernel");
     let rendered = err.to_string();
     assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("int32"),
+        rendered.starts_with("unsupported:") && rendered.contains("i32"),
         "the rejection must be branded and name the dtype; got: {rendered}"
     );
 }

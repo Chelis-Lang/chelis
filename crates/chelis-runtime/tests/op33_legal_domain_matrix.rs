@@ -29,19 +29,19 @@ struct DtypeCase {
 
 const DTYPES: [DtypeCase; 8] = [
     DtypeCase {
-        name: "int8",
+        name: "i8",
         dtype: CHELIS_DTYPE_I8,
     },
     DtypeCase {
-        name: "int16",
+        name: "i16",
         dtype: CHELIS_DTYPE_I16,
     },
     DtypeCase {
-        name: "int32",
+        name: "i32",
         dtype: CHELIS_DTYPE_I32,
     },
     DtypeCase {
-        name: "int64",
+        name: "i64",
         dtype: CHELIS_DTYPE_I64,
     },
     DtypeCase {
@@ -73,9 +73,9 @@ const OPS: [&str; 7] = [
 ];
 
 const ADDITIONAL_EINSUM_ACCUMULATORS: [(&str, u8, u8); 6] = [
-    ("int8", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
-    ("int16", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
-    ("int32", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
+    ("i8", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
+    ("i16", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
+    ("i32", CHELIS_DTYPE_I64, CHELIS_DTYPE_I64),
     ("f16", CHELIS_DTYPE_F64, CHELIS_DTYPE_F16),
     ("bf16", CHELIS_DTYPE_F64, CHELIS_DTYPE_BF16),
     ("f32", CHELIS_DTYPE_F64, CHELIS_DTYPE_F64),

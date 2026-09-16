@@ -61,10 +61,10 @@ fn executable_nullary_integer_example_agrees_in_eval_and_c() {
 #[test]
 fn integer_literal_returns_preserve_every_integer_width_and_exact_int64() {
     for (dtype, literal, zero, expected) in [
-        ("int8", "127i8", "0i8", "127"),
-        ("int16", "32767i16", "0i16", "32767"),
-        ("int32", "2147483647i32", "0i32", "2147483647"),
-        ("int64", "9007199254740993i64", "0i64", "9007199254740993"),
+        ("i8", "127i8", "0i8", "127"),
+        ("i16", "32767i16", "0i16", "32767"),
+        ("i32", "2147483647i32", "0i32", "2147483647"),
+        ("i64", "9007199254740993i64", "0i64", "9007199254740993"),
     ] {
         let source = format!(
             "module Widths\n\
@@ -85,10 +85,10 @@ fn integer_literal_returns_preserve_every_integer_width_and_exact_int64() {
 fn integer_literal_return_remains_callable_through_aliases() {
     check_eval_and_run(
         "module Aliases\n\
-         def anchor() -> int32 = 7\n\
+         def anchor() -> i32 = 7\n\
          alias = anchor\n\
          second = alias\n\
-         def direct() -> int32 = second()\n",
+         def direct() -> i32 = second()\n",
         "anchor = 7\ndirect = 7\n",
     );
 }
@@ -98,11 +98,11 @@ fn marked_integer_atom_finalizes_directly_at_its_float_width() {
     // One above an f32 midpoint beyond 2^53: going through f64 first
     // would round down to the midpoint and then choose the wrong f32.
     check_eval_and_run_kind(
-        "(defsig {} answer (t-fn {} (t-prim {} int64)))\n\
+        "(defsig {} answer (t-fn {} (t-prim {} i64)))\n\
          (def {} answer (fn {} (params {})\n\
            (cast {}\n\
              (lit {type: (t-prim {} f32), literal_source: integer} 18014399583223809)\n\
-             (t-prim {} int64))))\n",
+             (t-prim {} i64))))\n",
         "answer = 18014400656965632\n",
         "dp",
     );
@@ -131,12 +131,12 @@ fn float_literal_finalization_and_nonnumeric_returns_are_unchanged() {
 #[test]
 fn invalid_literal_width_and_return_type_are_rejected_before_codegen() {
     for (body, extension) in [
-        ("def anchor() -> int8 = 128i8", "ch"),
-        ("def anchor() -> int16 = 32768i16", "ch"),
-        ("def anchor() -> int32 = 2147483648i32", "ch"),
-        ("def anchor() -> int64 = 9223372036854775808i64", "ch"),
+        ("def anchor() -> i8 = 128i8", "ch"),
+        ("def anchor() -> i16 = 32768i16", "ch"),
+        ("def anchor() -> i32 = 2147483648i32", "ch"),
+        ("def anchor() -> i64 = 9223372036854775808i64", "ch"),
         ("def anchor() -> bool = 7", "ch"),
-        ("def anchor() -> int8 = 7", "ch"),
+        ("def anchor() -> i8 = 7", "ch"),
         // Metadata alone may not reinterpret an integer atom as a float.
         ("(def {} answer (lit {type: (t-prim {} f32)} 7))", "dp"),
     ] {

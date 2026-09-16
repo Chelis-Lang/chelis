@@ -402,7 +402,7 @@ fn external_axis_names_the_exact_load_not_a_string_match() {
 }
 
 /// C4.1 / C2.1: `InputAxis` validates the tensor slot and its normalized
-/// `int32` axis; `ScalarInput` validates the rank-0 exact-`int64` contract.
+/// `i32` axis; `ScalarInput` validates the rank-0 exact-`i64` contract.
 #[test]
 fn input_axis_and_scalar_input_sources_validate_their_slots() {
     let mut dag = Dag::new();
@@ -491,7 +491,7 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         .expect_err("an absent extent slot must fail");
     assert!(error.to_string().contains("input slot 4"), "{error}");
 
-    // Negative parity: a rank-0 non-int64 scalar is not an admissible
+    // Negative parity: a rank-0 non-i64 scalar is not an admissible
     // extent source under C2.1.
     let mut wrong_dtype = Dag::new();
     let value = wrong_dtype.add_node(
@@ -521,8 +521,8 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
     );
     wrong_dtype.add_root(expanded);
     let error = check_axis_sources(&wrong_dtype, Stage::Lowering)
-        .expect_err("a non-int64 extent scalar is not an admissible ScalarInput");
-    assert!(error.to_string().contains("must be int64"), "{error}");
+        .expect_err("a non-i64 extent scalar is not an admissible ScalarInput");
+    assert!(error.to_string().contains("must be i64"), "{error}");
 }
 
 /// C4.3: a well-typed but currently unsupported mapping yields the

@@ -20,19 +20,18 @@ use std::process::Command;
 const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 
 /// The issue's reproducer, with `;` between block bindings.
-const REPRO: &str = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+const REPRO: &str = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }\n";
 
 /// The remedy the diagnostic names: the same program, newline separated.
-const REMEDY: &str = "def main() -> int64 = {\n  a = 1i64\n  b = 2i64\n  add(a, b)\n}\n";
+const REMEDY: &str = "def main() -> i64 = {\n  a = 1i64\n  b = 2i64\n  add(a, b)\n}\n";
 
 /// A `;` after the tail expression. spec/02-surf-syntax.md §P5 rejects a
 /// trailing `;` by name, but this used to report a bare statement.
-const TRAILING: &str = "def main() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n";
+const TRAILING: &str = "def main() -> i64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n";
 
 /// A `;` on its own line between bindings, which used to degrade to
 /// `unexpected end of input`.
-const AFTER_NEWLINE: &str =
-    "def main() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n";
+const AFTER_NEWLINE: &str = "def main() -> i64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n";
 
 fn write_tempfile(prefix: &str, src: &str) -> tempfile::NamedTempFile {
     let mut tmp = tempfile::Builder::new()

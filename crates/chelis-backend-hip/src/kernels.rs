@@ -3,7 +3,7 @@
 //! Each function returns a complete kernel source string ready for hiprtc
 //! compilation. Device-side indexing helpers are prepended to every kernel.
 //!
-//! Shape and stride parameters use int64 metadata. Each program specializes
+//! Shape and stride parameters use i64 metadata. Each program specializes
 //! every template and launch argument list to the same maximum checked DAG
 //! rank. Rank-zero programs carry one inert parameter slot; their semantic
 //! rank remains zero and their null shape/stride arrays are never read.
@@ -225,14 +225,14 @@ fn build_int_array(rank: usize, var_name: &str, prefix: &str, suffix: &str) -> S
 /// `bool_c_ty` is the backend's spelling of the exact one-byte `Bool8`
 /// carrier chelis#1308 landed (`unsigned char`, see `dtype_c_type`), so the
 /// kernel reads one byte per element and never a four-byte payload;
-/// `out_c_ty` is the same authority's spelling of the int64 result, so this
+/// `out_c_ty` is the same authority's spelling of the i64 result, so this
 /// template names no element type of its own (chelis#893). The
 /// runtime's `chelis_tensor_end_write` already rejects a byte outside {0, 1}
 /// at the host write boundary, so error code 1 is a backstop for a producer
 /// that bypasses the runtime, never the primary check. Each output thread
 /// enumerates its selected-axis leaves in original row-major order, then
 /// evaluates the specified adjacent-pair tree with a fixed-depth explicit
-/// stack. Error code 1 is a non-boolean payload, 2 is checked-int64 overflow,
+/// stack. Error code 1 is a non-boolean payload, 2 is checked-i64 overflow,
 /// 3 is a stack hardware limit, and 4 is an invalid storage index.
 pub fn count(
     rank: usize,

@@ -178,7 +178,7 @@ def f(y: f32) -> f32 = bump({
 fn free_references_survive_hygiene() {
     let text = expand_surf(
         r#"
-def f(batch: int32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] =
+def f(batch: i32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] =
   linear_layer(x, w, b)
 "#,
     );

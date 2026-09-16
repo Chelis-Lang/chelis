@@ -1,13 +1,13 @@
 xs: List[f32] = [1.0, 2.0]
 ys = concat(xs, [3.0, 4.0])
-prefix = take(ys, cast(3, int64))
-suffix = drop(ys, cast(1, int64))
+prefix = take(ys, cast(3, i64))
+suffix = drop(ys, cast(1, i64))
 item_count = numel(to_tensor(ys))
 roundtrip = to_list(to_tensor(ys))
-token_rows: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
+token_rows: List[List[i64]] = [[cast(1, i64), cast(2, i64)], [cast(3, i64)]]
 flat_tokens = flatten(token_rows)
-token_batches = chunk(flat_tokens, cast(2, int64))
-padded = pad_sequences(token_rows, cast(0, int64))
+token_batches = chunk(flat_tokens, cast(2, i64))
+padded = pad_sequences(token_rows, cast(0, i64))
 report = string_concat(string_concat("len=", to_string(len(ys))), string_concat(", items=", string_concat(to_string(item_count), string_concat(", shape=", string_concat(to_string(shape(padded, 0)), string_concat("x", to_string(shape(padded, 1))))))))
 printed = print(report)
 prefix_view = print(prefix)
@@ -16,6 +16,6 @@ flat_tokens_view = print(flat_tokens)
 token_batches_view = print(token_batches)
 roundtrip_view = print(roundtrip)
 selection_mask: tensor[2, bool] = [true, false]
-runtime_position: int64 = tensor_to_scalar(count(&selection_mask, 0))
+runtime_position: i64 = tensor_to_scalar(count(&selection_mask, 0))
 runtime_selected = index(ys, runtime_position)
 runtime_selected_view = print(runtime_selected)

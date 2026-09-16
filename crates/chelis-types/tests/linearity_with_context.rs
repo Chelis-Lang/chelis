@@ -236,12 +236,12 @@ def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
 #[test]
 fn parity_pair_three_borrow_keeps_caller_live() {
     let library_src = r#"
-def lib_rank(t: &tensor[4, f32]) -> int32 = rank(t)
+def lib_rank(t: &tensor[4, f32]) -> i32 = rank(t)
 "#;
     let new_src = r#"
 def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
-    n: int32 = lib_rank(my_x)
+    n: i32 = lib_rank(my_x)
     y: tensor[4, f32] = relu(my_x)
     _ = drop(my_x)
     y
@@ -286,12 +286,12 @@ fn parity_pair_five_observational_query_does_not_consume() {
     // Library def whose new-code call passes a tensor through an
     // observational builtin (`shape`) — must not consume `my_x`.
     let library_src = r#"
-def lib_shape0(t: &tensor[2, 3, f32]) -> int64 = shape(t, 0)
+def lib_shape0(t: &tensor[2, 3, f32]) -> i64 = shape(t, 0)
 "#;
     let new_src = r#"
 def caller(my_x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
   {
-    n: int64 = lib_shape0(my_x)
+    n: i64 = lib_shape0(my_x)
     y: tensor[2, 3, f32] = relu(my_x)
     _ = drop(my_x)
     y
@@ -324,14 +324,14 @@ fn library_assert_then_assert_does_not_double_consume_caller() {
     // separate tensor. The call sites pass `actual` to two consecutive
     // library calls, which monolithic linearity accepts.
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32]) -> int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32]) -> i32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
 "#;
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
   {
-    _shape: int32 = assert_shape_lib(&actual)
-    close: int32 = assert_close_lib(actual, expected)
+    _shape: i32 = assert_shape_lib(&actual)
+    close: i32 = assert_close_lib(actual, expected)
     _ = drop(actual)
     _ = drop(expected)
     close
@@ -364,15 +364,15 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
 #[test]
 fn library_underscore_discard_then_call_with_context_matches_monolithic() {
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: int64) -> int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32], n: i64) -> i32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
 "#;
     // Use `_ =` discard form, mirroring the chelis-std pattern.
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
   {
-    _ = assert_shape_lib(actual, cast(4, int64))
-    close: int32 = assert_close_lib(actual, expected)
+    _ = assert_shape_lib(actual, cast(4, i64))
+    close: i32 = assert_close_lib(actual, expected)
     _ = drop(actual)
     _ = drop(expected)
     close
@@ -400,14 +400,14 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
 #[test]
 fn library_calls_aliased_without_explicit_borrow_match_monolithic() {
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: int64) -> int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32], n: i64) -> i32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> i32 = rank(a)
 "#;
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> i32 =
   {
-    _shape: int32 = assert_shape_lib(actual, cast(4, int64))
-    close: int32 = assert_close_lib(actual, expected)
+    _shape: i32 = assert_shape_lib(actual, cast(4, i64))
+    close: i32 = assert_close_lib(actual, expected)
     _ = drop(actual)
     _ = drop(expected)
     close
@@ -442,14 +442,14 @@ fn library_two_consecutive_borrowing_calls_do_not_consume() {
     // `assert_shape(&t)` and `assert_close_tensor(&a, &b)` are
     // observational.
     let library_src = r#"
-def lib_a(t: &tensor[4, f32]) -> int32 = rank(t)
-def lib_b(t: &tensor[4, f32]) -> int32 = rank(t)
+def lib_a(t: &tensor[4, f32]) -> i32 = rank(t)
+def lib_b(t: &tensor[4, f32]) -> i32 = rank(t)
 "#;
     let new_src = r#"
 def caller(actual: tensor[4, f32]) -> tensor[4, f32] =
   {
-    _x: int32 = lib_a(actual)
-    _y: int32 = lib_b(actual)
+    _x: i32 = lib_a(actual)
+    _y: i32 = lib_b(actual)
     y: tensor[4, f32] = relu(actual)
     _ = drop(actual)
     y
@@ -579,7 +579,7 @@ type Carrier[n] =
 "#;
     let lib_b = r#"
 type Carrier[n] =
-  | Carrier { tag: int32 }
+  | Carrier { tag: i32 }
 "#;
     let new_src = r#"
 type Outer[n] =

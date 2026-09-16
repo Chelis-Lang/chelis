@@ -8,9 +8,9 @@
 //! verify.rs lines 404-468: `BlasMatmul` IS checked for narrowness
 //! against the spec default.
 //!
-//! Symptom: a hand-built (or lowering-produced) Sum with int8
-//! accumulator on int8 operand passes verify, then the C backend's
-//! emit_reduce_sum dispatches the int8 path with int8 accumulator,
+//! Symptom: a hand-built (or lowering-produced) Sum with i8
+//! accumulator on i8 operand passes verify, then the C backend's
+//! emit_reduce_sum dispatches the i8 path with i8 accumulator,
 //! silently overflowing on values whose sum exceeds 127.
 //!
 //! Spec §5.7.1: "The accumulator parameter is permitted only when it
@@ -37,7 +37,7 @@ fn scalar_t(p: Prim) -> TensorType {
 
 #[test]
 fn ir_verify_accepts_sum_int8_with_int8_accumulator_silent_overflow() {
-    // Hand-build a Sum with int8 accumulator (violates §5.7.1).
+    // Hand-build a Sum with i8 accumulator (violates §5.7.1).
     let mut dag = Dag::new();
     let inp = dag.add_node(
         RiscOp::Load {
@@ -62,7 +62,7 @@ fn ir_verify_accepts_sum_int8_with_int8_accumulator_silent_overflow() {
         !errs.is_empty(),
         "IR verify ASYMMETRY BUG: spec §5.7.1 narrowness rule for Sum is \
          not enforced at the verify layer (BlasMatmul has the rule but \
-         Sum does not). A hand-built Sum {{accumulator: Int8}} on an int8 \
+         Sum does not). A hand-built Sum {{accumulator: Int8}} on an i8 \
          operand passes verify cleanly; the constructor \
          `sum_with_accumulator` would have rejected it. Symptom: the \
          lowering or any other producer that constructs RiscOp::Sum \
@@ -99,8 +99,8 @@ fn ir_verify_accepts_sum_int16_with_int16_accumulator_silent_overflow() {
     let errs = verify::verify(&dag);
     assert!(
         !errs.is_empty(),
-        "IR verify ASYMMETRY BUG: int16 operand + int16 accumulator passes \
-         verify, despite spec §5.7.1 requiring int32 default."
+        "IR verify ASYMMETRY BUG: i16 operand + i16 accumulator passes \
+         verify, despite spec §5.7.1 requiring i32 default."
     );
 }
 

@@ -36,49 +36,49 @@ fn compiled_list_adjoints_are_compositional_and_preserve_recursive_shapes() {
 import Std.Index (drop_list, list_index, take_list)
 
 def sum_pair(value: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(value, cast(0, int32)))
+  tensor_to_scalar(sum(value, cast(0, i32)))
 
-def wrapped_select(xs: List[f32], index: int64) -> f32 = list_index(xs, index)
+def wrapped_select(xs: List[f32], index: i64) -> f32 = list_index(xs, index)
 def wrapped_values(xs: List[f32]) -> List[f32] = xs
 
 def second_list_loss(
   left: List[f32],
   right: List[f32],
-  index: int64
+  index: i64
 ) -> f32 = list_index(right, index)
 
-def reused_selector_loss(xs: List[f32], index: int64) -> f32 =
+def reused_selector_loss(xs: List[f32], index: i64) -> f32 =
   add(list_index(xs, index), cast(index, f32))
 
-def wrapped_loss(xs: List[f32], index: int64) -> f32 =
+def wrapped_loss(xs: List[f32], index: i64) -> f32 =
   wrapped_select(xs, index)
 
-def repeated_loss(xs: List[f32], index: int64) -> f32 =
+def repeated_loss(xs: List[f32], index: i64) -> f32 =
   add(list_index(xs, index), list_index(xs, index))
 
-def tensor_list_loss(xs: List[tensor[2, f32]], index: int64) -> f32 =
+def tensor_list_loss(xs: List[tensor[2, f32]], index: i64) -> f32 =
   sum_pair(list_index(xs, index))
 
-def empty_take_loss(xs: List[f32], count: int64) -> f32 = {
+def empty_take_loss(xs: List[f32], count: i64) -> f32 = {
   selected = take_list(xs, count)
-  if eq(len(selected), cast(0, int64)) then cast(0.0, f32) else list_index(selected, cast(0, int64))
+  if eq(len(selected), cast(0, i64)) then cast(0.0, f32) else list_index(selected, cast(0, i64))
 }
 
-def reused_count_loss(xs: List[f32], count: int64) -> f32 = {
-  selected = drop_list(take_list(xs, count), sub(count, cast(1, int64)))
-  add(list_index(selected, cast(0, int64)), mul(cast(count, f32), cast(0.0, f32)))
+def reused_count_loss(xs: List[f32], count: i64) -> f32 = {
+  selected = drop_list(take_list(xs, count), sub(count, cast(1, i64)))
+  add(list_index(selected, cast(0, i64)), mul(cast(count, f32), cast(0.0, f32)))
 }
 
 def both_lists_loss(
   left: List[f32],
   right: List[f32],
-  index: int64
+  index: i64
 ) -> f32 = add(list_index(left, index), list_index(right, index))
 
 def nested_runtime_loss(
   values: List[List[f32]],
-  outer: int64,
-  inner: int64
+  outer: i64,
+  inner: i64
 ) -> f32 = list_index(list_index(values, outer), inner)
 
 left: List[f32] = [cast(2.0, f32), cast(3.0, f32), cast(5.0, f32)]
@@ -92,8 +92,8 @@ nested_values: List[List[f32]] = [
   [cast(29.0, f32)]
 ]
 mask: tensor[2, bool] = [true, false]
-runtime_one: int64 = tensor_to_scalar(count(&mask, 0))
-runtime_zero: int64 = sub(runtime_one, runtime_one)
+runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
+runtime_zero: i64 = sub(runtime_one, runtime_one)
 
 second = grad(second_list_loss, wrt=right)(left, right, runtime_one)
 reused = grad(reused_selector_loss, wrt=xs)(left, runtime_one)
@@ -154,15 +154,15 @@ def fresh_template() -> tensor[2, f32] =
   to_tensor([cast(0.0, f32), cast(0.0, f32)])
 
 def sum_all(value: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(value, cast(0, int32)))
+  tensor_to_scalar(sum(value, cast(0, i32)))
 
 def float_condition(template: tensor[2, f32], scale: f32) -> f32 ! { Random } =
   if gt(scale, cast(0.0, f32))
   then sum_all(normal_like(template, cast(0.0, f32), scale))
   else sum_all(template)
 
-def int_condition(template: tensor[2, f32], gate: int64, scale: f32) -> f32 ! { Random } =
-  if eq(gate, cast(1, int64))
+def int_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } =
+  if eq(gate, cast(1, i64))
   then add(
     sum_all(normal_like(template, cast(0.0, f32), scale)),
     sum_all(xavier_uniform(template, scale, scale))
@@ -175,7 +175,7 @@ def guarded_error(template: tensor[2, f32], scale: f32) -> f32 ! { Random } =
   else fail("untaken error branch")
 
 false_mask: tensor[1, bool] = [false]
-runtime_zero: int64 = tensor_to_scalar(count(&false_mask, 0))
+runtime_zero: i64 = tensor_to_scalar(count(&false_mask, 0))
 
 after_float_grad = with seed(241i64) {
   skipped = grad(float_condition, wrt=scale)(fresh_template(), cast(-1.0, f32))
@@ -244,17 +244,17 @@ def fresh_template() -> tensor[2, f32] =
   to_tensor([cast(0.0, f32), cast(0.0, f32)])
 
 def sum_all(value: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(value, cast(0, int32)))
+  tensor_to_scalar(sum(value, cast(0, i32)))
 
-def inner_condition(template: tensor[2, f32], gate: int64, scale: f32) -> f32 ! { Random } =
-  if eq(gate, cast(1, int64))
+def inner_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } =
+  if eq(gate, cast(1, i64))
   then add(
     sum_all(normal_like(template, cast(0.0, f32), scale)),
     sum_all(xavier_uniform(template, scale, scale))
   )
   else sum_all(normal_like(template, cast(0.0, f32), scale))
 
-def nested_condition(template: tensor[2, f32], gate: int64, scale: f32) -> f32 ! { Random } = {
+def nested_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } = {
   positive = gt(scale, cast(0.0, f32))
   selected = if positive then inner_condition(template, gate, scale) else sum_all(template)
   reused = if positive then cast(0.0, f32) else cast(0.0, f32)
@@ -262,18 +262,18 @@ def nested_condition(template: tensor[2, f32], gate: int64, scale: f32) -> f32 !
 }
 
 false_mask: tensor[1, bool] = [false]
-runtime_zero: int64 = tensor_to_scalar(count(&false_mask, 0))
+runtime_zero: i64 = tensor_to_scalar(count(&false_mask, 0))
 
 after_nested_two_grad = with seed(257i64) {
   used = grad(nested_condition, wrt=(template, scale))(
     fresh_template(),
-    cast(1, int64),
+    cast(1, i64),
     cast(1.0, f32)
   )
   sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 after_nested_two_forward = with seed(257i64) {
-  used = nested_condition(fresh_template(), cast(1, int64), cast(1.0, f32))
+  used = nested_condition(fresh_template(), cast(1, i64), cast(1.0, f32))
   sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 after_nested_one_grad = with seed(259i64) {
@@ -320,7 +320,7 @@ fn compiled_list_grad_evaluates_runtime_selector_argument_once() {
 
 import Std.Index (list_index)
 
-def loss(xs: List[f32], index: int64) -> f32 =
+def loss(xs: List[f32], index: i64) -> f32 =
   add(list_index(xs, index), mul(cast(index, f32), cast(0.0, f32)))
 
 values: List[f32] = [cast(2.0, f32), cast(3.0, f32), cast(5.0, f32)]
@@ -376,10 +376,10 @@ fn empty_runtime_list_index_adjoint_reports_the_same_bounds_error_in_eval_and_c(
 
 import Std.Index (list_index)
 
-def loss(xs: List[f32], index: int64) -> f32 = list_index(xs, index)
+def loss(xs: List[f32], index: i64) -> f32 = list_index(xs, index)
 
 false_mask: tensor[1, bool] = [false]
-runtime_zero: int64 = tensor_to_scalar(count(&false_mask, 0))
+runtime_zero: i64 = tensor_to_scalar(count(&false_mask, 0))
 bad = grad(loss, wrt=xs)([], runtime_zero)
 "#,
     );
@@ -448,11 +448,11 @@ fn runtime_list_index_grad_source(len: usize) -> String {
 
 import Std.Index (list_index)
 
-def loss(xs: List[f32], index: int64) -> f32 = list_index(xs, index)
+def loss(xs: List[f32], index: i64) -> f32 = list_index(xs, index)
 
 values: List[f32] = [{values}]
 mask: tensor[2, bool] = [true, false]
-runtime_one: int64 = tensor_to_scalar(count(&mask, 0))
+runtime_one: i64 = tensor_to_scalar(count(&mask, 0))
 out = grad(loss, wrt=xs)(values, runtime_one)
 "#
     )

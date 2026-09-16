@@ -86,8 +86,8 @@ clipped = clamp(running, floor15, ceil30)
 - `to_tensor(list)`, `to_list(tensor)` bridge lists and tensors. `pad_sequences(list, fill)`
   builds a rectangular tensor from ragged rows.
 - `cast(x, precision)` changes precision.
-- `shape(t, axis)` returns a runtime `int64` scalar for an axis length; the
-  axis argument itself is `int32`.
+- `shape(t, axis)` returns a runtime `i64` scalar for an axis length; the
+  axis argument itself is `i32`.
 - `copy(x)` produces a fresh owned value; `realize(x)` materializes an intermediate.
 
 ### Randomness
@@ -101,7 +101,7 @@ clipped = clamp(running, floor15, ceil30)
 
 `Std.Tensor.Construct` builds and reshapes tensors:
 
-- `linspace(start, stop, count)` uses float endpoints and an `int64` count;
+- `linspace(start, stop, count)` uses float endpoints and an `i64` count;
   `arange(start, stop)` uses signed-integer endpoints.
 - `stack(xs, axis)` concatenates tensors along a new axis.
 - `squeeze(x, axis)` removes a size-1 dimension; `unsqueeze(x, axis)` inserts
@@ -116,7 +116,7 @@ do not yet actualize the helpers' generic cast targets
 
 `Std.Tensor.Mask`:
 
-- `where_indices(mask)` returns the `int64` indices where a `bool` mask is true.
+- `where_indices(mask)` returns the `i64` indices where a `bool` mask is true.
 
 ### Initializers
 
@@ -145,7 +145,7 @@ repeated or nested seed handlers.
 
 - `sort(values, axis)` accepts a numeric tensor of any rank and returns
   `(sorted_values, indices)`, with both tensors preserving the input shape and
-  the indices using `int64`.
+  the indices using `i64`.
 
 `Std.Scan`:
 
@@ -203,7 +203,7 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
 `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
 are exported, so documents can be built directly). Integer-form tokens outside
-int64 retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
+the `i64` range retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
 image is non-finite are rejected:
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
@@ -236,7 +236,7 @@ the shared CSV names apart in both lanes.
 
 - `load_tokenizer(path)` and `try_load_tokenizer(path)`.
 - `encode(tokenizer, text)`, `decode(tokenizer, ids)`.
-- `batch_encode(tokenizer, texts, max_length, pad_value)` returns a padded `int64` tensor.
+- `batch_encode(tokenizer, texts, max_length, pad_value)` returns a padded `i64` tensor.
 
 ### Testing
 

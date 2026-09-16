@@ -30,7 +30,7 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
     ] {
         for (dtype, values, accepts) in [
             ("f32", "[1.0f32, 2.0f32, 6.0f32]", true),
-            ("int32", "[1i32, 2i32, 6i32]", false),
+            ("i32", "[1i32, 2i32, 6i32]", false),
         ] {
             for expression in [
                 format!("middle(to_tensor({values}))"),
@@ -43,7 +43,7 @@ fn checked_library_round_trips_preserve_generic_and_primitive_function_values() 
                 if accepts {
                     verdict.unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
                 } else {
-                    let errors = verdict.expect_err("an imported contract must reject int32");
+                    let errors = verdict.expect_err("an imported contract must reject i32");
                     assert!(
                         errors.errors.iter().any(|error| matches!(
                             error.kind,
@@ -86,12 +86,12 @@ fn checked_library_round_trips_preserve_window_reduction_contracts() {
                 true,
             ),
             (
-                "out: tensor[2, int32] = window_mean(\
+                "out: tensor[2, i32] = window_mean(\
                    to_tensor([1i32, 2i32, 3i32]), [2i64], [1i64])\n",
                 false,
             ),
             (
-                "out: tensor[2, int32] = window_sum(\
+                "out: tensor[2, i32] = window_sum(\
                    to_tensor([1i32, 2i32, 3i32]), [2i64], [1i64])\n",
                 true,
             ),

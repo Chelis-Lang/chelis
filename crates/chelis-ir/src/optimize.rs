@@ -728,7 +728,7 @@ mod tests {
             RiscOp::Const { value } => {
                 assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_992));
             }
-            other => panic!("exact int64 subtraction must fold directly, got {other:?}"),
+            other => panic!("exact i64 subtraction must fold directly, got {other:?}"),
         }
 
         let mut overflow = Dag::new();

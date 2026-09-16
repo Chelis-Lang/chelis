@@ -70,7 +70,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     )
     .expect("write main.ch");
 
@@ -78,9 +78,9 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(
         root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add, double, square)\n\n\
-         def add(x: int32, y: int32) -> int32 = x + y\n\
-         def double(x: int32) -> int32 = x + x\n\
-         def square(x: int32) -> int32 = x * x\n",
+         def add(x: i32, y: i32) -> i32 = x + y\n\
+         def double(x: i32) -> i32 = x + x\n\
+         def square(x: i32) -> i32 = x * x\n",
     )
     .expect("write math.ch");
 
@@ -107,7 +107,7 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 }
 
 const SNIPPET: &str =
-    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> int32 = add(3, 4)\n";
+    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> i32 = add(3, 4)\n";
 
 #[test]
 fn previous_checked_extent_cache_is_rejected_before_payload_decode() {
@@ -211,7 +211,7 @@ fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
                     .collect::<Vec<_>>()
                     .join("\n");
                 assert!(
-                    error.contains(&format!("numeric trap: domain in {operation} at int64")),
+                    error.contains(&format!("numeric trap: domain in {operation} at i64")),
                     "{error}"
                 );
                 assert!(error.contains(context), "{error}");
@@ -256,7 +256,7 @@ fn cold_build_then_load_round_trips_eval_result() {
         "eval_in_context on a freshly-loaded cache must match the pre-save eval"
     );
     // Strengthening: pre and post root counts must match. We can't
-    // unconditionally require non-empty roots — `def name() -> int32 = ...`
+    // unconditionally require non-empty roots — `def name() -> i32 = ...`
     // is a 0-arg fn under desugar and the runtime treats it as a tensor-
     // unlowerable root in some paths (see Phase G's comment in
     // `eval_many_in_context_per_root_isolation_matches_independent_calls`)
@@ -533,7 +533,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml alt");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder_alt() -> int32 = cast(1, int32)\n",
+        "module App.Main\n\ndef placeholder_alt() -> i32 = cast(1, i32)\n",
     )
     .expect("write main.ch alt");
 
@@ -541,7 +541,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     fs::write(
         root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add)\n\n\
-         def add(x: int32, y: int32) -> int32 = x + y + cast(99, int32)\n",
+         def add(x: i32, y: i32) -> i32 = x + y + cast(99, i32)\n",
     )
     .expect("write math.ch alt");
 

@@ -1,9 +1,9 @@
 //! chelis#1112: the [05-DIM-1]/[05-DIM-2] extent-domain dtype rule.
 //!
 //! Extent-domain quantities (dimension extents, slice bounds, pad amounts,
-//! stride steps, expand sizes) are `int64`; axis-domain quantities (rank
-//! indices, permutation entries) are `int32`. `shape()` returns `int64`
-//! and its axis parameter stays `int32`.
+//! stride steps, expand sizes) are `i64`; axis-domain quantities (rank
+//! indices, permutation entries) are `i32`. `shape()` returns `i64`
+//! and its axis parameter stays `i32`.
 //!
 //! Spec authority: `spec/05-risc-primitives.md` §2.4 ([05-DIM-1],
 //! [05-DIM-2] and the movement signature table) and
@@ -11,8 +11,8 @@
 //! shape-list recognizer, bare and cast element forms), §4.7.5 (the
 //! reshape precision rule and its diagnostics).
 //!
-//! Both polarities throughout: every accepted `int64` form has the
-//! rejected `int32` counterpart beside it.
+//! Both polarities throughout: every accepted `i64` form has the
+//! rejected `i32` counterpart beside it.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -63,16 +63,16 @@ fn assert_rejected_with(source: &str, needle: &str, what: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// [05-DIM-2]: shape() returns int64; its axis parameter stays int32.
+// [05-DIM-2]: shape() returns i64; its axis parameter stays i32.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn shape_read_types_int64() {
     assert_clean(
         r#"
-def f(x: tensor[3, f32]) -> int64 = shape(x, 0)
+def f(x: tensor[3, f32]) -> i64 = shape(x, 0)
 "#,
-        "shape() read declared int64",
+        "shape() read declared i64",
     );
 }
 
@@ -80,12 +80,12 @@ def f(x: tensor[3, f32]) -> int64 = shape(x, 0)
 fn shape_read_is_not_int32() {
     let errors = typecheck_surf(
         r#"
-def f(x: tensor[3, f32]) -> int32 = shape(x, 0)
+def f(x: tensor[3, f32]) -> i32 = shape(x, 0)
 "#,
     );
     assert!(
         !errors.is_empty(),
-        "shape() read declared int32 must be rejected under [05-DIM-2]"
+        "shape() read declared i32 must be rejected under [05-DIM-2]"
     );
 }
 
@@ -93,21 +93,21 @@ def f(x: tensor[3, f32]) -> int32 = shape(x, 0)
 fn shape_axis_stays_int32_and_rejects_int64() {
     assert_clean(
         r#"
-def f(x: tensor[3, f32]) -> int64 = shape(x, cast(0, int32))
+def f(x: tensor[3, f32]) -> i64 = shape(x, cast(0, i32))
 "#,
-        "shape() with cast(0, int32) axis",
+        "shape() with cast(0, i32) axis",
     );
     assert_rejected_with(
         r#"
-def g(x: tensor[3, f32]) -> int64 = shape(x, 0i64)
+def g(x: tensor[3, f32]) -> i64 = shape(x, 0i64)
 "#,
-        "int32 axis",
-        "shape() with an int64 axis",
+        "i32 axis",
+        "shape() with an i64 axis",
     );
 }
 
 // ---------------------------------------------------------------------------
-// shrink: bounds are List<List<int64>>.
+// shrink: bounds are List<List<i64>>.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -116,7 +116,7 @@ fn shrink_int64_bounds_typecheck() {
         r#"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0i64, 1i64], [1i64, 3i64]])
 "#,
-        "shrink with int64 bounds pairs",
+        "shrink with i64 bounds pairs",
     );
 }
 
@@ -126,13 +126,13 @@ fn shrink_int32_bounds_rejected_naming_int64() {
         r#"
 def f(x: tensor[2, 4, f32]) -> tensor[1, 2, f32] = shrink(&x, [[0, 1], [1, 3]])
 "#,
-        "int64",
-        "shrink with bare int32 bounds pairs",
+        "i64",
+        "shrink with bare i32 bounds pairs",
     );
 }
 
 // ---------------------------------------------------------------------------
-// pad: padding pairs are List<List<int64>>.
+// pad: padding pairs are List<List<i64>>.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -141,7 +141,7 @@ fn pad_int64_pairs_typecheck() {
         r#"
 def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1i64, 1i64]], 0.0)
 "#,
-        "pad with int64 padding pairs",
+        "pad with i64 padding pairs",
     );
 }
 
@@ -151,13 +151,13 @@ fn pad_int32_pairs_rejected_naming_int64() {
         r#"
 def f(x: tensor[2, f32]) -> tensor[4, f32] = pad(&x, [[1, 1]], 0.0)
 "#,
-        "int64",
-        "pad with bare int32 padding pairs",
+        "i64",
+        "pad with bare i32 padding pairs",
     );
 }
 
 // ---------------------------------------------------------------------------
-// stride: steps are int64.
+// stride: steps are i64.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -166,7 +166,7 @@ fn stride_int64_steps_typecheck() {
         r#"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1i64, 2i64)
 "#,
-        "stride with int64 steps",
+        "stride with i64 steps",
     );
 }
 
@@ -176,13 +176,13 @@ fn stride_int32_steps_rejected_naming_int64() {
         r#"
 def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
 "#,
-        "int64",
-        "stride with bare int32 steps",
+        "i64",
+        "stride with bare i32 steps",
     );
 }
 
 // ---------------------------------------------------------------------------
-// expand (positional): axis stays int32, size becomes int64.
+// expand (positional): axis stays i32, size becomes i64.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -191,7 +191,7 @@ fn expand_int64_size_typechecks() {
         r#"
 def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8i64)
 "#,
-        "expand with an int64 literal size",
+        "expand with an i64 literal size",
     );
 }
 
@@ -202,7 +202,7 @@ fn expand_int32_size_rejected_naming_int64() {
 def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8)
 "#,
         "write Ni64",
-        "expand with a bare int32 size",
+        "expand with a bare i32 size",
     );
 }
 
@@ -212,13 +212,13 @@ fn expand_int64_axis_rejected() {
         r#"
 def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0i64, 8i64)
 "#,
-        "int32",
-        "expand with an int64 axis",
+        "i32",
+        "expand with an i64 axis",
     );
 }
 
 /// The canonical broadcast idiom: a `shape()` read feeding the size slot.
-/// Under [05-DIM-2] both sides are int64, so the idiom is well-typed by
+/// Under [05-DIM-2] both sides are i64, so the idiom is well-typed by
 /// construction with no cast.
 #[test]
 fn expand_shape_sourced_size_typechecks() {
@@ -231,7 +231,7 @@ def f(x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expand(
 }
 
 // ---------------------------------------------------------------------------
-// expand (named-axis, spec/04 §4.5.3): size is an int64 literal.
+// expand (named-axis, spec/04 §4.5.3): size is an i64 literal.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -241,7 +241,7 @@ fn named_axis_expand_int64_size_typechecks() {
 sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
 def add_axis(x) = insert(x, one, 1i64)
 "#,
-        "named-axis expand with an int64 literal size",
+        "named-axis expand with an i64 literal size",
     );
 }
 
@@ -252,15 +252,15 @@ fn named_axis_expand_int32_size_rejected() {
 sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
 def add_axis(x) = insert(x, one, 1)
 "#,
-        "int64",
-        "named-axis expand with a bare int32 size",
+        "i64",
+        "named-axis expand with a bare i32 size",
     );
 }
 
 // ---------------------------------------------------------------------------
 // reshape (spec/04 §4.7.3/§4.7.5): the bare shape() element is recognized
 // and propagates the input's symbolic dim; the cast spelling stays
-// accepted; an unsuffixed int32 list is rejected with a fix-naming
+// accepted; an unsuffixed i32 list is rejected with a fix-naming
 // diagnostic.
 // ---------------------------------------------------------------------------
 
@@ -285,7 +285,7 @@ fn reshape_cast_shape_element_still_propagates() {
     assert_clean(
         r#"
 sig flat_view: &tensor[batch, 4, f32] -> tensor[batch, 4, f32]
-def flat_view(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
+def flat_view(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
         "reshape with the cast-wrapped shape() element",
     );
@@ -308,12 +308,12 @@ fn reshape_unsuffixed_list_rejected_naming_the_fix() {
 def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4])
 "#,
         "i64",
-        "reshape with an unsuffixed int32 shape list",
+        "reshape with an unsuffixed i32 shape list",
     );
 }
 
 // ---------------------------------------------------------------------------
-// Axis-domain pins: [05-DIM-1]'s other half. These lock that the int64
+// Axis-domain pins: [05-DIM-1]'s other half. These lock that the i64
 // extent flip did NOT move axis-domain surfaces, and that a future change
 // cannot flip them silently.
 // ---------------------------------------------------------------------------
@@ -324,33 +324,33 @@ fn permute_axes_stay_int32() {
         r#"
 def f(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1, 0)
 "#,
-        "permute with bare int32 axes",
+        "permute with bare i32 axes",
     );
     assert_rejected_with(
         r#"
 def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
 "#,
-        "int32 axis indices",
-        "permute with int64 axes",
+        "i32 axis indices",
+        "permute with i64 axes",
     );
 }
 
 /// [05-DIM-3]: reduce_window window_shape/strides are extent-domain
-/// `List[int64]`; the old `List[int32]` spelling is rejected.
+/// `List[i64]`; the old `List[i32]` spelling is rejected.
 #[test]
 fn reduce_window_lists_are_int64() {
     assert_clean(
         r#"
 def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 2i64], [2i64, 2i64])
 "#,
-        "reduce_window_max with int64 window/strides",
+        "reduce_window_max with i64 window/strides",
     );
     assert_rejected_with(
         r#"
 def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
 "#,
-        "List[int64]",
-        "reduce_window_max with int32 window",
+        "List[i64]",
+        "reduce_window_max with i32 window",
     );
 }
 
@@ -365,7 +365,7 @@ fn reshape_mixed_suffix_list_rejected() {
         r#"
 def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [2i64, 2i32])
 "#,
-        "int32",
+        "i32",
         "reshape with a mixed-suffix shape list",
     );
 }

@@ -10,7 +10,7 @@
 //! (`chelis-effects` `validate_handler_expr`): a `random` handler whose seed
 //! is not an int LITERAL (`int_literal`: a bare `Atom::Int` or a single
 //! `(lit … Atom::Int)`) is REJECTED with
-//! `with seed(...) requires a signed int64 literal seed` in BOTH lanes
+//! `with seed(...) requires a signed i64 literal seed` in BOTH lanes
 //! (check/eval AND build all run the gate). So every "computed" seed
 //! (negation `-1`, `cast(..)`, `add(..)`, a float) fails LOUDLY and
 //! IDENTICALLY across lanes — never a silent divergence. The eval
@@ -114,7 +114,7 @@ fn assert_both_reject(tag: &str, seed_expr: &str) {
     let (e, c) = outcome(tag, seed_expr);
     match (e, c) {
         (Lane::Err(em), Lane::Err(_)) => assert!(
-            em.contains("requires a signed int64 literal seed"),
+            em.contains("requires a signed i64 literal seed"),
             "{seed_expr}: eval rejected but not via the seed-literal gate: {em}"
         ),
         (e, c) => panic!("{seed_expr}: expected BOTH-ERR, got eval={e:?} c={c:?}"),
@@ -135,7 +135,7 @@ fn assert_both_agree(tag: &str, seed_expr: &str) {
 
 #[test]
 fn rt_2a_negative_seed_rejected_both_lanes() {
-    // Unsuffixed negative seeds remain rejected: their dtype is not int64.
+    // Unsuffixed negative seeds remain rejected: their dtype is not i64.
     assert_both_reject("2a", "-1");
     assert_both_reject("2a", "-2147483649");
 }
@@ -150,7 +150,7 @@ fn rt_2c_float_seed_rejected_both_lanes() {
 fn rt_2d_cast_wrapped_seed_rejected_both_lanes() {
     // The recorded residual calls this "computed"; the gate rejects it, so the
     // narrowing it warns about is NOT reachable through the checked pipeline.
-    assert_both_reject("2d", "cast(4294967295, int64)");
+    assert_both_reject("2d", "cast(4294967295, i64)");
 }
 
 #[test]
@@ -160,8 +160,8 @@ fn rt_2e_add_computed_seed_rejected_both_lanes() {
 
 #[test]
 fn rt_4_literal_boundaries_agree() {
-    // int64-suffixed literals across the int32/int64 boundary pass the gate and
-    // must be lane-identical. chelis#731 Phase 1 makes the seed's int64 suffix a
+    // i64-suffixed literals across the i32/i64 boundary pass the gate and
+    // must be lane-identical. chelis#731 Phase 1 makes the seed's i64 suffix a
     // checker requirement (an unsuffixed literal is now a type error), so the
     // boundary seeds carry the `i64` suffix; the suffix is meta-only and does
     // not change the seed's raw-atom value the peel reads, so lane parity holds.
@@ -176,9 +176,9 @@ fn rt_4_literal_boundaries_agree() {
     }
 }
 
-/// 2b: an int64-*suffixed* seed literal `Ni64` desugars to
-/// `(lit {type: (t-prim {} int64)} N)`. The peel is meta-agnostic (it reads
-/// the raw atom whether the meta says int32 or int64), so a suffixed seed
+/// 2b: an i64-*suffixed* seed literal `Ni64` desugars to
+/// `(lit {type: (t-prim {} i64)} N)`. The peel is meta-agnostic (it reads
+/// the raw atom whether the meta says i32 or i64), so a suffixed seed
 /// reads full width and agrees with C — the design-intended §C1.5 form.
 #[test]
 fn rt_2b_suffixed_int64_seed_agrees() {

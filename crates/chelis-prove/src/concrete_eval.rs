@@ -491,7 +491,7 @@ mod tests {
         );
         assert!(
             eval_bool_strict(&distinct, &UnordMap::new()),
-            "adjacent int64 values above 2^53 must not collapse in the concrete prover"
+            "adjacent i64 values above 2^53 must not collapse in the concrete prover"
         );
     }
 
@@ -529,7 +529,7 @@ mod tests {
         );
         assert!(
             eval_bool_strict(&exact, &UnordMap::new()),
-            "integer min must preserve the adjacent int64 distinction"
+            "integer min must preserve the adjacent i64 distinction"
         );
     }
 

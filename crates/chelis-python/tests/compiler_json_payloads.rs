@@ -198,16 +198,16 @@ fn native_eval_json_preserves_exact_execution_values() {
 fn native_eval_bindings_reject_invalid_payloads_before_either_route() {
     Python::with_gil(|py| {
         let module = native(py);
-        for (dtype, data) in [
+        for (language_dtype, data) in [
             (
-                "int64",
+                "i64",
                 json!({"dtype":"int64","values":[9007199254740993_i64]}),
             ),
             ("f64", json!({"dtype":"f64","bits":["8000000000000000"]})),
             ("f64", json!({"dtype":"f64","bits":["7ff8000000000001"]})),
         ] {
             let tensor = json!({"shape":[1],"data":data});
-            let source = format!("x = (x : tensor[1, {dtype}])\n");
+            let source = format!("x = (x : tensor[1, {language_dtype}])\n");
             let actual = decode(
                 module
                     .getattr("eval_json")
@@ -223,7 +223,7 @@ fn native_eval_bindings_reject_invalid_payloads_before_either_route() {
                 .unwrap();
             assert_eq!(root["value"], json!({"type":"tensor","value":tensor}));
         }
-        let source = "x = (x : tensor[1, int64])\n";
+        let source = "x = (x : tensor[1, i64])\n";
         let invalid = [
             "not json".to_string(),
             json!({"x":{"shape":[1],"data":{"dtype":"int8","values":[128]}}}).to_string(),
@@ -306,7 +306,7 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
     .unwrap();
     std::fs::write(
         root.join("src/lib.ch"),
-        "module JsonControl.Lib\nexport (keep, keep_float)\ndef keep(x: tensor[1, int64]) -> tensor[1, int64] = neg(neg(x))\ndef keep_float(x: tensor[1, f64]) -> tensor[1, f64] = neg(neg(x))\n",
+        "module JsonControl.Lib\nexport (keep, keep_float)\ndef keep(x: tensor[1, i64]) -> tensor[1, i64] = neg(neg(x))\ndef keep_float(x: tensor[1, f64]) -> tensor[1, f64] = neg(neg(x))\n",
     )
     .unwrap();
     Python::with_gil(|py| {
@@ -315,9 +315,9 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
         kwargs
             .set_item("project_root", root.to_str().unwrap())
             .unwrap();
-        for (dtype, function, data) in [
+        for (language_dtype, function, data) in [
             (
-                "int64",
+                "i64",
                 "keep",
                 json!({"dtype":"int64","values":[9007199254740993_i64]}),
             ),
@@ -330,7 +330,7 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
             let tensor = json!({"shape":[1],"data":data});
             let bindings = json!({"x":tensor.clone()});
             let source = format!(
-                "module JsonControl.Entry\nimport JsonControl.Lib ({function})\nx = (x : tensor[1, {dtype}])\ny = {function}(x)\n"
+                "module JsonControl.Entry\nimport JsonControl.Lib ({function})\nx = (x : tensor[1, {language_dtype}])\ny = {function}(x)\n"
             );
             let value = decode(
                 module

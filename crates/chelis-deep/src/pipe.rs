@@ -299,11 +299,7 @@ mod tests {
 
     #[test]
     fn dedicated_operand_stages_forward_only_the_direct_parameter() {
-        for (tag, tail) in [
-            ("cast", " (t-prim {} int64)"),
-            ("copy", ""),
-            ("realize", ""),
-        ] {
+        for (tag, tail) in [("cast", " (t-prim {} i64)"), ("copy", ""), ("realize", "")] {
             let folded = fold_source(&format!(
                 "(pipe {{}} (var {{}} xs) (fn {{surf_pipe_stage: \"call-first\"}} (params {{}} p) ({tag} {{}} (var {{}} p){tail})))"
             ));

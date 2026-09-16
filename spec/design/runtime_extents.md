@@ -119,7 +119,7 @@ of a pipe stage used to reach `check_expand_signature` as an unresolved type
 variable, whose arm returns before the size rule, and after the fold the
 operand is the real expression. Hoisting the provenance rule above the
 operand-type match would also have closed the hole, and was measured to
-replace the direct-position rendering for `insert(b, m, cast(k, int64), n)`
+replace the direct-position rendering for `insert(b, m, cast(k, i64), n)`
 with the sourceless one: a silent change to an established diagnostic that
 nothing asked for. Stating the pipe's meaning once cannot have that effect.
 With #1266/#569
@@ -164,12 +164,12 @@ not establish that claim preservation through calls.
 
 | clause | implementation obligation | authority |
 |---|---|---|
-| C1.1 | Admit every correctly typed int64 extent expression, including record projection, calls, casts and arithmetic | spec/04 §4.7.2–4.7.6 |
+| C1.1 | Admit every correctly typed i64 extent expression, including record projection, calls, casts and arithmetic | spec/04 §4.7.2–4.7.6 |
 | C1.2 | Preserve an independently stated literal or named claim; require proof of equality or its execution-time guard | spec/04 §4.7 |
 | C1.3 | Evaluate guards once, after operands and before dependent allocation/access; interface guards at entry in signature order, local guards at the introducing operation's source position | spec/04 §4.7 |
 | C1.4 | Use the exact Domain trap line and accompanying source/axis/value context; preserve trap occurrence and attribution through rewrites | [04-NUM-9..12], spec/06 §5.2–5.4 |
 | C1.5 | Zero is legal; negative static sizes reject and runtime negatives trap | spec/04 §4.7.2 |
-| C1.6 | Extents are int64 and axes int32; retain the exact owner-specific carrier | [05-DIM-1..3], spec/05 §2.4.1 |
+| C1.6 | Extents are i64 and axes i32; retain the exact owner-specific carrier | [05-DIM-1..3], spec/05 §2.4.1 |
 | C1.7 | Share rank-0 extent producers under vmap; shift shape reads past the batch axis; reject element-derived extents | spec/06 §3.7, §8.6 |
 | C1.8 | `expand` is same-rank and requires a unit operand axis; `insert` raises rank | spec/04 §4.7.2, spec/05 §2.4.1 |
 
@@ -178,8 +178,8 @@ not establish that claim preservation through calls.
 #### C2.1 Existing value carriers
 
 `RtDim::Node(i)` names an absolute input slot containing an earlier rank-0
-int64 node. `InputAxis { tensor, axis }` names the exact tensor input slot and
-its normalized int32 axis. These are real dependencies; a tensor used only
+i64 node. `InputAxis { tensor, axis }` names the exact tensor input slot and
+its normalized i32 axis. These are real dependencies; a tensor used only
 for its shape is still an input. `Lit` is an independently folded value,
 not a copy of the result declaration. The carrier matrix is unchanged:
 
@@ -477,11 +477,11 @@ representation of the same obligation, not distinct trapping operations.
 
 ##### Stride preconditions and result extents (#1907 and #1931)
 
-A stride step is read as its signed `int64` carrier and validated before any
+A stride step is read as its signed `i64` value and validated before any
 conversion to an index type, ceil-division, allocation or element access. A
 runtime step less than or equal to zero executes one stride
 operation-precondition guard and raises `Domain` with the exact
-`numeric trap: domain in stride at int64` line and its stride-step context.
+`numeric trap: domain in stride at i64` line and its stride-step context.
 Eval and C consume the same observation and neither substitutes step one,
 returns the input extent, or reaches a result-claim or generic movement-target
 check first.
@@ -741,9 +741,9 @@ observed extent.
 The transport uses `RiscOp::ExtentWitness { site, parameter, axis,
 requirements, claims }`. Its FIRST input is the actual argument, followed by
 one input per named claim, each an earlier `ExtentWitness` of the same
-activation; its result is the observed axis extent as a rank-zero `int64`.
+activation; its result is the observed axis extent as a rank-zero `i64`.
 `parameter` is diagnostic text, `axis: RtAxis` selects the observed axis,
-`requirements: Vec<ScalarValue>` retains ordered, tagged `int64` literal
+`requirements: Vec<ScalarValue>` retains ordered, tagged `i64` literal
 claims, and `claims` retains one entry per requirement input, each carrying the
 dimension binder and a `requirement_declares` flag saying which side declares
 it, because either side can be the later witness and the edges do not recover
@@ -813,7 +813,7 @@ host execution receipts do not certify device execution.
 The checked-extent integration owns #1686 and #1687. It adds two checked
 carriers to the construction and consumer inventory above:
 
-- `CheckedReshapeExtent { claims, axis }` consumes an ordinary scalar `int64`
+- `CheckedReshapeExtent { claims, axis }` consumes an ordinary scalar `i64`
   input for the independently computed target and one for each required value.
   Each requirement is a tagged literal constant or the declaring parameter's
   `ExtentWitness`, selected within the current signature activation before
@@ -856,7 +856,7 @@ Literal-condition host functions use existing DAG branch pruning while retaining
 their full declaring signature; dynamic host control flow keeps its existing route.
 
 Host-sourced extents use a shared staged function plan. A supported scalar
-`int64` expression that cannot execute in the tensor DAG keeps its checked
+`i64` expression that cannot execute in the tensor DAG keeps its checked
 source expression and captures the current activation's
 values explicitly. Its result supplies a fresh typed scalar input in the logical
 DAG. Lowering attaches result claims through that complete graph before splitting
@@ -968,8 +968,8 @@ shape/value or required failure. Random values are checked at exact f32 bits. Tw
 checked HIP host window entry with exact shape/data and require a clean error
 for its unimplemented bf16 cell. Current [05-RWIN-2] permits the operation;
 these controls distinguish the selected host implementation from device support.
-Claim mismatches require Domain/reshape/int64. Scheduling fixtures
-independently require Eval's division-by-zero/floor_div/int64 diagnostic and
+Claim mismatches require Domain/reshape/i64. Scheduling fixtures
+independently require Eval's division-by-zero/floor_div/i64 diagnostic and
 the C integer helper's existing division-by-zero failure; they do not certify
 that helper's diagnostic parity. The same command retains the earlier literal and helper-order
 receipts and the existing reshape arithmetic gradient/finite-difference controls,

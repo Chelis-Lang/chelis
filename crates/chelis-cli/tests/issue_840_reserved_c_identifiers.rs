@@ -83,7 +83,7 @@ fn link_and_run(out_dir: &std::path::Path, name: &str) -> String {
 #[test]
 fn a_def_named_double_builds_with_a_mangled_c_identifier() {
     let (source, _dir, out_dir) = c_build_source(
-        "def double(x: int32) -> int32 = mul(x, 2)\n\
+        "def double(x: i32) -> i32 = mul(x, 2)\n\
          out = print(double(21))\n",
         "kw_double",
     )
@@ -105,7 +105,7 @@ fn a_def_named_double_builds_with_a_mangled_c_identifier() {
 #[test]
 fn a_def_named_double_survives_the_named_callback_position() {
     let (source, _dir, out_dir) = c_build_source(
-        "def double(x: int32) -> int32 = mul(x, 2)\n\
+        "def double(x: i32) -> i32 = mul(x, 2)\n\
          out = print(map(double, [1, 2, 3]))\n",
         "kw_double_map",
     )
@@ -128,7 +128,7 @@ fn a_def_named_double_survives_the_named_callback_position() {
 #[test]
 fn a_param_named_long_builds_consistently() {
     let (source, _dir, out_dir) = c_build_source(
-        "def scale(long: int32, x: int32) -> int32 = mul(long, x)\n\
+        "def scale(long: i32, x: i32) -> i32 = mul(long, x)\n\
          out = print(scale(3, 14))\n",
         "kw_long_param",
     )
@@ -151,7 +151,7 @@ fn a_param_named_long_builds_consistently() {
 #[test]
 fn a_def_named_int8_t_builds_with_a_mangled_c_identifier() {
     let (source, _dir, out_dir) = c_build_source(
-        "def int8_t(x: int32) -> int32 = add(x, 1)\n\
+        "def int8_t(x: i32) -> i32 = add(x, 1)\n\
          out = print(int8_t(41))\n",
         "kw_typedef",
     )
@@ -172,7 +172,7 @@ fn eval_still_accepts_a_def_named_double() {
     let path = dir.path().join("kw_eval.ch");
     write_file(
         &path,
-        "def double(x: int32) -> int32 = mul(x, 2)\n\
+        "def double(x: i32) -> i32 = mul(x, 2)\n\
          out = print(double(21))\n",
     );
     let out = Command::cargo_bin("chelis")
@@ -198,8 +198,8 @@ fn eval_still_accepts_a_def_named_double() {
 #[test]
 fn a_reserved_callback_parameter_name_stays_consistent_at_the_call_site() {
     let (source, _dir, out_dir) = c_build_source(
-        "def apply(double: int32 -> int32, x: int32) -> int32 = double(x)\n\
-         def inc(y: int32) -> int32 = add(y, 1)\n\
+        "def apply(double: i32 -> i32, x: i32) -> i32 = double(x)\n\
+         def inc(y: i32) -> i32 = add(y, 1)\n\
          out = print(apply(inc, 41))\n",
         "kw_cb_param",
     )
@@ -223,8 +223,8 @@ fn a_reserved_callback_parameter_name_stays_consistent_at_the_call_site() {
 #[test]
 fn source_spellings_that_resembled_the_old_escape_remain_distinct() {
     let (source, _dir, out_dir) = c_build_source(
-        "def double(x: int32) -> int32 = mul(x, 2)\n\
-         def chelis_user__double(x: int32) -> int32 = add(x, 100)\n\
+        "def double(x: i32) -> i32 = mul(x, 2)\n\
+         def chelis_user__double(x: i32) -> i32 = add(x, 100)\n\
          out = print(add(double(21), chelis_user__double(0)))\n",
         "kw_collision",
     )
@@ -247,8 +247,8 @@ fn eval_still_accepts_the_colliding_spelling_program() {
     let path = dir.path().join("kw_collision_eval.ch");
     write_file(
         &path,
-        "def double(x: int32) -> int32 = mul(x, 2)\n\
-         def chelis_user__double(x: int32) -> int32 = add(x, 100)\n\
+        "def double(x: i32) -> i32 = mul(x, 2)\n\
+         def chelis_user__double(x: i32) -> i32 = add(x, 100)\n\
          out = print(add(double(21), chelis_user__double(0)))\n",
     );
     let out = Command::cargo_bin("chelis")
@@ -269,7 +269,7 @@ fn eval_still_accepts_the_colliding_spelling_program() {
 #[test]
 fn a_def_named_int_fast8_t_builds_with_a_mangled_c_identifier() {
     let (source, _dir, out_dir) = c_build_source(
-        "def int_fast8_t(x: int32) -> int32 = add(x, 1)\n\
+        "def int_fast8_t(x: i32) -> i32 = add(x, 1)\n\
          out = print(int_fast8_t(41))\n",
         "kw_fast_typedef",
     )

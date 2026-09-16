@@ -348,7 +348,7 @@ int main(void) {{
         assert!(
             String::from_utf8_lossy(&output.stderr)
                 .lines()
-                .any(|s| s == format!("numeric trap: domain in {op} at int64")),
+                .any(|s| s == format!("numeric trap: domain in {op} at i64")),
             "{output:?}"
         );
     }
@@ -964,7 +964,7 @@ int main(void) {{
                     assert!(!result.status.success());
                     let stderr = String::from_utf8_lossy(&result.stderr);
                     assert!(
-                        stderr.contains(&format!("numeric trap: domain in {diagnostic} at int64")),
+                        stderr.contains(&format!("numeric trap: domain in {diagnostic} at i64")),
                         "{stderr}"
                     );
                     assert!(
@@ -1651,7 +1651,7 @@ int main(void) {{
                 };
                 assert!(
                     String::from_utf8_lossy(&run.stderr)
-                        .ends_with(&format!("numeric trap: {class} in {name} at int64\n")),
+                        .ends_with(&format!("numeric trap: {class} in {name} at i64\n")),
                     "{run:?}"
                 );
             }
@@ -2926,7 +2926,7 @@ fn vec_int(n: usize, precision: Prim) -> TensorType {
 /// operand pairs `{7,2},{7,-2},{-7,2},{-7,-2}` exercise every sign
 /// combination so floor-vs-truncate rounding is distinguished on the
 /// mixed-sign cases. `precision` parametrizes the integer width (chelis#550
-/// F2: int8 / int16 / int64 in addition to the original int32).
+/// F2: i8 / i16 / i64 in addition to the original i32).
 fn run_int_div_op_exec(
     op: RiscOp,
     fn_name: &str,
@@ -3092,9 +3092,9 @@ fn exec_trunc_div_int32_truncates_toward_zero() {
 }
 
 // chelis#550 F2: the trunc_div / floor_div emit is width-independent (the
-// C backend promotes to int64 internally), but the repo's negative-parity
+// C backend promotes to i64 internally), but the repo's negative-parity
 // bar requires the narrower and wider integer widths be exercised
-// end-to-end, not just int32. Same operands / expected results as the int32
+// end-to-end, not just i32. Same operands / expected results as the i32
 // cases above; only the storage precision changes.
 #[test]
 fn exec_trunc_div_int8_truncates_toward_zero() {
@@ -3148,8 +3148,8 @@ fn exec_floor_div_int32_rounds_toward_neg_inf() {
 }
 
 // chelis#550 F2: floor_div across the remaining integer widths. The
-// round-toward-−∞ remainder-sign correction must hold at int8 / int16 /
-// int64 just as at int32.
+// round-toward-−∞ remainder-sign correction must hold at i8 / i16 /
+// i64 just as at i32.
 #[test]
 fn exec_floor_div_int8_rounds_toward_neg_inf() {
     run_int_div_op_exec(
@@ -4450,7 +4450,7 @@ fn exec_i8_add_overflow_traps() {
 extern void test_i8_add_wrap(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
-    // Both elements overflow int8 and must trap before store-back.
+    // Both elements overflow i8 and must trap before store-back.
     int8_t a_data[2] = {{ 100, 127 }};
     int8_t b_data[2] = {{ 50, 1 }};
     chelis_tensor *at = make_view_1d_i8(a_data, 2);
@@ -4470,7 +4470,7 @@ int main() {{
         "i8 add overflow must terminate unsuccessfully"
     );
     assert!(
-        stderr.contains("numeric trap: overflow in add at int8"),
+        stderr.contains("numeric trap: overflow in add at i8"),
         "i8 add overflow must use the canonical diagnostic; stderr={stderr:?}"
     );
 }
@@ -4495,7 +4495,7 @@ extern void test_i8_mul(chelis_tensor** inputs, int n_in, chelis_tensor** output
 int main() {{
     int8_t a_data[2] = {{ 12, 16 }};
     int8_t b_data[2] = {{ 10, 8 }};
-    // 12*10 = 120 fits; 16*8 = 128 overflows int8 and must trap.
+    // 12*10 = 120 fits; 16*8 = 128 overflows i8 and must trap.
     chelis_tensor *at = make_view_1d_i8(a_data, 2);
     chelis_tensor *bt = make_view_1d_i8(b_data, 2);
     chelis_tensor* in_ptrs[2] = {{ at, bt }};
@@ -4513,7 +4513,7 @@ int main() {{
         "i8 mul overflow must terminate unsuccessfully"
     );
     assert!(
-        stderr.contains("numeric trap: overflow in mul at int8"),
+        stderr.contains("numeric trap: overflow in mul at i8"),
         "i8 mul overflow must use the canonical diagnostic; stderr={stderr:?}"
     );
 }
@@ -4640,7 +4640,7 @@ int main() {{
 
 /// i16 reduce_sum into i32: same accumulator-promotion path as i8.
 /// 200 i16 values of 1000 each = 200000 — overflows i16 (max +32767)
-/// but fits in i32. Pin both the source-int16 path and the i32 result.
+/// but fits in i32. Pin both the source-i16 path and the i32 result.
 #[test]
 fn exec_i16_reduce_sum_promotes_to_i32() {
     let mut dag = Dag::new();
@@ -4717,11 +4717,11 @@ fn ws_a4_i8_sum_with_narrower_accumulator_is_ir_error() {
 // element dtype, not the boolean (f32) output dtype. The cmplt
 // signature is `∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,bool]`,
 // so the operands carry the compared precision `p` while the result
-// is bool (stored f32). Reading a RUNTIME-PRODUCED int32 / int64 /
+// is bool (stored f32). Reading a RUNTIME-PRODUCED i32 / i64 /
 // f64 operand through a raw `float*` reinterprets the bit pattern
 // (the #347 / #476 bug class). The discriminator is a NEGATIVE
-// integer operand: as int32, `-7 < -3` is true; reinterpreting the
-// int32 bit pattern 0xFFFFFFF9 / 0xFFFFFFFD as `float` yields NaN, so
+// integer operand: as i32, `-7 < -3` is true; reinterpreting the
+// i32 bit pattern 0xFFFFFFF9 / 0xFFFFFFFD as `float` yields NaN, so
 // the buggy `float*` read returns false. eval-vs-C parity oracle.
 // ============================================================
 
@@ -4854,7 +4854,7 @@ int main() {{
     );
 }
 
-/// #517 primary oracle: runtime int32 operands, including the negative
+/// #517 primary oracle: runtime i32 operands, including the negative
 /// values that the `float*` bit-reinterpret gets wrong.
 #[test]
 fn exec_cmplt_int32_runtime_operands_match_evaluator() {
@@ -4868,7 +4868,7 @@ fn exec_cmplt_int32_runtime_operands_match_evaluator() {
     );
 }
 
-/// #517 sweep: int64 operands. The buggy `float*` read also misaligns
+/// #517 sweep: i64 operands. The buggy `float*` read also misaligns
 /// the 8-byte stride; reading as `int64_t*` is required.
 #[test]
 fn exec_cmplt_int64_runtime_operands_match_evaluator() {
@@ -6533,11 +6533,11 @@ int main() {{
         "the guard runs at ENTRY, before any other operation: {out}"
     );
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "section 4.7 makes this an [04-NUM-9] guard naming the `load`: {out}"
     );
     // NOT `out.contains('n')`. That was satisfied by "numeric", "domain in"
-    // and "int64" in the trap line itself, so it asserted nothing about the
+    // and "i64" in the trap line itself, so it asserted nothing about the
     // context line it was meant to check: round 1 replaced the whole context
     // `fprintf` with a literal and both driven rows still passed. Section 4.7
     // requires the disagreeing SOURCE NAMES, the AXIS and each OBSERVED
@@ -6654,7 +6654,7 @@ fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> ch
 /// witness in signature order". The operand's axis IS the only witness and it
 /// is an input tensor's axis, so the class is all-interface.
 ///
-/// The `<prim>` slot is `int64` because the guarded result is an extent under
+/// The `<prim>` slot is `i64` because the guarded result is an extent under
 /// [05-DIM-1] rather than a tensor element, which is why it does not track the
 /// tensor's own `f32`.
 ///
@@ -6703,7 +6703,7 @@ int main() {{
     let (ok, out) = run("bcast_entry_trap", 2);
     assert!(!ok, "an operand extent of 2 refutes the unit claim: {out}");
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "the trap renders [04-NUM-9] at the extent's dtype, and `<op>` is \
          `load` because the operand's axis is an interface value: {out}"
     );
@@ -6805,7 +6805,7 @@ fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
         "the class guards the same axis against the same literal: {src}"
     );
     assert!(
-        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at int64\")"),
+        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at i64\")"),
         "and renders [04-NUM-9]: {src}"
     );
 }
@@ -7025,7 +7025,7 @@ int main() {{
         "`adim` sorts first by name but its guard runs second: {out}"
     );
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "an all-interface class renders [04-NUM-9]: {out}"
     );
 }
@@ -7088,7 +7088,7 @@ int main() {{
     let (ok, out) = run("lit_entry", 5);
     assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "section 4.7 renders this [04-NUM-9], not the ABI check's abort: {out}"
     );
     assert!(
@@ -7185,7 +7185,7 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
     assert!(
         result
             .c_source
-            .contains("chelis_numeric_trap(\"numeric trap: domain in insert at int64\")"),
+            .contains("chelis_numeric_trap(\"numeric trap: domain in insert at i64\")"),
         "and `<op>` names the operation introducing the extent: {}",
         result.c_source
     );
@@ -7220,7 +7220,7 @@ int main() {{
     let (ok, out) = run("local_guard", 3);
     assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
     assert!(
-        out.contains("numeric trap: domain in insert at int64"),
+        out.contains("numeric trap: domain in insert at i64"),
         "the local guard renders [04-NUM-9]: {out}"
     );
     assert!(
@@ -7369,7 +7369,7 @@ fn numeric_local_extent_claims_execute_exactly() {
                     let name =
                         format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
                     let op = if reshape { "reshape" } else { "insert" };
-                    let trap = format!("numeric trap: domain in {op} at int64");
+                    let trap = format!("numeric trap: domain in {op} at i64");
                     // Section 4.7's context names the OPERATION that
                     // introduces the extent, not the node id: a node id is not
                     // a source name and does not survive `spec/06` section
@@ -7669,7 +7669,7 @@ int main() {{
     assert!(!ok, "the local literal claim must trap: {out}");
     assert!(
         out.lines()
-            .any(|line| line == "numeric trap: domain in insert at int64")
+            .any(|line| line == "numeric trap: domain in insert at i64")
             && out.contains("claimed = 4")
             && out.contains("insert axis 0 = 5")
             && !out.contains("NO TRAP"),
@@ -7872,7 +7872,7 @@ puts("EXACT"); return 0; }}"#
                 assert!(
                     diagnostic
                         .lines()
-                        .any(|line| line == "numeric trap: domain in reshape at int64"),
+                        .any(|line| line == "numeric trap: domain in reshape at i64"),
                     "{lane}: {diagnostic}"
                 );
                 assert!(
@@ -8058,7 +8058,7 @@ int main(void) {{
                 "a declared {declared} over min({rows}, 4) must abort: {stdout}{stderr}"
             );
             assert!(
-                stderr.contains("numeric trap: domain in diagonal at int64"),
+                stderr.contains("numeric trap: domain in diagonal at i64"),
                 "the frozen [04-NUM-9] line: {stderr}"
             );
             assert!(
@@ -8106,17 +8106,17 @@ int main(void) {{
 fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
     use chelis_unord::UnordMap;
 
-    // `let m = cast(shape(x, 0), int64) in concat([reshape(x, [1, m]),
+    // `let m = cast(shape(x, 0), i64) in concat([reshape(x, [1, m]),
     //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
     let row = "(app {} (var {} reshape) (var {} x) \
-       (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} int64)) \
+       (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} i64)) \
          (app {} (var {} Cons) (var {} m) (var {} Nil))))";
     let src = format!(
         "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) (t-prim {{}} int64))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) (t-prim {{}} i64))) \
          (app {{}} (var {{}} concat) \
            (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
-           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))))"
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))))"
     );
     let mut exprs = chelis_deep::parser::parse_str(&src).expect("deep parse");
     assert_eq!(exprs.len(), 1);
@@ -8243,7 +8243,7 @@ int main(void) {
         compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
     assert!(!ok, "a disagreeing later carrier must abort: {text}");
     assert!(
-        text.contains("numeric trap: domain in reshape at int64"),
+        text.contains("numeric trap: domain in reshape at i64"),
         "the abort must be the typed reshape domain trap: {text}"
     );
 }
@@ -8441,7 +8441,7 @@ fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
         "exactly one declaration per scope, not a redeclaration: {emitted}"
     );
     assert!(
-        !emitted.contains("numeric trap: domain in load at int64"),
+        !emitted.contains("numeric trap: domain in load at i64"),
         "two independent signatures are not one class, so no entry guard pairs \
          their axes: {emitted}"
     );

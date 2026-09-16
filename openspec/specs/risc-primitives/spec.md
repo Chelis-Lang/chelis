@@ -125,7 +125,7 @@ SHALL be valid on float types only, and each SHALL carry its defined AD adjoint.
 
 ### Requirement: Reduction axis and accumulator
 
-A reduction SHALL take one or more unique compile-time positional int32 axes
+A reduction SHALL take one or more unique compile-time positional i32 axes
 or one or more unique named axes, never a mixture. Negative positional axes
 SHALL normalize once against original rank. Value reductions execute the
 highest-original-position-first single-axis composition; `count` executes one
@@ -140,12 +140,12 @@ an explicitly narrower-than-default accumulator SHALL be a type error.
 
 #### Scenario: Runtime axis is rejected
 
-- **WHEN** a reduction axis is a runtime `int32` parameter
+- **WHEN** a reduction axis is a runtime `i32` parameter
 - **THEN** it is rejected at the reduction call site naming the compile-time-constant requirement
 
 ### Requirement: Windowed reductions
 
-`reduce_window_max/min/sum/mean` SHALL accept runtime `List[int64]`
+`reduce_window_max/min/sum/mean` SHALL accept runtime `List[i64]`
 `window_shape` and `strides`, validate lengths/positive values before access,
 and implement the exact target-independent output-shape, arithmetic,
 tie/NaN, accumulation, adjoint, and second-derivative graph of
@@ -186,7 +186,7 @@ zero cotangent.
 
 `const` and `load` SHALL be the pure tensor constructors and contribute zero
 cotangent. `shape(x, axis)` SHALL read the runtime extent along any literal or
-computed int32 axis as a rank-0 int64 scalar contributing a zero
+computed i32 axis as a rank-0 i64 scalar contributing a zero
 cotangent. Literal and computed axes SHALL remain ordinary checked runtime
 values when `shape` participates in a graph constructed by `grad`.
 
@@ -217,7 +217,7 @@ whole-module or language-wide rejection.
 #### Scenario: process_run compiles as a host effect
 
 - **WHEN** a program applying `process_run` is compiled with `--target c`
-- **THEN** the host execution performs the exact argv call and returns `(int64,string,string)!{IO}`
+- **THEN** the host execution performs the exact argv call and returns `(i64,string,string)!{IO}`
 
 ### Requirement: Seed determinism
 
@@ -258,7 +258,7 @@ exact stored width without conversion.
 
 #### Scenario: Narrow signed indices remain exact
 
-- **WHEN** gather or scatter consumes an int8 or int16 index tensor
+- **WHEN** gather or scatter consumes an i8 or i16 index tensor
 - **THEN** it interprets each stored index exactly rather than rejecting or widening the tensor
 
 ### Requirement: Host-executed builtins

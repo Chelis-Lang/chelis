@@ -98,7 +98,7 @@ fn incompatible_callback_argument_still_rejected() {
     // Negative parity: the fix must not over-loosen unification. The
     // callback body `mul(t, q)` forces `q` (which is `P`) to be the
     // same tensor type as `t` (`tensor[n, f32]`), but the `inner_p`
-    // argument supplied at the call site is a scalar `int32` literal,
+    // argument supplied at the call site is a scalar `i32` literal,
     // bound to the same `P`. `P` cannot be both, so a unification
     // mismatch must still be reported.
     let dir = tempdir().expect("tempdir");

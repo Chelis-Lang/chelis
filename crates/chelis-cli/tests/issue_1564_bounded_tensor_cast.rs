@@ -23,9 +23,9 @@ fn bounded_tensor_casts_match_generated_c_at_each_target_dtype() {
     for (family, dtypes) in [
         ("Float", ["f32", "f64"]),
         ("Float", ["f16", "bf16"]),
-        ("Int", ["int16", "int64"]),
-        ("Int", ["int8", "int32"]),
-        ("Numeric", ["f32", "int64"]),
+        ("Int", ["i16", "i64"]),
+        ("Int", ["i8", "i32"]),
+        ("Numeric", ["f32", "i64"]),
     ] {
         for dtype in dtypes {
             let (input, expected) = match dtype {
@@ -34,7 +34,7 @@ fn bounded_tensor_casts_match_generated_c_at_each_target_dtype() {
                 _ => (123, 123.0),
             };
             let source = format!(
-                "module Bounded.Main\nexport (main)\ndef convert[p: {family}](x: tensor[2, int32], witness: p) -> tensor[2, p] = cast(x, p)\ndef recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, {dtype}] = recast(convert(to_tensor([{input}, -12]), cast(0, {dtype})))\n"
+                "module Bounded.Main\nexport (main)\ndef convert[p: {family}](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\ndef recast[p: {family}](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, {dtype}] = recast(convert(to_tensor([{input}, -12]), cast(0, {dtype})))\n"
             );
             let interpreted = eval(&source);
             assert!(
@@ -55,7 +55,7 @@ fn bounded_tensor_casts_match_generated_c_at_each_target_dtype() {
 
 #[test]
 fn bounded_truncating_tensor_cast_matches_generated_c() {
-    let source = "module Bounded.Main\nexport (main)\ndef convert[p: Float, q: Int](x: tensor[2, p], witness: q) -> tensor[2, q] = cast_trunc(x, q)\ndef main() -> tensor[2, int64] = convert(to_tensor([1.5f32, -2.5f32]), 0i64)\n";
+    let source = "module Bounded.Main\nexport (main)\ndef convert[p: Float, q: Int](x: tensor[2, p], witness: q) -> tensor[2, q] = cast_trunc(x, q)\ndef main() -> tensor[2, i64] = convert(to_tensor([1.5f32, -2.5f32]), 0i64)\n";
     let interpreted = eval(source);
     assert!(
         interpreted.status.success(),
@@ -73,7 +73,7 @@ fn bounded_truncating_tensor_cast_matches_generated_c() {
 
 #[test]
 fn one_program_keeps_distinct_instantiations_of_the_same_cast() {
-    let source = "module Bounded.Main\nexport (main)\ndef convert[p: Float](x: tensor[2, int32], witness: p) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, f64] = add(cast(convert(to_tensor([16777217, -12]), 0.0f32), f64), convert(to_tensor([16777217, -12]), 0.0f64))\n";
+    let source = "module Bounded.Main\nexport (main)\ndef convert[p: Float](x: tensor[2, i32], witness: p) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, f64] = add(cast(convert(to_tensor([16777217, -12]), 0.0f32), f64), convert(to_tensor([16777217, -12]), 0.0f64))\n";
     let interpreted = eval(source);
     assert!(
         interpreted.status.success(),
@@ -93,15 +93,15 @@ fn one_program_keeps_distinct_instantiations_of_the_same_cast() {
 fn invalid_bounded_tensor_calls_reject_before_either_execution_lane() {
     for (body, expected_diagnostic) in [
         (
-            "def f[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, int64] = f(to_tensor([1, 2]))\n",
+            "def f[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, i64] = f(to_tensor([1, 2]))\n",
             "Float",
         ),
         (
-            "def f[p](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, int32] = f(to_tensor([1, 2]))\n",
+            "def f[p](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, i32] = f(to_tensor([1, 2]))\n",
             "04-DTYPE-1",
         ),
         (
-            "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, int32] = f(to_tensor([1, 2]))\n",
+            "def f[p: Float](x: tensor[2, p]) -> tensor[2, p] = cast(x, p)\ndef main() -> tensor[2, i32] = f(to_tensor([1, 2]))\n",
             "Float",
         ),
     ] {
@@ -138,15 +138,15 @@ fn result_constraints_actualize_bounded_tensor_targets() {
         ("Float", "f64", 16777217, 16777217.0),
         ("Float", "f16", 123, 123.0),
         ("Float", "bf16", 123, 123.0),
-        ("Int", "int8", 123, 123.0),
-        ("Int", "int16", 123, 123.0),
-        ("Int", "int32", 123, 123.0),
-        ("Int", "int64", 123, 123.0),
+        ("Int", "i8", 123, 123.0),
+        ("Int", "i16", 123, 123.0),
+        ("Int", "i32", 123, 123.0),
+        ("Int", "i64", 123, 123.0),
         ("Numeric", "f64", 16777217, 16777217.0),
     ] {
         for declaration in ["result:", "def result() ->"] {
             let source = format!(
-                "module Result.Main\nexport (result)\ndef convert[p: {family}](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\n{declaration} tensor[2, {dtype}] = convert(to_tensor([{input}, -12]))\n"
+                "module Result.Main\nexport (result)\ndef convert[p: {family}](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\n{declaration} tensor[2, {dtype}] = convert(to_tensor([{input}, -12]))\n"
             );
             let interpreted = eval(&source);
             assert!(
@@ -167,7 +167,7 @@ fn result_constraints_actualize_bounded_tensor_targets() {
 
 #[test]
 fn result_only_cast_instances_do_not_share_precision() {
-    let source = "module Result.Main\nexport (a, b)\ndef convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\na: tensor[2, f32] = convert(to_tensor([16777217, -12]))\nb: tensor[2, f64] = convert(to_tensor([16777217, -12]))\n";
+    let source = "module Result.Main\nexport (a, b)\ndef convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\na: tensor[2, f32] = convert(to_tensor([16777217, -12]))\nb: tensor[2, f64] = convert(to_tensor([16777217, -12]))\n";
     let interpreted = eval(source);
     assert!(
         interpreted.status.success(),
@@ -189,7 +189,7 @@ fn result_only_cast_instances_do_not_share_precision() {
 
 #[test]
 fn result_constraint_shadows_an_outer_same_named_binder() {
-    let source = "module Nested.Main\nexport (result)\ndef convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\ndef outer[p: Float](witness: p) -> tensor[2, f64] = convert(to_tensor([16777217, -12]))\ndef result() -> tensor[2, f64] = outer(0.0f32)\n";
+    let source = "module Nested.Main\nexport (result)\ndef convert[p: Float](x: tensor[2, i32]) -> tensor[2, p] = cast(x, p)\ndef outer[p: Float](witness: p) -> tensor[2, f64] = convert(to_tensor([16777217, -12]))\ndef result() -> tensor[2, f64] = outer(0.0f32)\n";
     let interpreted = eval(source);
     assert!(
         interpreted.status.success(),

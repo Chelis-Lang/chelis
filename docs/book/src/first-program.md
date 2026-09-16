@@ -40,7 +40,7 @@ Deep is the stable machine form that shell tooling can inspect.
     (app {}
       (var {} softmax)
       (app {} (var {} relu) (var {} x))
-      (lit {type: (t-prim {} int32)} 0))))
+      (lit {type: (t-prim {} i32)} 0))))
 ```
 
 ## Useful Commands

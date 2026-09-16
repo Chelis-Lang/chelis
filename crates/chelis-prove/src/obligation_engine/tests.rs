@@ -247,7 +247,7 @@ fn u1_chokepoint_signature_is_stable() {
 
 // ===================================================================
 // Review 5: int-width consistency on the SAMPLING axis. Every integer
-// width (int8/int16/int32/int64) samples as a width-clamped INTEGER at
+// width (i8/i16/i32/i64) samples as a width-clamped INTEGER at
 // Tier C (not a float), via the single-source `int_sample_bounds`, so an
 // int-field/param obligation runs and passes at the fuzz tier.
 // ===================================================================
@@ -256,11 +256,11 @@ fn u1_chokepoint_signature_is_stable() {
 /// (fuzz-only, no SMT) with integer-valued samples and PASSES, looped over
 /// every integer width. The producer guards `x >= 0` so the constructed
 /// value satisfies `c.n >= 0` for every accepted sample; a float-sampled
-/// int param (the pre-fix bug for int8/int16) would mis-type the producer
+/// int param (the pre-fix bug for i8/i16) would mis-type the producer
 /// call and error rather than pass cleanly.
 #[test]
 fn w5_int_width_field_param_samples_as_integer_at_tier_c() {
-    for width in ["int8", "int16", "int32", "int64"] {
+    for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (make)
@@ -315,31 +315,25 @@ def make(x: f32) -> Option[Probability] =
     );
 }
 
-/// The fuzz-sampling bounds are single-source and width-clamped: an int8
-/// samples in [-128, 127], an int16 in [-1000, 1000] (the convenience
+/// The fuzz-sampling bounds are single-source and width-clamped: an i8
+/// samples in [-128, 127], an i16 in [-1000, 1000] (the convenience
 /// window, since [-32768, 32767] exceeds it), etc. -- proving the sampling
 /// axis routes through `int_sample_bounds` / `Prim::integer_fuzz_bounds`,
 /// not an independent [-1000, 1000] for every width.
 #[test]
 fn w5_int_sample_bounds_are_width_clamped_single_source() {
     assert_eq!(
-        crate::opaque::int_sample_bounds("int8"),
+        crate::opaque::int_sample_bounds("i8"),
         Some((-128, 127)),
-        "int8 sampling is clamped to its representable range"
+        "i8 sampling is clamped to its representable range"
     );
     assert_eq!(
-        crate::opaque::int_sample_bounds("int16"),
+        crate::opaque::int_sample_bounds("i16"),
         Some((-1000, 1000)),
-        "int16 keeps the convenience window (within its range)"
+        "i16 keeps the convenience window (within its range)"
     );
-    assert_eq!(
-        crate::opaque::int_sample_bounds("int32"),
-        Some((-1000, 1000))
-    );
-    assert_eq!(
-        crate::opaque::int_sample_bounds("int64"),
-        Some((-1000, 1000))
-    );
+    assert_eq!(crate::opaque::int_sample_bounds("i32"), Some((-1000, 1000)));
+    assert_eq!(crate::opaque::int_sample_bounds("i64"), Some((-1000, 1000)));
     assert_eq!(
         crate::opaque::int_sample_bounds("f32"),
         None,
@@ -350,18 +344,18 @@ fn w5_int_sample_bounds_are_width_clamped_single_source() {
 #[test]
 fn tier_c_tensor_argument_preserves_int64_payload_and_dtype() {
     let exact = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
-        .expect("value is representable as int64");
-    let arg = obligation_tensor_arg("xs", &[1], "int64", &[exact]);
+        .expect("value is representable as i64");
+    let arg = obligation_tensor_arg("xs", &[1], "i64", &[exact]);
 
     assert_eq!(arg.json[0].as_i64(), Some(9_007_199_254_740_993));
     let deep = chelis_deep::printer::print_canonical(&[arg.expr]);
-    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(deep.contains("(t-prim {} i64)"), "{deep}");
     assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
 }
 
 #[test]
 fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
-    for width in ["int8", "int16", "int32", "int64"] {
+    for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (make)

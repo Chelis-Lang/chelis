@@ -204,28 +204,28 @@ fn check_score_and_output(program: &str, ext: &str) -> (f64, String) {
 // ===========================================================================
 
 /// **Rejection lock (replaced the Phase 0 evidence lock at Phase 1):**
-/// `chelis build --target hip` on an int64 `neg` is REJECTED with the
+/// `chelis build --target hip` on an i64 `neg` is REJECTED with the
 /// branded section C2 diagnostic - `elem_kind`'s former `_ =>
 /// ElemKind::F32` wildcard is deleted (census row 5, chelis#689;
 /// runtime-confirmed corrupt on gfx1151). The shared typed gate admits
-/// int64 because the HIP target has typed integer kernels; the EMITTER
+/// i64 because the HIP target has typed integer kernels; the EMITTER
 /// remains responsible for refusing this unsupported op/dtype cell - the
 /// enforcement-ladder rung the plan demands. Emission-only; no hipcc needed.
 #[test]
 fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
     let (ok, stderr, emitted) = build_target(
-        "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
+        "def f(x: tensor[4, i64]) -> tensor[4, i64] = neg(x)\n",
         ".ch",
         "hip_i64_neg",
         "hip",
     );
     assert!(
         !ok,
-        "census row 5 (chelis#689): the HIP emitter must reject an int64 \
+        "census row 5 (chelis#689): the HIP emitter must reject an i64 \
          elementwise kernel, never emit the F32 fallback"
     );
     assert!(
-        stderr.contains("unsupported:") && stderr.contains("int64"),
+        stderr.contains("unsupported:") && stderr.contains("i64"),
         "the rejection must be the branded section C2 diagnostic naming the \
          dtype; got: {stderr}"
     );
@@ -326,7 +326,7 @@ fn dp_bogus_cast_target_must_not_build_silently() {
 // Census row 14 (named_axis.rs pack_dag_roots precision default) - DEAD canary.
 // ===========================================================================
 
-/// **Canary:** `vmap` over an int64 tensor keeps integer precision through
+/// **Canary:** `vmap` over an i64 tensor keeps integer precision through
 /// `pack_dag_roots` (the transforms.rs caller of the row 14 site). The
 /// F32 default at named_axis.rs:430 fires only when a root id is missing
 /// from the DAG - an internal desync with no user-facing driver - so this
@@ -336,16 +336,16 @@ fn dp_bogus_cast_target_must_not_build_silently() {
 fn canary_vmap_int64_roots_keep_integer_precision() {
     let got = eval_first_line(
         "module M.Main\n\
-         def f(xs: tensor[3, 1, int64]) -> tensor[3, int64] = \
-         vmap(fn (r: tensor[1, int64]) -> \
-         add(tensor_to_scalar(sum(r, 0)), cast(1, int64)))(xs)\n\
-         out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]]), int64))))\n",
+         def f(xs: tensor[3, 1, i64]) -> tensor[3, i64] = \
+         vmap(fn (r: tensor[1, i64]) -> \
+         add(tensor_to_scalar(sum(r, 0)), cast(1, i64)))(xs)\n\
+         out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]]), i64))))\n",
         ".ch",
     )
-    .expect("census row 14: vmap over int64 must evaluate");
+    .expect("census row 14: vmap over i64 must evaluate");
     assert_eq!(
         got, "[2, 3, 4]",
-        "census row 14: int64 roots must pack with integer precision (no \
+        "census row 14: i64 roots must pack with integer precision (no \
          F32/float rendering); a float-shaped result here means the \
          precision default fired on a reachable path - update the census \
          per B2.5, do not fix here"

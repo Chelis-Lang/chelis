@@ -99,29 +99,29 @@ def reject_sentinel_programs() -> list[dict]:
     for prog in arity_progs:
         sentinels.append({"program": prog, "rule_tag": TAG_REJECT_ARITY})
     # Class 3: precision mismatch the compiler rejects (no implicit promotion).
-    # add(f32, int32) mismatches; add(f32, bool) mismatches; etc.
+    # add(f32, i32) mismatches; add(f32, bool) mismatches; etc.
     precision_progs = [
-        "(def {} g (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} int32)} 2)))",
-        "(def {} g (app {} (var {} mul) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} int32)} 2)))",
-        "(def {} g (app {} (var {} sub) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))",
+        "(def {} g (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} i32)} 2)))",
+        "(def {} g (app {} (var {} mul) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} i32)} 2)))",
+        "(def {} g (app {} (var {} sub) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} f32)} 2.0)))",
         "(def {} g (app {} (var {} div) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} bool)} true)))",
         "(def {} g (app {} (var {} add) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} bool)} false)))",
-        "(def {} g (app {} (var {} mul) (lit {type: (t-prim {} int32)} 3) (lit {type: (t-prim {} bool)} true)))",
-        "(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} int32)} 4)))",
-        "(def {} g (app {} (var {} exp) (lit {type: (t-prim {} int32)} 1)))",
+        "(def {} g (app {} (var {} mul) (lit {type: (t-prim {} i32)} 3) (lit {type: (t-prim {} bool)} true)))",
+        "(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} i32)} 4)))",
+        "(def {} g (app {} (var {} exp) (lit {type: (t-prim {} i32)} 1)))",
         "(def {} g (app {} (var {} log) (lit {type: (t-prim {} bool)} true)))",
-        "(def {} g (app {} (var {} sin) (lit {type: (t-prim {} int32)} 1)))",
+        "(def {} g (app {} (var {} sin) (lit {type: (t-prim {} i32)} 1)))",
         "(def {} g (app {} (var {} add) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} string)} hello)))",
         "(def {} g (app {} (var {} neg) (lit {type: (t-prim {} string)} hello)))",
         "(def {} g (app {} (var {} sub) (lit {type: (t-prim {} string)} a) (lit {type: (t-prim {} string)} b)))",
-        "(def {} g (app {} (var {} div) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} string)} z)))",
+        "(def {} g (app {} (var {} div) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} string)} z)))",
         "(def {} g (app {} (var {} mul) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} string)} q)))",
         "(def {} g (app {} (var {} add) (lit {type: (t-prim {} bool)} true) (lit {type: (t-prim {} f32)} 1.0)))",
         "(def {} g (app {} (var {} exp) (lit {type: (t-prim {} string)} s)))",
         "(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} bool)} false)))",
-        "(def {} g (app {} (var {} log) (lit {type: (t-prim {} int32)} 7)))",
+        "(def {} g (app {} (var {} log) (lit {type: (t-prim {} i32)} 7)))",
         "(def {} g (app {} (var {} sin) (lit {type: (t-prim {} bool)} true)))",
-        "(def {} g (app {} (var {} sub) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} int32)} 9)))",
+        "(def {} g (app {} (var {} sub) (lit {type: (t-prim {} f32)} 1.0) (lit {type: (t-prim {} i32)} 9)))",
     ]
     for prog in precision_progs:
         sentinels.append({"program": prog, "rule_tag": TAG_REJECT_PRECISION})

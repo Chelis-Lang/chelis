@@ -330,7 +330,7 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 /// `parse_tensor_line -> Vec<f64>` and compare under 1e-6 tolerance) is
 /// deliberately gone (chelis#729 Phase 0, chelis#687): it engaged exactly
 /// when a real divergence was present and re-read integer payloads as
-/// floats, so an int64 corruption above 2^53 could never fail this
+/// floats, so an i64 corruption above 2^53 could never fail this
 /// harness. A mismatch now REPORTS. chelis#732 Phase 2 is the release
 /// valve for formatting differences by making both lanes canonical;
 /// Phase 3's explicit per-op table is the only release valve for a genuine
@@ -370,7 +370,7 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
 // (`migrated_render_equivalent`) lived here while the compiled lane kept
 // its pre-contract printf forms; Phase 2's generated printer restored
 // byte equality on every line and the function is deleted as Phase 1
-// promised. Its red-team-hardened blind-spot behaviors (exact-int64
+// promised. Its red-team-hardened blind-spot behaviors (exact-i64
 // refusal above 2^53, second-tensor and shape divergences, the rank-0
 // wrapper class) are now simply line diffs, which byte equality reports
 // by construction.

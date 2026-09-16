@@ -274,7 +274,7 @@ fn build_link_run(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
 /// The frozen `[04-NUM-9]` line plus the section 4.7 context content.
 fn assert_bound_trap(output: &str, claimed: usize, axis: usize, observed: usize, lane: &str) {
     assert!(
-        output.contains("numeric trap: domain in diagonal at int64"),
+        output.contains("numeric trap: domain in diagonal at i64"),
         "{lane} must render the frozen [04-NUM-9] line, got {output}"
     );
     assert!(
@@ -785,7 +785,7 @@ fn assert_selected_branch(form: &str, c_lane: bool) {
                 assert!(
                     output
                         .lines()
-                        .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+                        .any(|line| line == format!("numeric trap: domain in {op} at i64")),
                     "{output}"
                 );
                 assert!(
@@ -1042,7 +1042,7 @@ fn emitted_shape_guard_blocks(c_source: &str) -> Vec<EmittedShapeGuard<'_>> {
         let trap = body[1].trim();
         if !diagnostic.starts_with("fprintf(stderr, ")
             || !trap.starts_with("chelis_numeric_trap(\"numeric trap: domain in ")
-            || !trap.ends_with(" at int64\");")
+            || !trap.ends_with(" at i64\");")
             || body[2].trim() != "}"
             || line.len() - line.trim_start().len() != body[2].len() - body[2].trim_start().len()
         {
@@ -1173,7 +1173,7 @@ fn entry_inventories_match(expected: &[EntryGuardReceipt], actual: &[EntryGuardR
 fn emitted_entry_inventory(c_source: &str) -> EntryInventory {
     let mut found = EntryInventory::new();
     for guard in emitted_shape_guard_blocks(c_source) {
-        if guard.trap != "chelis_numeric_trap(\"numeric trap: domain in load at int64\");" {
+        if guard.trap != "chelis_numeric_trap(\"numeric trap: domain in load at i64\");" {
             continue;
         }
         if let Some(rest) = guard.diagnostic.strip_prefix("fprintf(stderr, \"input ")
@@ -1436,7 +1436,7 @@ chelis_tensor *d__chelis_owned_body(chelis_tensor *x, chelis_tensor *y) {
     }
     if (unrelated) {
         fprintf(stderr, "extent `3`: claimed = 3, diagonal axis 0 = %lld\n", 2LL);
-        chelis_numeric_trap("numeric trap: domain in diagonal at int64");
+        chelis_numeric_trap("numeric trap: domain in diagonal at i64");
     }
 }
 "#;
@@ -1508,12 +1508,12 @@ fn the_census_signature_oracle_rejects_missing_duplicate_reordered_and_wrong_axi
     );
     let literal = r#"    if (chelis_tensor_shape(x, 0) != 2) {
         fprintf(stderr, "input `x` axis 0 expected 2, got %lld\n", (long long)chelis_tensor_shape(x, 0));
-        chelis_numeric_trap("numeric trap: domain in load at int64");
+        chelis_numeric_trap("numeric trap: domain in load at i64");
     }
 "#;
     let named = r#"    if (chelis_tensor_shape(y, 0) != chelis_tensor_shape(x, 1)) {
         fprintf(stderr, "extent `n`: x axis 1 = %lld, y axis 0 = %lld\n", (long long)chelis_tensor_shape(x, 1), (long long)chelis_tensor_shape(y, 0));
-        chelis_numeric_trap("numeric trap: domain in load at int64");
+        chelis_numeric_trap("numeric trap: domain in load at i64");
     }
 "#;
     let read = |body: String| {

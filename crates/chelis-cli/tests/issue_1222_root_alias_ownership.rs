@@ -837,8 +837,8 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     if skip_without_cc() {
         return;
     }
-    let source = "def idl(p: List[int64]) -> List[int64] = p\n\
-                  def h3() -> int64 = {\n  base = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+    let source = "def idl(p: List[i64]) -> List[i64] = p\n\
+                  def h3() -> i64 = {\n  base = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
                   n = h3()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_balance");
     let body = emitted_function(&emitted, "int64_t h3()");
@@ -854,7 +854,7 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     assert_eq!(
         creations + retains,
         releases,
-        "`h3` returns an int64, so it transfers no reference out: every \
+        "`h3` returns an i64, so it transfers no reference out: every \
          allocation it makes and every reference it retains must be \
          released before it returns (chelis#1222). Got {creations} \
          creation(s) + {retains} retain(s) vs {releases} \
@@ -872,8 +872,8 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     // outer-aliasing. The retain has already fired for the argument, so
     // the outer-alias verdict must not cancel the release.
     let source = "g = [9i64]\n\
-                  def f1(p: List[int64], c: bool) -> List[int64] = if c then p else g\n\
-                  def h1() -> int64 = {\n  base = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
+                  def h1() -> i64 = {\n  base = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
                   n = h1()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_outer");
     let body = emitted_function(&emitted, "int64_t h1()");
@@ -962,8 +962,8 @@ fn renaming_a_lambda_parameter_that_shadows_a_binding_changes_nothing() {
     // emitted a `chelis_list_retain` inside the loop for one spelling and not
     // the other -- a leak that grew with the iteration count.
     assert_alpha_invariant(
-        "def idl(x: List[int64]) -> List[int64] = x\n\
-         def h() -> int64 = {\n\
+        "def idl(x: List[i64]) -> List[i64] = x\n\
+         def h() -> i64 = {\n\
          \x20 p = [[1i64], [2i64]]\n\
          \x20 q = map(fn (p) -> idl(p), p)\n\
          \x20 add(len(p), len(q))\n\
@@ -1128,10 +1128,10 @@ fn a_parameter_spelled_like_a_binder_key_takes_no_retain() {
     // key the block's own binding had just been given. The escaping result
     // then looked like a transfer of that binding and took a retain nobody
     // releases.
-    let colliding = "def f(__bind_0: List[int64]) -> List[int64] = {\n\
+    let colliding = "def f(__bind_0: List[i64]) -> List[i64] = {\n\
                      \x20 q = [1i64]\n  __bind_0\n}\n\
                      z = [7i64]\nb = f(z)\n";
-    let distinct = "def f(zzq_param: List[int64]) -> List[int64] = {\n\
+    let distinct = "def f(zzq_param: List[i64]) -> List[i64] = {\n\
                     \x20 q = [1i64]\n  zzq_param\n}\n\
                     z = [7i64]\nb = f(z)\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_param");
@@ -1164,10 +1164,10 @@ fn a_let_binder_shadowing_a_parameter_does_not_mask_an_outer_result() {
     // returns, and `main` released `g` twice. Parameters are the outermost
     // scope, so `env` decides.
     let colliding = "g = [1i64]\n\
-                     def f(p: List[int64]) -> List[int64] = {\n  p = g\n  p\n}\n\
+                     def f(p: List[i64]) -> List[i64] = {\n  p = g\n  p\n}\n\
                      b = f([2i64])\nc = g\n";
     let distinct = "g = [1i64]\n\
-                    def f(p: List[int64]) -> List[int64] = {\n\
+                    def f(p: List[i64]) -> List[i64] = {\n\
                     \x20 zzq_inner = g\n  zzq_inner\n}\n\
                     b = f([2i64])\nc = g\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "param_shadow_outer");
@@ -1258,7 +1258,7 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     // the block frees at its close, the result slot needs the issue #406
     // escape retain the bare-`Var` and call transfers already take. Without
     // it the block released one allocation twice.
-    let source = "def h() -> int64 = {\n  base = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
+    let source = "def h() -> i64 = {\n  base = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
                   n = h()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "builtin_transfer_balance");
     let body = emitted_function(&emitted, "int64_t h()");
@@ -1273,7 +1273,7 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     assert_eq!(
         creations + retains,
         releases,
-        "`h` returns an int64, so it transfers no reference out: every \
+        "`h` returns an i64, so it transfers no reference out: every \
          allocation it makes and every reference it retains must be released \
          before it returns. Got {creations} creation(s) + {retains} \
          retain(s) vs {releases} release(s):\n{body}"

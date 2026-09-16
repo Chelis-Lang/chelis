@@ -256,7 +256,7 @@ def diagnostic_cases():
             "compiled-backend lowering of `reduce_window_*` (lowering); unimplemented "
             "chelis#1058: window and stride lists must be integer literals for the compiled "
             "lane today; a runtime-parameterized window previously lowered to a silent no-op; "
-            "chelis#1058 owns compiled runtime-list support at source span `surf:86..89`",
+            "chelis#1058 owns compiled runtime-list support at source span `surf:82..85`",
             "severity": value,
             "expected": "literal window",
             "got": "runtime window",

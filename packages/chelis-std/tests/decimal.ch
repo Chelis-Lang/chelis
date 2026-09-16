@@ -6,9 +6,9 @@ def test_add_tenths_is_exact() -> unit ! { Test } = {
   assert_true(decimal_eq(sum, decimal("0.3")), "0.1 + 0.2 == 0.3")
 }
 def test_add_from_int() -> unit ! { Test } = {
-  lhs = decimal_from_int(cast(42, int64))
-  rhs = decimal_from_int(cast(8, int64))
-  expected = decimal_from_int(cast(50, int64))
+  lhs = decimal_from_int(cast(42, i64))
+  rhs = decimal_from_int(cast(8, i64))
+  expected = decimal_from_int(cast(50, i64))
   assert_true(decimal_eq(decimal_add(lhs, rhs), expected), "42 + 8 == 50")
 }
 def test_sub_inverts_add() -> unit ! { Test } = {
@@ -42,12 +42,12 @@ def test_try_decimal_rejects_garbage() -> unit ! { Test } =
     | None => assert_true(true, "try_decimal(\"not_a_number\") returns None")
   }
 def test_div_one_by_three_round_half_even() -> unit ! { Test } = {
-  q = decimal_div(decimal("1"), decimal("3"), cast(0, int64), round_half_even())
-  assert_true(decimal_eq(q, decimal_from_int(cast(0, int64))), "1 / 3 @ scale 0, half-even == 0")
+  q = decimal_div(decimal("1"), decimal("3"), cast(0, i64), round_half_even())
+  assert_true(decimal_eq(q, decimal_from_int(cast(0, i64))), "1 / 3 @ scale 0, half-even == 0")
 }
 def test_div_five_by_two_half_even_ties_to_even() -> unit ! { Test } = {
-  q = decimal_div(decimal_from_int(cast(5, int64)), decimal_from_int(cast(2, int64)), cast(0, int64), round_half_even())
-  assert_true(decimal_eq(q, decimal_from_int(cast(2, int64))), "5 / 2 half-even == 2 (banker's)")
+  q = decimal_div(decimal_from_int(cast(5, i64)), decimal_from_int(cast(2, i64)), cast(0, i64), round_half_even())
+  assert_true(decimal_eq(q, decimal_from_int(cast(2, i64))), "5 / 2 half-even == 2 (banker's)")
 }
 def test_mul_scale_accumulation_value() -> unit ! { Test } = assert_true(decimal_eq(decimal_mul(decimal("0.1"), decimal("0.1")), decimal("0.01")), "0.1 * 0.1 == 0.01 (value)")
 def test_mul_scale_accumulation_string() -> unit ! { Test } = assert_eq(decimal_to_string(decimal_mul(decimal("0.1"), decimal("0.1"))), "0.01", "decimal_to_string normalises 0.1*0.1 to \"0.01\"")

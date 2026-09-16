@@ -40,7 +40,7 @@ supported dtypes.
 - `crates/chelis-backend-c/src/emit.rs` — now emits bounded sparse C
   loops for first-class `Gather` and `ScatterAdd`.
 - `crates/chelis-backend-hip/src/emit.rs` and `src/kernels.rs` — now emit
-  f32 sparse gather/scatter-add kernels with int32/int64 indices. ScatterAdd
+  f32 sparse gather/scatter-add kernels with i32/i64 indices. ScatterAdd
   uses `atomicAdd`, so f64 scatter-add remains explicitly rejected.
 
 Net: the sparse IR/C/HIP path is in place and tested for tensor-lane Surf
@@ -114,7 +114,7 @@ for sparse gather plus duplicate-index scatter-add.
 `RiscOp::Scatter { axis }` shipped alongside the existing
 `RiscOp::ScatterAdd { axis }`. The two are intentionally distinct
 primitives, sharing the structural input contract (target, indices,
-updates with conforming shapes; int32/int64 indices; matching
+updates with conforming shapes; i32/i64 indices; matching
 target/updates/output precision) but differing in duplicate-index
 semantics and AD policy:
 

@@ -92,7 +92,7 @@ Explain why this works (columns are tensors, filter is gather, gather is differe
 #### Effect-Tracked Monte Carlo (Shoals)
 
 ```chelis
-def mc_price(spot: f32, vol: f32, paths: int64) -> f32 ! { Random } = {
+def mc_price(spot: f32, vol: f32, paths: i64) -> f32 ! { Random } = {
   -- pricing logic using normal_sample
 }
 -- Reproducible: same seed -> same price, guaranteed by the type system

@@ -452,7 +452,7 @@ fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
                                         && error.message.contains("reshape axis 0 = 3")
                                         && error
                                             .message
-                                            .contains("numeric trap: domain in reshape at int64")
+                                            .contains("numeric trap: domain in reshape at i64")
                                 }) =>
                             {
                                 eprintln!("PASS negative {target} dropout={dropout} {lane}");
@@ -760,7 +760,7 @@ fn checked_extent_dropout_source_and_gradient_keep_computed_claims() {
                                 && error.message.contains("reshape axis 0 = 17")
                                 && error
                                     .message
-                                    .contains("numeric trap: domain in reshape at int64")),
+                                    .contains("numeric trap: domain in reshape at i64")),
                         "gradient={gradient}: {error:?}"
                     );
                 }
@@ -813,7 +813,7 @@ fn checked_unit_axis_dropout_source_and_gradient_preserve_domain_checks() {
                                 && error.message.contains("axis 0 = 2")
                                 && error
                                     .message
-                                    .contains("numeric trap: domain in load at int64")),
+                                    .contains("numeric trap: domain in load at i64")),
                         "gradient={gradient}: {error:?}"
                     );
                 }
@@ -865,7 +865,7 @@ fn checked_extent_dropout_context_cache_keeps_claims_and_fresh_replay() {
                                     && error.message.contains("reshape axis 0 = 17")
                                     && error
                                         .message
-                                        .contains("numeric trap: domain in reshape at int64")),
+                                        .contains("numeric trap: domain in reshape at i64")),
                             "gradient={gradient}: {error:?}"
                         );
                     }
@@ -919,11 +919,7 @@ fn checked_extent_dropout_helper_keeps_result_claim_and_source_trap_order() {
                     assert_eq!(tensor(&result.unwrap(), "sample"), mask(0));
                 } else {
                     let error = result.unwrap_err();
-                    let dtype = if operation == "dropout" {
-                        "f32"
-                    } else {
-                        "int64"
-                    };
+                    let dtype = if operation == "dropout" { "f32" } else { "i64" };
                     assert!(
                         error.errors.iter().any(|error| error
                             .message
@@ -1331,7 +1327,7 @@ fn every_active_float_dtype_and_invalid_domain_use_the_source_plan() {
 fn mismatch_nonfloat_and_alias_admission_follow_the_shared_signature() {
     use chelis_compiler_api::compiler::check;
     use chelis_compiler_api::schema::CheckRequest;
-    for (input, rate) in [("f64", "0.5f32"), ("f16", "0.5bf16"), ("int32", "0i32")] {
+    for (input, rate) in [("f64", "0.5f32"), ("f16", "0.5bf16"), ("i32", "0i32")] {
         let source = format!(
             "def sample(x: tensor[4, {input}]) = with seed(42i64) {{ dropout(x, {rate}) }}\n"
         );

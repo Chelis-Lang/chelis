@@ -1,6 +1,6 @@
 //! Issue #230 host-runtime parity for `argmax_reduce` / `argmin_reduce`.
 //!
-//! `check_reduction_signature` now produces `tensor[..., int64]` for
+//! `check_reduction_signature` now produces `tensor[..., i64]` for
 //! these ops (issue #230 fix). The host-runtime evaluator must
 //! continue to dispatch them and produce the expected integer indices
 //! along the reduced axis, in the same per-op shape collapsing the

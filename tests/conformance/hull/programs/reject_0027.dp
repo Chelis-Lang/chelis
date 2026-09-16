@@ -1,1 +1,6 @@
-(def {} g (app {} (var {} sub) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))
+(def {}
+  g
+  (app {}
+    (var {} sub)
+    (lit {type: (t-prim {} i32)} 1)
+    (lit {type: (t-prim {} f32)} 2.0)))

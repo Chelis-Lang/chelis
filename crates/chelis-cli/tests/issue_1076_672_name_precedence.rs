@@ -15,16 +15,16 @@ use common::{build_and_run, write_file};
 
 const BLOCK_LOCAL_BUILTIN: &str = "\
 def apply3(x: f64) -> f64 = {
-  round_to = fn (v: f64, p: int64) -> mul(v, 1000.0f64)
-  round_to(x, cast(0, int64))
+  round_to = fn (v: f64, p: i64) -> mul(v, 1000.0f64)
+  round_to(x, cast(0, i64))
 }
 out = apply3(1.55f64)
 ";
 
 const PARAM_BUILTIN: &str = "\
-def apply(round_to: (f64 -> int64 -> f64), x: f64) -> f64 =
-  round_to(x, cast(0, int64))
-def scale(v: f64, p: int64) -> f64 = mul(v, 1000.0f64)
+def apply(round_to: (f64 -> i64 -> f64), x: f64) -> f64 =
+  round_to(x, cast(0, i64))
+def scale(v: f64, p: i64) -> f64 = mul(v, 1000.0f64)
 out = apply(scale, 1.55f64)
 ";
 
@@ -38,8 +38,8 @@ out = apply_pipe(-2.0f64)
 
 const NAMED_AXIS_SHAPED_LOCAL: &str = "\
 def apply_sum(x: f64) -> f64 = {
-  axis = cast(2, int32)
-  sum = fn (value: f64, offset: int32) -> add(value, cast(offset, f64))
+  axis = cast(2, i32)
+  sum = fn (value: f64, offset: i32) -> add(value, cast(offset, f64))
   sum(x, axis)
 }
 out = apply_sum(3.0f64)

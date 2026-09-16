@@ -35,11 +35,11 @@
 //!   form reaching the checker SHALL be rejected with a diagnostic.
 //! * `spec/03-deep-syntax.md` §6.4: the canonical `lit` forms.
 //!
-//! # The int64-stamped axis row is RECORDED, not asserted
+//! # The i64-stamped axis row is RECORDED, not asserted
 //!
 //! `spec/05-risc-primitives.md` [05-DIM-1]/[05-DIM-3] make the axis/extent
 //! dtype split normative, not stylistic ("Two things make the distinction
-//! normative rather than stylistic"), and [05-DIM-3] requires `int32` for
+//! normative rather than stylistic"), and [05-DIM-3] requires `i32` for
 //! positional axis-domain arguments to movement, shape, reduction, ordering,
 //! gathering, scattering, splitting and concatenation OPERATIONS. That rule
 //! is already owned elsewhere in this crate -- the semantic/builtin operand
@@ -49,11 +49,11 @@
 //! `vmap` is a `spec/06-transformations.md` transformation, not a spec/05
 //! operation, and spec/06 §3.1/§3.4/§3.6 state only "integer axis" with no
 //! dtype. `tuple-get`'s index is not an axis at all. So no current normative
-//! rule assigns `int32` to either child, and [04-LIT-1] alone admits an
-//! `int64`-stamped Int atom exactly as it admits an `int32`-stamped one.
+//! rule assigns `i32` to either child, and [04-LIT-1] alone admits an
+//! `i64`-stamped Int atom exactly as it admits an `i32`-stamped one.
 //! Whether [05-DIM-3]'s open "including ..." list reaches a spec/06 transform
 //! axis is a spec question this bounded fix does not get to settle, so the
-//! `int64` rows below assert only INGRESS PARITY and print the verdict they
+//! `i64` rows below assert only INGRESS PARITY and print the verdict they
 //! observe. They deliberately do not pin accept-or-reject.
 
 use chelis_deep::{Expr, parse_and_stamp_file};
@@ -150,9 +150,9 @@ fn record_verdict(label: &str, source: &str) {
 /// Bare Int atom: hand-written Deep with no `lit` wrapper at all.
 const BARE: &str = "1";
 /// The spec/04 §5.3 default integer stamp. Legal.
-const INT32: &str = "(lit {type: (t-prim {} int32)} 1)";
+const INT32: &str = "(lit {type: (t-prim {} i32)} 1)";
 /// Integer family, wider carrier. Legal under [04-LIT-1]; see header.
-const INT64: &str = "(lit {type: (t-prim {} int64)} 1)";
+const INT64: &str = "(lit {type: (t-prim {} i64)} 1)";
 /// The issue's malformed input: an Int atom under a `bool` stamp.
 const BOOL: &str = "(lit {type: (t-prim {} bool)} 1)";
 /// [04-LIT-1]'s sole cross-family exception: an exact Int payload marked
@@ -164,8 +164,8 @@ const F32_INT_SPELLED: &str = "(lit {type: (t-prim {} f32), literal_source: inte
 // Zero-valued spellings, for the selector position where the index must be
 // in bounds for a two-element tuple.
 const BARE_0: &str = "0";
-const INT32_0: &str = "(lit {type: (t-prim {} int32)} 0)";
-const INT64_0: &str = "(lit {type: (t-prim {} int64)} 0)";
+const INT32_0: &str = "(lit {type: (t-prim {} i32)} 0)";
+const INT64_0: &str = "(lit {type: (t-prim {} i64)} 0)";
 const BOOL_0: &str = "(lit {type: (t-prim {} bool)} 0)";
 
 // ---------------------------------------------------------------------------
@@ -179,8 +179,8 @@ fn general_program(lit: &str) -> String {
 #[test]
 fn general_position_legal_stamps_stay_accepted() {
     for (label, lit) in [
-        ("general/int32", INT32),
-        ("general/int64", INT64),
+        ("general/i32", INT32),
+        ("general/i64", INT64),
         ("general/f32-integer-spelled", F32_INT_SPELLED),
     ] {
         assert_accepted(label, &general_program(lit));
@@ -202,7 +202,7 @@ fn nested_program(lit: &str) -> String {
 
 #[test]
 fn nested_position_int32_stays_accepted() {
-    assert_accepted("nested/int32", &nested_program(INT32));
+    assert_accepted("nested/i32", &nested_program(INT32));
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn an_explicit_axis_adds_one_real_inference_visit() {
 #[test]
 fn vmap_axis_legal_stamps_stay_accepted() {
     assert_accepted("axis/bare", &vmap_program(BARE));
-    assert_accepted("axis/int32", &vmap_program(INT32));
+    assert_accepted("axis/i32", &vmap_program(INT32));
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn vmap_axis_bool_stamped_int_is_rejected() {
 
 #[test]
 fn vmap_axis_int64_row_is_recorded_not_pinned() {
-    record_verdict("axis/int64", &vmap_program(INT64));
+    record_verdict("axis/i64", &vmap_program(INT64));
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn vmap_axis_integer_spelled_float_row_is_recorded_not_pinned() {
 // ---------------------------------------------------------------------------
 
 const TUPLE_VALUE: &str =
-    "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 7) (lit {type: (t-prim {} f32)} 2.0)))";
+    "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 7) (lit {type: (t-prim {} f32)} 2.0)))";
 
 fn tuple_get_program(index: &str) -> String {
     format!("{TUPLE_VALUE}\n(def {{}} x (tuple-get {{}} (var {{}} t) {index}))")
@@ -288,7 +288,7 @@ fn tuple_get_program(index: &str) -> String {
 #[test]
 fn tuple_get_index_legal_stamps_stay_accepted() {
     assert_accepted("selector/bare", &tuple_get_program(BARE_0));
-    assert_accepted("selector/int32", &tuple_get_program(INT32_0));
+    assert_accepted("selector/i32", &tuple_get_program(INT32_0));
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn tuple_get_index_bool_stamped_int_is_rejected() {
 
 #[test]
 fn tuple_get_index_int64_row_is_recorded_not_pinned() {
-    record_verdict("selector/int64", &tuple_get_program(INT64_0));
+    record_verdict("selector/i64", &tuple_get_program(INT64_0));
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +307,7 @@ fn tuple_get_index_int64_row_is_recorded_not_pinned() {
 // `F32_INT_SPELLED` is a LEGAL literal under [04-LIT-1]'s marked exception,
 // but it is a float-typed value, and it reads through the integer extractor
 // into `vmap`'s axis slot. Rejecting it needs an axis-operand DTYPE rule for
-// `vmap`, which is the same missing rule the `int64` rows above record; it is
+// `vmap`, which is the same missing rule the `i64` rows above record; it is
 // not a stamp/atom contradiction and so is outside #1603's "Expected". It is
 // recorded, not fixed.
 // ---------------------------------------------------------------------------

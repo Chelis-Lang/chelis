@@ -628,7 +628,7 @@ fn parsed_surf_expression_spans_enter_deep_metadata() {
         "Expected callee var node to carry its Surf byte range, got:\n{text}"
     );
     assert!(
-        text.contains("(lit {span: \"surf:18..19\", type: (t-prim {} int32)} 1)"),
+        text.contains("(lit {span: \"surf:18..19\", type: (t-prim {} i32)} 1)"),
         "Expected literal node to preserve both span and type metadata, got:\n{text}"
     );
 }
@@ -804,7 +804,7 @@ fn repo_ch_corpus_discovery_excludes_generated_and_symlinked_trees() {
 
     let root = tempfile::tempdir().expect("repository fixture");
     let external = tempfile::tempdir().expect("external fixture");
-    std::fs::write(root.path().join("real.ch"), "def real() -> int32 = 1\n")
+    std::fs::write(root.path().join("real.ch"), "def real() -> i32 = 1\n")
         .expect("write repository source");
     for generated in [".devenv", ".venv", "target", "node_modules", ".git"] {
         let directory = root.path().join(generated);

@@ -130,7 +130,7 @@ fn bound_parameterized_mismatch_names_the_disagreeing_sources() {
         "{messages}"
     );
     assert!(
-        messages.ends_with("numeric trap: domain in load at int64"),
+        messages.ends_with("numeric trap: domain in load at i64"),
         "{messages}"
     );
 }
@@ -280,7 +280,7 @@ fn host_applied_mismatch_names_the_disagreeing_sources() {
         "{messages}"
     );
     assert!(
-        messages.ends_with("numeric trap: domain in load at int64"),
+        messages.ends_with("numeric trap: domain in load at i64"),
         "{messages}"
     );
 }
@@ -363,7 +363,7 @@ fn wildcard_arguments_do_not_hide_real_shared_host_binders() {
     // prints for the same program.
     assert_eq!(
         error.errors[0].message,
-        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at int64"
+        "extent `extent`: x axis 0 = 2, y axis 0 = 1\nnumeric trap: domain in load at i64"
     );
 }
 

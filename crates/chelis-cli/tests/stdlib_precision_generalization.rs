@@ -95,9 +95,7 @@ fn expect_any_error(json: &Value, label: &str) {
 
 // Active arithmetic dtypes per spec sec 1.1, intersected with sec 5.4
 // arithmetic row.
-const ARITHMETIC_DTYPES: &[&str] = &[
-    "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
-];
+const ARITHMETIC_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64"];
 const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 
 // ---------------------------------------------------------------
@@ -108,7 +106,7 @@ const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 // keep-by-default regression lock
 // `precision_polymorphism_adversarial.rs::baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping`
 // and by `precision_polymorphism.rs::ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch`.
-// Both survivors write the identical fixture and assert the f32+int32
+// Both survivors write the identical fixture and assert the f32+i32
 // mismatch error, so the copy that previously lived here was removed in
 // the e2e parsimony pass.
 // ---------------------------------------------------------------
@@ -120,7 +118,7 @@ const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 //    declaration contract forbids a signature-only runtime symbol.
 // ---------------------------------------------------------------
 
-/// Reduction-shaped sig `&tensor[a, b, p] -> int32 -> tensor[b, p]`:
+/// Reduction-shaped sig `&tensor[a, b, p] -> i32 -> tensor[b, p]`:
 /// the precision tvar `p` admits every active arithmetic dtype. This
 /// pins the precision-generalization of that sig SHAPE in isolation — it
 /// is self-contained (the sig is replicated inline, not imported). The
@@ -134,10 +132,10 @@ fn stub_sig_min_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("min.ch");
         let src = format!(
-            r#"sig min: &tensor[a, b, p] -> int32 -> tensor[b, p]
+            r#"sig min: &tensor[a, b, p] -> i32 -> tensor[b, p]
 def min(xs, axis) = fail("stub")
 def call_min(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
-  min(xs, cast(0, int32))
+  min(xs, cast(0, i32))
 "#
         );
         write_file(&path, &src);
@@ -154,10 +152,10 @@ fn stub_sig_prod_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("prod.ch");
         let src = format!(
-            r#"sig prod: &tensor[a, b, p] -> int32 -> tensor[b, p]
+            r#"sig prod: &tensor[a, b, p] -> i32 -> tensor[b, p]
 def prod(xs, axis) = fail("stub")
 def call_prod(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
-  prod(xs, cast(0, int32))
+  prod(xs, cast(0, i32))
 "#
         );
         write_file(&path, &src);
@@ -166,8 +164,8 @@ def call_prod(xs: &tensor[2, 3, {dtype}]) -> tensor[3, {dtype}] =
     }
 }
 
-/// Index-reduction sig shape `&tensor[a, b, p] -> int32 -> tensor[b,
-/// int64]`: input precision is generalized; output is always int64
+/// Index-reduction sig shape `&tensor[a, b, p] -> i32 -> tensor[b,
+/// i64]`: input precision is generalized; output is always i64
 /// indices (changed in WS-C from spec-misaligned f32). The two ops share
 /// an identical sig shape, so they are exercised by one table-driven test
 /// over `[argmax, argmin]` (consolidated in the e2e parsimony pass). The
@@ -180,10 +178,10 @@ fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dt
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("argreduce.ch");
             let src = format!(
-                "sig {op}: &tensor[a, b, p] -> int32 -> tensor[b, int64]\n\
+                "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
                  def {op}(xs, axis) = fail(\"stub\")\n\
-                 def call_{op}(xs: &tensor[2, 3, {dtype}]) -> tensor[3, int64] =\n  \
-                 {op}(xs, cast(0, int32))\n"
+                 def call_{op}(xs: &tensor[2, 3, {dtype}]) -> tensor[3, i64] =\n  \
+                 {op}(xs, cast(0, i32))\n"
             );
             write_file(&path, &src);
             let json = run_check(&path);
@@ -262,15 +260,15 @@ def call_xavier(t: tensor[32, 128, {dtype}], gain: {dtype}) -> tensor[32, 128, {
 /// preserved as the per-op table entries).
 #[test]
 fn neg_reduce_rejects_mismatched_input_output_precision() {
-    let cases: &[(&str, &str)] = &[("min", "int32"), ("prod", "f64")];
+    let cases: &[(&str, &str)] = &[("min", "i32"), ("prod", "f64")];
     for (op, input_dtype) in cases {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("neg_reduce.ch");
         let src = format!(
-            "sig {op}: &tensor[a, b, p] -> int32 -> tensor[b, p]\n\
+            "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
              def {op}(xs, axis) = fail(\"stub\")\n\
              def bad(xs: &tensor[2, 3, {input_dtype}]) -> tensor[3, f32] =\n  \
-             {op}(xs, cast(0, int32))\n"
+             {op}(xs, cast(0, i32))\n"
         );
         write_file(&path, &src);
         let json = run_check(&path);
@@ -296,21 +294,21 @@ def bad(x: &tensor[1, 4, 1, 16, f32], w: &tensor[8, 4, 1, 3, bf16]) -> tensor[1,
 }
 
 /// Calling `argmax` and asserting an f32 result must fail because the
-/// generalized sig pins the index dtype to int64.
+/// generalized sig pins the index dtype to i64.
 #[test]
 fn neg_argmax_return_must_be_int64_not_input_precision() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("neg_argmax.ch");
     write_file(
         &path,
-        r#"sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+        r#"sig argmax: &tensor[a, b, p] -> i32 -> tensor[b, i64]
 def argmax(xs, axis) = fail("stub")
 def bad(xs: &tensor[2, 3, f32]) -> tensor[3, f32] =
-  argmax(xs, cast(0, int32))
+  argmax(xs, cast(0, i32))
 "#,
     );
     let json = run_check(&path);
-    expect_any_error(&json, "argmax must return int64");
+    expect_any_error(&json, "argmax must return i64");
 }
 
 /// Calling xavier sample with a non-matching gain dtype must fail
@@ -368,7 +366,7 @@ fn float_matmul_accepted_at_all_float_dtypes() {
 
 /// A single polymorphic stub used at two distinct concrete dtypes
 /// across two call sites in the same module type-checks cleanly. The
-/// `min` (precision-passthrough sig) and `argmax` (int64-indices sig)
+/// `min` (precision-passthrough sig) and `argmax` (i64-indices sig)
 /// cases share the identical "one polymorphic stub, two concrete call
 /// sites" structure, so they are exercised by one table-driven test
 /// over each stub fixture (consolidated in the e2e parsimony pass).
@@ -376,18 +374,18 @@ fn float_matmul_accepted_at_all_float_dtypes() {
 fn polymorphic_stub_used_at_two_distinct_dtypes_in_same_module() {
     let fixtures: &[(&str, &str)] = &[
         (
-            "min used at f32 and int64 in same module",
-            "sig min: &tensor[a, b, p] -> int32 -> tensor[b, p]\n\
+            "min used at f32 and i64 in same module",
+            "sig min: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
              def min(xs, axis) = fail(\"stub\")\n\
-             def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, f32] = min(xs, cast(0, int32))\n\
-             def call_int64(xs: &tensor[2, 3, int64]) -> tensor[3, int64] = min(xs, cast(0, int32))\n",
+             def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, f32] = min(xs, cast(0, i32))\n\
+             def call_int64(xs: &tensor[2, 3, i64]) -> tensor[3, i64] = min(xs, cast(0, i32))\n",
         ),
         (
-            "argmax at f32 and int8 in same module",
-            "sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]\n\
+            "argmax at f32 and i8 in same module",
+            "sig argmax: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
              def argmax(xs, axis) = fail(\"stub\")\n\
-             def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, int64] = argmax(xs, cast(0, int32))\n\
-             def call_int8(xs: &tensor[2, 3, int8]) -> tensor[3, int64] = argmax(xs, cast(0, int32))\n",
+             def call_f32(xs: &tensor[2, 3, f32]) -> tensor[3, i64] = argmax(xs, cast(0, i32))\n\
+             def call_int8(xs: &tensor[2, 3, i8]) -> tensor[3, i64] = argmax(xs, cast(0, i32))\n",
         ),
     ];
     for (label, src) in fixtures {

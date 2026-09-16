@@ -292,7 +292,7 @@ fn blas_interior_named_claim_blocks_replacement_and_traps_after_dce() {
         chelis_ir::specialize::specialize_for_blas,
         |dag| eval_blas_pattern(dag, Some(5)),
         "extent `n`: claimed = 5, mul axis 0 = 2\n\
-         numeric trap: domain in mul at int64",
+         numeric trap: domain in mul at i64",
     );
     assert!(
         !specialized
@@ -311,7 +311,7 @@ fn blas_interior_literal_claim_blocks_replacement_and_traps_after_dce() {
         chelis_ir::specialize::specialize_for_blas,
         |dag| eval_blas_pattern(dag, None),
         "extent `5`: claimed = 5, mul axis 0 = 2\n\
-         numeric trap: domain in mul at int64",
+         numeric trap: domain in mul at i64",
     );
     assert!(
         !specialized
@@ -345,7 +345,7 @@ fn dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce() {
         chelis_ir::specialize::specialize_for_exact_arithmetic,
         |dag| eval_dense_gather_pattern(dag, Some(5)),
         "extent `n`: claimed = 5, mul axis 0 = 4\n\
-         numeric trap: domain in mul at int64",
+         numeric trap: domain in mul at i64",
     );
     assert!(
         !specialized
@@ -364,7 +364,7 @@ fn dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce() 
         chelis_ir::specialize::specialize_for_exact_arithmetic,
         |dag| eval_dense_gather_pattern(dag, None),
         "extent `5`: claimed = 5, mul axis 0 = 4\n\
-         numeric trap: domain in mul at int64",
+         numeric trap: domain in mul at i64",
     );
     assert!(
         !specialized
@@ -577,7 +577,7 @@ fn named_result_claim_traps_after_specialization_and_dce() {
     assert_eq!(
         eval_identity_claim(&dag, 2, 3).unwrap_err(),
         "extent `n`: claimed = 2, cast axis 0 = 3\n\
-         numeric trap: domain in cast at int64"
+         numeric trap: domain in cast at i64"
     );
 
     let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
@@ -591,7 +591,7 @@ fn named_result_claim_traps_after_specialization_and_dce() {
     assert_eq!(
         eval_identity_claim(&specialized, 2, 3).unwrap_err(),
         "extent `n`: claimed = 2, cast axis 0 = 3\n\
-         numeric trap: domain in cast at int64",
+         numeric trap: domain in cast at i64",
         "specialization plus DCE must preserve the trap and cast attribution"
     );
 }
@@ -630,7 +630,7 @@ fn named_result_claim_traps_after_fusion_and_dce() {
     assert_eq!(
         eval_named_claim(&dag, 2).unwrap_err(),
         "extent `n`: claimed = 2, add axis 0 = 3\n\
-         numeric trap: domain in add at int64"
+         numeric trap: domain in add at i64"
     );
 
     let fused = dead_code_eliminate(&chelis_ir::fuse::fuse(&dag));
@@ -648,7 +648,7 @@ fn named_result_claim_traps_after_fusion_and_dce() {
     assert_eq!(
         eval_named_claim(&fused, 2).unwrap_err(),
         "extent `n`: claimed = 2, add axis 0 = 3\n\
-         numeric trap: domain in add at int64",
+         numeric trap: domain in add at i64",
         "fuse plus DCE must preserve both the trap and add attribution"
     );
     assert_eq!(
@@ -693,7 +693,7 @@ fn an_interior_named_result_claim_splits_the_fusion_chain() {
     assert_eq!(
         eval_named_claim(&fused, 2).unwrap_err(),
         "extent `n`: claimed = 2, add axis 0 = 3\n\
-         numeric trap: domain in add at int64"
+         numeric trap: domain in add at i64"
     );
 }
 
@@ -753,7 +753,7 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
     assert_eq!(
         error,
         "extent `2`: claimed = 2, add axis 0 = 3\n\
-        numeric trap: domain in add at int64"
+        numeric trap: domain in add at i64"
     );
 }
 

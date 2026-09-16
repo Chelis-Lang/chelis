@@ -25,7 +25,7 @@ use tempfile::{TempDir, tempdir};
 
 /// A pipe chain with both stage shapes: a bare-name stage and a call stage
 /// the desugarer wraps in a synthesized unary lambda.
-const PIPED: &str = "def f(x: tensor[3, f32]) -> tensor[f32] = x |> sum(cast(0, int32))\n\
+const PIPED: &str = "def f(x: tensor[3, f32]) -> tensor[f32] = x |> sum(cast(0, i32))\n\
                      out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
 fn fixture(dir: &TempDir, name: &str, source: &str) -> std::path::PathBuf {
@@ -106,7 +106,7 @@ fn resugaring_the_deep_still_prints_the_pipe() {
     let deep_path = fixture(&dir, "piped_resugar.dp", &deep_of(&path, false));
     let printed = run(&["surf", deep_path.to_str().unwrap()]);
     assert!(
-        printed.contains("x |> sum(cast(0, int32))"),
+        printed.contains("x |> sum(cast(0, i32))"),
         "the pipe comes back: {printed}"
     );
 }
@@ -133,11 +133,11 @@ fn lambda_pipe_stages_preserve_lexical_bindings() {
         ("fn (x) -> fn (y) -> x", "result(9i64)", 3),
         ("fn (x) -> {\n y = 9i64\n x\n }", "result", 3),
         ("fn (x) -> {\n x = 9i64\n x\n }", "result", 9),
-        ("fn (x: int64) -> add(x, x)", "result", 6),
+        ("fn (x: i64) -> add(x, x)", "result", 6),
     ] {
         for input in [format!("y |> {stage}"), format!("({stage})(y)")] {
             let source = format!(
-                "def f(y: int64) -> int64 = {{\n result = {input}\n {call}\n}}\nout = f(3i64)\n"
+                "def f(y: i64) -> i64 = {{\n result = {input}\n {call}\n}}\nout = f(3i64)\n"
             );
             let out = checked_eval(&source);
             assert!(out.status.success(), "{source}\n{out:?}");
@@ -169,7 +169,7 @@ fn lambda_pipe_stages_evaluate_the_input_before_the_body() {
         ] {
             for z in [0, 1] {
                 let source = format!(
-                    "def f(z: int64) -> int64 = {{\n result = {input}\n {tail}\n}}\nout = f({z}i64)\n"
+                    "def f(z: i64) -> i64 = {{\n result = {input}\n {tail}\n}}\nout = f({z}i64)\n"
                 );
                 let out = checked_eval(&source);
                 if z == 1 && succeeds {

@@ -57,13 +57,13 @@ const RELU_GRAD: [f64; 2] = [1.0, 0.0];
 
 /// Row A — the issue's verbatim shape: separate `sig` carrying the
 /// symbolic dim, bare `def`, concrete `tensor[2, f32]` call site.
-/// Keeps the issue reproducer's `cast(0, int32)` axis form.
+/// Keeps the issue reproducer's `cast(0, i32)` axis form.
 fn row_a_sig_form() -> String {
     format!(
         "module Repro.Issue345RowA\n\
          sig relu_fwd: tensor[a, f32] -> tensor[a, f32]\n\
          def relu_fwd(x) = relu(x)\n\
-         def f(x: tensor[2, f32]) -> f32 = sum(relu_fwd(x), cast(0, int32)) |> tensor_to_scalar\n\
+         def f(x: tensor[2, f32]) -> f32 = sum(relu_fwd(x), cast(0, i32)) |> tensor_to_scalar\n\
          out = grad(f)({RELU_INPUT})\n"
     )
 }

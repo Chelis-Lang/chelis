@@ -516,7 +516,7 @@ fn artifact_entry_borrow_is_copied_before_an_owned_formal() {
 #[test]
 fn artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy() {
     let verified = verified_source(
-        "def peek(x: &tensor[2, f32]) -> int64 = 1i64\n\
+        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
          input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
          out = peek(&input)\n",
     );
@@ -599,7 +599,7 @@ fn option_some_moves_fresh_payloads_and_clones_named_payloads_before_the_move() 
     let named = unit_text(
         &verified_source(
             r#"
-def length_after_wrap() -> int64 = {
+def length_after_wrap() -> i64 = {
   text = "abc"
   wrapped: Option[string] = Some(text)
   string_len(text)
@@ -640,18 +640,17 @@ fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
 
 #[test]
 fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
-    let verified =
-        verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[int64]) -> v, xs)\n");
+    let verified = verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[i64]) -> v, xs)\n");
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("empty_list"), "{roots}");
     assert!(roots.contains("list_push"), "{roots}");
     assert!(roots.contains("loop borrow"), "{roots}");
 
     for source in [
-        "xs = [1i64, 2i64]\nys = filter(fn (v: int64) -> gte(v, 2i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = scan(fn (acc: int64, v: int64) -> add(acc, v), 0i64, xs)\n",
-        "xs = [1i64, 2i64]\nys = partition(fn (v: int64) -> gt(v, 1i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = flat_map(fn (v: int64) -> [v, v], xs)\n",
+        "xs = [1i64, 2i64]\nys = filter(fn (v: i64) -> gte(v, 2i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
+        "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
         "sampled = with seed(7i64) { 1i64 }\n",
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
@@ -669,18 +668,18 @@ fn assert_front_rejects(source: &str) {
 
 #[test]
 fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
-    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects(
-        "xs = [1i64]\nys = scan(fn (acc: int64, v: int64) -> missing(acc, v), 0i64, xs)\n",
+        "xs = [1i64]\nys = scan(fn (acc: i64, v: i64) -> missing(acc, v), 0i64, xs)\n",
     );
-    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: int64) -> missing(v), xs)\n");
-    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects("sampled = with seed(7i64) { missing }\n");
 }
 
 #[test]
 fn malformed_real_host_programs_fail_at_typed_boundaries() {
-    let front = front("def id(p: int64) -> int64 = p\nout = id(1i64)\n");
+    let front = front("def id(p: i64) -> i64 = p\nout = id(1i64)\n");
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
         function: "id".to_string(),
@@ -710,8 +709,8 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
 #[test]
 fn checked_scalar_call_slots_restore_the_exact_literal_type() {
     let verified = verified_source(
-        "def keep_i32(x: int32) -> int32 = x\n\
-         def keep_i64(x: int64) -> int64 = x\n\
+        "def keep_i32(x: i32) -> i32 = x\n\
+         def keep_i64(x: i64) -> i64 = x\n\
          def keep_f32(x: f32) -> f32 = x\n\
          def keep_f64(x: f64) -> f64 = x\n\
          a = keep_i32(7)\n\
@@ -730,8 +729,8 @@ fn checked_scalar_call_slots_restore_the_exact_literal_type() {
 fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery() {
     let source = "sig guarded: tensor[n, f32] -> tensor[n, f32]\n\
                   def guarded(x) = {\n\
-                    n = cast(shape(x, cast(0, int32)), int64)\n\
-                    if gt(cast(1, int64), n) then fail(\"empty\") else x\n\
+                    n = cast(shape(x, cast(0, i32)), i64)\n\
+                    if gt(cast(1, i64), n) then fail(\"empty\") else x\n\
                   }\n\
                   def call(x: tensor[4, f32]) -> tensor[4, f32] = guarded(x)\n\
                   out = call(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
@@ -768,8 +767,8 @@ fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery
 fn checked_nominal_dimension_provenance_rejects_a_different_name() {
     let mut front = front(
         "def nominal(x: tensor[batch, f32]) -> tensor[batch, f32] = {\n\
-           size = cast(shape(x, cast(0, int32)), int64)\n\
-           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+           size = cast(shape(x, cast(0, i32)), i64)\n\
+           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
          }\n\
          def caller(x: tensor[batch, f32]) -> tensor[batch, f32] = nominal(x)\n\
          out = 0\n",
@@ -803,8 +802,8 @@ fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
     let mut front = front(
         "sig paired: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
          def paired(x, y) = {\n\
-           size = cast(shape(y, cast(0, int32)), int64)\n\
-           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+           size = cast(shape(y, cast(0, i32)), i64)\n\
+           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
          }\n\
          def caller(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = paired(x, y)\n\
          out = 0\n",
@@ -835,7 +834,7 @@ fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
 
 #[test]
 fn forged_call_argument_types_cannot_retag_an_actual_expression() {
-    let front = front("def keep(x: int32) -> int32 = x\nout = keep(1)\n");
+    let front = front("def keep(x: i32) -> i32 = x\nout = keep(1)\n");
 
     let mut forged_slot = front.host.clone();
     let HostExprKind::Call { arg_tys, .. } = &mut forged_slot
@@ -1054,7 +1053,7 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     assert!(terminal.contains("drop n4 move n2"), "{terminal}");
 
     let host = verified_source(
-        "def peek(x: &tensor[2, f32]) -> int64 = 1i64\n\
+        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
          input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
          out = peek(&input)\n",
     );

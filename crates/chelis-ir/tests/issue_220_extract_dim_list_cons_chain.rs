@@ -1,7 +1,7 @@
 //! Issue Chelis-Lang/chelis#220: `extract_dim_list` in
 //! `crates/chelis-ir/src/lower.rs` walked `list.elements` directly and
 //! matched any `Atom::Name` as a dim name. Surface syntax like
-//! `[cast(2, int64), cast(3, int64)]` desugars to a Cons-chain
+//! `[cast(2, i64), cast(3, i64)]` desugars to a Cons-chain
 //! `(app (var Cons) (cast ...) (app (var Cons) (cast ...) (var Nil)))`.
 //! Element 0 of that outer `(app ...)` is the literal tag symbol
 //! `"app"`, so the broken walker emitted
@@ -23,7 +23,7 @@
 //! defect.
 //!
 //! Fixture acceptance:
-//!   1. A Deep `reshape(x, Cons(cast(2, int64), Cons(cast(3, int64), Nil)))`
+//!   1. A Deep `reshape(x, Cons(cast(2, i64), Cons(cast(3, i64), Nil)))`
 //!      lowered through `lower_subexpr_program` does NOT synthesize a
 //!      `DimInfo::Named("app", _)` (or any other Deep-tag-as-symbol)
 //!      anywhere in the resulting DAG.
@@ -40,14 +40,14 @@ use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_types::types::Prim;
 
-/// Hand-built Deep: `reshape(x, Cons(cast(2, int64), Cons(cast(3, int64), Nil)))`.
+/// Hand-built Deep: `reshape(x, Cons(cast(2, i64), Cons(cast(3, i64), Nil)))`.
 ///
 /// The outer `(app ...)` carries no `type:` meta entry, so `lower_app`
 /// initializes the reshape's `ty` to `default_type()` and the broken
 /// `extract_dim_list` is the only path that can set the
 /// `RiscOp::Reshape`'s `new_shape`. The hand-built Cons chain mirrors
 /// the exact shape `chelis-surf::desugar` produces for the surface
-/// list literal `[cast(2, int64), cast(3, int64)]`.
+/// list literal `[cast(2, i64), cast(3, i64)]`.
 fn cons_chain_reshape_expr() -> Expr {
     let src = r#"
         (app {}
@@ -55,10 +55,10 @@ fn cons_chain_reshape_expr() -> Expr {
              (var {} x)
              (app {}
                (var {} Cons)
-               (cast {} (lit {} 2) (t-prim {} int64))
+               (cast {} (lit {} 2) (t-prim {} i64))
                (app {}
                  (var {} Cons)
-                 (cast {} (lit {} 3) (t-prim {} int64))
+                 (cast {} (lit {} 3) (t-prim {} i64))
                  (var {} Nil))))
     "#;
     let mut exprs = chelis_deep::parser::parse_str(src).expect("deep parse");

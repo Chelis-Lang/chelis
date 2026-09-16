@@ -12,7 +12,7 @@ fn fatal_summary_diagnostic_is_visible_in_text_and_json_eval() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("sink.ch");
     let formatted = chelis_surf::format::format_source(SOURCE).expect("format fixture");
-    let insert = "insert(sink_scalar, cast(0, int32), seq)";
+    let insert = "insert(sink_scalar, cast(0, i32), seq)";
     let start = formatted.find(insert).expect("original insert remains");
     let source_id = format!("surf:{start}..{}", start + insert.len());
     fs::write(&path, formatted).expect("fixture");

@@ -184,12 +184,12 @@ fn assert_close(label: &str, got: &[f64], want: &[f64], tol: f64) {
 
 const STRIDE_SIG: &str = "sig f: tensor[batch, 4, f32] -> f32";
 
-const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
-  sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, i64), cast(2, i64))\n\
+  sum(sum(s, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar";
 
-const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
+const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, i64), cast(2, i64))\n\
   sq = mul(s, s)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar";
 
 const STRIDE_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
@@ -234,9 +234,9 @@ fn issue_513_stride_symbolic_batch_grad_nonlinear_matches_fd() {
 /// kept columns are {0, 3}, gradient 2x there and 0 elsewhere.
 #[test]
 fn issue_513_stride_overshoot_symbolic_batch_grad_matches_fd() {
-    let body = "  s = stride(&x, cast(1, int64), cast(3, int64))\n\
+    let body = "  s = stride(&x, cast(1, i64), cast(3, i64))\n\
   sq = mul(s, s)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar";
     let (shape, grad) = eval_grad(&grad_source(
         STRIDE_SIG,
         body,
@@ -255,8 +255,8 @@ fn issue_513_stride_overshoot_symbolic_batch_grad_matches_fd() {
 
 const PROD_SIG: &str = "sig f: tensor[batch, 3, f32] -> f32";
 
-const PROD_BODY: &str = "  p = prod_reduce(&x, cast(1, int32))\n\
-  sum(p, cast(0, int32)) |> tensor_to_scalar";
+const PROD_BODY: &str = "  p = prod_reduce(&x, cast(1, i32))\n\
+  sum(p, cast(0, i32)) |> tensor_to_scalar";
 
 const PROD_BASE: [f64; 6] = [0.5, 1.5, 2.0, 1.0, 2.5, 0.5];
 
@@ -311,9 +311,9 @@ fn issue_513_prod_reduce_zero_element_symbolic_batch_grad_matches_fd() {
 /// the concrete annotation directly.
 fn reshape_arith_source(nonlinear: bool, literal: &str, grad: bool) -> String {
     let sq = if nonlinear {
-        "  sq = mul(r, r)\n  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar"
+        "  sq = mul(r, r)\n  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar"
     } else {
-        "  sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar"
+        "  sum(sum(r, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar"
     };
     let call = if grad {
         format!("out = grad(f)(to_tensor([{literal}]))")
@@ -323,10 +323,10 @@ fn reshape_arith_source(nonlinear: bool, literal: &str, grad: bool) -> String {
     format!(
         "module Repro.ReshapeArith\n\
          def f(x: tensor[2, 2, f32]) -> f32 = {{\n\
-         \x20 a_d = cast(shape(x, cast(0, int32)), int64)\n\
-         \x20 b_d = cast(shape(x, cast(1, int32)), int64)\n\
-         \x20 p = permute(&x, cast(1, int32), cast(0, int32))\n\
-         \x20 r = reshape(p, [mul(b_d, a_d), cast(1, int64)])\n\
+         \x20 a_d = cast(shape(x, cast(0, i32)), i64)\n\
+         \x20 b_d = cast(shape(x, cast(1, i32)), i64)\n\
+         \x20 p = permute(&x, cast(1, i32), cast(0, i32))\n\
+         \x20 r = reshape(p, [mul(b_d, a_d), cast(1, i64)])\n\
          {sq}\n\
          }}\n\
          {call}\n"
@@ -402,12 +402,12 @@ fn reshape_arith2_source(target: &str, literal: &str, grad: bool) -> String {
     format!(
         "module Repro.ReshapeArith2\n\
          def f(x: tensor[2, 4, f32]) -> f32 = {{\n\
-         \x20 a_d = cast(shape(x, cast(0, int32)), int64)\n\
-         \x20 b_d = cast(shape(x, cast(1, int32)), int64)\n\
-         \x20 p = permute(&x, cast(1, int32), cast(0, int32))\n\
+         \x20 a_d = cast(shape(x, cast(0, i32)), i64)\n\
+         \x20 b_d = cast(shape(x, cast(1, i32)), i64)\n\
+         \x20 p = permute(&x, cast(1, i32), cast(0, i32))\n\
          \x20 r = reshape(p, [{target}])\n\
          \x20 sq = mul(r, r)\n\
-         \x20 sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20 sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
          }}\n\
          {call}\n"
     )
@@ -421,7 +421,7 @@ const RESHAPE2_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 /// all divisors positive, so floor, trunc, and euclidean semantics agree
 /// and the fold is exact). Loss = sum of squares, gradient 2x. Pre-fold
 /// these arms had no positive coverage at all.
-const DIV_MOD_TARGET: &str = "floor_div(mul(b_d, a_d), cast(4, int64)), \
+const DIV_MOD_TARGET: &str = "floor_div(mul(b_d, a_d), cast(4, i64)), \
      add(sub(b_d, a_d), mod(a_d, b_d))";
 
 #[test]
@@ -750,8 +750,8 @@ fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
-  s = stride(&x, cast(2, int64))\n\
-  sum(s, cast(0, int32)) |> tensor_to_scalar\n\
+  s = stride(&x, cast(2, i64))\n\
+  sum(s, cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
     let (shape, grad) = eval_grad(source);
@@ -772,8 +772,8 @@ fn issue_513_prod_reduce_on_symbolic_axis_stays_fail_closed() {
     let source = "module Repro.ProdSymAxis\n\
 sig f: tensor[n, 3, f32] -> f32\n\
 def f(x) = {\n\
-  p = prod_reduce(&x, cast(0, int32))\n\
-  sum(p, cast(0, int32)) |> tensor_to_scalar\n\
+  p = prod_reduce(&x, cast(0, i32))\n\
+  sum(p, cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
     expect_grad_failure(
@@ -793,8 +793,8 @@ fn issue_513_shrink_concrete_bounds_on_symbolic_axis_grad_is_window_mask() {
     let source = "module Repro.ShrinkSymAxis\n\
 sig f: tensor[batch, 4, f32] -> f32\n\
 def f(x) = {\n\
-  s = shrink(&x, [[cast(0, int64), cast(1, int64)], [cast(1, int64), cast(3, int64)]])\n\
-  sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  s = shrink(&x, [[cast(0, i64), cast(1, i64)], [cast(1, i64), cast(3, i64)]])\n\
+  sum(sum(s, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]]))\n";
     let (shape, grad) = eval_grad(source);
@@ -820,11 +820,11 @@ fn issue_513_symbolic_sig_reshape_arith_target_grad_is_ones() {
     let source = "module Repro.ReshapeArithSym\n\
 sig f: tensor[a, b, f32] -> f32\n\
 def f(x) = {\n\
-  a_d = cast(shape(x, cast(0, int32)), int64)\n\
-  b_d = cast(shape(x, cast(1, int32)), int64)\n\
-  p = permute(&x, cast(1, int32), cast(0, int32))\n\
-  r = reshape(p, [mul(b_d, a_d), cast(1, int64)])\n\
-  sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  a_d = cast(shape(x, cast(0, i32)), i64)\n\
+  b_d = cast(shape(x, cast(1, i32)), i64)\n\
+  p = permute(&x, cast(1, i32), cast(0, i32))\n\
+  r = reshape(p, [mul(b_d, a_d), cast(1, i64)])\n\
+  sum(sum(r, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
     let (shape, eval_g) = eval_grad(source);
@@ -858,7 +858,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast
 /// program.)
 #[test]
 fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes() {
-    let target = "neg(floor_div(sub(a_d, cast(10, int64)), cast(2, int64))), cast(4, int64)";
+    let target = "neg(floor_div(sub(a_d, cast(10, i64)), cast(2, i64))), cast(4, i64)";
     let source = reshape_arith2_source(
         target,
         "[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], \
@@ -918,7 +918,7 @@ fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes()
 /// negative-extent diagnostic, never fall back to wildcard dims.
 #[test]
 fn issue_513_reshape_arith_negative_fold_fails_loud() {
-    let target = "sub(a_d, cast(10, int64)), cast(4, int64)";
+    let target = "sub(a_d, cast(10, i64)), cast(4, i64)";
     let source = reshape_arith2_source(
         target,
         "[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], \
@@ -942,7 +942,7 @@ fn issue_513_reshape_arith_negative_fold_fails_loud() {
 /// evaluation of forms the host lane handles honestly.
 #[test]
 fn issue_513_reshape_arith_gate_refused_forward_still_evals_via_host() {
-    let target = "neg(floor_div(sub(a_d, cast(5, int64)), cast(2, int64))), cast(4, int64)";
+    let target = "neg(floor_div(sub(a_d, cast(5, i64)), cast(2, i64))), cast(4, i64)";
     let source = reshape_arith2_source(target, &matrix_literal(&RESHAPE2_BASE, 4), false);
     let loss = eval_scalar(&source);
     let want: f64 = RESHAPE2_BASE.iter().map(|x| x * x).sum();

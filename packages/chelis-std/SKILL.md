@@ -44,7 +44,7 @@ Rules to preserve:
 - No implicit broadcasting. Shapes must match unless an explicit helper changes them.
 - No implicit precision promotion. Use `cast` when changing precision.
 - Named dimensions are nominal: `batch` and `seq` do not unify by size.
-- Integer literals default to `int32`; float literals default to `f32`.
+- Integer literals default to `i32`; float literals default to `f32`.
 - Reduction-style calls need an explicit axis argument.
 
 ## Style Rules for Generated Surf
@@ -199,7 +199,7 @@ map, calls use `app`, references use `var`, and literals carry a type.
     (app {}
       (var {} softmax)
       (app {} (var {} relu) (var {} x))
-      (lit {type: (t-prim {} int32)} 0))))
+      (lit {type: (t-prim {} i32)} 0))))
 ```
 
 ```chelis-deep
@@ -225,10 +225,10 @@ map, calls use `app`, references use `var`, and literals carry a type.
           (fn {} (params {} __chelis_pipe) (app {} (var {} add) (var {} __chelis_pipe) (var {} labels))))
         loss
         (pipe {}
-          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} int32)} 0))
+          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} i32)} 0))
           (var {} log)
           (fn {} (params {} __chelis_pipe) (app {} (var {} mul) (var {} __chelis_pipe) (var {} labels)))
-          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} int32)} 0)))))
+          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} i32)} 0)))))
       (var {} loss))))
 ```
 

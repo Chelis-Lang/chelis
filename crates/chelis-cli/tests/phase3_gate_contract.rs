@@ -66,12 +66,12 @@ fn shared_gate_target_parser_rejects_unknown_spellings() {
 
 /// chelis#697: C dtype admission is a property of the lowered operation and
 /// backend, never of whether an unrelated declaration happens to need the
-/// host lane. Both forms use an active, exactly-supported int64 scalar.
+/// host lane. Both forms use an active, exactly-supported i64 scalar.
 #[test]
 fn c_dtype_admission_does_not_depend_on_an_unrelated_host_function() {
-    let tensor_only = "def value() -> int64 = cast(1, int64)\n";
+    let tensor_only = "def value() -> i64 = cast(1, i64)\n";
     let with_unrelated_host =
-        "def label() -> string = \"unrelated\"\ndef value() -> int64 = cast(1, int64)\n";
+        "def label() -> string = \"unrelated\"\ndef value() -> i64 = cast(1, i64)\n";
 
     build(tensor_only, "int64_tensor_only", "c").success();
     build(with_unrelated_host, "int64_with_host", "c").success();
@@ -114,7 +114,7 @@ fn hip_f64_admission_agrees_across_public_build_paths() {
 #[test]
 fn hip_scatter_elements_rejects_an_unimplemented_f64_payload_cell() {
     build(
-        "def apply_scatter(data: tensor[2, 2, f64], indices: tensor[2, 2, int32], \
+        "def apply_scatter(data: tensor[2, 2, f64], indices: tensor[2, 2, i32], \
          updates: tensor[2, 2, f64]) -> tensor[2, 2, f64] = \
          scatter_elements(data, indices, updates, 0)\n",
         "hip_scatter_elements_f64",

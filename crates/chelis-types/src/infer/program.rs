@@ -2780,8 +2780,8 @@ mod component_level_scope_tests {
     #[test]
     fn primary_driver_mid_scc_cancellation_aborts_before_return() {
         let exprs = chelis_deep::parser::parse_str(
-            "(defsig {} left (t-fn {} (t-prim {} int32) (t-prim {} int32)))
-             (defsig {} right (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+            "(defsig {} left (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+             (defsig {} right (t-fn {} (t-prim {} i32) (t-prim {} i32)))
              (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
              (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
         )

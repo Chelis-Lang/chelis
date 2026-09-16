@@ -312,10 +312,10 @@ async fn eval_endpoint_returns_host_values_and_transcript() {
 async fn eval_endpoint_returns_dict_and_tuple_collection_values() {
     let source = r#"
 keys: List[string] = ["alpha", "beta"]
-ids: List[int64] = [cast(1, int64), cast(2, int64)]
+ids: List[i64] = [cast(1, i64), cast(2, i64)]
 pairs = zip(keys, ids)
 enumerated = enumerate(keys)
-vocab: Dict[string, int64] = dict_of(pairs)
+vocab: Dict[string, i64] = dict_of(pairs)
 entries = dict_entries(vocab)
 "#;
     let (_, ok) = post_json(
@@ -406,18 +406,18 @@ items = to_list(x)
 #[tokio::test]
 async fn eval_endpoint_returns_sequence_and_dict_helper_values() {
     let source = r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
-prefix = take(xs, cast(2, int64))
-suffix = drop(xs, cast(1, int64))
-groups = chunk(xs, cast(2, int64))
-scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
-buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
-exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], take(xs, cast(2, int64)))
-flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
-base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+xs: List[i64] = [cast(1, i64), cast(2, i64), cast(3, i64)]
+prefix = take(xs, cast(2, i64))
+suffix = drop(xs, cast(1, i64))
+groups = chunk(xs, cast(2, i64))
+scanned = scan(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), xs)
+buckets = partition(fn (x: i64) -> gt(x, cast(1, i64)), xs)
+exploded = flat_map(fn (x: i64) -> [x, add(x, cast(10, i64))], take(xs, cast(2, i64)))
+flattened = flatten([[cast(1, i64)], [cast(2, i64), cast(3, i64)]])
+base: Dict[string, i64] = dict_of([("alpha", cast(1, i64))])
 key_count = len(base)
-extended = dict_insert(base, "beta", cast(2, int64))
-merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+extended = dict_insert(base, "beta", cast(2, i64))
+merged = dict_merge(extended, dict_of([("beta", cast(20, i64)), ("gamma", cast(3, i64))]))
 trimmed = dict_remove(merged, "gamma")
 "#;
     let (_, ok) = post_json(

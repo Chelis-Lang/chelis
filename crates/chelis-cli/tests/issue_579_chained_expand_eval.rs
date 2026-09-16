@@ -8,7 +8,7 @@
 //! running this corpus against it during review):
 //!
 //! - School's REAL batchnorm extent spelling, a LET-BOUND
-//!   `cast(shape(x, axis), int64)` read passed to `expand`, was check-clean
+//!   `cast(shape(x, axis), i64)` read passed to `expand`, was check-clean
 //!   AND eval-clean at v0.12.0 but REJECTED at `chelis build` as sourceless:
 //!   a §4.7.2 Form-3 check-accept/build-reject asymmetry. PR #596 closed it
 //!   by following let-bound `shape` reads to their source tensor. The
@@ -21,7 +21,7 @@
 //!   at its 0.12.0 pin bump. They are pinned here so the reject stays loud,
 //!   cites #469, and never regresses into the reported rank-mismatch ICE.
 //! - The inline shape-sourced chain (`expand(g, 1, shape(x, cast(2,
-//!   int32)))`) already checked, evaluated, and built correctly at v0.12.0.
+//!   i32)))`) already checked, evaluated, and built correctly at v0.12.0.
 //!   Its chained positive lane (eval + C parity) was previously untested and
 //!   is pinned here as the explicit working baseline.
 //!
@@ -52,7 +52,7 @@ use tempfile::tempdir;
 /// the batch axis of rank-2 `x`. The #579 discriminator case (passed even at
 /// 0.12.0); pinned so the working baseline is explicit.
 const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
-    \x20 gb: tensor[a, n, f32] = insert(g, 0, shape(x, cast(0, int32)))\n\
+    \x20 gb: tensor[a, n, f32] = insert(g, 0, shape(x, cast(0, i32)))\n\
     \x20 mul(x, gb)\n\
     }\n\
     xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
@@ -60,14 +60,14 @@ const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f
     out = bn1d_scale(xs, gs)\n";
 
 /// School's REAL batchnorm1d extent spelling (src/nn/batchnorm.ch):
-/// `a_dim = cast(shape(x, cast(0, int32)), int64)` LET-BOUND, then
+/// `a_dim = cast(shape(x, cast(0, i32)), i64)` LET-BOUND, then
 /// `expand(g, 0, a_dim)`. At the v0.12.0 tag this exact program was
 /// check-clean AND eval-clean but `chelis build` rejected the extent as
 /// sourceless (the §4.7.2 check-accept/build-reject asymmetry #596 closed
 /// by following let-bound `shape` reads to their source tensor). The
 /// let-bound tests below fail on a pre-#596 compiler.
 const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
-    \x20 a_dim = cast(shape(x, cast(0, int32)), int64)\n\
+    \x20 a_dim = cast(shape(x, cast(0, i32)), i64)\n\
     \x20 gb: tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     \x20 mul(x, gb)\n\
     }\n\
@@ -78,11 +78,11 @@ const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &t
 /// How the chained corpus spells its runtime extents.
 #[derive(Clone, Copy)]
 enum ExtentSpelling {
-    /// `expand(g, 1, shape(x, cast(2, int32)))`: the `bias_broadcast` form.
+    /// `expand(g, 1, shape(x, cast(2, i32)))`: the `bias_broadcast` form.
     /// Already worked end-to-end at v0.12.0; pinned as the working baseline.
     Inline,
-    /// School's batchnorm form: `h_dim = cast(shape(x, cast(2, int32)),
-    /// int64)` let-bound, then `expand(g, 1, h_dim)`. Check/eval-clean but
+    /// School's batchnorm form: `h_dim = cast(shape(x, cast(2, i32)),
+    /// i64)` let-bound, then `expand(g, 1, h_dim)`. Check/eval-clean but
     /// build-REJECTED as sourceless at v0.12.0; fixed by #596.
     LetBound,
 }
@@ -101,14 +101,14 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
     let (lets, h_size, w_size, a_size) = match spelling {
         ExtentSpelling::Inline => (
             "",
-            "shape(x, cast(2, int32))",
-            "shape(x, cast(3, int32))",
-            "shape(x, cast(0, int32))",
+            "shape(x, cast(2, i32))",
+            "shape(x, cast(3, i32))",
+            "shape(x, cast(0, i32))",
         ),
         ExtentSpelling::LetBound => (
-            "\x20 h_dim = cast(shape(x, cast(2, int32)), int64)\n\
-             \x20 w_dim = cast(shape(x, cast(3, int32)), int64)\n\
-             \x20 a_dim = cast(shape(x, cast(0, int32)), int64)\n",
+            "\x20 h_dim = cast(shape(x, cast(2, i32)), i64)\n\
+             \x20 w_dim = cast(shape(x, cast(3, i32)), i64)\n\
+             \x20 a_dim = cast(shape(x, cast(0, i32)), i64)\n",
             "h_dim",
             "w_dim",
             "a_dim",
@@ -136,26 +136,26 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
 }
 
 /// Bare-runtime-scalar sourceless spelling, batchnorm1d flavor: the expand
-/// size is a bare `int64` parameter with no tensor source. NOTE: this is the
+/// size is a bare `i64` parameter with no tensor source. NOTE: this is the
 /// #469 sourceless family, NOT school's shipped spelling (that one is
 /// `BN1D_LET_BOUND_SOURCE`), and it was ALREADY check-rejected at v0.12.0 by
 /// the #494 source-tracking predicate. Pinned so the reject stays loud,
 /// cites #469, and never regresses into the issue's `rank mismatch` ICE.
-const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
-    out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, int64))\n";
+const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
+    out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, i64))\n";
 
 /// The sourceless chained rank-1 -> rank-4 spelling: school's PRE-0.12-bump
-/// `broadcast_to_achw` signature (bare `int64` dim params), retired in
+/// `broadcast_to_achw` signature (bare `i64` dim params), retired in
 /// school's §4.7.2 witness rewrite when the 0.12.0 pin bump brought in the
 /// #494 check reject. Already check-rejected at v0.12.0; pinned for the same
 /// loud-reject / no-ICE invariant through the eval lane.
-const SOURCELESS_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
+const SOURCELESS_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: i64, w_dim: i64, a_dim: i64) -> tensor[a, c, h, w, f32] = {\n\
     \x20 step1: tensor[c, h, f32] = insert(v, 1, h_dim)\n\
     \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, w_dim)\n\
     \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, a_dim)\n\
     \x20 step3\n\
     }\n\
-    out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, int64), cast(4, int64), cast(5, int64))\n";
+    out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, i64), cast(4, i64), cast(5, i64))\n";
 
 /// Build a nested Surf tensor literal of `shape` with sequential f32 data.
 fn nested_literal(shape: &[usize], next: &mut f64) -> String {
@@ -434,7 +434,7 @@ fn issue_579_bn1d_single_shape_sourced_expand_evals() {
     assert_bn1d_out(&parse_printed_tensors(&eval), "bn1d eval");
 }
 
-/// School's REAL bn1d spelling (let-bound `cast(shape(x, 0), int64)` extent)
+/// School's REAL bn1d spelling (let-bound `cast(shape(x, 0), i64)` extent)
 /// through EVERY lane: checks clean, evaluates to the exact values, C build
 /// succeeds, the compiled binary produces the same values, and eval agrees
 /// with the backend. At the v0.12.0 tag this exact program was check-clean
@@ -640,7 +640,7 @@ fn issue_579_sourceless_expand_rejects_in_eval_without_rank_ice() {
 #[test]
 fn issue_579_wrong_axis_broadcast_rejected_at_check() {
     let source = "def bad(x: &tensor[2, 3, f32], g: &tensor[3, f32]) -> tensor[2, 3, f32] = {\n\
-        \x20 gb: tensor[3, 2, f32] = insert(g, 1, shape(x, cast(0, int32)))\n\
+        \x20 gb: tensor[3, 2, f32] = insert(g, 1, shape(x, cast(0, i32)))\n\
         \x20 mul(x, gb)\n\
         }\n\
         out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";

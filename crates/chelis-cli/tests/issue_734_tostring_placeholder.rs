@@ -124,8 +124,8 @@ fn to_string_of_a_list_stringifies_in_the_compiled_lane() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(xs: List[int64]) -> string = to_string(xs)\n\
-         out = print(f([cast(1, int64), cast(2, int64)]))\n";
+         def f(xs: List[i64]) -> string = to_string(xs)\n\
+         out = print(f([cast(1, i64), cast(2, i64)]))\n";
     let eval_got = eval_first_line(program).expect("eval");
     assert_eq!(eval_got, "[1, 2]");
     let c_got = c_first_line(program, "ts_list");
@@ -141,7 +141,7 @@ fn to_string_of_a_list_stringifies_in_the_compiled_lane() {
 #[test]
 fn to_string_scalar_arms_agree_across_lanes() {
     let rows = [
-        ("to_string(cast(7, int64))", "7"),
+        ("to_string(cast(7, i64))", "7"),
         ("to_string(cast(1.5, f64))", "1.5"),
         ("to_string(true)", "true"),
     ];

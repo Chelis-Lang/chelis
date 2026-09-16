@@ -261,10 +261,7 @@ fn assert_cli_diagnostic_counts(source: &str, reserved: usize, mismatches: usize
 #[test]
 fn one_reserved_parameter_site_produces_one_cli_error() {
     for name in ["f8e4m3", "f8e5m2"] {
-        assert_rejected_sites(
-            &format!("def classify(x: {name}) -> int32 = 0i32\n"),
-            &[name],
-        );
+        assert_rejected_sites(&format!("def classify(x: {name}) -> i32 = 0i32\n"), &[name]);
     }
 }
 
@@ -511,7 +508,7 @@ fn property_copy_cli_ownership_handles_multiple_and_arity_disagreements() {
                     scalar.clone(),
                     "(t-prim {} f64)".to_string(),
                     tensor.clone(),
-                    "(t-prim {} int64)".to_string(),
+                    "(t-prim {} i64)".to_string(),
                 ],
                 vec![
                     scalar.clone(),
@@ -675,7 +672,7 @@ fn nominal_arity_cli_recovery_keeps_nested_rejections_and_the_arity_witness() {
 fn one_reserved_tensor_element_site_produces_one_located_cli_error() {
     for name in ["f8e4m3", "f8e5m2"] {
         assert_rejected_sites(
-            &format!("def classify(x: tensor[3, {name}]) -> int32 = 0i32\n"),
+            &format!("def classify(x: tensor[3, {name}]) -> i32 = 0i32\n"),
             &[name],
         );
     }
@@ -685,7 +682,7 @@ fn one_reserved_tensor_element_site_produces_one_located_cli_error() {
 fn a_rejected_tensor_precision_keeps_the_independent_shape_error() {
     for name in ["f8e4m3", "f8e5m2"] {
         let (success, report, source) = check(&format!(
-            "def inspect(x: tensor[3, {name}]) -> int64 = shape(x, 1i32)\n"
+            "def inspect(x: tensor[3, {name}]) -> i64 = shape(x, 1i32)\n"
         ));
         assert!(!success, "{name}: {report:?}");
         assert!(report.score < 1.0, "{name}: {report:?}");
@@ -723,7 +720,7 @@ fn a_rejected_tensor_precision_keeps_the_independent_shape_error() {
 #[test]
 fn separate_declarations_keep_their_own_cli_errors() {
     assert_rejected_sites(
-        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e5m2) -> int32 = 0i32\n",
+        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e5m2) -> i32 = 0i32\n",
         &["f8e4m3", "f8e5m2"],
     );
 }
@@ -731,7 +728,7 @@ fn separate_declarations_keep_their_own_cli_errors() {
 #[test]
 fn repeated_reserved_spelling_keeps_distinct_cli_locations() {
     assert_rejected_sites(
-        "def left(x: f8e4m3) -> int32 = 0i32\ndef right(x: f8e4m3) -> int32 = 0i32\n",
+        "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e4m3) -> i32 = 0i32\n",
         &["f8e4m3"],
     );
 }
@@ -739,7 +736,7 @@ fn repeated_reserved_spelling_keeps_distinct_cli_locations() {
 #[test]
 fn a_call_does_not_report_its_failed_signature_again() {
     assert_rejected_sites(
-        "def classify(x: f8e4m3) -> int32 = 0i32\nresult = classify(1i32)\n",
+        "def classify(x: f8e4m3) -> i32 = 0i32\nresult = classify(1i32)\n",
         &["f8e4m3"],
     );
 }
@@ -747,11 +744,11 @@ fn a_call_does_not_report_its_failed_signature_again() {
 #[test]
 fn distinct_parameter_sites_in_one_signature_keep_separate_cli_errors() {
     assert_rejected_sites(
-        "def classify(x: f8e4m3, y: f8e5m2) -> int32 = 0i32\n",
+        "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32\n",
         &["f8e4m3", "f8e5m2"],
     );
     assert_rejected_sites(
-        "def classify(x: f8e4m3, y: f8e4m3) -> int32 = 0i32\n",
+        "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32\n",
         &["f8e4m3"],
     );
 }
@@ -767,8 +764,8 @@ fn parameter_and_return_sites_keep_separate_cli_errors() {
 #[test]
 fn nested_type_components_keep_separate_cli_errors() {
     for source in [
-        "def classify(x: (f8e4m3, f8e5m2)) -> int32 = 0i32\n",
-        "def classify(x: Dict[f8e4m3, f8e5m2]) -> int32 = 0i32\n",
+        "def classify(x: (f8e4m3, f8e5m2)) -> i32 = 0i32\n",
+        "def classify(x: Dict[f8e4m3, f8e5m2]) -> i32 = 0i32\n",
     ] {
         assert_rejected_sites(source, &["f8e4m3", "f8e5m2"]);
     }
@@ -776,8 +773,7 @@ fn nested_type_components_keep_separate_cli_errors() {
 
 #[test]
 fn a_failed_signature_does_not_hide_a_cli_body_error() {
-    let (success, report, source) =
-        check("def classify(x: f8e4m3) -> int32 = cast(0i32, f8e5m2)\n");
+    let (success, report, source) = check("def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)\n");
     assert!(!success, "{report:?}");
     assert!(report.score < 1.0, "{report:?}");
     assert_eq!(report.errors.len(), 2, "{report:?}");
@@ -800,7 +796,7 @@ fn a_failed_signature_does_not_hide_a_cli_body_error() {
 #[test]
 fn active_float_parameters_keep_a_successful_empty_report() {
     for name in ["f32", "f64", "f16", "bf16"] {
-        let (success, report, _) = check(&format!("def classify(x: {name}) -> int32 = 0i32\n"));
+        let (success, report, _) = check(&format!("def classify(x: {name}) -> i32 = 0i32\n"));
         assert!(success, "{report:?}");
         assert_eq!(report.score, 1.0, "{report:?}");
         assert!(report.errors.is_empty(), "{report:?}");

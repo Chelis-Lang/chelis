@@ -128,7 +128,7 @@ impl ScalarPayload {
     }
 
     /// View any numeric scalar as f64. Exact for every float width and
-    /// for integers up to 2^53; int64 may lose precision past 2^53 (the
+    /// for integers up to 2^53; i64 may lose precision past 2^53 (the
     /// named-lossy read of the dtype-semantics contract).
     pub(crate) fn as_f64_lossy(&self) -> f64 {
         self.value.as_f64_lossy()
@@ -258,7 +258,7 @@ impl RuntimeValue {
     }
 
     /// Default-narrowed integer literal per spec §5.3: bare integer
-    /// values default to `int32` unless the surrounding context says
+    /// values default to `i32` unless the surrounding context says
     /// otherwise. The checker range-guards literals (spec §5.6), so the
     /// ingress constructor cannot trap here.
     pub(crate) fn int_lit(value: i64) -> Self {
@@ -278,11 +278,11 @@ impl RuntimeValue {
     }
 
     /// Computed integer value preserving full i64 precision (e.g. `len`,
-    /// shape sizes, parsed `to_int` results). Carries dtype `int64`.
+    /// shape sizes, parsed `to_int` results). Carries dtype `i64`.
     pub(crate) fn int64(value: i64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_i64("int64", Prim::Int64, value)
-                .expect("int64 ingress from i64 is total"),
+            chelis_types::scalar_from_i64("i64", Prim::Int64, value)
+                .expect("i64 ingress from i64 is total"),
         )
     }
 
@@ -1194,16 +1194,16 @@ fn int_value(expr: &Expr) -> Option<i64> {
 
 /// Read a *literal* seed at full i64 width, peeling `(lit {meta} …)`
 /// wrappers down to the raw `Atom::Int`. Mirrors the compiled C host lane,
-/// which reads the raw atom and ignores the int32 default meta (`host.rs`
+/// which reads the raw atom and ignores the i32 default meta (`host.rs`
 /// `lower_host_expr`: the `lit` peel forwards to the `Atom::Int(i64)` arm).
 ///
 /// chelis#771: routing a literal seed through `eval_lit` narrows it to the
-/// spec/04-type-system.md §5.3 int32 default (int32-truncate then
+/// spec/04-type-system.md §5.3 i32 default (i32-truncate then
 /// sign-extend), so any seed `>= 2^31` becomes an unrelated `u64` in the
 /// evaluator while the compiled lane keeps the full value — the two lanes
 /// then sample completely different streams from the "same" seed. The seed
-/// is designed int64 (spec/design/checker_totality.md §C1.5 item 5, the
-/// int64-suffixed literal contract; #731 Phase 1's FORM gate is unshipped).
+/// is designed i64 (spec/design/checker_totality.md §C1.5 item 5, the
+/// i64-suffixed literal contract; #731 Phase 1's FORM gate is unshipped).
 ///
 /// Returns `None` for non-literal (computed) seed expressions; those keep
 /// the existing dtype-narrowing `eval_expr` path unchanged.

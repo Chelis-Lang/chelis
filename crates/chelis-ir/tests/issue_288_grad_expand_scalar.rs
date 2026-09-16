@@ -6,8 +6,8 @@
 //! ```chelis
 //! module Repro.GradExpandConst
 //! def f(x: tensor[2, f32]) -> f32 = {
-//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))
-//!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
+//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i32))
+//!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
 //! ```

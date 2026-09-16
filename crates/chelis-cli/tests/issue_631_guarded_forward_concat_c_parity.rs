@@ -24,17 +24,17 @@ use tempfile::{TempDir, tempdir};
 /// behind an `if`/`fail` kernel-length guard.
 const AVGPOOL: &str = "sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
-  n = cast(shape(x, cast(0, int32)), int64)\n\
-  if gt(cast(2, int64), n) then fail(\"kernel exceeds input length\") else {\n\
-    m = add(floor_div(sub(n, cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-    rows = [window_row(&x, m, cast(0, int64)), window_row(&x, m, cast(1, int64))]\n\
-    mean(concat(rows, cast(0, int32)), cast(0, int32))\n\
+  n = cast(shape(x, cast(0, i32)), i64)\n\
+  if gt(cast(2, i64), n) then fail(\"kernel exceeds input length\") else {\n\
+    m = add(floor_div(sub(n, cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+    rows = [window_row(&x, m, cast(0, i64)), window_row(&x, m, cast(1, i64))]\n\
+    mean(concat(rows, cast(0, i32)), cast(0, i32))\n\
   }\n\
 }\n\
-def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] = {\n\
-  start = cast(k, int64)\n\
-  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int64)\n\
-  reshape(stride(shrink(x, [[start, extent]]), cast(2, int64)), [cast(1, int64), m])\n\
+def window_row[n](x: &tensor[n, f32], m: i64, k: i64) -> tensor[u, m, f32] = {\n\
+  start = cast(k, i64)\n\
+  extent = cast(add(add(k, mul(sub(m, cast(1, i64)), cast(2, i64))), cast(1, i64)), i64)\n\
+  reshape(stride(shrink(x, [[start, extent]]), cast(2, i64)), [cast(1, i64), m])\n\
 }";
 
 fn avgpool_source(values: &[f64]) -> String {
@@ -226,7 +226,7 @@ fn issue_631_data_dependent_fail_branch_aborts_in_c() {
     let source = "module Repro.FailClean\n\
 sig f: tensor[n, f32] -> tensor[n, f32]\n\
 def f(x) = {\n\
-  total = tensor_to_scalar(sum(x, cast(0, int32)))\n\
+  total = tensor_to_scalar(sum(x, cast(0, i32)))\n\
   if gt(total, cast(0.0, f32)) then fail(\"positive sum\") else neg(x)\n\
 }\n\
 out = f(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";

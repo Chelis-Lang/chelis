@@ -91,11 +91,11 @@ fn sum_default_constructor_pins_accumulator_into_node() {
         other => panic!("expected RiscOp::Sum, got {other:?}"),
     }
 
-    let op = RiscOp::sum_default(2, Prim::Int8).expect("int8 reduce_sum should construct");
+    let op = RiscOp::sum_default(2, Prim::Int8).expect("i8 reduce_sum should construct");
     match op {
         RiscOp::Sum { axis, accumulator } => {
             assert_eq!(axis, 2);
-            assert_eq!(accumulator, Prim::Int32, "int8 → int32 default per §5.7.1");
+            assert_eq!(accumulator, Prim::Int32, "i8 → i32 default per §5.7.1");
         }
         other => panic!("expected RiscOp::Sum, got {other:?}"),
     }
@@ -167,7 +167,7 @@ fn matmul_with_accumulator_also_rejects_integer_operands() {
         Prim::Int32,
         Prim::Int64,
     );
-    let err = result.expect_err("explicit-accumulator matmul on int32 must be rejected per §5.7.2");
+    let err = result.expect_err("explicit-accumulator matmul on i32 must be rejected per §5.7.2");
     assert!(err.contains("§5.7.2"));
 }
 
@@ -178,10 +178,10 @@ fn matmul_with_accumulator_also_rejects_integer_operands() {
 #[test]
 fn reduce_sum_int8_with_explicit_int8_accumulator_is_rejected_per_spec_5_7_1() {
     // Per §5.7.1: the explicit accumulator must be at least as wide as
-    // the documented default. For int8 operands the default is int32,
-    // so int8 accumulator is too narrow.
+    // the documented default. For i8 operands the default is i32,
+    // so i8 accumulator is too narrow.
     let err = RiscOp::sum_with_accumulator(0, Prim::Int8, Prim::Int8)
-        .expect_err("int8 operand + int8 accumulator must be rejected per §5.7.1");
+        .expect_err("i8 operand + i8 accumulator must be rejected per §5.7.1");
     assert!(
         err.contains("narrower than"),
         "diagnostic must explain the accumulator is narrower than the default; got: {err}"
@@ -191,18 +191,18 @@ fn reduce_sum_int8_with_explicit_int8_accumulator_is_rejected_per_spec_5_7_1() {
         "diagnostic must cite spec/04-type-system.md §5.7.1; got: {err}"
     );
     assert!(
-        err.contains("int32"),
-        "diagnostic must mention the spec-default accumulator (`int32`); got: {err}"
+        err.contains("i32"),
+        "diagnostic must mention the spec-default accumulator (`i32`); got: {err}"
     );
 }
 
 #[test]
 fn reduce_sum_int16_with_explicit_int16_accumulator_is_rejected() {
-    // Same shape as int8 (default accumulator is int32 for int16).
+    // Same shape as i8 (default accumulator is i32 for i16).
     let err = RiscOp::sum_with_accumulator(0, Prim::Int16, Prim::Int16)
-        .expect_err("int16 operand + int16 accumulator must be rejected per §5.7.1");
+        .expect_err("i16 operand + i16 accumulator must be rejected per §5.7.1");
     assert!(err.contains("§5.7.1"));
-    assert!(err.contains("int32"));
+    assert!(err.contains("i32"));
 }
 
 #[test]

@@ -1,8 +1,8 @@
 module Std.Tests.Init.XavierExt
 import Std.Init.XavierExt (xavier_uniform, xavier_normal, trunc_normal)
 import Std.Test (assert_close, assert_close_tensor, assert_eq, assert_shape, assert_true)
-def long_template() -> tensor[2000, f32] = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(2000, int64))))
-def small_template() -> tensor[8, f32] = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(8, int64))))
+def long_template() -> tensor[2000, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(2000, i64))))
+def small_template() -> tensor[8, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(8, i64))))
 def sample_mean[n](t: tensor[n, f32]) -> f32 = {
   xs = to_list(t)
   total = fold(fn (acc: f32, x: f32) -> add(acc, x), cast(0.0, f32), xs)
@@ -17,7 +17,7 @@ def sample_std[n](t: tensor[n, f32]) -> f32 = {
 }
 def tensor_max[n](t: tensor[n, f32]) -> f32 = fold(fn (acc: f32, x: f32) -> if gt(x, acc) then x else acc, cast(-1000000.0, f32), to_list(t))
 def tensor_min[n](t: tensor[n, f32]) -> f32 = fold(fn (acc: f32, x: f32) -> if lt(x, acc) then x else acc, cast(1000000.0, f32), to_list(t))
-def first_elem[n](t: tensor[n, f32]) -> f32 = index(to_list(t), cast(0, int64))
+def first_elem[n](t: tensor[n, f32]) -> f32 = index(to_list(t), cast(0, i64))
 def test_xavier_uniform_deterministic_under_seed() -> unit ! { Test } = {
   a = with seed(101i64) { xavier_uniform(long_template(), cast(64.0, f32), cast(64.0, f32)) }
   b = with seed(101i64) { xavier_uniform(long_template(), cast(64.0, f32), cast(64.0, f32)) }
@@ -56,15 +56,15 @@ def test_trunc_normal_seed_sensitive() -> unit ! { Test } = {
 }
 def test_xavier_uniform_shape_matches_template() -> unit ! { Test } = {
   out = with seed(7i64) { xavier_uniform(small_template(), cast(8.0, f32), cast(8.0, f32)) }
-  assert_shape(out, [cast(8, int64)], "xavier_uniform preserves template length 8")
+  assert_shape(out, [cast(8, i64)], "xavier_uniform preserves template length 8")
 }
 def test_xavier_normal_shape_matches_template() -> unit ! { Test } = {
   out = with seed(7i64) { xavier_normal(small_template(), cast(8.0, f32), cast(8.0, f32)) }
-  assert_shape(out, [cast(8, int64)], "xavier_normal preserves template length 8")
+  assert_shape(out, [cast(8, i64)], "xavier_normal preserves template length 8")
 }
 def test_trunc_normal_shape_matches_template() -> unit ! { Test } = {
   out = with seed(7i64) { trunc_normal(small_template(), cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32), cast(1.0, f32)) }
-  assert_shape(out, [cast(8, int64)], "trunc_normal preserves template length 8")
+  assert_shape(out, [cast(8, i64)], "trunc_normal preserves template length 8")
 }
 def test_xavier_uniform_stays_within_bound() -> unit ! { Test } = {
   out = with seed(45i64) { xavier_uniform(long_template(), cast(4.0, f32), cast(4.0, f32)) }

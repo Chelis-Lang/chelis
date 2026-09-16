@@ -538,7 +538,7 @@ fn opaque_accessor_hint(message: &str) -> Option<String> {
         return None;
     }
     let (left, right) = (sides[0].trim(), sides[1].trim());
-    let primitives = ["f32", "f64", "int32", "int64", "bool"];
+    let primitives = ["f32", "f64", "i32", "i64", "bool"];
     // Opaque type (PascalCase, no brackets) vs primitive
     if is_opaque_candidate(left) && primitives.contains(&right) {
         let accessor = format!("{}_value", to_snake_case(left));

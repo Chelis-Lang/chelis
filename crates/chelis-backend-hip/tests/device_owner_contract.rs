@@ -89,7 +89,7 @@ fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
             "domain"
         };
         assert!(
-            stderr.contains(&format!("numeric trap: {class} in metadata_plan at int64")),
+            stderr.contains(&format!("numeric trap: {class} in metadata_plan at i64")),
             "{case}: {stderr}"
         );
         assert!(

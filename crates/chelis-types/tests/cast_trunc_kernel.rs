@@ -134,7 +134,7 @@ fn largest_in_range_value_succeeds_and_smallest_out_of_range_traps_overflow() {
 
         // Just inside, both ends. `i64::MAX` is NOT representable in
         // f64 -- it rounds up to 2^63, which is out of range -- so the
-        // int64 row uses the largest f64 strictly below 2^63 instead.
+        // i64 row uses the largest f64 strictly below 2^63 instead.
         // This is the same boundary the checked default enforces.
         let in_max: f64 = if target == Prim::Int64 {
             9_223_372_036_854_774_784.0
@@ -155,7 +155,7 @@ fn largest_in_range_value_succeeds_and_smallest_out_of_range_traps_overflow() {
         // A fraction ABOVE the largest in-range value still truncates
         // INTO range: this is the whole point of truncating before the
         // width check, and the compiled lane must agree (it truncates
-        // first too). int64 has no representable fractional neighbour at
+        // first too). i64 has no representable fractional neighbour at
         // that magnitude, so it uses a fractional value well inside.
         let (frac_high, frac_high_expected) = if target == Prim::Int64 {
             (
@@ -185,7 +185,7 @@ fn largest_in_range_value_succeeds_and_smallest_out_of_range_traps_overflow() {
             "{target:?}: and toward zero on the negative side too"
         );
 
-        // Just outside, both ends. int64's neighbours are not
+        // Just outside, both ends. i64's neighbours are not
         // representable in f64, so step by the f64 ulp at that
         // magnitude (2^63 exactly) rather than by 1.
         let (over, under) = if target == Prim::Int64 {
@@ -263,12 +263,12 @@ fn trap_messages_carry_the_cast_trunc_brand() {
     let domain = trunc_f64(f64::NAN, Prim::Int32).expect_err("NaN traps");
     assert_eq!(
         domain.to_string(),
-        format!("numeric trap: {NUMERIC_TRAP_DOMAIN_KIND} in cast_trunc at int32")
+        format!("numeric trap: {NUMERIC_TRAP_DOMAIN_KIND} in cast_trunc at i32")
     );
     let overflow = trunc_f64(1e30, Prim::Int32).expect_err("1e30 traps");
     assert_eq!(
         overflow.to_string(),
-        format!("numeric trap: {NUMERIC_TRAP_OVERFLOW_KIND} in cast_trunc at int32")
+        format!("numeric trap: {NUMERIC_TRAP_OVERFLOW_KIND} in cast_trunc at i32")
     );
 }
 
@@ -332,16 +332,16 @@ fn tensor_surface_traps_on_the_first_offending_element() {
 ///
 /// The narrow-width rows are the ones that actually bite: the bulk
 /// `finalize_tensor` path domain-checks the whole buffer before it
-/// width-checks any of it, so `[300.9, NaN] -> int8` reported `Domain`
-/// there while C reports `Overflow` at element 0. int64 alone is immune
-/// (both offenders are caught in the same pass), so testing only int32
-/// or int64 would have missed the divergence.
+/// width-checks any of it, so `[300.9, NaN] -> i8` reported `Domain`
+/// there while C reports `Overflow` at element 0. i64 alone is immune
+/// (both offenders are caught in the same pass), so testing only i32
+/// or i64 would have missed the divergence.
 #[test]
 fn mixed_offender_buffers_report_the_first_offender_in_order() {
     let cases: [(&str, Vec<f64>, Prim, NumericTrap); 6] = [
         // Out-of-range first, then non-finite.
         (
-            "[1e30, NaN] -> int32",
+            "[1e30, NaN] -> i32",
             vec![1e30, f64::NAN],
             Prim::Int32,
             NumericTrap::Overflow {
@@ -350,7 +350,7 @@ fn mixed_offender_buffers_report_the_first_offender_in_order() {
             },
         ),
         (
-            "[300.9, NaN] -> int8",
+            "[300.9, NaN] -> i8",
             vec![300.9, f64::NAN],
             Prim::Int8,
             NumericTrap::Overflow {
@@ -359,7 +359,7 @@ fn mixed_offender_buffers_report_the_first_offender_in_order() {
             },
         ),
         (
-            "[40000.5, inf] -> int16",
+            "[40000.5, inf] -> i16",
             vec![40000.5, f64::INFINITY],
             Prim::Int16,
             NumericTrap::Overflow {
@@ -369,7 +369,7 @@ fn mixed_offender_buffers_report_the_first_offender_in_order() {
         ),
         // Non-finite first, then out-of-range.
         (
-            "[NaN, 1e30] -> int32",
+            "[NaN, 1e30] -> i32",
             vec![f64::NAN, 1e30],
             Prim::Int32,
             NumericTrap::Domain {
@@ -378,7 +378,7 @@ fn mixed_offender_buffers_report_the_first_offender_in_order() {
             },
         ),
         (
-            "[NaN, 300.9] -> int8",
+            "[NaN, 300.9] -> i8",
             vec![f64::NAN, 300.9],
             Prim::Int8,
             NumericTrap::Domain {
@@ -387,7 +387,7 @@ fn mixed_offender_buffers_report_the_first_offender_in_order() {
             },
         ),
         (
-            "[-inf, 40000.5] -> int16",
+            "[-inf, 40000.5] -> i16",
             vec![f64::NEG_INFINITY, 40000.5],
             Prim::Int16,
             NumericTrap::Domain {
@@ -432,6 +432,6 @@ fn an_integer_source_has_no_truncating_cast() {
 #[should_panic(expected = "is not a float source")]
 fn a_sealed_integer_scalar_has_no_truncating_cast() {
     let sealed = chelis_types::scalar_from_i64("test_ingress", Prim::Int32, 3)
-        .expect("an in-range int32 ingress");
+        .expect("an in-range i32 ingress");
     let _ = cast_trunc_scalar("cast_trunc", sealed, Prim::Int64);
 }

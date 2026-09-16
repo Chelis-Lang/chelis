@@ -6,7 +6,7 @@ use chelis_compiler_api::schema::{EvalRequest, SourceKind};
 use std::collections::BTreeMap;
 
 const SOURCE: &str = include_str!("../../../tests/support/helper_summary_fatal.ch");
-const MESSAGE: &str = "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469";
+const MESSAGE: &str = "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an i64 literal or a shape(tensor, i32-axis) read. Tracked by Chelis-Lang/chelis#469";
 
 fn request(source: &str) -> EvalRequest {
     EvalRequest {
@@ -38,7 +38,7 @@ fn fatal_summary_diagnostic_returns_and_later_eval_recovers() {
         // the diagnostic text; this repair does not change the wire schema.
         assert_eq!(
             error.errors[0].message,
-            format!("{MESSAGE} at source span `surf:467..507`")
+            format!("{MESSAGE} at source span `surf:465..503`")
         );
         let valid = eval(request(
             "def sink_output(x: f32) -> f32 = add(x, 2.0)\noutput = sink_output(3.0)\n",

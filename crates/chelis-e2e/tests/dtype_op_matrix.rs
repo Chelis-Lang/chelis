@@ -126,7 +126,7 @@ fn tensor_to_scalar_i64() {
 fn tensor_to_scalar_i32() {
     unsafe {
         let t = alloc_scalar(CHELIS_DTYPE_I32);
-        // RT-4 F1: int32 tensors now use genuine int32 storage.
+        // RT-4 F1: i32 tensors now use genuine i32 storage.
         *i32::data_ptr_unchecked(t) = 42;
         let out = chelis_tensor_to_scalar(t);
         assert_eq!(out.dtype, CHELIS_DTYPE_I32);
@@ -399,7 +399,7 @@ unsafe fn alloc_vec_with_values(dtype: chelis_dtype, vals: &[f64]) -> *mut cheli
                 }
             }
             CHELIS_DTYPE_I32 => {
-                // RT-4 F1: int32 tensors now use genuine int32 storage
+                // RT-4 F1: i32 tensors now use genuine i32 storage
                 // (4 bytes), not the legacy f32-encoded convention.
                 let p = i32::data_ptr_unchecked(t);
                 for (i, v) in vals.iter().enumerate() {

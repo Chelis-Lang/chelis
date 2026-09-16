@@ -1401,7 +1401,7 @@ mod tests {
     /// other's cached contexts — checking programs under the other
     /// build's type semantics. Observed both directions on 0.18.2 vs a
     /// post-`#1130` `main`: a spurious `precision mismatch: expected
-    /// int32, got int64` on valid code, and (unsound) silent acceptance
+    /// i32, got i64` on valid code, and (unsound) silent acceptance
     /// of code the running binary would reject on a cold cache.
     #[test]
     fn cache_identity_uses_the_build_fingerprint_not_the_bare_version() {
@@ -1460,7 +1460,7 @@ mod tests {
         .expect("write app reef.toml");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef main_value() -> int32 = cast(7, int32)\n",
+            "module App.Main\n\ndef main_value() -> i32 = cast(7, i32)\n",
         )
         .expect("write main.ch");
         fs::write(
@@ -1473,7 +1473,7 @@ mod tests {
         .expect("write mylib reef.toml");
         fs::write(
             root.join("mylib/src/math.ch"),
-            "module Mylib.Math\nexport (add)\n\ndef add(x: int32, y: int32) -> int32 = cast(0, int32)\n",
+            "module Mylib.Math\nexport (add)\n\ndef add(x: i32, y: i32) -> i32 = cast(0, i32)\n",
         )
         .expect("write math.ch");
         // Hand-write a minimal reef.lock so prepare_reef_graph hits
@@ -1704,7 +1704,7 @@ mod tests {
         let (_second_dir, second_root) = path_dep_fixture();
         fs::write(
             second_root.join("src/main.ch"),
-            "module App.Main\n\ndef main_value() -> int32 = cast(8, int32)\n",
+            "module App.Main\n\ndef main_value() -> i32 = cast(8, i32)\n",
         )
         .expect("rewrite second main.ch");
         let second =

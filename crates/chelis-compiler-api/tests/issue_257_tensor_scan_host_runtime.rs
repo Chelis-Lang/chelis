@@ -64,9 +64,9 @@ fn issue257_tensor_scan_int64_n20000_does_not_overflow() {
     // The callback `(prev, _i) -> add(prev, 1)` produces 1..=n.
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(20000, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(20000, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -82,9 +82,9 @@ fn issue257_tensor_scan_int64_n40000_does_not_overflow() {
     // (30720 fc1 + 10080 fc2 + 840 fc3 ≈ 41.6k Glorot weights).
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(40000, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(40000, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -104,9 +104,9 @@ fn issue257_tensor_scan_int64_small_n_matches_fold_oracle() {
     // Same callback as above. For n=8 we expect [1, 2, 3, 4, 5, 6, 7, 8].
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(8, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(8, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -118,14 +118,14 @@ out = tensor_scan(
 
 #[test]
 fn issue257_tensor_scan_int64_uses_index_argument() {
-    // Confirm the `int64` index argument is wired correctly: the
+    // Confirm the `i64` index argument is wired correctly: the
     // callback receives `i` and the accumulator. For
     // `fn (_, i) -> i`, the output is [0, 1, 2, 3, 4].
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (_prev: int64, i: int64) -> i,
-  cast(5, int64)
+  cast(0, i64),
+  fn (_prev: i64, i: i64) -> i,
+  cast(5, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -138,9 +138,9 @@ out = tensor_scan(
 fn issue257_tensor_scan_zero_length_returns_empty_tensor() {
     let src = r#"
 out = tensor_scan(
-  cast(7, int64),
-  fn (prev: int64, _i: int64) -> prev,
-  cast(0, int64)
+  cast(7, i64),
+  fn (prev: i64, _i: i64) -> prev,
+  cast(0, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -159,9 +159,9 @@ out = tensor_scan(
 fn issue257_tensor_scan_negative_length_rejected() {
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> prev,
-  cast(-1, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> prev,
+  cast(-1, i64)
 )
 "#;
     let result = eval(EvalRequest {
@@ -180,13 +180,13 @@ out = tensor_scan(
 fn issue257_tensor_scan_non_callable_second_arg_rejected() {
     // Passing an int where a callback belongs must be caught.
     // This will likely fail at type-check (the callback slot wants a
-    // `(T, int64) -> T` function); the durable invariant is that the
+    // `(T, i64) -> T` function); the durable invariant is that the
     // user gets a tensor_scan-specific error message.
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  cast(42, int64),
-  cast(5, int64)
+  cast(0, i64),
+  cast(42, i64),
+  cast(5, i64)
 )
 "#;
     let result = eval(EvalRequest {
@@ -207,7 +207,7 @@ out = tensor_scan(
 #[test]
 fn issue257_tensor_scan_wrong_arity_rejected() {
     let src = r#"
-out = tensor_scan(cast(0, int64), cast(5, int64))
+out = tensor_scan(cast(0, i64), cast(5, i64))
 "#;
     let result = eval(EvalRequest {
         source_kind: SourceKind::Surf,
@@ -231,7 +231,7 @@ out = tensor_scan(cast(0, int64), cast(5, int64))
 // ---------------------------------------------------------------------------
 // Precision pinning: the output tensor's dtype must follow the initial
 // value's dtype, end-to-end. Two positive cases that pin precision
-// without going through a generic int64 path, plus a runtime-level
+// without going through a generic i64 path, plus a runtime-level
 // dtype-mismatch guard (the type checker normally catches this; the
 // runtime arm is the belt-and-suspenders for value-level shenanigans).
 // ---------------------------------------------------------------------------
@@ -243,8 +243,8 @@ fn issue257_tensor_scan_f32_initial_value_produces_correct_values() {
     let src = r#"
 out = tensor_scan(
   cast(1.0, f32),
-  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
-  cast(4, int64)
+  fn (prev: f32, _i: i64) -> mul(prev, cast(2.0, f32)),
+  cast(4, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -260,8 +260,8 @@ fn issue257_tensor_scan_bool_initial_value_produces_correct_values() {
     let src = r#"
 out = tensor_scan(
   true,
-  fn (prev: bool, _i: int64) -> not(prev),
-  cast(4, int64)
+  fn (prev: bool, _i: i64) -> not(prev),
+  cast(4, i64)
 )
 "#;
     let result = eval_surf(src);
@@ -283,9 +283,9 @@ out = tensor_scan(
 fn issue257_tensor_scan_build_target_c_rejected() {
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(8, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(8, i64)
 )
 "#;
     let result = compile(CompileRequest {
@@ -324,9 +324,9 @@ out = tensor_scan(
 fn issue257_tensor_scan_build_target_hip_rejected() {
     let src = r#"
 out = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(8, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(8, i64)
 )
 "#;
     let result = compile(CompileRequest {
@@ -356,9 +356,9 @@ fn issue257_tensor_scan_grad_rejected_with_tagged_error() {
     let src = r#"
 target = fn (x: f32) -> sum(tensor_scan(
   x,
-  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
-  cast(4, int64)
-), cast(0, int32))
+  fn (prev: f32, _i: i64) -> mul(prev, cast(2.0, f32)),
+  cast(4, i64)
+), cast(0, i32))
 out = grad(target)(cast(1.0, f32))
 "#;
     let result = eval(EvalRequest {
@@ -396,9 +396,9 @@ fn issue257_grad_unrelated_tensor_scan_def_does_not_block() {
     // `grad(target)` is a pure tensor-lane function and must succeed.
     let src = r#"
 unrelated = tensor_scan(
-  cast(0, int64),
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(4, int64)
+  cast(0, i64),
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(4, i64)
 )
 target = fn (x: f32) -> mul(x, cast(2.0, f32))
 out = grad(target)(cast(1.0, f32))
@@ -451,12 +451,12 @@ out = grad(target)(cast(1.0, f32))
 fn issue257_tensor_scan_build_c_rejected_inside_map_callback() {
     let src = r#"
 out = map(
-  fn (x: int64) -> tensor_scan(
+  fn (x: i64) -> tensor_scan(
     x,
-    fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-    cast(3, int64)
+    fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+    cast(3, i64)
   ),
-  [cast(1, int64), cast(2, int64)]
+  [cast(1, i64), cast(2, i64)]
 )
 "#;
     let result = compile(CompileRequest {
@@ -481,12 +481,12 @@ out = map(
 #[test]
 fn issue257_tensor_scan_build_c_rejected_inside_named_helper() {
     let src = r#"
-def builder(x: int64) -> tensor[*, int64] = tensor_scan(
+def builder(x: i64) -> tensor[*, i64] = tensor_scan(
   x,
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(3, int64)
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(3, i64)
 )
-out = map(builder, [cast(1, int64), cast(2, int64)])
+out = map(builder, [cast(1, i64), cast(2, i64)])
 "#;
     let result = compile(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -520,8 +520,8 @@ fn issue257_tensor_scan_vmap_rejected_with_tagged_error() {
     let src = r#"
 target = fn (row: tensor[1, f32]) -> tensor_scan(
   cast(0.0, f32),
-  fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
-  cast(4, int64)
+  fn (prev: f32, _i: i64) -> mul(prev, cast(2.0, f32)),
+  cast(4, i64)
 )
 out = vmap(target)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
 "#;
@@ -569,10 +569,10 @@ out = vmap(target)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
 #[test]
 fn issue257_tensor_scan_build_c_rejected_in_unreachable_helper() {
     let src = r#"
-def helper(x: int64) -> tensor[*, int64] = tensor_scan(
+def helper(x: i64) -> tensor[*, i64] = tensor_scan(
   x,
-  fn (prev: int64, _i: int64) -> add(prev, cast(1, int64)),
-  cast(3, int64)
+  fn (prev: i64, _i: i64) -> add(prev, cast(1, i64)),
+  cast(3, i64)
 )
 def main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)
 "#;

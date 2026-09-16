@@ -280,7 +280,7 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
 
 fn zero_elements(precision: &str, len: usize) -> Result<TensorElements, String> {
     use chelis_types::{RawTensor, finalize_tensor, types::Prim};
-    let prim = Prim::parse_name(precision)
+    let prim = Prim::parse_interchange_name(precision)
         .filter(|prim| prim.runtime_dtype().is_ok())
         .ok_or_else(|| {
             format!("eval failed\n- cannot auto-evaluate non-runtime dtype `{precision}`")
@@ -366,7 +366,7 @@ mod tests {
             "f64", "f32", "f16", "bf16", "int64", "int32", "int16", "int8", "bool",
         ] {
             let storage = zero_elements(name, 2).expect("declared zeros");
-            assert_eq!(storage.prim().name(), name);
+            assert_eq!(storage.prim().interchange_name(), name);
             assert_eq!(storage.len(), 2);
             assert_eq!(storage.to_f64_lossy_vec(), vec![0.0, 0.0]);
         }

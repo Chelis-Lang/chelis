@@ -147,7 +147,7 @@ fn authored_generic_wrappers_must_declare_collection_constructors() {
     for (operation, source) in [
         ("len", "def size(x) = len(x)\n"),
         ("len", "def size(x) = len(x)\nout = size([1i32])\n"),
-        ("len", "def size[a](x: a) -> int64 = len(x)\n"),
+        ("len", "def size[a](x: a) -> i64 = len(x)\n"),
         ("len", "measure = fn (x) -> len(x)\n"),
         ("len", "measure = len\ndef size(x) = measure(x)\n"),
         (
@@ -176,18 +176,18 @@ fn authored_generic_wrappers_must_declare_collection_constructors() {
 fn explicit_list_and_dict_contracts_are_sufficient() {
     accepts(
         "explicit List length",
-        "def size[a](xs: List[a]) -> int64 = len(xs)\nout = size([1i32])\n",
+        "def size[a](xs: List[a]) -> i64 = len(xs)\nout = size([1i32])\n",
     );
     accepts(
         "explicit Dict length",
-        "def size[k, v](xs: Dict[k, v]) -> int64 = len(xs)\n\
+        "def size[k, v](xs: Dict[k, v]) -> i64 = len(xs)\n\
          keys: List[string] = [\"a\"]\n\
-         values: List[int64] = [1i64]\n\
+         values: List[i64] = [1i64]\n\
          out = size(dict_of(zip(keys, values)))\n",
     );
     accepts(
         "explicit collection relations",
-        "def at[a](xs: List[a], i: int64) -> a = index(xs, i)\n\
+        "def at[a](xs: List[a], i: i64) -> a = index(xs, i)\n\
          def push[a](xs: List[a], x: a) -> List[a] = append(xs, x)\n\
          def join[a](lhs: List[a], rhs: List[a]) -> List[a] = concat(lhs, rhs)\n\
          first = at([1i64], 0i64)\n\
@@ -196,7 +196,7 @@ fn explicit_list_and_dict_contracts_are_sufficient() {
     );
     rejects_type_mismatch(
         "checked user function type survives aliasing",
-        "def size[a](xs: List[a]) -> int64 = len(xs)\n\
+        "def size[a](xs: List[a]) -> i64 = len(xs)\n\
          measure = size\n\
          out = measure(1i64)\n",
     );
@@ -206,14 +206,14 @@ fn explicit_list_and_dict_contracts_are_sufficient() {
 fn local_first_application_remains_monomorphic() {
     accepts(
         "local list binding",
-        "def use(xs: List[int64]) -> int64 = {\n\
+        "def use(xs: List[i64]) -> i64 = {\n\
          measure = fn (x) -> len(x)\n\
          measure(xs)\n\
          }\n",
     );
     rejects(
         "local scalar binding",
-        "def use(x: int64) -> int64 = {\n\
+        "def use(x: i64) -> i64 = {\n\
          measure = fn (value) -> len(value)\n\
          measure(x)\n\
          }\n",
@@ -239,7 +239,7 @@ fn builtin_contracts_survive_alias_return_aggregate_and_higher_order_passage() {
     );
     for source in [
         "measure = len\nout = measure([1i64])\n",
-        "measure = len\nout: int64 = measure([1i64])\n",
+        "measure = len\nout: i64 = measure([1i64])\n",
         "def identity(f) = f\nmeasure = identity(len)\nout = measure([1i64])\n",
         "def invoke(f, x) = f(x)\nout = invoke(len, [1i64])\n",
         "def choose(flag: bool) = if flag then len else len\nmeasure = choose(true)\nout = measure([1i64])\n",
@@ -264,9 +264,9 @@ fn each_collection_relation_survives_indirect_calls() {
         rejects("transported relation", source, operation);
     }
     for source in [
-        "op = index\nout: int64 = op([1i64], 0i64)\n",
-        "op = append\nout: List[int64] = op([1i64], 2i64)\n",
-        "op = concat\nout: List[int64] = op([1i64], [2i64])\n",
+        "op = index\nout: i64 = op([1i64], 0i64)\n",
+        "op = append\nout: List[i64] = op([1i64], 2i64)\n",
+        "op = concat\nout: List[i64] = op([1i64], [2i64])\n",
         "op = concat\nout = op([to_tensor([1.0f32])], 0i32)\n",
     ] {
         accepts("valid transported relation", source);
@@ -325,8 +325,8 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
         ),
         (
             "recursive return",
-            "def choose_concat(n: int32) \
-             -> List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = \
+            "def choose_concat(n: i32) \
+             -> List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = \
              if n == 0i32 then concat else choose_concat(n - 1i32)\n\
              def bad(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 99, f32] = {\n\
              op = choose_concat(1i32)\n\
@@ -337,7 +337,7 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
         (
             "monomorphic annotated alias",
             "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
-             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+             op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
              op([a, b], 1i32)\n\
              }\n"
             .to_string(),
@@ -345,7 +345,7 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
         (
             "nested monomorphic function value",
             "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 99, f32] = {\n\
-             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+             op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
              nested = (op, 1i32).0\n\
              nested([a, b], 1i32)\n\
              }\n"
@@ -373,7 +373,7 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
         (
             "monomorphic annotated alias",
             "def bad(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-             op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+             op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
              op([a, b], 9i32)\n\
              }\n"
             .to_string(),
@@ -396,18 +396,18 @@ fn tensor_concat_transport_preserves_axis_and_exact_result_equations() {
          op([a, b], 0i32)\n\
          }\n",
         "def good(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          op([a, b], 1i32)\n\
          }\n",
-        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+        "def dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: i32) \
          -> tensor[*, *, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          op([a, b], axis)\n\
          }\n",
-        "def direct_dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: int32) \
+        "def direct_dynamic(a: tensor[2, 3, f32], b: tensor[2, 3, f32], axis: i32) \
          -> tensor[*, *, f32] = concat([a, b], axis)\n",
-        "def choose_concat(n: int32) \
-         -> List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = \
+        "def choose_concat(n: i32) \
+         -> List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = \
          if n == 0i32 then concat else choose_concat(n - 1i32)\n\
          def good(a: tensor[2, 3, f32], b: tensor[2, 4, f32]) -> tensor[2, 7, f32] = {\n\
          op = choose_concat(1i32)\n\
@@ -423,7 +423,7 @@ fn tensor_concat_call_evidence_is_owned_and_cleaned_up_per_application() {
     accepts(
         "one alias supports independent axis equations",
         "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, *, f32] = concat\n\
          rows: tensor[4, 3, f32] = op([a, b], 0i32)\n\
          cols: tensor[2, 6, f32] = op([a, b], 1i32)\n\
          cols\n\
@@ -432,8 +432,8 @@ fn tensor_concat_call_evidence_is_owned_and_cleaned_up_per_application() {
     accepts(
         "independently specialized aliases do not share evidence",
         "def both(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         rows_op: List[tensor[2, 3, f32]] -> int32 -> tensor[*, 3, f32] = concat\n\
-         cols_op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         rows_op: List[tensor[2, 3, f32]] -> i32 -> tensor[*, 3, f32] = concat\n\
+         cols_op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          rows: tensor[4, 3, f32] = rows_op([a, b], 0i32)\n\
          cols: tensor[2, 6, f32] = cols_op([a, b], 1i32)\n\
          cols\n\
@@ -442,7 +442,7 @@ fn tensor_concat_call_evidence_is_owned_and_cleaned_up_per_application() {
     rejects_once(
         "a failed call does not poison the following valid call",
         "def mixed(a: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> tensor[2, 6, f32] = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          bad = op([a, b], 9i32)\n\
          good: tensor[2, 6, f32] = op([a, b], 1i32)\n\
          good\n\
@@ -498,7 +498,7 @@ fn checked_contracts_survive_serialized_library_contexts() {
     .unwrap_or_else(|errors| panic!("{}", rendered(&errors).join("\n")));
 
     let invalid_monomorphic_tensor_concat = "def exported() = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          op\n\
          }\n\
          join = exported()\n\
@@ -517,7 +517,7 @@ fn checked_contracts_survive_serialized_library_contexts() {
     );
     serialized_context(
         "def exported() = {\n\
-         op: List[tensor[2, 3, f32]] -> int32 -> tensor[2, *, f32] = concat\n\
+         op: List[tensor[2, 3, f32]] -> i32 -> tensor[2, *, f32] = concat\n\
          op\n\
          }\n\
          join = exported()\n\
@@ -531,13 +531,13 @@ fn checked_contracts_survive_serialized_library_contexts() {
 fn recursive_indirect_calls_keep_the_checked_contract() {
     accepts(
         "recursive indirect list call",
-        "def invoke(n: int32, f: List[int64] -> int64, xs: List[int64]) -> int64 =\n\
+        "def invoke(n: i32, f: List[i64] -> i64, xs: List[i64]) -> i64 =\n\
            if n == 0i32 then f(xs) else invoke(n - 1i32, f, xs)\n\
          out = invoke(1i32, len, [1i64])\n",
     );
     rejects(
         "recursive indirect scalar call",
-        "def invoke(n: int32, f: int64 -> int64, x: int64) -> int64 =\n\
+        "def invoke(n: i32, f: i64 -> i64, x: i64) -> i64 =\n\
            if n == 0i32 then f(x) else invoke(n - 1i32, f, x)\n\
          out = invoke(1i32, len, 1i64)\n",
         "len",

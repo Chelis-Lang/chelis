@@ -28,7 +28,7 @@ fn issue_1205_source(operations: usize, flat: bool) -> String {
     ];
     if flat {
         lines.push(
-            "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+            "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
              if gte(i, 5i64) then s else {"
                 .to_string(),
         );
@@ -47,7 +47,7 @@ fn issue_1205_source(operations: usize, flat: bool) -> String {
             body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
         }
         lines.push(format!(
-            "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+            "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
              if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
         ));
     }

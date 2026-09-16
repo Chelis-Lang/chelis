@@ -1,2 +1,2 @@
-values: List[(string, int64)] = [("a", 1i64)]
+values: List[(string, i64)] = [("a", 1i64)]
 out = len(values)

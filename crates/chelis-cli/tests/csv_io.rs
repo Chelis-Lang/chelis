@@ -250,7 +250,7 @@ done = write_file("{}", to_json(JsonFloat(index(px, 0))))
     );
 }
 
-/// Integer columns end-to-end ([05-OP-3] / [04-NUM-11]): an int64 ID
+/// Integer columns end-to-end ([05-OP-3] / [04-NUM-11]): an i64 ID
 /// column above 2^53 reads exactly through `to_int`, survives
 /// `JsonInt` -> `to_json`/`to_csv` output assembly bit-exactly, and the same
 /// column read through `to_float` is the *named* lossy widening -- the
@@ -273,11 +273,11 @@ def required_cell(row: Dict[string, string], column: string) -> string = match d
   | Some(text) => text
   | None => fail(string_concat("required CSV column missing: `", string_concat(column, "`")))
 }}
-def integer_cell(row: Dict[string, string], column: string) -> int64 = match to_int(required_cell(row, column)) with {{
+def integer_cell(row: Dict[string, string], column: string) -> i64 = match to_int(required_cell(row, column)) with {{
   | Some(number) => number
   | None => fail(string_concat("integer_column: column `", string_concat(column, "` contains a value that is not an integer; use to_float for a named lossy conversion")))
 }}
-def integer_column(rows: List[Dict[string, string]], column: string) -> List[int64] = map(fn (row: Dict[string, string]) -> integer_cell(row, column), rows)
+def integer_column(rows: List[Dict[string, string]], column: string) -> List[i64] = map(fn (row: Dict[string, string]) -> integer_cell(row, column), rows)
 def float_column(rows: List[Dict[string, string]], column: string) -> List[f64] = map(fn (row: Dict[string, string]) -> match to_float(required_cell(row, column)) with {{
   | Some(number) => number
   | None => fail(string_concat("float_column: column `", string_concat(column, "` contains a non-numeric value")))

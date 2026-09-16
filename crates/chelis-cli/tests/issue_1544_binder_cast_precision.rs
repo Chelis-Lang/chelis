@@ -19,7 +19,7 @@ const TENSOR: &str = "module Bind.Main\nexport (main)\n\
  def at_f64() -> tensor[1, f64] = scale(to_tensor([3.0f64]))\n\
  def main() -> tensor[1, f64] = at_f64()\n";
 const TENSOR_NATIVE: &str = "module Bind.Main\nexport (main)\n\
- def scale[p: Float](x: tensor[3, p]) -> tensor[3, p] = mul(x, insert(scalar_to_tensor(cast(0.1, p)), cast(0, int32), cast(3, int64)))\n\
+ def scale[p: Float](x: tensor[3, p]) -> tensor[3, p] = mul(x, insert(scalar_to_tensor(cast(0.1, p)), cast(0, i32), cast(3, i64)))\n\
  def at_f64() -> tensor[3, f64] = scale(to_tensor([3.0f64, 3.0f64, 3.0f64]))\n\
  def main() -> tensor[3, f64] = at_f64()\n";
 
@@ -102,8 +102,8 @@ const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
            (cast {}\n\
              (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
              (t-var {} p)))))\n\
-     (defsig {} main (t-fn {} (t-prim {} int64)))\n\
-     (def {} main (fn {} (params {}) (app {} (var {} addk) (lit {type: (t-prim {} int64)} 0)))))\n";
+     (defsig {} main (t-fn {} (t-prim {} i64)))\n\
+     (def {} main (fn {} (params {}) (app {} (var {} addk) (lit {type: (t-prim {} i64)} 0)))))\n";
 
 /// A single type stamp preserves the source narrow in both execution lanes.
 /// Duplicate stamps are now rejected uniformly by [03-META-1], below.
@@ -167,14 +167,14 @@ const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n
                (cast {}\n\
                  (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
                  (t-var {} p)))\n\
-             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int32)} 0) (t-prim {} int32))\n\
-             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int64)} 1) (t-prim {} int64))))))\n\
-     (defsig {} main (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} int64))))\n\
+             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i32)} 0) (t-prim {} i32))\n\
+             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} i64)} 1) (t-prim {} i64))))))\n\
+     (defsig {} main (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} i64))))\n\
      (def {} main\n\
        (fn {} (params {})\n\
          (app {} (var {} addk)\n\
            (app {} (var {} to_tensor)\n\
-             (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 0) (var {} Nil)))))))\n";
+             (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 0) (var {} Nil)))))))\n";
 
 /// The single-stamp control also preserves the source narrow on the tensor
 /// lowering lane, which finalizes the literal directly at f32.
@@ -261,7 +261,7 @@ fn undeclared_and_unbounded_targets_fail_all_lanes() {
 #[test]
 fn integer_literals_adopt_every_compatible_family() {
     for family in ["Int", "Float", "Numeric"] {
-        let ty = if family == "Int" { "int64" } else { "f64" };
+        let ty = if family == "Int" { "i64" } else { "f64" };
         let source = format!(
             "module Bind.Main\nexport (main)\ndef addk[p: {family}](x: p) -> p = add(x, cast(1, p))\ndef main() -> {ty} = addk(41{suffix})\n",
             suffix = if family == "Int" { "i64" } else { ".0f64" }
@@ -277,7 +277,7 @@ fn adopted_integer_literals_must_fit_every_family_member() {
         for literal in ["128", "-129"] {
             reject(
                 &format!(
-                    "module Bind.Main\nexport (main)\ndef value[p: {family}](x: p) -> p = cast({literal}, p)\ndef main() -> int64 = value(0i64)\n"
+                    "module Bind.Main\nexport (main)\ndef value[p: {family}](x: p) -> p = cast({literal}, p)\ndef main() -> i64 = value(0i64)\n"
                 ),
                 "§5.6",
             );
@@ -294,14 +294,14 @@ fn numeric_cross_family_float_literal_preserves_source_default() {
         let source = format!(
             "module Bind.Main\nexport (main)\n\
              def addk[p: Numeric](x: p) -> p = add(x, cast({literal}, p))\n\
-             def main() -> int64 = addk(0i64)\n"
+             def main() -> i64 = addk(0i64)\n"
         );
         assert_native(name, &source, &format!("main = {expected}"));
     }
 
     let tensor = "module Bind.Main\nexport (main)\n\
-                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, insert(scalar_to_tensor(cast(16777217.0, p)), cast(0, int32), cast(1, int64)))\n\
-                  def main() -> tensor[1, int64] = addk(to_tensor([0i64]))\n";
+                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, insert(scalar_to_tensor(cast(16777217.0, p)), cast(0, i32), cast(1, i64)))\n\
+                  def main() -> tensor[1, i64] = addk(to_tensor([0i64]))\n";
     assert_native(
         "tensor_cross_family",
         tensor,

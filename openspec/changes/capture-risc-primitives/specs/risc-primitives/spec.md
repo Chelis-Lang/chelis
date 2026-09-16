@@ -98,7 +98,7 @@ SHALL be valid on float types only, and each SHALL carry its defined AD adjoint.
 
 ### Requirement: Reduction axis and accumulator
 
-A reduction axis SHALL be a compile-time constant (literal or `cast(N, int32)`); a runtime axis
+A reduction axis SHALL be a compile-time constant (literal or `cast(N, i32)`); a runtime axis
 SHALL be rejected at the call site. Negative axes SHALL index from the end uniformly across
 axis-taking primitives. `sum` SHALL carry a populated accumulator-precision field resolved to
 the documented default when omitted; an explicitly narrower-than-default accumulator SHALL be a
@@ -111,7 +111,7 @@ type error.
 
 #### Scenario: Runtime axis is rejected
 
-- **WHEN** a reduction axis is a runtime `int32` parameter
+- **WHEN** a reduction axis is a runtime `i32` parameter
 - **THEN** it is rejected at the reduction call site naming the compile-time-constant requirement
 
 ### Requirement: Windowed reductions

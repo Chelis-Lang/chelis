@@ -22,9 +22,9 @@ fn function_alias_program_checks_evaluates_and_builds_its_concrete_result() {
     for annotated in [false, true] {
         let dir = TempDir::new().unwrap();
         let source = format!(
-            "module Aliases\ndef anchor(x: int32) -> int32 = x\n{} = anchor\ndef user() -> int32 = alias(1)\n",
+            "module Aliases\ndef anchor(x: i32) -> i32 = x\n{} = anchor\ndef user() -> i32 = alias(1)\n",
             if annotated {
-                "alias: (int32) -> int32"
+                "alias: (i32) -> i32"
             } else {
                 "alias"
             }

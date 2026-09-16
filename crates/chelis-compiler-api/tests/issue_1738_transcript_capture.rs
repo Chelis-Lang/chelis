@@ -46,7 +46,7 @@ fn closed_capture_does_not_suppress_the_library_result() {
 fn request(body: &str) -> EvalRequest {
     EvalRequest {
         source_kind: SourceKind::Surf,
-        source: format!("def run() -> int64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n"),
+        source: format!("def run() -> i64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n"),
         bindings: BTreeMap::new(),
     }
 }

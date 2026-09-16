@@ -10,8 +10,8 @@ def test_normal_cdf_reference_values() -> unit ! { Test } = {
   assert_close(reflected, cast(1.0, f32), cast(0.0002, f32), "N(-x) + N(x) = 1")
 }
 def test_contract_fuzz_metadata() -> unit ! { Test } = {
-  _ = assert_eq(normal_cdf_contract_samples(), cast(8192, int64), "normal CDF fuzz sample count")
-  expected_seed = add(mul(cast(3235848, int64), cast(1000, int64)), cast(230, int64))
+  _ = assert_eq(normal_cdf_contract_samples(), cast(8192, i64), "normal CDF fuzz sample count")
+  expected_seed = add(mul(cast(3235848, i64), cast(1000, i64)), cast(230, i64))
   _ = assert_eq(normal_cdf_contract_seed(), expected_seed, "normal CDF fuzz seed")
   assert_true(gt(standard_contract_tolerance(), cast(0.0, f32)), "contract tolerance is positive")
 }

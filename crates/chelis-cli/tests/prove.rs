@@ -453,7 +453,7 @@ module_prefix = "Demo"
         r#"module Demo.Clf
 export (forward)
 
-def w() = reshape(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [cast(1, int64), cast(2, int64)])
+def w() = reshape(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [cast(1, i64), cast(2, i64)])
 
 def forward(x: tensor[1, 2, f32]) = mul(x, w())
 
@@ -524,9 +524,9 @@ def forward(x: tensor[1, 2, f32]) = mul(x, w())
 #[test]
 fn prove_bare_file_still_rejects_forged_linker_name() {
     let dir = write_prop(
-        r#"def pkg__demo__Demo__Clf__sneaky() -> int32 = 7
+        r#"def pkg__demo__Demo__Clf__sneaky() -> i32 = 7
 
-@property forged forall(x: int32):
+@property forged forall(x: i32):
   {
     _ = pkg__demo__Demo__Clf__sneaky()
     x == x
@@ -2023,34 +2023,34 @@ fn whitelist_corpus_never_aborts_cvc5() {
     let corpus: &[&str] = &[
         // --- user @property shapes ---
         // sqrt over an int param (transcendental-over-Int abort shape).
-        "module M\n@property sqrt_int forall(n: int32):\n  sqrt(n) >= 0.0\n",
+        "module M\n@property sqrt_int forall(n: i32):\n  sqrt(n) >= 0.0\n",
         // min/max mixing an int param and a float literal (mixed-sort min/max).
-        "module M\n@property min_mixed forall(n: int32):\n  min(n, 0.5) <= 0.5\n",
-        "module M\n@property max_mixed forall(n: int32):\n  max(n, 0.5) >= 0.5\n",
+        "module M\n@property min_mixed forall(n: i32):\n  min(n, 0.5) <= 0.5\n",
+        "module M\n@property max_mixed forall(n: i32):\n  max(n, 0.5) >= 0.5\n",
         // a bool param compared with an int param (Bool-vs-Int comparison).
-        "module M\n@property bool_vs_int forall(b: bool, n: int32):\n  b == (n >= 0)\n",
+        "module M\n@property bool_vs_int forall(b: bool, n: i32):\n  b == (n >= 0)\n",
         // nested intrinsics over reals (lowerable -- must NOT abort, may prove).
         "module M\n@property nested_real forall(x: f32):\n  sqrt(abs(x)) >= 0.0\n",
         // exp/sin/cos over an int param (more transcendental-over-Int shapes).
-        "module M\n@property exp_int forall(n: int32):\n  exp(n) >= 0.0\n",
-        "module M\n@property sin_int forall(n: int32):\n  sin(n) <= 1.0\n",
+        "module M\n@property exp_int forall(n: i32):\n  exp(n) >= 0.0\n",
+        "module M\n@property sin_int forall(n: i32):\n  sin(n) <= 1.0\n",
         // a clean f32 linear property (the flagship -- must still run clean).
         "module M\n@property linear_real forall(x: f32):\n  (x - 1.0) <= x\n",
         // int comparison against an int literal (all-int -- clean).
-        "module M\n@property int_cmp forall(n: int32) where n >= 0:\n  n + 1 >= 1\n",
+        "module M\n@property int_cmp forall(n: i32) where n >= 0:\n  n + 1 >= 1\n",
         // mixed int/real arithmetic in one comparison (Int-vs-Real abort shape).
-        "module M\n@property mixed_arith forall(n: int32, x: f32):\n  n + x >= 0.0\n",
+        "module M\n@property mixed_arith forall(n: i32, x: f32):\n  n + x >= 0.0\n",
         // --- opaque invariants whose DERIVED obligation reaches Tier B/cvc5 ---
         // The f32 flagship: the obligation proves at proof_tier:smt (the
         // whitelist must admit it).
         "module M\nexport (probability)\n@opaque\n@invariant(p) p.value >= 0.0 && p.value <= 1.0\ntype Probability =\n  | Probability { value: f32 }\ndef probability(x: f32) -> Option[Probability] =\n  if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None\n",
-        // An int32-field opaque: the obligation lowers an all-Int comparison
+        // An i32-field opaque: the obligation lowers an all-Int comparison
         // (the whitelist admits it; a mistaken Real-const lowering would have
         // aborted).
-        "module M\nexport (mk)\n@opaque\n@invariant(c) c.n >= 0\ntype Counter =\n  | Counter { n: int32 }\ndef mk(x: int32) -> Option[Counter] =\n  if x >= 0 then Some(Counter { n: x }) else None\n",
-        // An int8-field opaque: the obligation lowers an all-int8 comparison
+        "module M\nexport (mk)\n@opaque\n@invariant(c) c.n >= 0\ntype Counter =\n  | Counter { n: i32 }\ndef mk(x: i32) -> Option[Counter] =\n  if x >= 0 then Some(Counter { n: x }) else None\n",
+        // An i8-field opaque: the obligation lowers an all-i8 comparison
         // (single-source int width; the obligation must not abort).
-        "module M\nexport (mk8)\n@opaque\n@invariant(c) c.n >= (0 : int8)\ntype Counter8 =\n  | Counter8 { n: int8 }\ndef mk8(x: int8) -> Option[Counter8] =\n  if x >= (0 : int8) then Some(Counter8 { n: x }) else None\n",
+        "module M\nexport (mk8)\n@opaque\n@invariant(c) c.n >= (0 : i8)\ntype Counter8 =\n  | Counter8 { n: i8 }\ndef mk8(x: i8) -> Option[Counter8] =\n  if x >= (0 : i8) then Some(Counter8 { n: x }) else None\n",
         // A tensor-field opaque with a sqrt invariant over a Real sum (the
         // intrinsic-over-Real path; must not abort).
         "module M\nexport (mk_simplex)\n@opaque\n@invariant(p) sqrt(sum(p.weights)) >= 0.0\ntype Simplex =\n  | Simplex { weights: tensor[3, f32] }\ndef mk_simplex(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }\n",
@@ -2873,7 +2873,7 @@ fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
     let fixtures = [
         (
             "named",
-            r#"def integer_value(x: f32) -> int32 = 1
+            r#"def integer_value(x: f32) -> i32 = 1
 @property integer_grad_zero forall(x: f32):
   grad(integer_value, wrt=x)(x) == 0.0
 "#,

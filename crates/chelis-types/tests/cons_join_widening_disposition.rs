@@ -58,8 +58,8 @@ fn summary(errors: &[CheckError]) -> String {
 #[test]
 fn mismatched_literal_element_dims_widen_and_satisfy_an_unrelated_extent() {
     let accepted = check(
-        "def sink(xs: List[tensor[9, f32]]) -> int32 = 0\n\
-         def f(a: tensor[2, f32], b: tensor[3, f32]) -> int32 = sink([a, b])\n",
+        "def sink(xs: List[tensor[9, f32]]) -> i32 = 0\n\
+         def f(a: tensor[2, f32], b: tensor[3, f32]) -> i32 = sink([a, b])\n",
     );
     assert!(
         accepted.is_ok(),
@@ -76,7 +76,7 @@ fn mismatched_literal_element_dims_widen_and_satisfy_an_unrelated_extent() {
 #[test]
 fn a_mismatched_literal_element_list_is_accepted_on_its_own() {
     let accepted = check(
-        "def f(a: tensor[2, f32], b: tensor[3, f32]) -> int32 = {\n  \
+        "def f(a: tensor[2, f32], b: tensor[3, f32]) -> i32 = {\n  \
          xs = [a, b]\n  \
          0\n\
          }\n",
@@ -94,8 +94,8 @@ fn a_mismatched_literal_element_list_is_accepted_on_its_own() {
 #[test]
 fn a_mismatched_element_rank_is_still_rejected() {
     let errors = check(
-        "def sink(xs: List[tensor[9, f32]]) -> int32 = 0\n\
-         def f(a: tensor[2, f32], b: tensor[3, 4, f32]) -> int32 = sink([a, b])\n",
+        "def sink(xs: List[tensor[9, f32]]) -> i32 = 0\n\
+         def f(a: tensor[2, f32], b: tensor[3, 4, f32]) -> i32 = sink([a, b])\n",
     )
     .expect_err("rank-uniform elements are required");
     assert!(

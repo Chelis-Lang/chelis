@@ -97,7 +97,7 @@ module_prefix = "Test"
 {deps_toml}"#,
         compiler = CURRENT_COMPILER_PIN,
     );
-    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> int32 = 0\n";
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> i32 = 0\n";
 
     let mut tar_bytes = Vec::new();
     {

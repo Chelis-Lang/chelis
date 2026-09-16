@@ -2487,7 +2487,7 @@ mod tests {
 
     #[test]
     fn w5_flagship_int32_comparison_still_proves() {
-        // int32 comparison with a precondition: n >= 0 => n + 1 >= 1.
+        // i32 comparison with a precondition: n >= 0 => n + 1 >= 1.
         let prop = SmtProperty {
             variables: vec![("n".to_string(), SmtSort::Int)],
             preconditions: vec![SmtExpr::Cmp(

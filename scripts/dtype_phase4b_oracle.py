@@ -146,7 +146,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     7: "The runtime extent read",
     8: "`uniform_like(template, low, high) -> result`",
     9: "`pad_sequences(sequences: List[List[T]], pad: T) ->",
-    10: "`pad_sequences_to(sequences: List[List[T]], width: int64,",
+    10: "`pad_sequences_to(sequences: List[List[T]], width: i64,",
     11: "`mean(x, axes...) -> result`",
     12: "`max_reduce(x, axes...) -> result`",
     13: "`min_reduce(x, axes...) -> result`",
@@ -342,23 +342,23 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-34": tuple(
         """\
-| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-| `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-| `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-| `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |""".splitlines()
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
+| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
+| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
+| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,i64], Dict[string,i64], Dict[i64,string], i64)` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
 | `contracts::normal_cdf` | `(p_float)->p_float` |
-| `contracts::normal_cdf_contract_samples` | `()->int64` |
-| `contracts::normal_cdf_contract_seed` | `()->int64` |
+| `contracts::normal_cdf_contract_samples` | `()->i64` |
+| `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
+| `decimal::decimal_div` | `(Decimal,Decimal,i64,RoundingMode)->Decimal` |
 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-| `decimal::decimal_from_int` | `(int64)->Decimal` |
+| `decimal::decimal_from_int` | `(i64)->Decimal` |
 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
@@ -368,9 +368,9 @@ EXPECTED_OP_MANIFESTS = {
 | `decimal::decimal_to_float` | `(Decimal)->f64` |
 | `decimal::decimal_to_string` | `(Decimal)->string` |
 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-| `index::drop_list` | `(List[T],int64)->List[T]` |
-| `index::list_index` | `(List[T],int64)->T` |
-| `index::take_list` | `(List[T],int64)->List[T]` |
+| `index::drop_list` | `(List[T],i64)->List[T]` |
+| `index::list_index` | `(List[T],i64)->T` |
+| `index::take_list` | `(List[T],i64)->List[T]` |
 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
 | `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
@@ -382,7 +382,7 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-| `io/json::json_int` | `(Option[Json])->Option[int64]` |
+| `io/json::json_int` | `(Option[Json])->Option[i64]` |
 | `io/json::json_is_null` | `(Option[Json])->bool` |
 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
 | `io/json::json_string` | `(Option[Json])->Option[string]` |
@@ -394,27 +394,27 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-| `io::mmap_size` | `(string)->int64!{IO}` |
-| `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-| `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-| `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
+| `io::mmap_size` | `(string)->i64!{IO}` |
+| `io::read_head_bytes` | `(string,i64)->List[i64]!{IO}` |
+| `process::run` | `(string,List[string])->(i64,string,string)!{IO}` |
+| `process::run_chelis` | `(List[string])->(i64,string,string)!{IO}` |
 | `scalar::abs` | `(p_numeric)->p_numeric` |
 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-| `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
+| `sort::sort` | `(&tensor[..r,p_numeric],i32)->(tensor[..r,p_numeric],tensor[..r,i64])` |
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-| `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-| `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
+| `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
+| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]` |
+| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]` |
+| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]` |
+| `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-| `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-| `time::add_days` | `(Date,int64)->Date` |
-| `time::date` | `(int64,int64,int64)->Date` |
+| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |
+| `time::add_days` | `(Date,i64)->Date` |
+| `time::date` | `(i64,i64,i64)->Date` |
 | `time::date_gt` | `(Date,Date)->bool` |
 | `time::date_gte` | `(Date,Date)->bool` |
 | `time::date_lt` | `(Date,Date)->bool` |
@@ -422,16 +422,16 @@ EXPECTED_OP_MANIFESTS = {
 | `time::date_to_string` | `(Date)->string` |
 | `time::day_of_week` | `(Date)->DayOfWeek` |
 | `time::day_of_week_name` | `(Date)->string` |
-| `time::day_of_year` | `(Date)->int64` |
-| `time::days_between` | `(Date,Date)->int64` |
-| `time::duration` | `(int64,int64,int64,int64)->Duration` |
-| `time::is_leap_year` | `(int64)->bool` |
+| `time::day_of_year` | `(Date)->i64` |
+| `time::days_between` | `(Date,Date)->i64` |
+| `time::duration` | `(i64,i64,i64,i64)->Duration` |
+| `time::is_leap_year` | `(i64)->bool` |
 | `time::parse_date` | `(string)->Option[Date]` |
-| `time::sub_days` | `(Date,int64)->Date` |
-| `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-| `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-| `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-| `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
+| `time::sub_days` | `(Date,i64)->Date` |
+| `time::try_date` | `(i64,i64,i64)->Option[Date]` |
+| `tokenizer::batch_encode` | `(Tokenizer,List[string],i64,i64)->tensor[batch,seq,i64]` |
+| `tokenizer::decode` | `(Tokenizer,List[i64])->string` |
+| `tokenizer::encode` | `(Tokenizer,string)->List[i64]` |
 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
@@ -492,8 +492,8 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-38": tuple(
         """\
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
-> | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | `tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E` |
+> | `process_run` | `(string,List[string])->(i64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 > | `test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |""".splitlines()
@@ -1575,8 +1575,8 @@ def validate_normative_contract(
         spec04_blocks,
         "04-NUM-11",
         (
-            "A language binding or device descriptor SHALL preserve rank as int32 "
-            "and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor SHALL preserve rank as i32 "
+            "and each extent, stride, element count, and byte capacity as i64",
             "It SHALL carry the exact dtype tag and dynamic rank",
             "a fixed-rank carrier, a narrower metadata field, or an element pointer "
             "not coupled to the exact tag in the same validated descriptor is not a "
@@ -1593,7 +1593,7 @@ def validate_normative_contract(
             "expressions",
             "SHALL NOT wrap, saturate, truncate, or substitute an overflow sentinel "
             "that can make unequal mathematical counts equal",
-            "Projection from the exact count into `int64`, `usize`, or a target "
+            "Projection from the exact count into `i64`, `usize`, or a target "
             "allocation-size domain SHALL be checked",
             "a reuse decision is not exempt because no bytes have yet been touched",
         ),
@@ -1728,7 +1728,7 @@ def validate_normative_contract(
                 "total sum result precision rule",
             ),
             (
-                "`int32` | `int32`, `int64` | accumulator dtype `a`",
+                "`i32` | `i32`, `i64` | accumulator dtype `a`",
                 "explicit wider integer accumulator result",
             ),
             (
@@ -1757,7 +1757,7 @@ def validate_normative_contract(
                 "precondition guard finalized-quantity dtype",
             ),
             (
-                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at i64`",
                 "runtime extent guard trap line",
             ),
             (
@@ -1844,8 +1844,8 @@ def validate_normative_contract(
             "A JSON number token containing `.`, `e`, or `E`",
             "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
             "any other number token",
-            "ingest as `JsonInt` carrying its exact int64 value",
-            "An integer-form token outside int64 range SHALL ingest as",
+            "ingest as `JsonInt` carrying its exact i64 value",
+            "An integer-form token outside i64 range SHALL ingest as",
             "`JsonBigInt` carrying the token's exact decimal spelling",
             "never\n> selects a lossy float image for an integer-form token",
             "CSV cells are TEXT at parse time",
@@ -1853,27 +1853,27 @@ def validate_normative_contract(
             "An empty or non-conforming cell is a loud error",
         ),
         "05-OP-3": (
-            "`io/json::json_int` returns the stored `JsonInt` int64 exactly",
+            "`io/json::json_int` returns the stored `JsonInt` i64 exactly",
             "`io/json::json_float` returns a stored `JsonFloat` f64 exactly",
             "It never truncates or rounds a float into an integer",
-            "`csv_int` | `(List[Dict[string,string]], int64, string) -> int64`",
-            "`csv_ints` | `(List[Dict[string,string]], string) -> List[int64]`",
-            "`csv_f64` | `(List[Dict[string,string]], int64, string) -> f64`",
+            "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
+            "`csv_ints` | `(List[Dict[string,string]], string) -> List[i64]`",
+            "`csv_f64` | `(List[Dict[string,string]], i64, string) -> f64`",
             "`csv_f64s` | `(List[Dict[string,string]], string) -> List[f64]`",
-            "`csv_nrows` | `(List[Dict[string,string]]) -> int64`",
+            "`csv_nrows` | `(List[Dict[string,string]]) -> i64`",
             "no JSON variant or default cell is fabricated",
             "structurally rejected inside `grad`",
             "They have no accumulator",
         ),
         "05-OP-4": (
             "`JsonFloat(value)` accepts exactly f64",
-            "`JsonInt(value)` accepts exactly int64",
+            "`JsonInt(value)` accepts exactly i64",
             "every other operand width is a type error",
             "No construction path widens or narrows a numeric value",
             "feeds the byte-exact serialization channel of [05-OP-5]",
         ),
         "05-OP-5": (
-            "emits a stored `JsonInt` int64 as its exact decimal digits",
+            "emits a stored `JsonInt` i64 as its exact decimal digits",
             "a stored f64 through the [05-OBS-1]",
             "every finite emission parses back to the identical f64",
             "A non-finite `JsonFloat` is a loud serialization error",
@@ -1895,7 +1895,7 @@ def validate_normative_contract(
             "has no accumulator",
         ),
         "05-OP-7": (
-            "returns the stored extent of `x` along `axis` as an exact `int64`",
+            "returns the stored extent of `x` along `axis` as an exact `i64`",
             "a negative value first normalizes by adding the rank exactly once",
             "an axis still outside `0..rank` is a loud error",
             "read has a zero-cotangent adjoint",
@@ -1971,7 +1971,7 @@ def validate_normative_contract(
             "first stored representation among equal\n> values",
             "execution-time extent is zero",
             "equal positive or negative infinities",
-            "tie count `k` is\n> counted exactly as `int64`",
+            "tie count `k` is\n> counted exactly as `i64`",
             "`div(g, k)`",
             "full cotangent flows to the\n> first NaN",
             "Integer operands are forward-only and `grad` rejects them",
@@ -1995,11 +1995,11 @@ def validate_normative_contract(
         ),
         "05-OP-15": (
             "every active\n> signed integer and float tensor dtype",
-            "returns `int64` indices",
+            "returns `i64` indices",
             "lowest\n> axis index containing NaN",
             "Comparisons never convert through another dtype",
             "execution-time extent is zero",
-            "result dtype `int64`",
+            "result dtype `i64`",
             "non-differentiable: `grad` rejects it",
         ),
         "05-OP-16": (
@@ -2103,12 +2103,12 @@ def validate_normative_contract(
         ),
         "05-OP-29": (
             "admits exactly a `bool` tensor operand",
-            "returns an `int64` tensor",
+            "returns an `i64` tensor",
             "one or more unique named axes",
             "Missing axes, mixed positional/named axes, duplicate normalized "
             "positions or names",
             "visited in original row-major order",
-            "checked `int64` addition",
+            "checked `i64` addition",
             "traps `Overflow` as operation `count`",
             "result is `0i64`",
             "dedicated reduction and is not a `cast` plus `sum` lowering",
@@ -2149,7 +2149,7 @@ def validate_normative_contract(
             "chelis_dict_entry;",
             "rank in `0..=INT32_MAX`",
             "a rank-zero descriptor has no extents",
-            "exactly `rank` nonnegative int64 extents",
+            "exactly `rank` nonnegative i64 extents",
             "with the rank-zero empty product equal to one",
             "There is no rank-eight limit",
             "byte size is the checked product `count * chelis_dtype_size(dtype)`",
@@ -2193,7 +2193,7 @@ def validate_normative_contract(
             "chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)",
             "chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)",
             "chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)",
-            "All lengths, indices, offsets, sizes, and returned counts are exact `int64`",
+            "All lengths, indices, offsets, sizes, and returned counts are exact `i64`",
             "Negative lengths, indices, offsets, and counts trap `Domain`",
             "result-length and allocation arithmetic traps `Overflow`",
             "half-open increasing sequence",
@@ -2209,7 +2209,7 @@ def validate_normative_contract(
             "only for absence",
             "An option node renders as `None` when it owns no child and otherwise "
             "as `Some(` followed by `R` of its child and `)`",
-            "A mapped file renders as `<mapped-file:` followed by its exact int64 "
+            "A mapped file renders as `<mapped-file:` followed by its exact i64 "
             "byte length in decimal digits and then `>`",
             "Recursive dictionary observation is canonical rather than "
             "insertion-ordered",
@@ -2233,13 +2233,13 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
-            "returns exact int64 zero for a rank-zero input, or one when the input shape",
+            "returns exact i64 zero for a rank-zero input, or one when the input shape",
             "is identical to the domain shape",
             "It validates every extent and the exact zero-aware element product before",
             "An iteration domain requires neither storage byte counts nor contiguous suffix strides",
             "A caller validates the original input before repurposing its storage",
             "excluding spare storage capacity",
-            "takes rank and every target extent as exact tagged int64 scalars",
+            "takes rank and every target extent as exact tagged i64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
             "exactly the public C callable identities enumerated in",
@@ -2274,7 +2274,7 @@ def validate_normative_contract(
             "are zero-based",
             "must lie in the selected base-axis extent",
             "Any negative or out-of-range index traps `Domain` before any write",
-            "no int32/int64-only dispatch exception",
+            "no i32/i64-only dispatch exception",
             "Replace admits every active dtype, including bool",
             "admits exactly active signed-integer and float dtypes",
             "NaNs follow all non-NaNs",
@@ -2317,16 +2317,16 @@ def validate_normative_contract(
         ),
         "05-OP-35": (
             "exactly the eighty-four final exported stdlib numeric definitions",
-            "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | "
             "`(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
             "`tensor/construct::linspace` | "
-            "`(p_float,p_float,int64)->tensor[n,p_float]`",
+            "`(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::arange` | "
             "`(p_int,p_int)->tensor[n,p_int]`",
-            "`sort::sort` | `(&tensor[..r,p_numeric],int32)->"
-            "(tensor[..r,p_numeric],tensor[..r,int64])`",
+            "`sort::sort` | `(&tensor[..r,p_numeric],i32)->"
+            "(tensor[..r,p_numeric],tensor[..r,i64])`",
             "`scalar::abs` | `(p_numeric)->p_numeric`",
             "`scalar::max` | `(p_numeric,p_numeric)->p_numeric`",
             "`scalar::min` | `(p_numeric,p_numeric)->p_numeric`",
@@ -2338,7 +2338,7 @@ def validate_normative_contract(
             "`test::assert_eq_tensor` | "
             "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`tensor/construct::stack` | "
-            "`(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]`",
+            "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
             "Decimal rational and calendar ordinal computations explicitly named as "
             "mathematical below use an exact internal domain",
@@ -2379,7 +2379,7 @@ def validate_normative_contract(
             "returns the increasing half-open same-dtype sequence",
             "Its length and every step are checked in exact mathematical integers",
             "an unrepresentable length or element traps `Overflow`",
-            "requires finite endpoints and int64 `count >= 1`",
+            "requires finite endpoints and i64 `count >= 1`",
             "Squeeze removes the selected singleton dimension",
             "Unsqueeze inserts a singleton dimension and stack inserts the "
             "input-list length at the selected position",
@@ -2422,7 +2422,7 @@ def validate_normative_contract(
             "requires equal shapes and one common active element dtype",
             "signed-integer and bool elements use exact equality",
             "`assert_shape` requires its expected list to contain only nonnegative "
-            "int64 extents",
+            "i64 extents",
             "compares its length and every entry to the tensor's complete shape "
             "in axis order",
             "Each finite element pair computes `abs(actual - expected)` at that "
@@ -2435,10 +2435,10 @@ def validate_normative_contract(
             "rounded result equals the stored upper endpoint",
             "computed denominator must be finite and strictly positive",
             "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "final normalized `days` field has no int64 representation",
+            "final normalized `days` field has no i64 representation",
             "A negative year uses `-` followed by exactly "
             "`max(4, digits(|year|))` decimal digits",
-            "`|year|` is the exact mathematical magnitude rather than an int64 `abs`",
+            "`|year|` is the exact mathematical magnitude rather than an i64 `abs`",
             "no token pair occurs at more than one merge rank",
             "repeatedly selects the lowest merge rank and then the leftmost pair",
             "`encode` maps each final token through `vocab`",
@@ -2511,8 +2511,8 @@ def validate_normative_contract(
         ),
         "05-OP-38": (
             "governs exactly these five numeric-capacity identities and signatures",
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
-            "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`",
+            "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
             "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
             "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
@@ -2720,7 +2720,7 @@ def validate_normative_contract(
             "no index dtype is widened, narrowed, or otherwise converted",
             "public C gather and scatter callables in [05-OP-33] have this same "
             "complete index-dtype domain",
-            "no int32/int64-only exception",
+            "no i32/i64-only exception",
         ),
         "05-HOST-3": (
             "`test_assert` admits bool",
@@ -2794,7 +2794,7 @@ def validate_normative_contract(
                 "C axis family names both movement primitives",
             ),
             (
-                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> "
                 "tensor[D_plus,p]` | Insert a new dimension of width `size` "
                 "at position `axis`, producing rank `rank(x) + 1`.",
                 "insert movement row",

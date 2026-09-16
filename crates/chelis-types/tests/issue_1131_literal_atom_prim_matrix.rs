@@ -29,7 +29,7 @@ fn int_atom_under_f32_metadata_is_rejected() {
 #[test]
 fn all_canonical_atom_prim_pairs_are_accepted() {
     for source in [
-        "(lit {type: (t-prim {} int32)} 7)",
+        "(lit {type: (t-prim {} i32)} 7)",
         "(lit {type: (t-prim {} f32)} 7.0)",
         "(lit {type: (t-prim {} f32), literal_source: integer} 18014399583223809)",
         "(lit {type: (t-prim {} bool)} true)",
@@ -46,16 +46,16 @@ fn all_canonical_atom_prim_pairs_are_accepted() {
 #[test]
 fn every_cross_family_atom_prim_pair_is_rejected() {
     for source in [
-        "(lit {type: (t-prim {} int32)} 1.0)",
-        "(lit {type: (t-prim {} int32)} true)",
-        "(lit {type: (t-prim {} int32)} \"x\")",
+        "(lit {type: (t-prim {} i32)} 1.0)",
+        "(lit {type: (t-prim {} i32)} true)",
+        "(lit {type: (t-prim {} i32)} \"x\")",
         "(lit {type: (t-prim {} f64)} 1)",
         "(lit {type: (t-prim {} f64)} true)",
         "(lit {type: (t-prim {} bool)} 1)",
         "(lit {type: (t-prim {} bool)} \"x\")",
         "(lit {type: (t-prim {} string)} 1)",
         "(lit {type: (t-prim {} string)} false)",
-        "(lit {type: (t-prim {} int32), literal_source: integer} 1)",
+        "(lit {type: (t-prim {} i32), literal_source: integer} 1)",
         "(lit {type: (t-prim {} f32), literal_source: integer} 1.0)",
         "(lit {literal_source: integer} 1)",
     ] {

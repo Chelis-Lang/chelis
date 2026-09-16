@@ -143,7 +143,7 @@ def assert_change_owned_topology(
 
     required = jobs["change-owned-shard"]
     test.assertEqual(required["needs"], ["changes", "integration-plan"])
-    test.assertEqual(required["timeout-minutes"], 20)
+    test.assertEqual(required["timeout-minutes"], 60)
     test.assertFalse(required.get("continue-on-error", False))
     test.assertFalse(required["strategy"]["fail-fast"])
     test.assertEqual(required["strategy"]["matrix"]["shard"], SHARDS)

@@ -360,7 +360,7 @@ fn property_metadata_has_its_required_fields_and_matching_binders() {
             "property_quantifiers: (params {} (y",
             1,
         ),
-        valid.replacen("f32", "int32", 1),
+        valid.replacen("f32", "i32", 1),
     ] {
         assert!(parse_str(&bad).is_err(), "{bad}");
     }
@@ -378,7 +378,7 @@ fn declaration_roles_and_property_binder_spellings_follow_the_contract() {
     let source = "(def {chelis_role: \"property\", property_source_kind: \"user\", property_quantifiers: (params {} ^{:type (t-prim {} f32)} x), property_preconditions: (tuple {})} p (fn {} (params {} (x {type: (t-prim {} f32), doc: \"binder\"})) true))";
     parse_raw_str(source).unwrap();
     parse_str(source).unwrap();
-    assert!(parse_str(&source.replacen("f32", "int32", 1)).is_err());
+    assert!(parse_str(&source.replacen("f32", "i32", 1)).is_err());
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn module_construction_checks_the_siblings_it_already_contains() {
 #[test]
 fn resource_effect_metadata_requires_string_devices_at_every_ingress() {
     for (owner, key, children) in [
-        ("t-fn", "eff", "(t-prim {} int32)"),
+        ("t-fn", "eff", "(t-prim {} i32)"),
         ("fn", "effects", "(params {}) (lit {} 1)"),
     ] {
         for device in ["\"gpu:0\"", "42", "unwrapped", "(lit {} 42)"] {

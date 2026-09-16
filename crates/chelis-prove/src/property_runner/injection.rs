@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn injected_int64_scalar_sample_is_not_widened_through_f64() {
         let mut rng = crate::opaque::GenRng::new(9);
-        let value = sample_scalar("int64", &mut rng);
+        let value = sample_scalar("i64", &mut rng);
 
         assert_eq!(value.prim(), chelis_types::types::Prim::Int64);
         assert!(value.as_i64_exact().is_some());

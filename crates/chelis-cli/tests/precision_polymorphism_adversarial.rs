@@ -95,7 +95,7 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
         &path,
         "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
-         def use_mismatch(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)\n",
+         def use_mismatch(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
 
     let json = run_json_check(&path);
@@ -109,11 +109,11 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
     );
     let any_mentions_both_precisions = errors.iter().any(|e| {
         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        msg.contains("f32") && msg.contains("int32")
+        msg.contains("f32") && msg.contains("i32")
     });
     assert!(
         any_mentions_both_precisions,
-        "at least one error should mention both f32 and int32 so the user \
+        "at least one error should mention both f32 and i32 so the user \
          sees the mismatched precisions, got {errors:?}"
     );
 }
@@ -164,8 +164,8 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
 #[test]
 fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     // BASELINE (no unbound wrapper): precision mismatch IS reported.
-    // `poly_id(x)` with `x: tensor[3, int32]` resolves to
-    // `tensor[3, int32]`, which conflicts with the declared
+    // `poly_id(x)` with `x: tensor[3, i32]` resolves to
+    // `tensor[3, i32]`, which conflicts with the declared
     // `tensor[3, f32]` return. This must stay caught.
     let dir = tempdir().expect("tempdir");
     let baseline_path = dir.path().join("baseline.ch");
@@ -173,7 +173,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
         &baseline_path,
         "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
-         def use_mix(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)\n",
+         def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
     let baseline_errors = run_json_check(&baseline_path)["errors"]
         .as_array()
@@ -181,7 +181,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
         .unwrap_or_default();
     let baseline_has_precision_error = baseline_errors.iter().any(|e| {
         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        msg.contains("int32") && msg.contains("f32")
+        msg.contains("i32") && msg.contains("f32")
     });
     assert!(
         baseline_has_precision_error,
@@ -194,7 +194,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     // erased arg (`nonexistent_function(x)` is `Type::Error`) leaves
     // `poly_id`'s output precision genuinely FREE, so the body resolves
     // to the declared `tensor[3, f32]` with no conflict. The pre-#773 F1
-    // path re-surfaced an int32/f32 "declared-shape" error ONLY because
+    // path re-surfaced an i32/f32 "declared-shape" error ONLY because
     // the arg-Error short-circuit collapsed the body to `Type::Error`;
     // that report was speculative (it assumed the unknown wrapper is
     // precision-preserving). Post-#773 the sound result is exactly the
@@ -206,7 +206,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
         &attack_path,
         "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
-         def use_mix(x: tensor[3, int32]) -> tensor[3, f32] = \
+         def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
          poly_id(nonexistent_function(x))\n",
     );
     let attack_errors = run_json_check(&attack_path)["errors"]
@@ -263,7 +263,7 @@ fn unbound_wrapper_into_concrete_downstream_still_surfaces_real_mismatch() {
         "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def force_f64(y: tensor[3, f64]) -> tensor[3, f64] = y\n\
-         def use_mix(x: tensor[3, int32]) -> tensor[3, f32] = \
+         def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
          force_f64(nonexistent_function(x))\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -422,7 +422,7 @@ fn baseline_two_independent_precision_tvars_accepted() {
         &path,
         "sig f: tensor[d, p] -> tensor[d, q] -> tensor[d, p]\n\
          def f(a, b) = a\n\
-         def use_it(x: tensor[3, f32], y: tensor[3, int32]) \
+         def use_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -444,7 +444,7 @@ fn baseline_same_precision_tvar_reused_rejects_mismatch() {
         &path,
         "sig f: tensor[d, p] -> tensor[d, p] -> tensor[d, p]\n\
          def f(a, b) = a\n\
-         def break_it(x: tensor[3, f32], y: tensor[3, int32]) \
+         def break_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -471,7 +471,7 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
         &path,
         "sig f: tensor[d, f32] -> tensor[d, f32]\n\
          def f(x) = x\n\
-         def break_it(x: tensor[3, int32]) -> tensor[3, int32] = f(x)\n",
+         def break_it(x: tensor[3, i32]) -> tensor[3, i32] = f(x)\n",
     );
     let errors = run_json_check(&path)["errors"]
         .as_array()
@@ -480,7 +480,7 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
     assert!(
         errors.iter().any(|e| {
             let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            msg.contains("f32") && msg.contains("int32")
+            msg.contains("f32") && msg.contains("i32")
         }),
         "concrete `f32` in sig must NOT be treated as a tvar; mismatched \
          call must error. Got {errors:?}"
@@ -631,7 +631,7 @@ fn baseline_builtin_add_rejects_mixed_precision_args() {
     let path = dir.path().join("builtin_add_mix.ch");
     write_file(
         &path,
-        "def use_add(x: tensor[3, f32], y: tensor[3, int32]) \
+        "def use_add(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = add(x, y)\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -692,8 +692,8 @@ fn baseline_builtin_sub_rejects_mixed_precision_args() {
     let path = dir.path().join("builtin_sub_mix.ch");
     write_file(
         &path,
-        "def use_sub(x: tensor[3, int32], y: tensor[3, int64]) \
-         -> tensor[3, int32] = sub(x, y)\n",
+        "def use_sub(x: tensor[3, i32], y: tensor[3, i64]) \
+         -> tensor[3, i32] = sub(x, y)\n",
     );
     let errors = run_json_check(&path)["errors"]
         .as_array()

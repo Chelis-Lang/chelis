@@ -54,7 +54,7 @@ const WELL_TYPED_CH: &str = "def negate(x: f32) -> f32 = neg(x)\n";
 const ILL_TYPED_DP: &str = "(def {}\n  \
     bad\n  \
     (app {} (var {} add)\n      \
-        (lit {precision: int32} 1)\n      \
+        (lit {precision: i32} 1)\n      \
         (lit {precision: bool} true)))\n";
 
 /// Helper: write `src` to `<dir>/<name>` and return the path.
@@ -402,7 +402,7 @@ fn check_dp_inherits_issue_207_exit_code_invariant() {
 fn eval_dp_json_emits_structured_eval_result() {
     let dir = tempdir().expect("tempdir");
     // A standalone .dp whose root is an evaluable scalar value.
-    let src = "(def {} answer (lit {precision: int32} 42))\n";
+    let src = "(def {} answer (lit {precision: i32} 42))\n";
     let path = write_fixture(dir.path(), "answer.dp", src);
 
     let output = Command::cargo_bin("chelis")
@@ -441,7 +441,7 @@ fn eval_dp_human_matches_equivalent_ch_output() {
     // a genuine cross-surface output comparison is meaningful. The `.dp`
     // is derived from the `.ch` via `chelis deep` so the two are
     // by-construction the same program.
-    let ch_src = "answer = cast(42, int32)\n";
+    let ch_src = "answer = cast(42, i32)\n";
     let ch_path = write_fixture(dir.path(), "answer.ch", ch_src);
     let deep_out = Command::cargo_bin("chelis")
         .expect("binary")

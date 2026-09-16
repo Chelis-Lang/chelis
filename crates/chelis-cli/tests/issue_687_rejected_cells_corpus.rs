@@ -195,7 +195,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "c_stub_tensor_scan",
         "def gen() -> tensor[5, f32] = \
-         tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+         tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
          out = gen()\n",
         "c",
         "error: unsupported: builtin `tensor_scan` on `chelis build --target c` host emission \
@@ -216,11 +216,11 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "c_int64_max_reduce",
-        "def f(x: tensor[4, int64]) -> tensor[int64] = max_reduce(x, 0)\n\
-         out = f(to_tensor([cast(1, int64), cast(4, int64), cast(2, int64), \
-         cast(3, int64)]))\n",
+        "def f(x: tensor[4, i64]) -> tensor[i64] = max_reduce(x, 0)\n\
+         out = f(to_tensor([cast(1, i64), cast(4, i64), cast(2, i64), \
+         cast(3, i64)]))\n",
         "c",
-        "error: unsupported: op `max_reduce` on `int64` tensors in the C DAG emitter (node 1) \
+        "error: unsupported: op `max_reduce` on `i64` tensors in the C DAG emitter (node 1) \
          (codegen:c); unimplemented chelis#729: the C reduce kernels are f32-hardcoded today \
          (WS-A1/F1); cast to f32 before the reduction. The target capability table owns non-f32 \
          widening\n",
@@ -229,18 +229,18 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         // [04-INF-9]: the Float admission contract rejects this before
         // lowering. Retain the exact original source and byte comparator.
         "c_int_tensor_cos",
-        "def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
-         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-         cast(4, int32)]))\n",
+        "def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
+         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+         cast(4, i32)]))\n",
         "c",
         // [04-FIT-26] (chelis#1853): one projected line per diagnostic.
         "error: Check errors: Type errors:\n  PrecisionMismatch: type variable bounded by dtype \
-         family `Float` (the active float dtypes) cannot be instantiated at `int32` at byte 51 \
-         [surf:51..57] (suggestion: Insert explicit cast)\n",
+         family `Float` (the active float dtypes) cannot be instantiated at `i32` at byte 47 \
+         [surf:47..53] (suggestion: Insert explicit cast)\n",
     ),
     (
         "c_nonliteral_window",
-        "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+        "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n",
         "c",
@@ -248,13 +248,13 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
          chelis#1058: window and stride lists must be integer literals for the compiled lane \
          today; a runtime-parameterized window previously lowered to a silent no-op; \
-         chelis#1058 owns compiled runtime-list support at source span `surf:86..89`\n",
+         chelis#1058 owns compiled runtime-list support at source span `surf:82..85`\n",
     ),
     (
         "hip_int64_neg",
-        "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
+        "def f(x: tensor[4, i64]) -> tensor[4, i64] = neg(x)\n",
         "hip",
-        "error: unsupported: dtype `int64` on a HIP kernel family with f32/f64 variants only \
+        "error: unsupported: dtype `i64` on a HIP kernel family with f32/f64 variants only \
          (codegen:hip); unimplemented chelis#689: this op has no typed HIP kernel for the \
          operand dtype; the former silent F32 fallback emitted a corrupting kernel \
          (chelis#689). Cast to f32/f64, or use the ops with typed templates (add/mul/div and \
@@ -348,7 +348,7 @@ fn unrelated_lowering_rejection_retains_the_legacy_wrapper() {
     // Integer cos now fails ordinary checking under [04-INF-9]. Use the
     // sum identity, which is not the max identity selected by #1870, to
     // keep executing the production lowering adapter's other branch.
-    let program = "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+    let program = "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_sum(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n";
     let (ok, stderr, emitted) = build_target(program, "hip_window_sum_wrapper", "hip");
@@ -390,9 +390,9 @@ const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[(
     // chelis#387 family: the portable integer div-by-zero guard, with a
     // runtime-computed divisor so nothing constant-folds it away.
     "int_div_by_zero",
-    "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
-         out = d(cast(7, int64), cast(5, int64), cast(5, int64))\n",
-    "numeric trap: division by zero in trunc_div at int64\n",
+    "def d(x: i64, y: i64, z: i64) -> i64 = trunc_div(x, sub(y, z))\n\
+         out = d(cast(7, i64), cast(5, i64), cast(5, i64))\n",
+    "numeric trap: division by zero in trunc_div at i64\n",
 )];
 
 /// Every runtime rejected cell aborts (nonzero exit) with its pinned

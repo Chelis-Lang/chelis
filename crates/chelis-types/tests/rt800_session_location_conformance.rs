@@ -85,7 +85,7 @@ fn tuple_projection_of_failed_cast_keeps_one_root_without_a_cascade() {
                   (cast {}
                     (lit {type: (t-prim {} f32)} 1.0)
                     (t-prim {} Missing))
-                  (lit {type: (t-prim {} int32)} 2))
+                  (lit {type: (t-prim {} i32)} 2))
                 0))"#,
     );
     assert_eq!(

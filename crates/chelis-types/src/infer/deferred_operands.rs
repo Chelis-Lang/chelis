@@ -36,7 +36,7 @@ use super::*;
 ///
 /// A variable that is never bound is still rejected. That is the difference
 /// between this and a tolerant arm, and it is load-bearing: measured, a
-/// tolerant `cast` lets `def go[t](x: t) -> int32 = cast(x, int32)` check at
+/// tolerant `cast` lets `def go[t](x: t) -> i32 = cast(x, i32)` check at
 /// score 1.0 AND build, with the backend selecting a dtype for `t` and
 /// emitting an exported entry point on that basis. Suspending the decision is
 /// safe; dropping it is not.

@@ -148,7 +148,7 @@ impl BuiltinDecl {
             "concat" => Some(match operand(1)? {
                 Type::Prim(Prim::Int32) => Case::ConcatTensors,
                 Type::Adt(name, _) if name == "List" => Case::ConcatList,
-                _ => return Err("concat requires List or int32 axis".into()),
+                _ => return Err("concat requires List or i32 axis".into()),
             }),
             "drop" => Some(match arguments.len() {
                 1 => Case::DropValue,

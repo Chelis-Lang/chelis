@@ -1,1 +1,12 @@
-(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (d-name {} rdim) (t-prim {} int64))})) (app {} (var {} sum) (var {} ta) (d-name {} rdim))))
+(def {}
+  answer
+  (fn {}
+    (params {}
+      (ta
+        {type: (t-tensor {}
+                  (d-lit {} 3)
+                  (d-lit {} 1)
+                  (d-name {} rdim)
+                  (t-prim {} i64))
+        }))
+    (app {} (var {} sum) (var {} ta) (d-name {} rdim))))

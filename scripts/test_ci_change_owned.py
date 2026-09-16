@@ -369,6 +369,111 @@ class SchemaTests(unittest.TestCase):
             deep_spec.packages,
             ("chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"),
         )
+        python_bindings = by_path["bindings/python/tests/"]
+        self.assertEqual(python_bindings.disposition, "packages")
+        self.assertEqual(python_bindings.packages, ("chelis-python",))
+        for path in (
+            "examples/checked_reshape.ch",
+            "examples/checked_sparse_axes.ch",
+            "examples/count_bool_axes.ch",
+            "examples/count_bool_device_entry.ch",
+            "examples/dict_foundation.ch",
+            "examples/hello_tensor.ch",
+            "examples/induction_bond.ch",
+            "examples/integer_functions.ch",
+            "examples/iter_foundation.ch",
+            "examples/list_foundation.ch",
+            "examples/recursive_cast_targets.ch",
+            "examples/recursive_generic.ch",
+            "examples/scalar_string_foundation.ch",
+            "examples/tensor_structural_ops.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-e2e",))
+        for path in (
+            "examples/illustrative/moe_gather_duplicate_indices.ch",
+            "examples/illustrative/phase3g_text_pipeline/src/main.ch",
+            "examples/illustrative/process_run_chelis_version.ch",
+            "examples/illustrative/runtime_shape_semantics.ch",
+            "examples/illustrative/scatter_replace_last_write_wins.ch",
+            "examples/illustrative/sparse_summary_def_wrapper.ch",
+            "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-cli",))
+        for path in (
+            "scripts/builtin_atom_semantic_contracts.py",
+            "scripts/capacity_census_wire_materialization.py",
+            "scripts/capacity_census_wire_operations.py",
+            "scripts/front_end_performance_fixtures.py",
+            "scripts/integer_dtype_spelling_oracle.py",
+            "scripts/nautilus_local_gate.py",
+            "scripts/runtime_extent_cache_compatibility.py",
+            "scripts/test_compiled_value_ownership_oracle.py",
+            "scripts/test_faithful_observation_phase2_oracle.py",
+            "scripts/test_front_end_performance_fixtures.py",
+            "scripts/test_integer_dtype_spelling_oracle.py",
+            "scripts/test_runtime_extent_cache_compatibility.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+        exact_job_owners = {
+            "editors/vscode/syntaxes/chelis.tmLanguage.json": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "scripts/compiled_value_ownership_oracle.py": (
+                "heavy-e2e.yml",
+                "compiled-value-ownership-phase0-oracle",
+            ),
+            "scripts/faithful_observation_phase2_oracle.py": (
+                "heavy-e2e.yml",
+                "faithful-observation-phase2-oracle",
+            ),
+            "tests/conformance/hull/build_corpus.py": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "tests/conformance/hull/known_conservative.json": (
+                "conformance.yml",
+                "conformance",
+            ),
+            "tests/conformance/hull/programs/": (
+                "conformance.yml",
+                "conformance",
+            ),
+        }
+        for path, expected in exact_job_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    expected,
+                )
+        package_owners = {
+            "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
+            "tests/support/helper_summary_fatal.ch": (
+                "chelis-cli",
+                "chelis-compiler-api",
+                "chelis-ir",
+            ),
+        }
+        for path, expected in package_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, expected)
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(

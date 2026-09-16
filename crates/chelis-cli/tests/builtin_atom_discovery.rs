@@ -16,7 +16,7 @@ fn evaluate(source: &str) -> std::process::Output {
 
 #[test]
 fn shifts_at_and_above_each_signed_width_follow_num_13() {
-    for (dtype, width) in [("int8", 8), ("int16", 16), ("int32", 32), ("int64", 64)] {
+    for (dtype, width) in [("i8", 8), ("i16", 16), ("i32", 32), ("i64", 64)] {
         for count in [width, width + 1] {
             let source = format!(
                 "left = shl(cast(1, {dtype}), cast({count}, {dtype}))\npositive = shr(cast(1, {dtype}), cast({count}, {dtype}))\nnegative = shr(cast(-1, {dtype}), cast({count}, {dtype}))\n"
@@ -76,7 +76,7 @@ fn rectangular_list(shape: &[usize], dtype: &str, next: &mut usize) -> String {
 #[test]
 fn rectangular_list_ingress_preserves_recursive_shape_and_every_element_dtype() {
     for dtype in [
-        "int8", "int16", "int32", "int64", "f16", "bf16", "f32", "f64", "bool",
+        "i8", "i16", "i32", "i64", "f16", "bf16", "f32", "f64", "bool",
     ] {
         for shape in [&[2][..], &[2, 2], &[2, 1, 2], &[1, 2, 1, 2]] {
             let mut count = 0;

@@ -20,8 +20,8 @@ const ONE_ERROR: &str = "def f(x: tensor[3, f32]) -> tensor[4, f32] = x\n\
                          out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
 /// The control: several diagnostics, some located and carrying suggestions.
-const SEVERAL_ERRORS: &str = "def f() -> int32 = missing_first\n\
-                              def g() -> int32 = missing_second\n\
+const SEVERAL_ERRORS: &str = "def f() -> i32 = missing_first\n\
+                              def g() -> i32 = missing_second\n\
                               out = f()\n";
 
 /// The debug-rendering markers [04-FIT-26] keeps off the textual surface.

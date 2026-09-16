@@ -131,11 +131,11 @@ fn phase3l_shoals_oracle() {
 import Shoals.Pricing (bs_call_scalar, mc_call_price)
 bs_atm = bs_call_scalar(cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))
 mc_seed42_a = with seed(42i64) {
-  template_a = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(20000, int64))))
+  template_a = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(20000, i64))))
   mc_call_price(template_a, cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))
 }
 mc_seed42_b = with seed(42i64) {
-  template_b = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), cast(20000, int64))))
+  template_b = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), cast(20000, i64))))
   mc_call_price(template_b, cast(100.0, f32), cast(100.0, f32), cast(0.05, f32), cast(0.2, f32), cast(1.0, f32))
 }
 "#,

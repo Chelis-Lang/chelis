@@ -180,10 +180,10 @@ fn max_reduce_family_name_tracked_in_rank_poly_body() {
         ));
         assert_clean(&json, &format!("{op} name-tracked in a ..r body"));
     }
-    // argmax/argmin return an int64 index tensor.
+    // argmax/argmin return an i64 index tensor.
     for op in ["argmax_reduce", "argmin_reduce"] {
         let json = check_json(&format!(
-            "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = {op}(x, seq)\n",
+            "def m(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, i64] = {op}(x, seq)\n",
         ));
         assert_clean(&json, &format!("{op} name-tracked in a ..r body"));
     }
@@ -205,13 +205,13 @@ fn max_reduce_family_builds_runs_in_rank_poly_body() {
     let source = "def max_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = max_reduce(x, seq)\n\
          def min_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = min_reduce(x, seq)\n\
          def prod_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = prod_reduce(x, seq)\n\
-         def amax_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = argmax_reduce(x, seq)\n\
-         def amin_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, int64] = argmin_reduce(x, seq)\n\
+         def amax_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, i64] = argmax_reduce(x, seq)\n\
+         def amin_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, i64] = argmin_reduce(x, seq)\n\
          def rmax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = max_seq(x)\n\
          def rmin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = min_seq(x)\n\
          def rprod(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, f32] = prod_seq(x)\n\
-         def ramax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, int64] = amax_seq(x)\n\
-         def ramin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, int64] = amin_seq(x)\n\
+         def ramax(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, i64] = amax_seq(x)\n\
+         def ramin(x: &tensor[batch, seq, hidden, f32]) -> tensor[batch, hidden, i64] = amin_seq(x)\n\
          ox = rmax(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
          on = rmin(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
          op = rprod(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
@@ -578,7 +578,7 @@ fn named_expand_dvar_letter_collision_fails_loud() {
 /// NEGATIVE (chelis#339 red team): the named-insert size must be a
 /// compile-time literal. A symbolic-dim size loses the inserted NAME at
 /// lowering (the same-body `sum(.., chan)` then cannot locate it and the
-/// emitted C referenced the raw symbol), and a runtime int32 size produced a
+/// emitted C referenced the raw symbol), and a runtime i32 size produced a
 /// silent shape-0 tensor in the backend. Both are rejected at check time.
 #[test]
 fn named_expand_size_must_be_compile_time_literal() {
@@ -591,12 +591,12 @@ fn named_expand_size_must_be_compile_time_literal() {
         "symbolic-dim size in the named insert form",
     );
     let runtime = check_json(
-        "def f(x: &tensor[seq, f32], k: int64) -> tensor[seq, chan, f32] = insert(x, chan, k)\n",
+        "def f(x: &tensor[seq, f32], k: i64) -> tensor[seq, chan, f32] = insert(x, chan, k)\n",
     );
     assert_rejected_with(
         &runtime,
         "compile-time literal size",
-        "runtime int64 size in the named insert form",
+        "runtime i64 size in the named insert form",
     );
 }
 
@@ -985,7 +985,7 @@ fn variadic_reduce_positional_axes_rejected() {
 #[test]
 fn variadic_argmax_rejected() {
     let json = check_json(
-        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq, head)\n",
+        "def bad(x: &tensor[batch, seq, head, f32]) -> tensor[batch, i64] = argmax_reduce(x, seq, head)\n",
     );
     assert_rejected_with(
         &json,
@@ -1375,7 +1375,7 @@ fn eval_resolves_named_axis_issue_repro() {
 /// `min_reduce`, and `prod_reduce` are included because at concrete rank they
 /// are checkable and buildable (the chelis#340 Body-Discipline rejection
 /// applies only inside `..r` bodies). `argmax_reduce`/`argmin_reduce` are now
-/// folded in too: chelis#347 closed (the C backend prints their int64 output
+/// folded in too: chelis#347 closed (the C backend prints their i64 output
 /// correctly instead of as a reinterpreted f32 bit pattern), so the agreement
 /// oracle covers them — `argmax`/`argmin` over a row return the index of the
 /// extreme element (eval and backend now agree).
@@ -1386,8 +1386,8 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
          def max_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = max_reduce(x, seq)\n\
          def min_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = min_reduce(x, seq)\n\
          def prod_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = prod_reduce(x, seq)\n\
-         def amax_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmax_reduce(x, seq)\n\
-         def amin_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmin_reduce(x, seq)\n\
+         def amax_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmax_reduce(x, seq)\n\
+         def amin_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmin_reduce(x, seq)\n\
          outs = sum_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outx = max_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
          outn = min_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n\
@@ -1402,7 +1402,7 @@ fn concrete_rank_named_reduce_eval_matches_backend() {
         ("outn", &[2], &[1.0, 4.0]),
         ("outp", &[2], &[6.0, 120.0]),
         // argmax/argmin over each row: both rows are ascending, so the max
-        // is at index 2 and the min at index 0 (chelis#347 closed — int64
+        // is at index 2 and the min at index 0 (chelis#347 closed — i64
         // indices now print correctly in the C backend).
         ("outax", &[2], &[2.0, 2.0]),
         ("outan", &[2], &[0.0, 0.0]),
@@ -1968,18 +1968,18 @@ fn named_reduce_unknown_axis_still_rejected() {
     );
 }
 
-/// chelis#364: a reduction whose axis is `cast(N, int32)` — a form the
+/// chelis#364: a reduction whose axis is `cast(N, i32)` — a form the
 /// checker admits as a compile-time-constant axis — must lower to axis N in
 /// the DAG/backend lane, not silently to axis 0. Pre-fix, `extract_axis_raw`
-/// returned 0 for any non-literal axis expr, so `sum(x, cast(1, int32))`
+/// returned 0 for any non-literal axis expr, so `sum(x, cast(1, i32))`
 /// reduced axis 0 (wrong numerics, a shape contradicting the checked type,
 /// and — under grad — eval and backend agreeing on the SAME wrong gradient).
 ///
-/// Non-square `[2, 3]`: axis 1 (`cast(1, int32)`) sums to `[6, 15]`; a
+/// Non-square `[2, 3]`: axis 1 (`cast(1, i32)`) sums to `[6, 15]`; a
 /// silent axis-0 default would produce a `[3]` shape of `[5, 7, 9]`.
 #[test]
 fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
-    let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, cast(1, int32))\n\
+    let source = "def f(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, cast(1, i32))\n\
          src = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
          out = f(src)\n";
     let backend = build_compile_run(source, "issue_364_cast_axis");
@@ -2005,12 +2005,12 @@ fn cast_axis_reduction_lowers_to_named_axis_not_zero() {
     assert_eval_agrees_with_backend(source, "issue_364_cast_axis", &backend);
 }
 
-/// chelis#364 (axis-2 cross-rank control): a `cast(2, int32)` axis on a
+/// chelis#364 (axis-2 cross-rank control): a `cast(2, i32)` axis on a
 /// rank-3 operand reduces the *third* axis, proving the fix carries the
 /// constant through rather than clamping to a fixed axis.
 #[test]
 fn cast_axis_reduction_axis_two_rank_three() {
-    let source = "def f(x: &tensor[a, b, c, f32]) -> tensor[a, b, f32] = sum(x, cast(2, int32))\n\
+    let source = "def f(x: &tensor[a, b, c, f32]) -> tensor[a, b, f32] = sum(x, cast(2, i32))\n\
          src = to_tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])\n\
          out = f(src)\n";
     let backend = build_compile_run(source, "issue_364_cast_axis_two");
@@ -2158,7 +2158,7 @@ fn vmap_two_stage_named_reduce_keyword_binding_builds_and_matches_backend() {
 /// changes the shape and cannot hide.
 #[test]
 fn form3_shape_sourced_expand_matches_backend() {
-    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, int32)))\n\
+    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
          xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
          bs = to_tensor([10.0, 20.0, 30.0, 40.0])\n\
          out = bias_broadcast(xs, bs)\n";
@@ -2182,7 +2182,7 @@ fn form3_shape_sourced_expand_matches_backend() {
 }
 
 /// chelis#384 (B): a §4.7.2 Form-3 runtime `expand` size that is a bare
-/// runtime scalar parameter (`k: int64`) with NO tensor source is rejected
+/// runtime scalar parameter (`k: i64`) with NO tensor source is rejected
 /// loudly at lowering, not silently mis-compiled. Pre-fix the C backend read
 /// the extent from an out-of-range operand axis (`x` is rank 1; the codegen
 /// read `inputs[0]->shape[1]`), emitting a garbage shape that disagreed with
@@ -2190,7 +2190,7 @@ fn form3_shape_sourced_expand_matches_backend() {
 /// extent, so the form has no backend representation and must reject.
 #[test]
 fn form3_scalar_param_expand_size_rejected() {
-    let source = "def f(x: &tensor[seq, f32], k: int64) -> tensor[seq, chan, f32] = insert(x, 1, k)\n\
+    let source = "def f(x: &tensor[seq, f32], k: i64) -> tensor[seq, chan, f32] = insert(x, 1, k)\n\
          out = f(to_tensor([1.0, 2.0]), 3i64)\n";
     let stderr = build_expecting_failure(source, "issue_384_scalar_param_expand");
     assert!(
@@ -2213,8 +2213,8 @@ fn form3_scalar_param_expand_size_rejected() {
 /// both lanes now reject the unsupported form with the same diagnostic.
 #[test]
 fn form3_scalar_param_expand_size_rejected_in_eval() {
-    let source = "def bcast[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
-         out = bcast(to_tensor([1.0, 2.0]), cast(3, int64))\n";
+    let source = "def bcast[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
+         out = bcast(to_tensor([1.0, 2.0]), cast(3, i64))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_397_eval_reject");
     assert!(
@@ -2239,7 +2239,7 @@ fn form3_scalar_param_expand_size_rejected_in_eval() {
 /// from `x`'s shape — out `[2, 3]`, C == eval.
 #[test]
 fn form3_shape_dep_survives_vmap_rebuild() {
-    let source = "def bcast(x: &tensor[n, f32], b: &tensor[f32]) -> tensor[n, f32] = insert(b, 0, shape(x, cast(0, int32)))\n\
+    let source = "def bcast(x: &tensor[n, f32], b: &tensor[f32]) -> tensor[n, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
          xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
          bs = to_tensor([10.0, 20.0])\n\
          out = vmap(bcast)(xs, bs)\n";
@@ -2269,7 +2269,7 @@ fn form3_shape_dep_survives_vmap_rebuild() {
 
 /// chelis#397 (check↔build symmetry): the EXACT 0.7.26-regression repro —
 /// `bcast_1d_to_2d`, a positional-axis Form-3 `expand` whose size is a bare
-/// runtime scalar parameter (`a_dim: int64`) with no tensor source — must be
+/// runtime scalar parameter (`a_dim: i64`) with no tensor source — must be
 /// rejected at CHECK time, not just at build/eval. Pre-fix, `chelis check`
 /// returned score 1.0 / empty errors while build and eval rejected it with the
 /// #469 sourceless-size diagnostic: a check-clean program that does not build,
@@ -2280,7 +2280,7 @@ fn form3_shape_dep_survives_vmap_rebuild() {
 #[test]
 fn form3_scalar_param_expand_size_rejected_at_check() {
     let json = check_json(
-        "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n",
+        "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n",
     );
     assert_rejected_with(
         &json,
@@ -2296,7 +2296,7 @@ fn form3_scalar_param_expand_size_rejected_at_check() {
 
 /// chelis#397 (check↔build symmetry, chained rank-1 -> rank-4): the full
 /// `broadcast_to_achw` repro from the issue — three chained positional-axis
-/// Form-3 `expand`s, each sized by a bare runtime `int64` parameter
+/// Form-3 `expand`s, each sized by a bare runtime `i64` parameter
 /// (`h_dim`/`w_dim`/`a_dim`) with no tensor source, with the explicit
 /// `step1`/`step2`/`step3` type ascriptions. This is the rank-1 -> rank-4 NN
 /// broadcast pattern (school's `broadcast_to_achw`) that previously
@@ -2306,7 +2306,7 @@ fn form3_scalar_param_expand_size_rejected_at_check() {
 #[test]
 fn form3_chained_rank4_expand_rejected_at_check() {
     let json = check_json(
-        "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
+        "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: i64, w_dim: i64, a_dim: i64) -> tensor[a, c, h, w, f32] = {\n\
         \x20 step1: tensor[c, h, f32] = insert(v, 1, h_dim)\n\
         \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, w_dim)\n\
         \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, a_dim)\n\
@@ -2335,13 +2335,13 @@ fn form3_chained_rank4_expand_rejected_at_check() {
 /// #469 reason survives across both lanes regardless of where it fires.
 #[test]
 fn form3_chained_rank4_expand_rejected_in_build_and_eval() {
-    let source = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
+    let source = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: i64, w_dim: i64, a_dim: i64) -> tensor[a, c, h, w, f32] = {\n\
         \x20 step1: tensor[c, h, f32] = insert(v, 1, h_dim)\n\
         \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, w_dim)\n\
         \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, a_dim)\n\
         \x20 step3\n\
         }\n\
-        out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, int64), cast(4, int64), cast(5, int64))\n";
+        out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, i64), cast(4, i64), cast(5, i64))\n";
     let build_stderr = build_expecting_failure(source, "issue_397_chained_achw_build");
     assert!(
         build_stderr.contains("no tensor in scope carries it")
@@ -2379,13 +2379,13 @@ fn form3_chained_rank4_expand_rejected_in_build_and_eval() {
 /// (`form3_shape_sourced_expand_matches_backend`) and must be ACCEPTED at
 /// check — the prior spelling-based predicate wrongly rejected it ("no tensor
 /// in scope carries it" while `x` plainly does). Source-tracking follows the
-/// `let` binding `a_dim = shape(x, cast(0, int32))` back to `x`'s shape, so
+/// `let` binding `a_dim = shape(x, cast(0, i32))` back to `x`'s shape, so
 /// the size is `ShapeSourced`. The evaluator materializes the extent from `x`
 /// (axis 0 = 2), producing `[2, 4]`.
 #[test]
 fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
     let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
-        \x20 a_dim: int64 = shape(x, cast(0, int32))\n\
+        \x20 a_dim: i64 = shape(x, cast(0, i32))\n\
         \x20 insert(b, 0, a_dim)\n\
         }\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
@@ -2412,7 +2412,7 @@ fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
 
 /// chelis#397 (BLOCKER 2): an arithmetic-built positive runtime size whose
 /// operands are all compile-time constants (`some_count = sub(cast(4,
-/// int32), cast(1, int32))` = 3) folds to a constant and is therefore a
+/// i32), cast(1, i32))` = 3) folds to a constant and is therefore a
 /// materializable `Static` extent — it must be ACCEPTED at check, not
 /// rejected as "sourceless". The evaluator computes the arithmetic and
 /// produces shape `[3, 2]`. This is the sibling of the host-runtime defense
@@ -2430,8 +2430,8 @@ fn form3_let_bound_shape_sourced_expand_accepted_at_check() {
 #[test]
 fn form3_static_arithmetic_expand_size_accepted_at_check() {
     let source = "b = to_tensor([1.0, 2.0])\n\
-        some_count = sub(cast(4, int32), cast(1, int32))\n\
-        out = insert(b, cast(0, int32), some_count)\n";
+        some_count = sub(cast(4, i32), cast(1, i32))\n\
+        out = insert(b, cast(0, i32), some_count)\n";
     let json = check_json(source);
     assert_clean(
         &json,
@@ -2473,7 +2473,7 @@ fn form3_static_arithmetic_expand_size_accepted_at_check() {
 #[test]
 fn form3_let_bound_shape_sourced_expand_matches_backend() {
     let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
-        \x20 a_dim: int64 = shape(x, cast(0, int32))\n\
+        \x20 a_dim: i64 = shape(x, cast(0, i32))\n\
         \x20 insert(b, 0, a_dim)\n\
         }\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
@@ -2494,7 +2494,7 @@ fn form3_let_bound_shape_sourced_expand_matches_backend() {
 
 /// chelis#469 RT-3 (let-to-let alias of a shape name): an intermediate `let`
 /// alias of a shape-bound name — `a = shape(x, 0); c = a; expand(b, 0, c)`,
-/// and the `cast`-wrapped `c = cast(a, int32); expand(b, 0, cast(c, int64))` —
+/// and the `cast`-wrapped `c = cast(a, i32); expand(b, 0, cast(c, i64))` —
 /// is check-clean and eval-correct and must now also BUILD with C agreeing
 /// with the evaluator. Pre-RT-3 the shape recovery followed a name bound
 /// DIRECTLY to `shape(...)` (plus a use-site `cast`) but not through a
@@ -2508,17 +2508,17 @@ fn form3_shape_alias_expand_matches_backend() {
         (
             "bare_alias",
             "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
-            \x20 a: int64 = shape(x, cast(0, int32))\n\
-            \x20 c: int64 = a\n\
+            \x20 a: i64 = shape(x, cast(0, i32))\n\
+            \x20 c: i64 = a\n\
             \x20 insert(b, 0, c)\n\
             }\n",
         ),
         (
             "cast_alias",
             "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = {\n\
-            \x20 a: int64 = shape(x, cast(0, int32))\n\
-            \x20 c: int64 = cast(a, int64)\n\
-            \x20 insert(b, 0, cast(c, int64))\n\
+            \x20 a: i64 = shape(x, cast(0, i32))\n\
+            \x20 c: i64 = cast(a, i64)\n\
+            \x20 insert(b, 0, cast(c, i64))\n\
             }\n",
         ),
     ] {
@@ -2554,8 +2554,8 @@ fn form3_shape_alias_expand_matches_backend() {
 #[test]
 fn form3_shape_alias_axis_discriminator_matches_backend() {
     let source = "def f(x: &tensor[2, 3, f32], b: &tensor[4, f32]) -> tensor[three, 4, f32] = {\n\
-        \x20 a: int64 = shape(x, cast(1, int32))\n\
-        \x20 c: int64 = a\n\
+        \x20 a: i64 = shape(x, cast(1, i32))\n\
+        \x20 c: i64 = a\n\
         \x20 insert(b, 0, c)\n\
         }\n\
         xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
@@ -2584,10 +2584,10 @@ fn form3_shape_alias_axis_discriminator_matches_backend() {
 #[test]
 fn form3_shape_alias_rebound_to_sourceless_rejected_at_check() {
     let json = check_json(
-        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int64) -> tensor[n, 4, f32] = {\n\
-        \x20 a: int64 = shape(x, cast(0, int32))\n\
-        \x20 c: int64 = a\n\
-        \x20 c: int64 = k\n\
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: i64) -> tensor[n, 4, f32] = {\n\
+        \x20 a: i64 = shape(x, cast(0, i32))\n\
+        \x20 c: i64 = a\n\
+        \x20 c: i64 = k\n\
         \x20 insert(b, 0, c)\n\
         }\n",
     );
@@ -2600,7 +2600,7 @@ fn form3_shape_alias_rebound_to_sourceless_rejected_at_check() {
 }
 
 /// chelis#469 (Case 1, static arithmetic): a size built from all-constant
-/// integer arithmetic (`sub(cast(4, int32), cast(1, int32))` = 3) now
+/// integer arithmetic (`sub(cast(4, i32), cast(1, i32))` = 3) now
 /// const-folds to a concrete extent and BUILDS, with C agreeing with the
 /// evaluator. Pre-#469 this SILENTLY miscompiled: check + eval produced
 /// `[3, 2]` while the C backend defaulted the unresolved size to extent 1 and
@@ -2611,7 +2611,7 @@ fn form3_shape_alias_rebound_to_sourceless_rejected_at_check() {
 #[test]
 fn form3_static_arithmetic_expand_size_matches_backend() {
     let source = "b = to_tensor([1.0, 2.0])\n\
-        out = insert(b, cast(0, int32), sub(cast(4, int64), cast(1, int64)))\n";
+        out = insert(b, cast(0, i32), sub(cast(4, i64), cast(1, i64)))\n";
     let backend = build_compile_run(source, "issue_469_static_arith");
     let tensors = parse_printed_tensors(&backend);
     let out = tensors
@@ -2628,7 +2628,7 @@ fn form3_static_arithmetic_expand_size_matches_backend() {
 }
 
 /// chelis#469 (Case 1, let-bound static): a `let`-bound STATIC size
-/// (`k = cast(3, int32); expand(b, 0, cast(k, int64))`) folds to its value
+/// (`k = cast(3, i32); expand(b, 0, cast(k, i64))`) folds to its value
 /// through the `let` and `cast` in IR lowering, matching the §4.7.2
 /// `SizeClass::Static` "followed transitively through `let` bindings" contract.
 /// Pre-#469 the cast-wrapped form silently defaulted to extent 1 (eval
@@ -2646,8 +2646,8 @@ fn form3_static_arithmetic_expand_size_matches_backend() {
 #[test]
 fn form3_let_bound_static_expand_size_builds_correct_extent() {
     let source = "def f(b: &tensor[3, f32]) -> tensor[3, 3, f32] = {\n\
-        \x20 k: int32 = cast(3, int32)\n\
-        \x20 insert(b, 0, cast(k, int64))\n\
+        \x20 k: i32 = cast(3, i32)\n\
+        \x20 insert(b, 0, cast(k, i64))\n\
         }\n\
         b = to_tensor([7.0, 8.0, 9.0])\n\
         out = f(&b)\n";
@@ -2676,7 +2676,7 @@ fn form3_let_bound_static_expand_size_builds_correct_extent() {
 
 /// chelis#1379: an expand size that is integer arithmetic COMBINING a
 /// `shape(tensor, axis)` read with another term
-/// (`mul(shape(x, cast(0, int32)), cast(2, int64))`) builds and agrees with
+/// (`mul(shape(x, cast(0, i32)), cast(2, i64))`) builds and agrees with
 /// the evaluator. It is the runtime twin of
 /// `form3_static_arithmetic_expand_size_matches_backend`: all-constant
 /// arithmetic folds to a literal extent, and arithmetic that touches a runtime
@@ -2695,7 +2695,7 @@ fn form3_let_bound_static_expand_size_builds_correct_extent() {
 /// `6dbbbf2bc` with the chelis#469 materialization rejection.
 #[test]
 fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
-    let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[m, 4, f32] = insert(b, 0, mul(shape(x, cast(0, int32)), cast(2, int64)))\n\
+    let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[m, 4, f32] = insert(b, 0, mul(shape(x, cast(0, i32)), cast(2, i64)))\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
         out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
     let backend = build_compile_run(source, "issue_1379_arith_over_shape");
@@ -2737,7 +2737,7 @@ fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
 /// emit identical `.c`.
 #[test]
 fn form3_bias_broadcast_c_is_byte_deterministic() {
-    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, int32)))\n\
+    let source = "def bias_broadcast(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, i32)))\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
         out = bias_broadcast(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
     let first = build_c_source(source, "issue_469_determinism_a");
@@ -2753,13 +2753,13 @@ fn form3_bias_broadcast_c_is_byte_deterministic() {
 /// the reduction/softmax/gather AXIS path. `extract_int_for_dim` (the shared
 /// axis walker) is deliberately left un-widened; the fold lives only in
 /// `fold_static_size` on the extent path. A static-arithmetic reduction axis
-/// (`sum(x, sub(cast(2, int32), cast(1, int32)))`) therefore stays REJECTED at
+/// (`sum(x, sub(cast(2, i32), cast(1, i32)))`) therefore stays REJECTED at
 /// check ("axis must be a compile-time constant or a named axis") — proving the
 /// extent fold did not silently widen the axis contract.
 #[test]
 fn static_arith_reduction_axis_still_rejected_at_check() {
     let json = check_json(
-        "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, int32), cast(1, int32)))\n",
+        "def f(x: &tensor[2, 3, f32]) -> tensor[2, f32] = sum(x, sub(cast(2, i32), cast(1, i32)))\n",
     );
     assert_rejected_with(
         &json,
@@ -2779,9 +2779,9 @@ fn static_arith_reduction_axis_still_rejected_at_check() {
 fn form3_chained_rank4_shape_sourced_expand_accepted_at_check() {
     let json = check_json(
         "def bcast4[c, h, w, a](v: &tensor[c, f32], src: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {\n\
-        \x20 step1: tensor[c, h, f32] = insert(v, 1, shape(src, cast(2, int32)))\n\
-        \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, shape(src, cast(3, int32)))\n\
-        \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, shape(src, cast(0, int32)))\n\
+        \x20 step1: tensor[c, h, f32] = insert(v, 1, shape(src, cast(2, i32)))\n\
+        \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, shape(src, cast(3, i32)))\n\
+        \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, shape(src, cast(0, i32)))\n\
         \x20 step3\n\
         }\n",
     );
@@ -2793,7 +2793,7 @@ fn form3_chained_rank4_shape_sourced_expand_accepted_at_check() {
 
 // ── chelis#397 source-tracking: negative (sourceless) rejection, uniform ──
 //
-// A truly-sourceless runtime size — a bare `int32`/`int64` parameter, a
+// A truly-sourceless runtime size — a bare `i32`/`i64` parameter, a
 // `cast`/arithmetic over one, or a `let` bound to such — has no backend
 // representation and must be REJECTED at check with the #469 diagnostic,
 // UNIFORMLY across spellings. The bare-`var` spelling is already pinned by
@@ -2801,14 +2801,14 @@ fn form3_chained_rank4_shape_sourced_expand_accepted_at_check() {
 // the prior predicate (which keyed on the bare-`(var)` form only) let escape.
 
 /// chelis#397 (MAJOR 4): the `cast`-wrapped sourceless form
-/// `expand(g, 0, cast(a_dim, int64))` — which the prior spelling-based
+/// `expand(g, 0, cast(a_dim, i64))` — which the prior spelling-based
 /// predicate let ESCAPE check entirely and then silently miscompile in C —
 /// must now be REJECTED at check with the #469 diagnostic. Source-tracking
 /// strips the `cast` and finds the bare runtime scalar `a_dim` underneath.
 #[test]
 fn form3_cast_wrapped_sourceless_expand_rejected_at_check() {
     let json = check_json(
-        "def g[a, n](b: tensor[n, f32], a_dim: int32) -> tensor[a, n, f32] = insert(b, 0, cast(a_dim, int64))\n",
+        "def g[a, n](b: tensor[n, f32], a_dim: i32) -> tensor[a, n, f32] = insert(b, 0, cast(a_dim, i64))\n",
     );
     assert_rejected_with(
         &json,
@@ -2829,8 +2829,8 @@ fn form3_cast_wrapped_sourceless_expand_rejected_at_check() {
 #[test]
 fn form3_let_bound_sourceless_expand_rejected_at_check() {
     let json = check_json(
-        "def g[a, n](b: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = {\n\
-        \x20 d: int64 = a_dim\n\
+        "def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = {\n\
+        \x20 d: i64 = a_dim\n\
         \x20 insert(b, 0, d)\n\
         }\n",
     );
@@ -2848,13 +2848,13 @@ fn form3_let_bound_sourceless_expand_rejected_at_check() {
 
 /// chelis#397: integer arithmetic that TOUCHES a sourceless runtime scalar is
 /// itself sourceless (`Sourceless` is absorbing) — `add(a_dim, cast(1,
-/// int64))` cannot be materialized because `a_dim` has no shape source. It
+/// i64))` cannot be materialized because `a_dim` has no shape source. It
 /// must be REJECTED at check, distinguishing it from the all-constant
 /// arithmetic accepted by `form3_static_arithmetic_expand_size_accepted_at_check`.
 #[test]
 fn form3_arithmetic_over_sourceless_expand_rejected_at_check() {
     let json = check_json(
-        "def g[a, n](b: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(b, 0, add(a_dim, cast(1, int64)))\n",
+        "def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, add(a_dim, cast(1, i64)))\n",
     );
     assert_rejected_with(
         &json,
@@ -2876,7 +2876,7 @@ fn form3_arithmetic_over_sourceless_expand_rejected_at_check() {
 // #397 exist to prevent — so each must reject at CHECK with the #469 reason.
 
 /// chelis#397 (BLOCKER A): a function-call-derived inline size
-/// `expand(b, 0, ident(a_dim))` (with `def ident(x: int64) -> int64 = x`)
+/// `expand(b, 0, ident(a_dim))` (with `def ident(x: i64) -> i64 = x`)
 /// must be REJECTED at check. Pre-fix it classified as `Unknown` and reached
 /// `check_expand_signature`'s non-rejecting `_` arm: check-clean AND
 /// build-clean, with the C backend emitting a hardcoded extent-1 axis (eval
@@ -2887,8 +2887,8 @@ fn form3_arithmetic_over_sourceless_expand_rejected_at_check() {
 #[test]
 fn form3_function_call_inline_expand_size_rejected_at_check() {
     let bare = check_json(
-        "def ident(x: int64) -> int64 = x\n\
-        def g[a, n](b: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(b, 0, ident(a_dim))\n",
+        "def ident(x: i64) -> i64 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, ident(a_dim))\n",
     );
     assert_rejected_with(
         &bare,
@@ -2898,8 +2898,8 @@ fn form3_function_call_inline_expand_size_rejected_at_check() {
     assert_rejected_with(&bare, "chelis#469", "BLOCKER A bare form cites #469");
 
     let cast_wrapped = check_json(
-        "def ident(x: int64) -> int64 = x\n\
-        def g[a, n](b: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(b, 0, cast(ident(a_dim), int64))\n",
+        "def ident(x: i64) -> i64 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, cast(ident(a_dim), i64))\n",
     );
     assert_rejected_with(
         &cast_wrapped,
@@ -2908,8 +2908,8 @@ fn form3_function_call_inline_expand_size_rejected_at_check() {
     );
 
     let arith_wrapped = check_json(
-        "def ident(x: int64) -> int64 = x\n\
-        def g[a, n](b: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(b, 0, add(ident(a_dim), cast(0, int64)))\n",
+        "def ident(x: i64) -> i64 = x\n\
+        def g[a, n](b: tensor[n, f32], a_dim: i64) -> tensor[a, n, f32] = insert(b, 0, add(ident(a_dim), cast(0, i64)))\n",
     );
     assert_rejected_with(
         &arith_wrapped,
@@ -2928,9 +2928,9 @@ fn form3_function_call_inline_expand_size_rejected_at_check() {
 #[test]
 fn form3_shape_to_sourceless_rebind_expand_rejected_at_check() {
     let json = check_json(
-        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int64) -> tensor[n, 4, f32] = {\n\
-        \x20 len: int64 = shape(x, cast(0, int32))\n\
-        \x20 len: int64 = k\n\
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: i64) -> tensor[n, 4, f32] = {\n\
+        \x20 len: i64 = shape(x, cast(0, i32))\n\
+        \x20 len: i64 = k\n\
         \x20 insert(b, 0, len)\n\
         }\n",
     );
@@ -2944,7 +2944,7 @@ fn form3_shape_to_sourceless_rebind_expand_rejected_at_check() {
 
 /// chelis#397 (BLOCKER C): a sourceless value parameter that SHADOWS an outer
 /// shape-sourced name — `d = shape(&xs, 0)` at top level, then `def f(..., d:
-/// int32) = expand(g, 0, d)` — must be REJECTED at check. Pre-fix `Env`'s
+/// i32) = expand(g, 0, d)` — must be REJECTED at check. Pre-fix `Env`'s
 /// derived `Clone` copied the outer `d`'s `ShapeSourced` provenance into the
 /// function scope and the value parameter did not clear it: check ACCEPTED
 /// while build/eval rejected #469 — the exact check-clean-fails-build #397
@@ -2954,8 +2954,8 @@ fn form3_shape_to_sourceless_rebind_expand_rejected_at_check() {
 fn form3_sourceless_param_shadowing_shape_name_rejected_at_check() {
     let json = check_json(
         "xs = to_tensor([[1.0, 2.0], [3.0, 4.0]])\n\
-        d = shape(&xs, cast(0, int32))\n\
-        def f[m, q](g: tensor[q, f32], d: int64) -> tensor[m, q, f32] = insert(g, 0, d)\n",
+        d = shape(&xs, cast(0, i32))\n\
+        def f[m, q](g: tensor[q, f32], d: i64) -> tensor[m, q, f32] = insert(g, 0, d)\n",
     );
     assert_rejected_with(
         &json,
@@ -2975,9 +2975,9 @@ fn form3_sourceless_param_shadowing_shape_name_rejected_at_check() {
 #[test]
 fn form3_sourceless_to_shape_rebind_expand_accepted_at_check() {
     let json = check_json(
-        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: int64) -> tensor[n, 4, f32] = {\n\
-        \x20 len: int64 = k\n\
-        \x20 len: int64 = shape(x, cast(0, int32))\n\
+        "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32], k: i64) -> tensor[n, 4, f32] = {\n\
+        \x20 len: i64 = k\n\
+        \x20 len: i64 = shape(x, cast(0, i32))\n\
         \x20 insert(b, 0, len)\n\
         }\n",
     );

@@ -8168,7 +8168,7 @@ mod shell_type_variable_canonicalization_tests {
                 .collect::<Vec<_>>(),
             vec![(
                 "len",
-                vec!["(t-var {} t0)".to_string(), "(t-prim {} int64)".to_string()]
+                vec!["(t-var {} t0)".to_string(), "(t-prim {} i64)".to_string()]
             )]
         );
     }
@@ -10103,7 +10103,7 @@ mod tests {
         write(
             &root.join("src/main.ch"),
             &format!(
-                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value() -> int32 = dep_add(1, 2)\n"
+                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value() -> i32 = dep_add(1, 2)\n"
             ),
         );
         write(
@@ -10116,7 +10116,7 @@ mod tests {
         write(
             &root.join("thedep/src/math.ch"),
             &format!(
-                "module {dep_prefix}.Math\nexport (dep_add)\n\ndef dep_add(x: int32, y: int32) -> int32 = cast(0, int32)\n"
+                "module {dep_prefix}.Math\nexport (dep_add)\n\ndef dep_add(x: i32, y: i32) -> i32 = cast(0, i32)\n"
             ),
         );
         write(
@@ -11116,7 +11116,7 @@ module_prefix = "Mylib"
         );
         write(
             &dep_root.join("src/math.ch"),
-            "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x + y\n",
+            "module Mylib.Math\n\nexport (add)\ndef add(x: i32, y: i32) -> i32 = x + y\n",
         );
 
         // Build the root package depending on mylib via a local path.
@@ -11137,7 +11137,7 @@ mylib = {{ path = "./mylib" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: int32) -> int32 = add(x, x)\n",
+            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: i32) -> i32 = add(x, x)\n",
         );
 
         // Write a reef.lock that records the path dependency (the fast path reads
@@ -11165,7 +11165,7 @@ path = "./mylib"
         let eval_file = dir.path().join("probe.ch");
         write(
             &eval_file,
-            "import Mylib.Math (add)\ndef result() -> int32 = add(1, 2)\n",
+            "import Mylib.Math (add)\ndef result() -> i32 = add(1, 2)\n",
         );
 
         let start = std::time::Instant::now();
@@ -11238,7 +11238,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+            "module Myapp.Main\n\ndef id(x: i32) -> i32 = x\n",
         );
 
         // No reef.lock — triggers the slow path.  The registry cache does not
@@ -11267,7 +11267,7 @@ some-registry-lib = {{ version = "0.1.0" }}
             std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
         }
         let entry_decls =
-            chelis_surf::parser::parse_str("def result() -> int32 = 42").expect("parse");
+            chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
@@ -11308,7 +11308,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         // Write a file that has an import — would fail if resolver ran.
         write(
             &eval_file,
-            "import NonExistent.Module (something)\ndef result() -> int32 = 42\n",
+            "import NonExistent.Module (something)\ndef result() -> i32 = 42\n",
         );
 
         let start = std::time::Instant::now();
@@ -11361,7 +11361,7 @@ some-lib = {{ version = "0.1.0" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+            "module Myapp.Main\n\ndef id(x: i32) -> i32 = x\n",
         );
 
         // Write a reef.lock that claims some-lib comes from the local registry (no cache).
@@ -11463,7 +11463,7 @@ missing = {{ path = "./nonexistent_dep" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+            "module Myapp.Main\n\ndef id(x: i32) -> i32 = x\n",
         );
 
         // reef.lock says the dep is a path dep to a nonexistent directory.
@@ -11488,7 +11488,7 @@ path = "./nonexistent_dep"
 
         let start = std::time::Instant::now();
         let entry_decls =
-            chelis_surf::parser::parse_str("def result() -> int32 = 42").expect("parse");
+            chelis_surf::parser::parse_str("def result() -> i32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         let elapsed = start.elapsed();
 
@@ -11533,7 +11533,7 @@ module_prefix = "Mylib"
         );
         write(
             &dep_root.join("src/math.ch"),
-            "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x + y\n",
+            "module Mylib.Math\n\nexport (add)\ndef add(x: i32, y: i32) -> i32 = x + y\n",
         );
 
         write(
@@ -11553,7 +11553,7 @@ mylib = {{ path = "./mylib" }}
         );
         write(
             &root.join("src/main.ch"),
-            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: int32) -> int32 = add(x, x)\n",
+            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: i32) -> i32 = add(x, x)\n",
         );
 
         write(
@@ -11595,7 +11595,7 @@ module_prefix = "OrphanSig"
         );
         write(
             &root.join("src/main.ch"),
-            "module OrphanSig.Main\nsig missing: int32\n",
+            "module OrphanSig.Main\nsig missing: i32\n",
         );
 
         let error = prepare_reef_graph(&root)
@@ -11610,7 +11610,7 @@ module_prefix = "OrphanSig"
     fn synthetic_entry_signatures_require_same_entry_definitions() {
         let (_dir, root) = shared_graph_fixture();
         let graph = prepare_reef_graph(&root).expect("prepare graph");
-        let orphan = chelis_surf::parser::parse_str("sig missing: int32").expect("parse orphan");
+        let orphan = chelis_surf::parser::parse_str("sig missing: i32").expect("parse orphan");
         let error = compile_with_reef_graph(&graph, &orphan)
             .expect_err("an eval entry signature cannot borrow a library definition");
         assert!(
@@ -11618,9 +11618,8 @@ module_prefix = "OrphanSig"
             "unexpected synthetic-entry diagnostic: {error}"
         );
 
-        let paired =
-            chelis_surf::parser::parse_str("sig present: int32\ndef present() -> int32 = 1")
-                .expect("parse pair");
+        let paired = chelis_surf::parser::parse_str("sig present: i32\ndef present() -> i32 = 1")
+            .expect("parse pair");
         compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
     }
 
@@ -11707,7 +11706,7 @@ module_prefix = "OrphanSig"
             &root.join("mylib/src/math.ch"),
             "module Mylib.Math\n\n\
              export (add, __chelis_batch_root_0)\n\
-             def add(x: int32, y: int32) -> int32 = x + y\n\
+             def add(x: i32, y: i32) -> i32 = x + y\n\
              def __chelis_batch_root_0() -> bool = true\n",
         );
         let graph = prepare_reef_graph(&root).expect("prepare graph");
@@ -11793,12 +11792,12 @@ module_prefix = "OrphanSig"
         let graph = prepare_reef_graph(&root).expect("prepare graph");
         let declarations = chelis_surf::parser::parse_str(
             "dim n\n\
-             sig helper: int32 -> int32\n\
-             def helper(x: int32) -> int32 = x\n\
-             type Row = tensor[n, int32]\n\
+             sig helper: i32 -> i32\n\
+             def helper(x: i32) -> i32 = x\n\
+             type Row = tensor[n, i32]\n\
              type Boxed = | Wrap(Row)\n\
              macro identity(x) = x\n\
-             @property stable forall(x: int32): helper(x) == x\n\
+             @property stable forall(x: i32): helper(x) == x\n\
              def test_all() -> bool = true\n",
         )
         .expect("parse every-namespace entry");
@@ -11829,7 +11828,7 @@ module_prefix = "OrphanSig"
     /// Build a two-package graph where the dependency (`coral`) and the
     /// root (`school`) each declare an ADT carrying a same-named
     /// *positional* `IntCol` constructor with a *different arity and field
-    /// type*: coral's `IntCol(tensor[n, int64], tensor[n, bool])` takes
+    /// type*: coral's `IntCol(tensor[n, i64], tensor[n, bool])` takes
     /// two args, school's `IntCol(tensor[n, f32])` takes one. Each
     /// package's own function constructs its own `IntCol`. Both go through
     /// the type-checked positional-application path (`infer_app`), so a
@@ -11858,8 +11857,8 @@ module_prefix = "Coral"
             &dep_root.join("src/frame.ch"),
             "module Coral.Frame\n\
              export (Column, make_int_col)\n\
-             type Column[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
-             def make_int_col[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> Column[n] = IntCol(xs, mask)\n",
+             type Column[n] = | IntCol(tensor[n, i64], tensor[n, bool])\n\
+             def make_int_col[n](xs: tensor[n, i64], mask: tensor[n, bool]) -> Column[n] = IntCol(xs, mask)\n",
         );
 
         write(
@@ -12064,7 +12063,7 @@ module_prefix = "School"
             &root.join("src/main.ch"),
             "module School.Main\n\
              type Side = | Left | Right\n\
-             def classify(s: Side) -> int32 = match s with { | Left => 0 }\n",
+             def classify(s: Side) -> i32 = match s with { | Left => 0 }\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12129,7 +12128,7 @@ module_prefix = "Coral"
             &dep_root.join("src/frame.ch"),
             "module Coral.Frame\n\
              export (ColumnA, IntCol)\n\
-             type ColumnA[n] = | IntCol(tensor[n, int64])\n",
+             type ColumnA[n] = | IntCol(tensor[n, i64])\n",
         );
         write(
             &dep_root.join("src/frame2.ch"),
@@ -12158,7 +12157,7 @@ coral = {{ path = "./coral" }}
             "module School.Main\n\
              import Coral.Frame (ColumnA, IntCol)\n\
              import Coral.Frame2 (IntCol)\n\
-             def use_it[n](xs: tensor[n, int64]) -> ColumnA[n] = IntCol(xs)\n",
+             def use_it[n](xs: tensor[n, i64]) -> ColumnA[n] = IntCol(xs)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12221,7 +12220,7 @@ module_prefix = "Coral"
             &dep_root.join("src/frame.ch"),
             "module Coral.Frame\n\
              export (Column, IntCol)\n\
-             type Column[n] = | IntCol(tensor[n, int64])\n",
+             type Column[n] = | IntCol(tensor[n, i64])\n",
         );
 
         write(
@@ -12243,7 +12242,7 @@ coral = {{ path = "./coral" }}
             &root.join("src/main.ch"),
             "module School.Main\n\
              import Coral.Frame (Column, IntCol)\n\
-             def use_it[n](xs: tensor[n, int64]) -> Column[n] = IntCol(xs)\n",
+             def use_it[n](xs: tensor[n, i64]) -> Column[n] = IntCol(xs)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12308,7 +12307,7 @@ module_prefix = "Coral"
             &dep_root.join("src/frame.ch"),
             "module Coral.Frame\n\
              export (Stamp, Mark)\n\
-             type Stamp = | Mark(int64)\n",
+             type Stamp = | Mark(i64)\n",
         );
 
         // Root module declares its OWN `Tag` with an own `Mark` constructor
@@ -12444,14 +12443,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `combo` pulls in both modules qualified-access-only (`()`), so no
         // unqualified `Mode`/`Train`/`Eval`/`use` collide, and reaches each
@@ -12461,7 +12460,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def go() -> int32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+             def go() -> i32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12558,13 +12557,13 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/combo.ch"),
             "module Demo.Combo\n\
              import Demo.Dropout\n\
-             def go() -> int32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+             def go() -> i32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12602,15 +12601,15 @@ version = "0.1.0"
         );
         write(
             &root.join("src/library.ch"),
-            "module Demo.Library\nexport (public_value, Mode)\ntype Mode = | Visible\ntype Hidden = | Secret\ndef secret() -> int32 = 1i32\ndef public_value() -> int32 = secret()\n",
+            "module Demo.Library\nexport (public_value, Mode)\ntype Mode = | Visible\ntype Hidden = | Secret\ndef secret() -> i32 = 1i32\ndef public_value() -> i32 = secret()\n",
         );
         let entry = root.join("src/client.ch");
         for (body, private_name) in [
-            ("def go() -> int32 = Demo.Library.secret()", "secret"),
+            ("def go() -> i32 = Demo.Library.secret()", "secret"),
             ("def go() = Demo.Library.Secret", "Secret"),
             ("def go(x: Demo.Library.Hidden) = x", "Hidden"),
             (
-                "def go(x: Demo.Library.Mode) -> int32 = match x with { | Demo.Library.Secret => 0i32 | Demo.Library.Visible => 1i32 }",
+                "def go(x: Demo.Library.Mode) -> i32 = match x with { | Demo.Library.Secret => 0i32 | Demo.Library.Visible => 1i32 }",
                 "Secret",
             ),
         ] {
@@ -12626,7 +12625,7 @@ version = "0.1.0"
         }
         write(
             &entry,
-            "module Demo.Client\nimport Demo.Library (Mode, Visible, public_value)\ndef go(x: Mode) -> int32 = match x with { | Visible => public_value() }\n",
+            "module Demo.Client\nimport Demo.Library (Mode, Visible, public_value)\ndef go(x: Mode) -> i32 = match x with { | Visible => public_value() }\n",
         );
         let prepared = prepare_program_for_file(&entry).unwrap().unwrap();
         let deep = expanded_desugared_program(&prepared.decls).unwrap();
@@ -12689,8 +12688,8 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def classify_dropout() -> int32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
-             def classify_sd() -> int32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+             def classify_dropout() -> i32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> i32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12782,14 +12781,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `relay` annotates its parameter with the qualified type and forwards
         // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
@@ -12799,7 +12798,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def relay(m: Demo.Dropout.Mode) -> int32 = Demo.Dropout.use(m)\n",
+             def relay(m: Demo.Dropout.Mode) -> i32 = Demo.Dropout.use(m)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12844,8 +12843,8 @@ version = "0.1.0"
     fn prepare_reef_graph_split_matches_single_shot_semantics() {
         let (_dir, root) = shared_graph_fixture();
 
-        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> int32 = add(1, 2)\n";
-        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> int32 = add(3, 4)\n";
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> i32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> i32 = add(3, 4)\n";
         let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
@@ -12916,8 +12915,8 @@ version = "0.1.0"
     fn prepare_reef_graph_amortizes_work_across_multiple_files() {
         let (_dir, root) = shared_graph_fixture();
 
-        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> int32 = add(1, 2)\n";
-        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> int32 = add(3, 4)\n";
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> i32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> i32 = add(3, 4)\n";
         let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
@@ -13083,7 +13082,7 @@ module_prefix = "RegistryLib"
         let source = registry_root.join("src/lib.ch");
         write(
             &source,
-            "module RegistryLib.Lib\nexport (one)\ndef one() -> int32 = 1\n",
+            "module RegistryLib.Lib\nexport (one)\ndef one() -> i32 = 1\n",
         );
 
         let mut graph = PackageGraph {
@@ -13127,7 +13126,7 @@ module_prefix = "RegistryLib"
             .expect("LocalRegistry graph is hashable");
         write(
             &source,
-            "module RegistryLib.Lib\nexport (one)\ndef one() -> int32 = 2\n",
+            "module RegistryLib.Lib\nexport (one)\ndef one() -> i32 = 2\n",
         );
         let after = prepared
             .source_digests()
@@ -13155,8 +13154,8 @@ module_prefix = "RegistryLib"
         let (_dir, root) = shared_graph_fixture();
         let entry = chelis_surf::parser::parse_str(
             "import Mylib.Math (add)\n\
-             def selected(x: int32) -> int32 = add(x, x)\n\
-             @property identity forall(x: int32): selected(x) == add(x, x)\n",
+             def selected(x: i32) -> i32 = add(x, x)\n\
+             @property identity forall(x: i32): selected(x) == add(x, x)\n",
         )
         .expect("entry parses");
         let graph = prepare_reef_graph(&root).expect("prepare graph");
@@ -13181,18 +13180,18 @@ module_prefix = "RegistryLib"
             "module Mylib.Math\n\
              export (n, Values, Wrapped, Probability, add)\n\
              dim n\n\
-             type Values = tensor[n, int32]\n\
+             type Values = tensor[n, i32]\n\
              type Wrapped = | Wrapped(Values)\n\
              def floor() -> f32 = 0.0\n\
              @opaque\n\
              @invariant(p) p.value >= floor()\n\
              type Probability = | Probability { value: f32 }\n\
-             def add(x: int32, y: int32) -> int32 = x + y\n\
-             def unreachable_dependency() -> int32 = 99\n",
+             def add(x: i32, y: i32) -> i32 = x + y\n\
+             def unreachable_dependency() -> i32 = 99\n",
         );
         let entry = chelis_surf::parser::parse_str(
             "import Mylib.Math (Wrapped, Probability)\n\
-             def inspect(value: Wrapped, probability: Probability) -> int32 = \
+             def inspect(value: Wrapped, probability: Probability) -> i32 = \
                match value with { | Wrapped(xs) => 1 }\n",
         )
         .expect("entry parses");
@@ -13223,10 +13222,10 @@ module_prefix = "RegistryLib"
     fn reachable_decls_follow_types_dimensions_constructors_and_patterns() {
         let decls = chelis_surf::parser::parse_str(
             "dim n\n\
-             type Values = tensor[n, int32]\n\
+             type Values = tensor[n, i32]\n\
              type Wrapped = | Wrapped(Values)\n\
-             def inspect(value: Wrapped) -> int32 = match value with { | Wrapped(xs) => 1 }\n\
-             def unrelated() -> int32 = 0\n",
+             def inspect(value: Wrapped) -> i32 = match value with { | Wrapped(xs) => 1 }\n\
+             def unrelated() -> i32 = 0\n",
         )
         .expect("fixture parses");
         let entry_decls = decls
@@ -13298,9 +13297,9 @@ module_prefix = "RegistryLib"
         );
 
         let macro_decls = chelis_surf::parser::parse_str(
-            "def increment() -> int32 = 1\n\
+            "def increment() -> i32 = 1\n\
              macro bump(x) = x + increment()\n\
-             def unrelated() -> int32 = 2\n",
+             def unrelated() -> i32 = 2\n",
         )
         .expect("macro fixture parses");
         let macro_entry = macro_decls
@@ -13380,7 +13379,7 @@ module_prefix = "RegistryLib"
 
         write(
             &root.join("mylib/src/math.ch"),
-            "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x - y\n",
+            "module Mylib.Math\n\nexport (add)\ndef add(x: i32, y: i32) -> i32 = x - y\n",
         );
         let changed = prepare_reef_graph_cached(&root).expect("source change rebuilds");
         assert!(
@@ -13497,7 +13496,7 @@ module_prefix = "RegistryLib"
         let second = root.join("src/second.ch");
         write(
             &second,
-            "module Myapp.Second\nexport (second)\ndef second() -> int32 = 2\n",
+            "module Myapp.Second\nexport (second)\ndef second() -> i32 = 2\n",
         );
         let added = prepare_reef_graph_cached(&root).expect("addition rebuilds");
         assert!(
@@ -13518,14 +13517,14 @@ module_prefix = "RegistryLib"
 
         write(
             &second,
-            "module Myapp.Second\nexport (second)\ndef second() -> int32 = 2\n",
+            "module Myapp.Second\nexport (second)\ndef second() -> i32 = 2\n",
         );
         prepare_reef_graph_cached(&root).expect("cache second source");
         let renamed = root.join("src/renamed.ch");
         fs::rename(&second, &renamed).expect("rename source");
         write(
             &renamed,
-            "module Myapp.Renamed\nexport (renamed)\ndef renamed() -> int32 = 3\n",
+            "module Myapp.Renamed\nexport (renamed)\ndef renamed() -> i32 = 3\n",
         );
         let after_rename = prepare_reef_graph_cached(&root).expect("rename rebuilds");
         let modules = &after_rename.graph.packages["myapp"].modules;
@@ -13542,7 +13541,7 @@ module_prefix = "RegistryLib"
             if !mutated {
                 write(
                     &dependency,
-                    "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x - y\n",
+                    "module Mylib.Math\n\nexport (add)\ndef add(x: i32, y: i32) -> i32 = x - y\n",
                 );
                 mutated = true;
             }
@@ -13587,7 +13586,7 @@ module_prefix = "RegistryLib"
         let outside = root.parent().expect("parent").join("outside");
         write(
             &outside.join("escape.ch"),
-            "module Myapp.Properties.Escape\ndef escaped() -> int32 = 1\n",
+            "module Myapp.Properties.Escape\ndef escaped() -> i32 = 1\n",
         );
         symlink(&outside, root.join("properties")).expect("source-root symlink");
         let manifest_path = root.join("reef.toml");
@@ -14066,11 +14065,11 @@ additional_sources = ["properties"]
         );
         write(
             &root.join("src/foo.ch"),
-            "module Pkg.Foo\n\nexport (one)\ndef one() -> int32 = 1\n",
+            "module Pkg.Foo\n\nexport (one)\ndef one() -> i32 = 1\n",
         );
         write(
             &root.join("properties/bar.ch"),
-            "module Pkg.Properties.Bar\n\nexport (two)\ndef two() -> int32 = 2\n",
+            "module Pkg.Properties.Bar\n\nexport (two)\ndef two() -> i32 = 2\n",
         );
 
         let archive_path = root.join("multi.tar.zst");
@@ -14125,7 +14124,7 @@ module_prefix = "Invalidation"
         write(&manifest_path, &pre_manifest);
         write(
             &root.join("src/main.ch"),
-            "module Invalidation.Main\n\nexport (id)\ndef id(x: int32) -> int32 = x\n",
+            "module Invalidation.Main\n\nexport (id)\ndef id(x: i32) -> i32 = x\n",
         );
 
         let pre_digests = prepare_reef_graph(&root)
@@ -14353,7 +14352,7 @@ module_prefix = "Atomic"
         );
         write(
             &root.join("src/main.ch"),
-            "module Atomic.Main\n\nexport (one)\ndef one() -> int32 = 1\n",
+            "module Atomic.Main\n\nexport (one)\ndef one() -> i32 = 1\n",
         );
         let archive_path = dir.join("atomicpkg.tar.zst");
         build_archive(&root, &archive_path).expect("build_archive");

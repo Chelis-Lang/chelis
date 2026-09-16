@@ -33,7 +33,7 @@ def operation_contracts():
         ("Scatter.axis", 66, "indexed_tensor(arguments...)", False),
         ("ScatterAdd.axis", 66, "indexed_tensor(arguments...)", False),
         ("ScatterElements.axis", 66, "indexed_tensor(arguments...)", False),
-        ("Shape.axis", 7, "axis-domain `int32`", False),
+        ("Shape.axis", 7, "axis-domain `i32`", False),
         ("Sum.axis", 30, "sum(x, axes...", False),
     )
     result = []
@@ -51,7 +51,7 @@ def operation_contracts():
             schema + "WireRtAxis::Lit.value",
             ("primitive", "i32"),
             "[05-OP-7]",
-            "axis-domain `int32`",
+            "axis-domain `i32`",
         )
     )
     for owner, number in (("UniformLike", 8), ("Dropout", 37)):

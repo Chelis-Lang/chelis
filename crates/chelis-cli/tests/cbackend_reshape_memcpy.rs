@@ -6,7 +6,7 @@
 //! `crates/chelis-backend-c/src/host_emit.rs::append_tensor_reshape_helper`
 //! (around line 276) emits a `memcpy(out, in, n * sizeof(float))` that
 //! drops the upper 4 bytes of every element for any tensor whose dtype
-//! is f64 or int64 (silent data corruption). The destination tensor is
+//! is f64 or i64 (silent data corruption). The destination tensor is
 //! allocated by `chelis_alloc` with the correct dtype, so the upper
 //! halves of each element are left zero-initialised; the lower halves
 //! hold half of the source element bits.
@@ -28,7 +28,7 @@
 //!        * rename the emitted `int main(void)` to a stub so the
 //!          linker picks up our custom main.
 //!   4. Writes a custom `main.c` harness that constructs a
-//!      `chelis_tensor` with raw f64 / int64 / f32 backing storage and
+//!      `chelis_tensor` with raw f64 / i64 / f32 backing storage and
 //!      a `dtype` field of the right precision, then calls
 //!      `chelis_host_reshape_tensor` directly and prints every output
 //!      element by reading the destination buffer at the correct C
@@ -227,7 +227,7 @@ static const void *harness_data(const chelis_tensor *tensor) {
 }
 "#;
 
-/// Build a `chelis_list` of int64 shape values in the harness.
+/// Build a `chelis_list` of i64 shape values in the harness.
 const BUILD_SHAPE_LIST_HELPER: &str = r#"
 static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     chelis_value* items = (chelis_value*)malloc(sizeof(chelis_value) * (size_t)len);
@@ -372,7 +372,7 @@ fn cbackend_reshape_tensor_f64() {
     let build = chelis_build_c(
         "module Demo\n\
          src = cast(to_tensor([1.5, 2.5, 3.5, 4.5]), f64)\n\
-         result = reshape(src, [cast(2, int64), cast(2, int64)])\n",
+         result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
     let kernel_c = build.path().join("reshape_demo.c");
@@ -412,10 +412,10 @@ int main(void) {{
     );
 }
 
-/// int64 reshape. Source buffer is 4 int64 elements (1, 2, 3, 4);
+/// i64 reshape. Source buffer is 4 i64 elements (1, 2, 3, 4);
 /// reshape to [2, 2] must preserve all 8 bytes of each element. With
 /// the `sizeof(float)` memcpy bug, only the low 4 bytes are copied;
-/// reading as int64 yields the original value because the upper half
+/// reading as i64 yields the original value because the upper half
 /// of small positive int64s is zero, but the buffer is *short* by
 /// 16 bytes -- the upper halves of the last two elements are stale
 /// or zero. We make the bug observable by using values whose upper
@@ -424,14 +424,14 @@ int main(void) {{
 fn cbackend_reshape_tensor_int64() {
     let build = chelis_build_c(
         "module Demo\n\
-         src = to_tensor([cast(1, int64), cast(2, int64), cast(3, int64), cast(4, int64)])\n\
-         result = reshape(src, [cast(2, int64), cast(2, int64)])\n",
+         src = to_tensor([cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64)])\n\
+         result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
     let kernel_c = build.path().join("reshape_demo.c");
     patch_emitted_kernel(&kernel_c);
     let main_c = build.path().join("main.c");
-    // Use int64 values with non-zero upper 4 bytes so the byte-drop
+    // Use i64 values with non-zero upper 4 bytes so the byte-drop
     // bug is observable. 0x0123456789ABCDEFLL etc.
     fs::write(
         &main_c,
@@ -469,7 +469,7 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "123456789abcdef 1122334455667788 7fedcba987654321 11223344556677",
-        "expected dtype-preserving int64 reshape; got stdout={trimmed:?}"
+        "expected dtype-preserving i64 reshape; got stdout={trimmed:?}"
     );
 }
 
@@ -482,7 +482,7 @@ fn cbackend_reshape_tensor_f32_control() {
     let build = chelis_build_c(
         "module Demo\n\
          src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
-         result = reshape(src, [cast(2, int64), cast(2, int64)])\n",
+         result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
     let kernel_c = build.path().join("reshape_demo.c");
@@ -545,7 +545,7 @@ fn cbackend_reshape_zero_element_tensor_keeps_an_extent_above_int32() {
     let build = chelis_build_c(
         "module Demo\n\
          src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
-         result = reshape(src, [cast(2, int64), cast(2, int64)])\n",
+         result = reshape(src, [cast(2, i64), cast(2, i64)])\n",
         "reshape_demo",
     );
     let kernel_c = build.path().join("reshape_demo.c");

@@ -1168,7 +1168,7 @@ fn compute_adjoints(
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let original_size = RtDim::InputAxis {
                 tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
             };
             let g_node = dag
                 .get(g)
@@ -1208,7 +1208,7 @@ fn compute_adjoints(
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let original_size = RtDim::InputAxis {
                 tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
             };
 
             // Expand forward max_reduce node back to input shape.
@@ -1257,7 +1257,7 @@ fn compute_adjoints(
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let original_size = RtDim::InputAxis {
                 tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
             };
 
             let expanded_min = dag.add_node(
@@ -1318,7 +1318,7 @@ fn compute_adjoints(
             let rank = input_ty.dims.len();
             let original_size = RtDim::InputAxis {
                 tensor: 1,
-                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits i32")),
             };
 
             // Build slice types: same as input_ty but with axis dim = 1.
@@ -2243,7 +2243,7 @@ fn scalar_int(precision: Prim) -> TensorType {
 }
 
 /// chelis#616: a fresh `Shape(x, axis)` read — the runtime extent of `x`
-/// along `axis` as a rank-0 exact int64 scalar ([05-DIM-2]).
+/// along `axis` as a rank-0 exact i64 scalar ([05-DIM-2]).
 fn shape_scalar(dag: &mut Dag, x: NodeId, axis: usize) -> NodeId {
     dag.add_node(
         RiscOp::Shape { axis },
@@ -2288,7 +2288,7 @@ fn int_scalar_binary(dag: &mut Dag, op: RiscOp, a: NodeId, b: NodeId) -> NodeId 
 /// chelis#616: materialize a forward movement bound as a rank-0 integer
 /// scalar node. A `Node` bound reuses the forward op's bound-source scalar
 /// directly (the backward DAG extends the forward one); a `Lit` becomes an
-/// int32 Const. `ToEnd`/`Sym` never reach the runtime adjoint paths (the
+/// i32 Const. `ToEnd`/`Sym` never reach the runtime adjoint paths (the
 /// sentinel is handled first and verify rejects `Sym` in movement bounds).
 fn bound_scalar(dag: &mut Dag, forward_node: &DagNode, bound: &RtDim) -> NodeId {
     match bound {

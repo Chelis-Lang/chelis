@@ -103,8 +103,10 @@ fn assert_unsigned_diagnostic(source: &str, name: &str, position: &str) {
          §1.1.2; got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|message| message
-            .contains("active set: f32, f64, bf16, f16, bool, int8, int16, int32, int64")),
+        messages
+            .iter()
+            .any(|message| message
+                .contains("active set: f32, f64, bf16, f16, bool, i8, i16, i32, i64")),
         "the diagnostic for `{name}` in {position} must offer the active \
          primitive set as the remedy; got: {messages:?}"
     );
@@ -180,7 +182,7 @@ fn a_typealias_body_is_rejected_with_the_spec_diagnostic() {
 fn a_lambda_annotation_is_rejected_with_the_spec_diagnostic() {
     for name in UNSIGNED {
         assert_unsigned_diagnostic(
-            &format!("module P.M\nexport (f)\ndef f() -> int32 = (fn (x: {name}) -> 1i32)(1i32)\n"),
+            &format!("module P.M\nexport (f)\ndef f() -> i32 = (fn (x: {name}) -> 1i32)(1i32)\n"),
             name,
             "a lambda parameter annotation",
         );
@@ -193,7 +195,7 @@ fn a_lambda_annotation_is_rejected_with_the_spec_diagnostic() {
 fn a_cast_target_still_carries_the_spec_diagnostic() {
     for name in UNSIGNED {
         assert_unsigned_diagnostic(
-            &format!("module P.M\nexport (f)\ndef f() -> int32 = cast(1i32, {name})\n"),
+            &format!("module P.M\nexport (f)\ndef f() -> i32 = cast(1i32, {name})\n"),
             name,
             "a cast target",
         );
@@ -240,12 +242,12 @@ fn a_genuine_lowercase_name_still_quantifies_and_checks_clean() {
 
 /// DISPOSITION LOCK. Green in both states. Negative parity for the predicate:
 /// the SIGNED spellings, including chelis#1587's short aliases, must not match
-/// the unsigned family. `int8`..`int64` share the suffix digits and `int8`
+/// the unsigned family. `i8`..`i64` share the suffix digits and `i8`
 /// contains no `uint8` only because the check is exact.
 #[test]
 fn signed_spellings_do_not_match_the_unsigned_family() {
     for name in [
-        "int8", "int16", "int32", "int64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
+        "i8", "i16", "i32", "i64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
     ] {
         let messages = messages(&format!(
             "module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n"

@@ -19,7 +19,7 @@ class ResultContractTests(unittest.TestCase):
                 assert_result({**good, "stdout": wrong}, "reshape", True)
 
     def test_mismatch_requires_the_correct_operation_source_axis_and_number(self):
-        message = "error: extent `2`: claimed = 2, reshape axis 0 = 3\nnumeric trap: domain in reshape at int64"
+        message = "error: extent `2`: claimed = 2, reshape axis 0 = 3\nnumeric trap: domain in reshape at i64"
         good = {"exit": 1, "stdout": "", "stderr": message}
         assert_result(good, "reshape", False)
         for wrong in (

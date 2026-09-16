@@ -449,7 +449,7 @@ mod tests {
             format_element(Prim::Int32, ElementRef::I32(2147483647)),
             "2147483647"
         );
-        // int64 prints all digits exactly, never through double.
+        // i64 prints all digits exactly, never through double.
         assert_eq!(
             format_element(Prim::Int64, ElementRef::I64(9007199254740993)),
             "9007199254740993"

@@ -29,7 +29,7 @@
       "ordinal": 1,
       "pattern": "Type::Var(_)",
       "disposition": "constrains_the_variable",
-      "reason": "unifies the slot with int64 and answers with the unification's own verdict, so nothing is published unvalidated"
+      "reason": "unifies the slot with i64 and answers with the unification's own verdict, so nothing is published unvalidated"
     },
     {
       "file": "app_numeric.rs",

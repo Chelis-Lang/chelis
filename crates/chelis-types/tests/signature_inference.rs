@@ -250,7 +250,7 @@ def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
         r#"
-def recur(x, y: tensor[4, f32], n: int32) =
+def recur(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else recur(x, y, sub(n, 1))
 "#,
     );
@@ -269,10 +269,10 @@ def recur(x, y: tensor[4, f32], n: int32) =
 fn mutual_recursive_cycle_members_do_not_infer_read_only_params() {
     let checked = checked_surf(
         r#"
-def ping(x, y: tensor[4, f32], n: int32) =
+def ping(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else pong(x, y, sub(n, 1))
 
-def pong(x, y: tensor[4, f32], n: int32) =
+def pong(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else ping(x, y, sub(n, 1))
 "#,
     );
@@ -344,7 +344,7 @@ def make[n](xs: tensor[n, f32]) -> Curve[n] =
   Curve { xs }
 def value[n](curve: Curve[n]) -> f32 =
   match curve with {
-    | Curve { xs: values } => index(to_list(values), cast(0, int64))
+    | Curve { xs: values } => index(to_list(values), cast(0, i64))
   }
 "#,
     )
@@ -394,7 +394,7 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
     let library_decls = parse_str(
         r#"
 def fixed(xs: tensor[3, f32]) -> f32 =
-  index(to_list(xs), cast(0, int64))
+  index(to_list(xs), cast(0, i64))
 "#,
     )
     .expect("library surf parse");

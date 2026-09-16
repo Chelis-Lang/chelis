@@ -2,7 +2,7 @@ epoch_text = " 7 "
 loss_text = "0.125"
 epoch = match to_int(epoch_text) with {
   | Some(n) => n
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 loss = match to_float(loss_text) with {
   | Some(value) => value

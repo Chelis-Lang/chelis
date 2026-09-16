@@ -173,7 +173,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
 ];
 
 /// Zero-based argument slots, after the callee, whose values name tensor
-/// axes and therefore carry the [05-DIM-3] `int32` contract.
+/// axes and therefore carry the [05-DIM-3] `i32` contract.
 ///
 /// This is semantic registration, not a name heuristic. A new axis-taking
 /// builtin must select a layout here; inference consults this table before
@@ -2028,7 +2028,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // `argmin_reduce` over a named axis so a *host-lane* occurrence keeps
         // its tensor type instead of falling through to the
         // "unsupported builtin" host emit. `argmax_reduce`/`argmin_reduce`
-        // return an int64 index tensor (no-grad). All remain usable at
+        // return an i64 index tensor (no-grad). All remain usable at
         // concrete rank.
         //
         // Named-axis expand (chelis#339, the R+1 inverse): `expand` addresses
@@ -2271,7 +2271,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
     /// type with the spec §2.3.1 shape contract; this scheme exists so
     /// the function name is in scope at lookup time and the canonical
-    /// arg-arity / list-of-int64 constraints are visible during unification.
+    /// arg-arity / list-of-i64 constraints are visible during unification.
     fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
@@ -2302,8 +2302,8 @@ pub fn builtin_env() -> (Env, VarGen) {
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
-                    // [05-DIM-1]: axis-domain axis (int32), extent-domain
-                    // size (int64).
+                    // [05-DIM-1]: axis-domain axis (i32), extent-domain
+                    // size (i64).
                     Type::Prim(Prim::Int32),
                     Type::Prim(Prim::Int64),
                 ],
@@ -2724,7 +2724,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
     // §2.3.1 reduce_window family. Fallback HM scheme is
-    // `&tensor[D, p] -> List[int64] -> List[int64] -> tensor[D', p]`;
+    // `&tensor[D, p] -> List[i64] -> List[i64] -> tensor[D', p]`;
     // the actual shape contract (output rank = input rank, trailing
     // axis extents derived from the window/stride formula) is enforced
     // by the dedicated `infer_reduce_window_app` arm in `infer.rs`,
@@ -2946,8 +2946,8 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
-    // The actual constraint shape (scalar `T`, callback signature, int64 `n`,
+    // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
+    // The actual constraint shape (scalar `T`, callback signature, i64 `n`,
     // tensor return) is enforced by the special-case arm in
     // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
     // role independently. This loose generic scheme is the type-env entry
@@ -3593,7 +3593,7 @@ mod tests {
         let mut subst = Subst::new();
         let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
-        // add(tensor[batch,f32], int32) should fail
+        // add(tensor[batch,f32], i32) should fail
         let t1 = Type::Tensor(
             vec![Dim::Name("batch".into())],
             TensorPrec::Concrete(Prim::F32),

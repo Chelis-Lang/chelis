@@ -594,10 +594,8 @@ mod tests {
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(&format!(
-            "module Sample\ndef {marker}_value() -> int32 = 1\n"
-        ))
-        .expect("sample decls must parse")
+        chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value() -> i32 = 1\n"))
+            .expect("sample decls must parse")
     }
 
     #[test]

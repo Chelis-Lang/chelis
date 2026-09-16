@@ -7,7 +7,7 @@
 //! When a tensor literal `[e1, e2, ...]` appears in a position with a
 //! known element type, the unsuffixed numeric literals in the body
 //! adopt that element type instead of the §5.3 / §P10 literal default
-//! (int32 for integer literals, f32 for float literals).
+//! (i32 for integer literals, f32 for float literals).
 //!
 //! The closed set of "known-element-type" positions is exactly four:
 //!   1. RHS of a let-binding whose declared type is a tensor type
@@ -18,7 +18,7 @@
 //!   4. First argument of an explicit `cast(literal, p)`
 //!
 //! Outside the closed set, numeric literals fall back to the WS-0 / D1
-//! default: integer literals → int32, float literals → f32.
+//! default: integer literals → i32, float literals → f32.
 
 use chelis_deep::printer::print_canonical_flat;
 use chelis_types::infer::infer_program;
@@ -116,20 +116,20 @@ fn position_1_let_binding_tensor_f64_narrows_float_literals() {
 
 #[test]
 fn position_1_let_binding_tensor_int64_narrows_int_literals() {
-    let (printed, result) = pipeline("xs: tensor[3, int64] = [1, 2, 3]");
+    let (printed, result) = pipeline("xs: tensor[3, i64] = [1, 2, 3]");
     assert!(
         result.errors.is_empty(),
         "expected no errors, got:\n{}",
         errors_summary(&result)
     );
     assert!(
-        contains_lit_with_prim(&printed, "int64"),
-        "expected int64-typed literals, got:\n{}",
+        contains_lit_with_prim(&printed, "i64"),
+        "expected i64-typed literals, got:\n{}",
         printed.join("\n")
     );
     assert!(
-        !contains_lit_with_prim(&printed, "int32"),
-        "expected NO int32-typed literals (the contextual rule must \
+        !contains_lit_with_prim(&printed, "i32"),
+        "expected NO i32-typed literals (the contextual rule must \
          override the §P10 default), got:\n{}",
         printed.join("\n")
     );
@@ -155,9 +155,9 @@ fn position_1_no_annotation_float_default_is_f32() {
 #[test]
 fn position_1_no_annotation_int_default_is_int32() {
     // Negative parity for the int-default rule: a bare `[1, 2, 3]` in
-    // an unannotated position must produce int32 literals, not int64.
+    // an unannotated position must produce i32 literals, not i64.
     // Per spec §5.3 / §P10 this is the user-facing contract; silently
-    // widening to int64 would violate the WS-0 pin.
+    // widening to i64 would violate the WS-0 pin.
     let (printed, result) = pipeline("xs = [1, 2, 3]");
     assert!(
         result.errors.is_empty(),
@@ -165,13 +165,13 @@ fn position_1_no_annotation_int_default_is_int32() {
         errors_summary(&result)
     );
     assert!(
-        contains_lit_with_prim(&printed, "int32"),
-        "expected int32-typed literals (the §P10 default), got:\n{}",
+        contains_lit_with_prim(&printed, "i32"),
+        "expected i32-typed literals (the §P10 default), got:\n{}",
         printed.join("\n")
     );
     assert!(
-        !contains_lit_with_prim(&printed, "int64"),
-        "expected NO int64-typed literals; silent widening to int64 \
+        !contains_lit_with_prim(&printed, "i64"),
+        "expected NO i64-typed literals; silent widening to i64 \
          would violate the WS-0 pin per spec §5.3, got:\n{}",
         printed.join("\n")
     );
@@ -181,15 +181,15 @@ fn position_1_no_annotation_int_default_is_int32() {
 
 #[test]
 fn position_4_cast_int_list_to_int8() {
-    let (printed, result) = pipeline("xs = cast([1, 2, 3], int8)");
+    let (printed, result) = pipeline("xs = cast([1, 2, 3], i8)");
     assert!(
         result.errors.is_empty(),
         "expected no errors, got:\n{}",
         errors_summary(&result)
     );
     assert!(
-        contains_lit_with_prim(&printed, "int8"),
-        "expected int8-typed literals, got:\n{}",
+        contains_lit_with_prim(&printed, "i8"),
+        "expected i8-typed literals, got:\n{}",
         printed.join("\n")
     );
 }
@@ -281,19 +281,19 @@ fn position_2_call_with_sig_decl_tensor_f64_param_narrows_arg_literals() {
 #[test]
 fn negative_bare_int_list_does_not_silently_default_to_int64() {
     // Per spec §5.3 / §P10, a bare `[1, 2, 3]` in an unannotated
-    // position must produce int32 literals, NOT int64. Silent widening
-    // to int64 would violate the WS-0 pin.
+    // position must produce i32 literals, NOT i64. Silent widening
+    // to i64 would violate the WS-0 pin.
     let (printed, _result) = pipeline("xs = [1, 2, 3]");
     let combined = printed.join("\n");
     assert!(
-        combined.contains("(t-prim {} int32)"),
-        "expected int32 literal default, got:\n{}",
+        combined.contains("(t-prim {} i32)"),
+        "expected i32 literal default, got:\n{}",
         combined
     );
     assert!(
-        !combined.contains("(t-prim {} int64)"),
+        !combined.contains("(t-prim {} i64)"),
         "bare unannotated [1, 2, 3] must not silently default to \
-         int64; got:\n{}",
+         i64; got:\n{}",
         combined
     );
 }

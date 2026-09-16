@@ -24,22 +24,22 @@ measured outputs are attached to the owning issues (#689, #690, #736).
 
 - **Out of scope (pre-existing, environmental):** 4 `gpu_correctness` tests fail
   with hiprtc `unknown type int8_t` on this box. Everything here is scoped to
-  int64 / int32 to avoid that path.
+  i64 / i32 to avoid that path.
 
 ## Part 1 — #689 / #690 runtime confirmation
 
 Five Surf fixtures (`*.ch`) plus their C++ driver mains (`main_*.cpp`). Each
 driver allocates input tensors via the chelis runtime, calls the emitted entry,
-and reads the output buffer with the **correct** element type (int64 via
+and reads the output buffer with the **correct** element type (i64 via
 `(int64_t*)t->data`, f32 via `t->data`), so the corruption is visible.
 
 | fixture | driver | what it shows |
 |---|---|---|
 | `p689_neg_i64.ch` | `main_p689_neg.cpp` | #689: `neg` emits `kernel_neg_f32` over a `CHELIS_I64` buffer → garbage + dropped upper lanes |
-| `p689_sum_i64.ch` | `main_p689_sum.cpp` | #689: `sum` emits `kernel_sum_ax0_f32` (f32 accumulator) over int64 → off by orders of magnitude |
+| `p689_sum_i64.ch` | `main_p689_sum.cpp` | #689: `sum` emits `kernel_sum_ax0_f32` (f32 accumulator) over i64 → off by orders of magnitude |
 | `p690_div_i64.ch` | `main_p690_div.cpp` | #690: `trunc_div` emits a correct `kernel_trunc_div_i64` but with **no divisor guard** → silent garbage on ÷0, no abort |
 | `sanity_neg_f32.ch` | `main_sanity_neg_f32.cpp` | control: f32 `neg` is correct (harness is sound) |
-| `control_add_i64.ch` | `main_control_add_i64.cpp` | control: int64 `add` (`kernel_add_i64`) is exact incl. above 2⁵³ (bug is op-specific, not a blanket int64 failure) |
+| `control_add_i64.ch` | `main_control_add_i64.cpp` | control: i64 `add` (`kernel_add_i64`) is exact incl. above 2⁵³ (bug is op-specific, not a blanket i64 failure) |
 
 ### Reproduce one probe
 
@@ -55,8 +55,8 @@ cd /tmp/p689 && hipcc -O2 -I. main.cpp p689_neg_i64_hip.cpp -L. \
 ```
 
 Compare each against the evaluator, e.g.
-`chelis eval 'neg(cast([16777217, 16777219, 9007199254740993, -5], int64))'`
-(correct) vs `chelis eval 'trunc_div(cast([100,42,-7,9], int64), cast([0,0,0,3], int64))'`
+`chelis eval 'neg(cast([16777217, 16777219, 9007199254740993, -5], i64))'`
+(correct) vs `chelis eval 'trunc_div(cast([100,42,-7,9], i64), cast([0,0,0,3], i64))'`
 (branded `error: integer division or remainder by zero`, exit 1 — the HIP binary
 exits 0 with garbage).
 

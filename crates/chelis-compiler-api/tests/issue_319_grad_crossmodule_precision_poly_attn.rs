@@ -93,7 +93,7 @@ const SDPA_BODY: &str = "{\n  \
 fn grad_driver(callee: &str) -> String {
     format!(
         "def loss(q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]) -> f32 =\n\
-         \x20 tensor_to_scalar(sum(sum({callee}(q, k, v, scale), cast(0, int32)), cast(0, int32)))\n\
+         \x20 tensor_to_scalar(sum(sum({callee}(q, k, v, scale), cast(0, i32)), cast(0, i32)))\n\
          out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]))\n",
     )
 }
@@ -253,7 +253,7 @@ fn issue_319_imported_precision_poly_sdpa_grad_lowers_and_matches_inline() {
                      scores = matmul(q, kt)\n  \
                      weights = softmax(mul(scores, scale), -1)\n  \
                      matmul(weights, v)\n}\n";
-    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let snippet = format!(
@@ -338,14 +338,14 @@ fn assert_separate_sig_grad_matches_inline(
     let inline_src = format!(
         "def verb({inline_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
-           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, i32)), cast(0, i32)))\n\
          out = grad(loss, wrt=q)({call})\n",
         call_args = bare_params,
     );
     let sep_src = format!(
         "{sig}\ndef verb({bare_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
-           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
+           tensor_to_scalar(sum(sum(verb({call_args}), cast(0, i32)), cast(0, i32)))\n\
          out = grad(loss, wrt=q)({call})\n",
         call_args = bare_params,
     );
@@ -409,7 +409,7 @@ fn issue_319_output_transpose_body_grad_matches_inline() {
 #[test]
 fn issue_319_reshape_precision_poly_verb_lowers() {
     let src = "sig flat2d: tensor[s, d, p] -> tensor[six, p]\n\
-               def flat2d(x) = reshape(permute(x, 1, 0), [cast(6, int64)])\n\
+               def flat2d(x) = reshape(permute(x, 1, 0), [cast(6, i64)])\n\
                out = flat2d(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(
@@ -434,7 +434,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
 #[test]
 fn issue_319_expand_precision_poly_verb_lowers() {
     let src = "sig broadcast: tensor[s, p] -> tensor[s, c, p]\n\
-               def broadcast(b) = insert(b, cast(1, int32), cast(2, int64))\n\
+               def broadcast(b) = insert(b, cast(1, i32), cast(2, i64))\n\
                out = broadcast(to_tensor([1.0, 2.0]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(
@@ -478,7 +478,7 @@ fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
     let twovar = "sig f[p: Numeric, w: Numeric]: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
-                    tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
+                    tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
                   out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
     let deep =
         chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
@@ -530,7 +530,7 @@ fn issue_319_one_precision_var_still_grads_at_a_monomorphic_call_site() {
     let onevar = "sig f[p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
-                    tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
+                    tensor_to_scalar(sum(sum(f(q, b), cast(0, i32)), cast(0, i32)))\n\
                   out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
     let result = try_eval(onevar).unwrap_or_else(|err| {
         panic!("issue #319: a one-precision-binder verb must still grad at a monomorphic call site: {err}")
@@ -558,7 +558,7 @@ fn issue_319_heterogeneous_precision_call_is_rejected_not_promoted() {
     let hetero = "sig f[p: Numeric]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
                   def f(a, b) = {\n  at = permute(a, 1, 0)\n  ar = permute(at, 1, 0)\n  add(ar, b)\n}\n\
                   def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
-                    tensor_to_scalar(sum(sum(f(a, b), cast(0, int32)), cast(0, int32)))\n\
+                    tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\
                   out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
     let outcome = try_eval(hetero);
     let message = match outcome {
@@ -585,7 +585,7 @@ fn issue_319_distinct_precisions_not_force_merged() {
     let distinct = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, p]\n\
                     def f(a, b) = {\n  bt = permute(b, 1, 0)\n  bp = permute(bt, 1, 0)\n  a\n}\n\
                     def use_f(a: tensor[2, 3, f32], b: tensor[2, 3, f64]) -> f32 =\n  \
-                      tensor_to_scalar(sum(sum(f(a, b), cast(0, int32)), cast(0, int32)))\n\
+                      tensor_to_scalar(sum(sum(f(a, b), cast(0, i32)), cast(0, i32)))\n\
                     out = use_f(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), cast(to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), f64))\n";
     // The verb type-checks (no cross-precision op). It must NOT silently
     // promote f64→f32; either it evaluates correctly (f64 preserved in the

@@ -55,17 +55,17 @@ impl LiteralSuffix {
         )
     }
 
-    /// Returns the canonical Deep `t-prim` precision name, e.g. `"int64"`.
+    /// Returns the canonical Deep `t-prim` precision name, e.g. `"i64"`.
     pub fn t_prim_name(self) -> &'static str {
         match self {
             LiteralSuffix::F32 => "f32",
             LiteralSuffix::F64 => "f64",
             LiteralSuffix::Bf16 => "bf16",
             LiteralSuffix::F16 => "f16",
-            LiteralSuffix::I8 => "int8",
-            LiteralSuffix::I16 => "int16",
-            LiteralSuffix::I32 => "int32",
-            LiteralSuffix::I64 => "int64",
+            LiteralSuffix::I8 => "i8",
+            LiteralSuffix::I16 => "i16",
+            LiteralSuffix::I32 => "i32",
+            LiteralSuffix::I64 => "i64",
         }
     }
 }

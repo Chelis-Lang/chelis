@@ -191,14 +191,14 @@ fn assert_row(row: Row) {
 const ROWS: &[Row] = &[
     Row {
         name: "direct recursion is a language-level function",
-        source: Source::Surf("def recurse(x: int32) -> int32 = recurse(x)\n"),
+        source: Source::Surf("def recurse(x: i32) -> i32 = recurse(x)\n"),
         expected: Expected::Accept,
     },
     Row {
         name: "mutual recursion is a language-level function group",
         source: Source::Surf(
-            "def left(x: int32) -> int32 = right(x)\n\
-             def right(x: int32) -> int32 = left(x)\n",
+            "def left(x: i32) -> i32 = right(x)\n\
+             def right(x: i32) -> i32 = left(x)\n",
         ),
         expected: Expected::Accept,
     },
@@ -211,7 +211,7 @@ const ROWS: &[Row] = &[
         name: "module-wrapped recursion",
         source: Source::Surf(
             "module Recursive\n\
-             def recurse(x: int32) -> int32 = recurse(x)\n",
+             def recurse(x: i32) -> i32 = recurse(x)\n",
         ),
         expected: Expected::Accept,
     },
@@ -219,8 +219,8 @@ const ROWS: &[Row] = &[
         name: "defsig-less forward function uses its compiler-authored stamp",
         source: Source::Deep(
             "(def {} caller (fn {} (params {}) (app {} (var {} helper))))\n\n\
-             (def {} helper (fn {type: (t-fn {} (t-prim {} int32))} (params {}) \
-             (lit {type: (t-prim {} int32)} 1)))\n",
+             (def {} helper (fn {type: (t-fn {} (t-prim {} i32))} (params {}) \
+             (lit {type: (t-prim {} i32)} 1)))\n",
         ),
         expected: Expected::Accept,
     },
@@ -254,7 +254,7 @@ const ROWS: &[Row] = &[
         name: "conv admits a runtime stride",
         source: Source::Surf(
             "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32], \
-             strides: List[int64]) = conv(x, k, strides, [(0i64, 0i64)])\n",
+             strides: List[i64]) = conv(x, k, strides, [(0i64, 0i64)])\n",
         ),
         expected: Expected::Accept,
     },
@@ -262,7 +262,7 @@ const ROWS: &[Row] = &[
         name: "conv admits runtime padding",
         source: Source::Surf(
             "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32], \
-             padding: List[(int64, int64)]) = conv(x, k, [1i64], padding)\n",
+             padding: List[(i64, i64)]) = conv(x, k, [1i64], padding)\n",
         ),
         expected: Expected::Accept,
     },
@@ -270,7 +270,7 @@ const ROWS: &[Row] = &[
         name: "vmap rejects an element-derived movement extent",
         source: Source::Surf(
             "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
-             \x20 end = cast(tensor_to_scalar(sum(x, 0i32)), int64)\n\
+             \x20 end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n\
              \x20 shrink(x, [[0i64, end]])\n\
              }\n\
              out = vmap(g)(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n",
@@ -320,7 +320,7 @@ const ROWS: &[Row] = &[
         name: "defsig and body mismatch remains rejected",
         source: Source::Deep(
             "(defsig {} k (t-prim {} f32))\n\n\
-             (def {} k (lit {type: (t-prim {} int32)} 1))\n",
+             (def {} k (lit {type: (t-prim {} i32)} 1))\n",
         ),
         expected: Expected::Reject("body doesn't match declared signature"),
     },
@@ -339,7 +339,7 @@ const ROWS: &[Row] = &[
     },
     Row {
         name: "ordinary scalar control",
-        source: Source::Surf("answer: int32 = add(40, 2)\n"),
+        source: Source::Surf("answer: i32 = add(40, 2)\n"),
         expected: Expected::Accept,
     },
     Row {

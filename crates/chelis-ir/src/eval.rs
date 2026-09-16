@@ -98,7 +98,7 @@ impl TensorValue {
         self.storage.is_empty()
     }
 
-    /// Widen every element to f64; exact except for int64 magnitudes
+    /// Widen every element to f64; exact except for i64 magnitudes
     /// above 2^53 (the named-lossy read of section C3).
     pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
         self.storage.to_f64_lossy_vec()
@@ -818,7 +818,7 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
 
 /// Read one gather/scatter index tensor element: exact for the integer
 /// family, the pre-refactor f64 truncation for float storage (index
-/// tensors are int64-typed after ingress, so the float arm is legacy
+/// tensors are i64-typed after ingress, so the float arm is legacy
 /// tolerance for f64-storage fixtures driving untyped index inputs).
 fn index_at(indices: &TensorValue, linear: usize) -> isize {
     match indices.storage().to_raw() {
@@ -1227,7 +1227,7 @@ fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<Tensor
 /// `better(current_best, candidate)`. Used for Argmax / Argmin.
 ///
 /// Ties are broken by the smallest index (first-seen wins), matching numpy's
-/// default argmax/argmin semantics. The output holds exact int64 indices
+/// default argmax/argmin semantics. The output holds exact i64 indices
 /// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
 /// f64-image detour of chelis#233).
 fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
@@ -1240,7 +1240,7 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
 /// [05-OP-29] multi-axis bool count. Source elements are partitioned into
 /// result groups by removing the selected coordinates. Each group is filled
 /// by scanning the input in its original row-major order. Arithmetic and the
-/// canonical adjacent-pair checked-int64 tree live only in the typed kernel.
+/// canonical adjacent-pair checked-i64 tree live only in the typed kernel.
 pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     if axes.is_empty()
         || axes.iter().any(|&axis| axis >= input.shape.len())
@@ -1364,7 +1364,7 @@ fn resolve_eval_bound(
             }
             let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
                 format!(
-                    "movement bound at node {}: bound-source input slot {i} must be int64",
+                    "movement bound at node {}: bound-source input slot {i} must be i64",
                     node.id.0
                 )
             })?;
@@ -1447,7 +1447,7 @@ fn resolve_eval_pairs(
 /// exact words. The signed step is checked against this domain before any
 /// unsigned conversion, extent division, allocation, or element access.
 const STRIDE_DOMAIN_TRAP: &str = "Domain: stride step must be positive\n\
-                                  numeric trap: domain in stride at int64";
+                                  numeric trap: domain in stride at i64";
 
 fn resolve_eval_stride_step(
     step: &RtDim,
@@ -1472,7 +1472,7 @@ fn resolve_eval_stride_step(
             }
             let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
                 format!(
-                    "stride step at node {}: step-source input slot {i} must be int64",
+                    "stride step at node {}: step-source input slot {i} must be i64",
                     node.id.0
                 )
             })?;
@@ -1577,7 +1577,7 @@ fn pad(
 /// neither introduces nor closes it; the text is merely newly reachable there,
 /// because the same program used to panic. The exit status agrees either way.
 const SHRINK_DOMAIN_TRAP: &str = "Domain: shrink bounds outside input extent\n\
-                                  numeric trap: domain in shrink at int64";
+                                  numeric trap: domain in shrink at i64";
 
 fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> Result<TensorValue, String> {
     assert_eq!(bounds.len(), input.shape.len());
@@ -2365,7 +2365,7 @@ where
             if observed != *declared {
                 return Err(format!(
                     "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
-                     numeric trap: domain in load at int64"
+                     numeric trap: domain in load at i64"
                 ));
             }
         }
@@ -2408,7 +2408,7 @@ where
                 format!("extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}")
             }
         };
-        return Err(format!("{context}\nnumeric trap: domain in load at int64"));
+        return Err(format!("{context}\nnumeric trap: domain in load at i64"));
     }
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
@@ -2763,10 +2763,10 @@ where
                 ) {
                     let required = required
                         .as_i64_exact()
-                        .ok_or_else(|| "extent witness requires int64".to_string())?;
+                        .ok_or_else(|| "extent witness requires i64".to_string())?;
                     if i64::try_from(observed).ok() != Some(required) {
                         return Err(format!(
-                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at int64"
+                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at i64"
                         ));
                     }
                 }
@@ -2794,7 +2794,7 @@ where
                         .storage()
                         .scalar_at(0)
                         .as_i64_exact()
-                        .ok_or("extent claim requires int64")?;
+                        .ok_or("extent claim requires i64")?;
                     if i64::try_from(observed).ok() == Some(required) {
                         continue;
                     }
@@ -2806,7 +2806,7 @@ where
                         (here, there)
                     };
                     return Err(format!(
-                        "extent `{}`: {first}, {second}\nnumeric trap: domain in {operation} at int64",
+                        "extent `{}`: {first}, {second}\nnumeric trap: domain in {operation} at i64",
                         claim.claim
                     ));
                 }
@@ -2814,7 +2814,7 @@ where
                     "shape",
                     out_prim,
                     vec![],
-                    vec![i64::try_from(observed).map_err(|_| "extent exceeds int64")?],
+                    vec![i64::try_from(observed).map_err(|_| "extent exceeds i64")?],
                 )?
             }
             RiscOp::CheckedReshapeExtent {
@@ -2825,16 +2825,16 @@ where
                     .storage()
                     .scalar_at(0)
                     .as_i64_exact()
-                    .ok_or("checked reshape actual must be int64")?;
+                    .ok_or("checked reshape actual must be i64")?;
                 for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
                     let required = values[input]
                         .storage()
                         .scalar_at(0)
                         .as_i64_exact()
-                        .ok_or("checked reshape requirement must be int64")?;
+                        .ok_or("checked reshape requirement must be i64")?;
                     if actual != required {
                         return Err(format!(
-                            "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at int64"
+                            "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at i64"
                         ));
                     }
                 }
@@ -3477,7 +3477,7 @@ fn local_guard_verdict(
     if observed != claimed {
         return Err(format!(
             "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\n\
-             numeric trap: domain in {} at int64",
+             numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));
     }
@@ -4066,12 +4066,12 @@ mod tests {
         assert!(err.contains("f16"), "source dtype must be named: {err}");
         assert!(err.contains("f32"), "declared dtype must be named: {err}");
 
-        let int8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
-        let input = TensorValue::from_storage(vec![1], int8);
+        let i8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
+        let input = TensorValue::from_storage(vec![1], i8);
         let err = ingress_to_declared("x", Prim::Int64, &input)
-            .expect_err("a tagged int8 input must not be contextually cast to int64");
-        assert!(err.contains("int8"), "source dtype must be named: {err}");
-        assert!(err.contains("int64"), "declared dtype must be named: {err}");
+            .expect_err("a tagged i8 input must not be contextually cast to i64");
+        assert!(err.contains("i8"), "source dtype must be named: {err}");
+        assert!(err.contains("i64"), "declared dtype must be named: {err}");
     }
 
     #[test]
@@ -4435,7 +4435,7 @@ mod tests {
     }
 
     /// [04-NUM-8]/dtype-semantics C5: the IR reference evaluator must call
-    /// the exact-width integer kernel, never project int64 operands through
+    /// the exact-width integer kernel, never project i64 operands through
     /// binary64 before arithmetic.
     #[test]
     fn int64_elementwise_add_is_exact_above_binary64_mantissa() {
@@ -4455,7 +4455,7 @@ mod tests {
             "b".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![2], vec![1, -1]).unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact int64 add");
+        let values = eval_tensor(&dag, &inputs).expect("exact i64 add");
         assert_eq!(
             values[&dag.roots()[0]].storage().to_i64_exact_vec(),
             Some(vec![(1_i64 << 53) + 2, (1_i64 << 53) + 1])
@@ -4477,8 +4477,8 @@ mod tests {
             TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![1, 1]).unwrap(),
         );
         assert_eq!(
-            eval_tensor(&dag, &inputs).expect_err("int8 overflow must trap"),
-            "numeric trap: overflow in add at int8"
+            eval_tensor(&dag, &inputs).expect_err("i8 overflow must trap"),
+            "numeric trap: overflow in add at i8"
         );
     }
 
@@ -4514,7 +4514,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact int64 comparison");
+        let values = eval_tensor(&dag, &inputs).expect("exact i64 comparison");
         assert_eq!(values[&out].storage().to_i64_exact_vec(), Some(vec![1, 0]));
     }
 
@@ -4557,7 +4557,7 @@ mod tests {
             "one".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![1], vec![1]).unwrap(),
         );
-        let values = eval_tensor(&fused, &inputs).expect("exact fused int64 arithmetic");
+        let values = eval_tensor(&fused, &inputs).expect("exact fused i64 arithmetic");
         let root = fused.roots()[0];
         assert_eq!(
             values[&root].storage().to_i64_exact_vec(),
@@ -5035,9 +5035,9 @@ mod tests {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y
-              (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))}
+              (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))}
                     (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-                    (t-prim {} int32)))
+                    (t-prim {} i32)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();
@@ -5047,8 +5047,8 @@ mod tests {
         );
         let err = eval_tensor(&dag, &inputs).unwrap_err();
         assert_eq!(
-            err, "numeric trap: domain in cast at int32",
-            "fractional cast to int32 must trap in the DAG evaluator (#380)",
+            err, "numeric trap: domain in cast at i32",
+            "fractional cast to i32 must trap in the DAG evaluator (#380)",
         );
     }
 
@@ -5058,12 +5058,12 @@ mod tests {
     /// int->float direction rather than applying the checked int-target rule.
     #[test]
     fn lowered_cast_int_to_float_preserves_value() {
-        // int32 input carries integral f64 storage; cast to f64 must keep it.
+        // i32 input carries integral f64 storage; cast to f64 must keep it.
         let src = r#"
-            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i32))} x))
             (def {} y
               (cast {type: (t-tensor {} (d-lit {} 2) (t-prim {} f64))}
-                    (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x)
+                    (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i32))} x)
                     (t-prim {} f64)))
         "#;
         let dag = lower(src);
@@ -5166,7 +5166,7 @@ mod tests {
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
         "#;
         let library = lower_library(src);
         let dag = library.dag();
@@ -5198,7 +5198,7 @@ mod tests {
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
         "#;
         let library = lower_library(src);
         let dag = library.dag();
@@ -5232,7 +5232,7 @@ mod tests {
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 42)
+                (lit {type: (t-prim {} i64)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
@@ -5251,14 +5251,14 @@ mod tests {
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 42)
+                (lit {type: (t-prim {} i64)} 42)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let src_b = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
             (def {} y
               (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 43)
+                (lit {type: (t-prim {} i64)} 43)
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag_a = lower(src_a);
@@ -5653,7 +5653,7 @@ mod tests {
         let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("integer floor_div by zero must trap");
         assert_eq!(
-            err, "numeric trap: division by zero in floor_div at int32",
+            err, "numeric trap: division by zero in floor_div at i32",
             "trap diagnostic must match the shared message exactly"
         );
     }
@@ -5663,7 +5663,7 @@ mod tests {
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
         let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
             .expect_err("integer trunc_div by zero must trap");
-        assert_eq!(err, "numeric trap: division by zero in trunc_div at int64");
+        assert_eq!(err, "numeric trap: division by zero in trunc_div at i64");
     }
 
     #[test]
@@ -5750,7 +5750,7 @@ mod tests {
         );
         let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("fused integer floor_div by zero must trap");
-        assert_eq!(err, "numeric trap: division by zero in floor_div at int32");
+        assert_eq!(err, "numeric trap: division by zero in floor_div at i32");
     }
 
     fn exact_tensor(prim: Prim, values: RawTensor) -> TensorValue {
@@ -5768,13 +5768,13 @@ mod tests {
         let overflow_first = exact_tensor(Prim::F32, RawTensor::Float(vec![300.0, f64::NAN]));
         assert_eq!(
             cast_tensor(&overflow_first, Prim::F32, Prim::Int8).unwrap_err(),
-            "numeric trap: overflow in cast at int8"
+            "numeric trap: overflow in cast at i8"
         );
 
         let domain_first = exact_tensor(Prim::F32, RawTensor::Float(vec![f64::NAN, 300.0]));
         assert_eq!(
             cast_tensor(&domain_first, Prim::F32, Prim::Int8).unwrap_err(),
-            "numeric trap: domain in cast at int8"
+            "numeric trap: domain in cast at i8"
         );
     }
 
@@ -5790,7 +5790,7 @@ mod tests {
 
         let i64_input = exact_tensor(Prim::Int64, RawTensor::Int(vec![9_007_199_254_740_992, 1]));
         let i64_out = reduce_window(&i64_input, ReduceWindowKind::Sum, &[2], &[1], Prim::Int64)
-            .expect("exact int64 reduction");
+            .expect("exact i64 reduction");
         assert_eq!(
             i64_out.storage().to_i64_exact_vec(),
             Some(vec![9_007_199_254_740_993])
@@ -5802,11 +5802,11 @@ mod tests {
         let input = exact_tensor(Prim::Int8, RawTensor::Int(vec![100, 100, -100]));
         let err = reduce_window(&input, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
             .expect_err("100i8 + 100i8 must trap before the later -100");
-        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at int8");
+        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at i8");
 
         let control = exact_tensor(Prim::Int8, RawTensor::Int(vec![40, 40, -40]));
         let output = reduce_window(&control, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
-            .expect("in-range int8 control");
+            .expect("in-range i8 control");
         assert_eq!(output.storage().to_i64_exact_vec(), Some(vec![40]));
     }
 
@@ -5824,8 +5824,8 @@ mod tests {
                 result: Prim::Int32,
             },
         )
-        .expect_err("lane0 + lane1 overflows the int32 accumulator");
-        assert_eq!(err, "numeric trap: overflow in sum at int32");
+        .expect_err("lane0 + lane1 overflows the i32 accumulator");
+        assert_eq!(err, "numeric trap: overflow in sum at i32");
 
         let control = exact_tensor(
             Prim::Int32,

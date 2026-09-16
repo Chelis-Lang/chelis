@@ -242,8 +242,8 @@ TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
     ("bare declaration", "(def {} f (lit {} 1))"),
     (
         "bare declaration pair",
-        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} int32)))\n"
-        "(def {} f (fn {} (params {}) (lit {type: (t-prim {} int32)} 1)))",
+        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} i32)))\n"
+        "(def {} f (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
     ),
     (
         "module wrapper beside a bare declaration",
@@ -254,7 +254,7 @@ TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
 
 # [03-META-1/2]: structural and expression-valued metadata rejection parity.
 METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
-    ("resource device is not a string", '(defsig {} f (t-fn {eff: (effects {} (resource {} 42))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))', "eff"),
+    ("resource device is not a string", '(defsig {} f (t-fn {eff: (effects {} (resource {} 42))} (t-prim {} i32))) (def {} f (fn {} (params {}) (lit {} 1)))', "eff"),
     ("nested expression name", '(def {property_seed: (app {} missing)} f (lit {} 1))', "property_seed"),
     ("integer path", '(module {surf_path: 1} m.path)', "surf_path"),
     ("node path", '(module {surf_path: (lit {} 1)} m.path)', "surf_path"),
@@ -270,7 +270,7 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
 ]
 METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
     ("opaque malformed-looking data", '(def {custom: {type: "ablation", inner: (lit {span: 1, surf_future: true} (var {})), inner: (unknown_macro unbound)}} f (lit {} 1))'),
-    ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
+    ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} i32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
     ("matching path and opaque span", '(module {surf_path: "M.Path", span: ""} m.path (def {} f (lit {} 1)))'),
     ("extensions and preserved provenance", '(def {source: (macro_name {surf_future: 1, span: 2} original_name), custom: {inner: (lit {span: "id"} 2)}, span_future: (a b)} f (lit {} 1))'),
     ("dtype binder named like metadata", '(defsig {dtype_bounds: {span: float}} f (t-fn {} (t-var {} span) (t-var {} span))) (def {} f (fn {} (params {} (x {type: (t-var {} span)})) (var {} x)))'),

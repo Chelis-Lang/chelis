@@ -377,7 +377,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
 //
 // chelis#874 (PP8) MOVED THIS REJECTION TO CHECK TIME, and the rest of this
 // block is the record of that. #524's program no longer checks clean: the
-// `vmap` axis is a `Selector` slot, and reading a bound `int32` parameter
+// `vmap` axis is a `Selector` slot, and reading a bound `i32` parameter
 // there is a [04-TOT-3]/[04-TOT-4] malformed form. Three sentences decide it,
 // and none of them is either test:
 //
@@ -393,7 +393,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
 //     tensor", keyed on the axis's value against a rank. A check-time
 //     diagnostic that names the value presupposes the value at check time.
 //   * spec/04-type-system.md section 4.5.3 names the general rule: "a bound
-//     `int32` variable is a runtime value and keeps the static-axis rule".
+//     `i32` variable is a runtime value and keeps the static-axis rule".
 //
 // chelis#259 had already reached the same conclusion for the reduce/expand
 // family on the same ground -- "the dimension at position `axis` is removed"
@@ -409,7 +409,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
 // =====================================================================
 
 /// A `vmap` over `tensor[batch, features]` whose mapped axis is the bound
-/// runtime parameter `ax: int32` (a non-constant).
+/// runtime parameter `ax: i32` (a non-constant).
 const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
 (defsig {} process
   (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
@@ -419,12 +419,12 @@ const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
     (app {} (var {} relu) (var {} x))))
 (defsig {} batch_process
   (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
-           (t-prim {} int32)
+           (t-prim {} i32)
            (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
 (def {} batch_process
   (fn {} (params {}
            (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))})
-           (ax {type: (t-prim {} int32)}))
+           (ax {type: (t-prim {} i32)}))
     (pipe {} (var {} xs)
       (vmap {} (var {} process) (var {span: "dp:vmap-runtime-axis"} ax)))))
 "#;
@@ -446,7 +446,7 @@ const VMAP_CONST_AXIS_DEEP: &str = r#"
   (fn {} (params {}
            (xs {type: (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))}))
     (pipe {} (var {} xs)
-      (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0)))))
+      (vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0)))))
 "#;
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {

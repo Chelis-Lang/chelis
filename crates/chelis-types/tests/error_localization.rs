@@ -24,7 +24,7 @@ fn check_errors(source: &str) -> Vec<CheckError> {
 
 #[test]
 fn precision_mismatch_has_span_offset() {
-    // add(f32, int32) is a precision mismatch; the span_offset should be
+    // add(f32, i32) is a precision mismatch; the span_offset should be
     // present and non-zero because the call site is not at byte 0.
     let source = r#"
 def bad() -> f32 =

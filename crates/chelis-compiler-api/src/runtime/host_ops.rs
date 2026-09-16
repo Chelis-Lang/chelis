@@ -364,7 +364,7 @@ pub(super) fn bit_int_binop(
         {
             // Pre-WS-A0 stored every int as i64; preserve i64-precision
             // arithmetic but pin the result dtype to the operand dtype
-            // when both sides agree, else widen to int64. Matches the
+            // when both sides agree, else widen to i64. Matches the
             // §5.1 "no implicit precision promotion" rule for matched
             // operands, and fails closed for mixed widths.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
@@ -725,7 +725,7 @@ pub(super) fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), Stri
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => Ok(()),
         RuntimeValue::String(_) => Ok(()),
         other => Err(format!(
-            "dict keys must be int64 or string in 3d, got {other:?}"
+            "dict keys must be i64 or string in 3d, got {other:?}"
         )),
     }
 }
@@ -877,7 +877,7 @@ pub(super) fn nested_list_to_tensor_data(
 
 /// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
 /// families, exact f64 images for floats (chelis#729 Phase 1; ends the
-/// f64-collapse of exact int64 elements, chelis#684).
+/// f64-collapse of exact i64 elements, chelis#684).
 pub(super) enum ListTensorData {
     Int(Vec<i64>),
     Float(Vec<f64>),
@@ -961,7 +961,7 @@ pub(super) fn tensor_to_list_values(
         ));
     }
     // chelis#729 Phase 1: elements read the sealed per-dtype storage
-    // directly, so int64 lists stay exact above 2^53 and float elements
+    // directly, so i64 lists stay exact above 2^53 and float elements
     // carry their own width (the probe-2 to_list narrowing is gone).
     let mut values = Vec::with_capacity(tensor.value.len());
     for index in 0..tensor.value.len() {
@@ -1167,7 +1167,7 @@ pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<u
                     Err(format!("{op} expects non-negative sizes, got {v}"))
                 }
             }
-            other => Err(format!("{op} expects int64 sizes, got {other:?}")),
+            other => Err(format!("{op} expects i64 sizes, got {other:?}")),
         })
         .collect()
 }
@@ -1415,9 +1415,9 @@ pub(super) fn tensor_insert_host(
 /// to hoist it.
 ///
 /// The trap renders through [`NumericTrap`], so the line is
-/// `numeric trap: domain in expand at int64` verbatim: the guarded result is
+/// `numeric trap: domain in expand at i64` verbatim: the guarded result is
 /// an extent under [05-DIM-1] and not a tensor element, which is why the
-/// dtype slot is `int64` rather than the tensor's precision
+/// dtype slot is `i64` rather than the tensor's precision
 /// (`spec/04-type-system.md` section 4.7).
 pub(super) fn tensor_expand_host(
     builtin: &str,
@@ -2035,7 +2035,7 @@ pub(super) fn conv_host(
             .checked_add(padding[axis].0)
             .and_then(|n| n.checked_add(padding[axis].1))
             .filter(|&n| i64::try_from(n).is_ok())
-            .ok_or("conv padded extent overflows int64")?;
+            .ok_or("conv padded extent overflows i64")?;
         let k = kernel_shape[axis + 2];
         if strides[axis] == 0 || k == 0 || k > padded {
             return Err(format!(
@@ -2046,7 +2046,7 @@ pub(super) fn conv_host(
             ((padded - k) / strides[axis])
                 .checked_add(1)
                 .filter(|&n| i64::try_from(n).is_ok())
-                .ok_or("conv output extent overflows int64")?,
+                .ok_or("conv output extent overflows i64")?,
         );
     }
     let output_ty = TensorType {
@@ -2496,7 +2496,7 @@ pub(super) fn tensor_sort_value(
         }
     }
     // reuse_* contract: the sorted values are a permutation of the input
-    // (section C3, element-preserving); the index tensor is exact int64.
+    // (section C3, element-preserving); the index tensor is exact i64.
     Ok(RuntimeValue::Tuple(vec![
         RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
             tensor.value.shape.clone(),
@@ -2780,8 +2780,8 @@ pub(super) fn tensor_einsum_value(
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
     // The host lane carries shapes as `usize`, but the language's extent
-    // domain is int64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
-    // count to trap `Overflow`. Fold in int64 so this lane agrees with the C
+    // domain is i64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
+    // count to trap `Overflow`. Fold in i64 so this lane agrees with the C
     // runtime about where the ceiling is instead of inheriting the host's, and
     // short-circuit a zero extent so the answer does not depend on axis order:
     // a zero anywhere means zero elements, whatever the other extents are.
@@ -2793,11 +2793,11 @@ pub(super) fn tensor_einsum_value(
             .iter()
             .try_fold(1_i64, |product, &extent| {
                 let extent = i64::try_from(extent).map_err(|_| {
-                    format!("Overflow: einsum {context} extent {extent} exceeds int64")
+                    format!("Overflow: einsum {context} extent {extent} exceeds i64")
                 })?;
                 product
                     .checked_mul(extent)
-                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds int64"))
+                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds i64"))
             })
             .and_then(|product| {
                 usize::try_from(product).map_err(|_| {
@@ -3011,7 +3011,7 @@ fn truncate_for_diagnostic(full: String) -> String {
 /// on top is a KIND TAG on the outermost value, because a mismatch
 /// diagnostic ("expected an f64 value, got ...") has to name what arrived,
 /// and the canonical exit form deliberately does not: `5` alone cannot
-/// distinguish an int32 from an f64 whose shortest form has no fraction.
+/// distinguish an i32 from an f64 whose shortest form has no fraction.
 /// Nested structure is *not* re-tagged - it is `render_value`'s output
 /// verbatim, so the diagnostic and the exit channel agree byte-for-byte on
 /// every payload they both render.
@@ -3052,7 +3052,7 @@ pub(crate) fn describe_argument(slot: Option<&RuntimeValue>) -> String {
 }
 
 /// Render an ADT constructor's field list for a malformed-shape diagnostic.
-/// Fields ARE tagged individually: `malformed JNum fields [int32 5]` names
+/// Fields ARE tagged individually: `malformed JNum fields [i32 5]` names
 /// the reason the shape was rejected, which an untagged `[5]` does not.
 #[cfg(test)]
 pub(crate) fn describe_fields(fields: &[RuntimeValue]) -> String {
@@ -3244,8 +3244,8 @@ mod numeric_trap_forwarding_tests {
 
     #[test]
     fn composed_evaluation_forwards_the_raising_primitive_trap_without_plumbing() {
-        // int8 sum has an int32 default accumulator and therefore cannot
-        // overflow on this two-element input. Use an int32 accumulator-edge
+        // i8 sum has an i32 default accumulator and therefore cannot
+        // overflow on this two-element input. Use an i32 accumulator-edge
         // row so the test continues to exercise trap forwarding without
         // contradicting the §5.7.1 accumulator contract.
         let input = RuntimeTensorValue::from_wide_int(
@@ -3254,22 +3254,22 @@ mod numeric_trap_forwarding_tests {
             vec![2],
             vec![i64::from(i32::MAX), 1],
         )
-        .expect("input is representable at int32");
+        .expect("input is representable at i32");
         let err = eval_composed_unary(&input, |dag, x, ty| {
             let output_ty = TensorType {
                 dims: Vec::new(),
                 precision: ty.precision,
             };
             dag.add_node(
-                RiscOp::sum_default(0, ty.precision).expect("int8 sum is admitted"),
+                RiscOp::sum_default(0, ty.precision).expect("i8 sum is admitted"),
                 vec![x],
                 output_ty,
                 None,
             )
         })
-        .expect_err("the composed int32 sum must overflow");
+        .expect_err("the composed i32 sum must overflow");
 
-        assert_eq!(err, "numeric trap: overflow in sum at int32");
+        assert_eq!(err, "numeric trap: overflow in sum at i32");
         assert!(!err.contains("IR eval failed"));
         assert!(!err.contains("composed unary"));
     }

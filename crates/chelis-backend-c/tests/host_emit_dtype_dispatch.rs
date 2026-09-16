@@ -178,22 +178,22 @@ fn tensor_to_scalar_i64_never_round_trips_through_f64() {
         &make_tensor_to_scalar_program(Prim::Int64, HostType::Int64),
         "tensor_to_scalar_i64_exact",
     )
-    .expect("rank-zero int64 extraction must emit");
+    .expect("rank-zero i64 extraction must emit");
 
     assert!(
         source.contains("chelis_host_scalar_as_i64("),
-        "int64 tensor_to_scalar must read back through the dtype-checked \
+        "i64 tensor_to_scalar must read back through the dtype-checked \
          exact scalar reader of the tagged-carrier ABI:\n{source}"
     );
     assert!(
         source.contains(
             "CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }"
         ),
-        "the exact reader must recover int64 bits at their declared width:\n{source}"
+        "the exact reader must recover i64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_tensor_to_f64("),
-        "int64 tensor_to_scalar must not pass through double:\n{source}"
+        "i64 tensor_to_scalar must not pass through double:\n{source}"
     );
 }
 
@@ -221,20 +221,20 @@ fn scalar_to_tensor_i64_uses_exact_i64_storage() {
         &make_scalar_to_tensor_program(),
         "scalar_to_tensor_i64_exact",
     )
-    .expect("rank-zero int64 packing must emit");
+    .expect("rank-zero i64 packing must emit");
 
     assert!(
         source.contains("chelis_host_scalar_from_i64("),
-        "int64 scalar_to_tensor must pack through the tagged exact-width \
+        "i64 scalar_to_tensor must pack through the tagged exact-width \
          scalar of the tagged-carrier ABI:\n{source}"
     );
     assert!(
         source.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value)"),
-        "the packer must tag int64 bits at their declared width:\n{source}"
+        "the packer must tag i64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_scalar_tensor_from_i64("),
-        "int64 scalar_to_tensor must not call the legacy I32 storage helper:\n{source}"
+        "i64 scalar_to_tensor must not call the legacy I32 storage helper:\n{source}"
     );
 }
 
@@ -339,7 +339,7 @@ fn compile_generated_i32_binary_assignment(op_name: &str, lhs: i32, rhs: i32) ->
     let assignment = arm
         .lines()
         .find(|line| line.contains("__target_data[i] ="))
-        .unwrap_or_else(|| panic!("the int32 arm contains no assignment:\n{arm}"))
+        .unwrap_or_else(|| panic!("the i32 arm contains no assignment:\n{arm}"))
         .trim();
 
     let c_source = format!(
@@ -380,14 +380,14 @@ int main(void) {{
         .unwrap_or_else(|error| panic!("failed to run gcc: {error}"));
     assert!(
         compile.status.success(),
-        "generated int32 assignment failed to compile:\n{}",
+        "generated i32 assignment failed to compile:\n{}",
         String::from_utf8_lossy(&compile.stderr)
     );
 
     let output = Command::new(&binary_path).output().unwrap();
     assert!(
         output.status.success(),
-        "generated int32 assignment failed to run:\n{}",
+        "generated i32 assignment failed to run:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout)
@@ -459,12 +459,12 @@ fn binary_elementwise_int32_arm_uses_int32_t_pointers() {
 
     assert!(
         arm.contains("int32_t *__target_data = (int32_t*)"),
-        "the int32 target pointer must use int32_t; arm:\n{arm}"
+        "the i32 target pointer must use int32_t; arm:\n{arm}"
     );
     assert!(
         arm.contains("const int32_t *__lhs_data = (const int32_t*)")
             && arm.contains("const int32_t *__rhs_data = (const int32_t*)"),
-        "the int32 input pointers must use int32_t; arm:\n{arm}"
+        "the i32 input pointers must use int32_t; arm:\n{arm}"
     );
 }
 
@@ -476,7 +476,7 @@ fn binary_elementwise_int32_arm_contains_no_float_pointer() {
 
     assert!(
         !arm.contains("float"),
-        "the int32 arm must not use an IEEE binary32 pointer; arm:\n{arm}"
+        "the i32 arm must not use an IEEE binary32 pointer; arm:\n{arm}"
     );
 }
 
@@ -620,13 +620,13 @@ fn unary_func_int32_arm_aborts_without_binary32_conversion() {
 
     assert!(
         arm.contains("abort();"),
-        "the int32 arm must abort; arm:\n{arm}"
+        "the i32 arm must abort; arm:\n{arm}"
     );
     assert!(
         !arm.contains("__target_data")
             && !arm.contains("(float*)")
             && !arm.contains("(const float*)"),
-        "the int32 arm must not convert through binary32; arm:\n{arm}"
+        "the i32 arm must not convert through binary32; arm:\n{arm}"
     );
 }
 
@@ -784,10 +784,10 @@ fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
     let src = emit_host_program(&program, "scalar_i64").unwrap();
     assert!(
         src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)__tensor_scalar0_0))"),
-        "int64 helper input must preserve its tag and all integer bits:\n{src}"
+        "i64 helper input must preserve its tag and all integer bits:\n{src}"
     );
     assert!(
         !src.contains("chelis_host_f64_bits(__tensor_scalar0_0)"),
-        "int64 helper input must not round-trip through f64:\n{src}"
+        "i64 helper input must not round-trip through f64:\n{src}"
     );
 }

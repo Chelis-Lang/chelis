@@ -19,10 +19,14 @@ raw Deep, and effect inference SHALL run after HM type inference on the same ann
 
 ### Requirement: Active primitive dtype set
 
-The active numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
-`int16`, `int32`, `int64`, `bool`, and `string`. `f8e4m3` SHALL be deferred and rejected by
+The active numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `i8`,
+`i16`, `i32`, `i64`, `bool`, and `string`. `f8e4m3` SHALL be deferred and rejected by
 the checker (and `cast(x, f8e4m3)`) with a diagnostic pointing at §1.1.1; unsigned integer
 types SHALL be out of scope and rejected per §1.1.2.
+The retired v0.18 spellings `int8`, `int16`, `int32`, and `int64` SHALL be
+rejected by normal Surf and Deep ingress and SHALL NOT bind as type variables.
+They remain the stable vocabulary of existing external interchange and ABI
+contracts; that separate vocabulary does not make them language type names.
 
 #### Scenario: Active primitive resolves
 
@@ -33,6 +37,11 @@ types SHALL be out of scope and rejected per §1.1.2.
 
 - **WHEN** a program uses `(t-prim {} f8e4m3)` or a `u32` type
 - **THEN** the checker rejects it, pointing at §1.1.1 (deferred) or §1.1.2 (out of scope)
+
+#### Scenario: Retired integer spelling requires migration
+
+- **WHEN** normal Surf or Deep ingress encounters `int64` in a type position
+- **THEN** it rejects the spelling and points to the explicit v0.18 migration
 
 ### Requirement: Per-backend dtype support matrix
 
@@ -211,7 +220,7 @@ name-trackable operations, rejecting positional shape-rewriters.
 
 ### Requirement: Runtime shape semantics
 
-`shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `int32`
+`shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `i32`
 runtime scalar; a negative or out-of-range axis SHALL be a `DimensionMismatch`. An `expand`
 runtime `size` SHALL be accepted only when it folds to a compile-time constant or derives from
 an in-scope tensor's shape; a sourceless runtime size SHALL be rejected identically at check,
@@ -219,19 +228,19 @@ build, and eval.
 
 #### Scenario: Shape-sourced expand preserves the symbolic dim
 
-- **WHEN** `expand(b, 0, shape(x, cast(0, int32)))` is used with a declared `tensor[n, 4, f32]` return
+- **WHEN** `expand(b, 0, shape(x, cast(0, i32)))` is used with a declared `tensor[n, 4, f32]` return
 - **THEN** the symbolic batch dim `n` is preserved through unification
 
 #### Scenario: Sourceless expand size is rejected
 
-- **WHEN** an `expand` size is a bare runtime scalar parameter `a_dim: int32`
+- **WHEN** an `expand` size is a bare runtime scalar parameter `a_dim: i32`
 - **THEN** it is rejected at check, build, and eval with the §4.7.2 sourceless-size diagnostic
 
 ### Requirement: No implicit precision promotion
 
 All operands of an arithmetic operation SHALL have the same precision; mixed precision SHALL be
 a type error with a cast suggestion. `cast` SHALL be the only precision change and SHALL always
-be explicit. Integer literals SHALL default to `int32` and float literals to `f32`, overridable
+be explicit. Integer literals SHALL default to `i32` and float literals to `f32`, overridable
 only by suffix, contextual element type, or explicit `cast`.
 
 #### Scenario: Same-precision arithmetic type-checks
@@ -258,7 +267,7 @@ call-site type error citing `floor_div`/`trunc_div` (for `div`) or the float-onl
 
 #### Scenario: Transcendental on an integer tensor is a type error
 
-- **WHEN** `log` is applied to an int32 tensor
+- **WHEN** `log` is applied to an i32 tensor
 - **THEN** it is a call-site type error because transcendentals are float-only
 
 ### Requirement: Contextual tensor-literal inference
@@ -266,7 +275,7 @@ call-site type error citing `floor_div`/`trunc_div` (for `div`) or the float-onl
 In a known-element-type position (typed binding RHS, matching call argument, typed tensor
 return body, or `cast(literal, p)`), unsuffixed numeric literals SHALL adopt that element type,
 binding directly at `p` for `cast` rather than narrowing-then-widening. Outside that closed set
-they SHALL fall back to the `int32`/`f32` defaults; a suffix disagreeing with the context SHALL
+they SHALL fall back to the `i32`/`f32` defaults; a suffix disagreeing with the context SHALL
 be a type error.
 
 #### Scenario: cast binds the literal directly at the target
@@ -283,7 +292,7 @@ be a type error.
 
 `matmul` and `reduce_sum` SHALL carry an optional accumulator-precision parameter that is the
 only mixed-precision mechanism; when omitted the compiler SHALL resolve the documented default
-(bf16/f16 → f32, int8/int16 → int32) before any backend is invoked. An accumulator narrower
+(bf16/f16 → f32, i8/i16 → i32) before any backend is invoked. An accumulator narrower
 than the operand or the default SHALL be a type error; integer `matmul` operand precisions
 SHALL NOT be admitted.
 
@@ -294,8 +303,8 @@ SHALL NOT be admitted.
 
 #### Scenario: Narrower accumulator is a type error
 
-- **WHEN** `reduce_sum(x: tensor[N, int8], accumulator=int8)` requests a narrower-than-default accumulator
-- **THEN** it is a type error suggesting the wider int32 default
+- **WHEN** `reduce_sum(x: tensor[N, i8], accumulator=i8)` requests a narrower-than-default accumulator
+- **THEN** it is a type error suggesting the wider i32 default
 
 ### Requirement: Fitness scoring
 

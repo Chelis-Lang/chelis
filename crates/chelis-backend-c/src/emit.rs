@@ -1561,14 +1561,14 @@ impl CEmitter {
                     .iter()
                     .chain(dag.literal_result_witness_requirements(node.id).iter())
                 {
-                    let required = required.as_i64_exact().expect("verified int64 requirement");
+                    let required = required.as_i64_exact().expect("verified i64 requirement");
                     self.line(&format!(
                         "if (chelis_tensor_shape(t{input}, {axis}) != {required}) {{"
                     ));
                     self.indent += 1;
                     self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = %lld, {parameter} axis {axis} = %lld\\n\", (long long){required}, (long long)chelis_tensor_shape(t{input}, {axis}));"));
                     self.line(&format!(
-                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at i64\");"
                     ));
                     self.indent -= 1;
                     self.line("}");
@@ -1618,7 +1618,7 @@ impl CEmitter {
                         "fprintf(stderr, \"extent `{label}`: {first}, {second}\\n\", {first_value}, {second_value});"
                     ));
                     self.line(&format!(
-                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at i64\");"
                     ));
                     self.indent -= 1;
                     self.line("}");
@@ -1636,7 +1636,7 @@ impl CEmitter {
                     self.line(&format!("if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"));
                     self.indent += 1;
                     self.line(&format!("fprintf(stderr, \"extent `{claim}`: claimed = %lld, reshape axis {axis} = %lld\\n\", (long long)((const int64_t*)t{required}_data)[0], (long long)((const int64_t*)t{actual}_data)[0]);"));
-                    self.line("chelis_numeric_trap(\"numeric trap: domain in reshape at int64\");");
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in reshape at i64\");");
                     self.indent -= 1;
                     self.line("}");
                 }
@@ -2273,7 +2273,7 @@ impl CEmitter {
                     let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                     if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
                         panic!(
-                            "C backend sparse gather requires int32/int64 indices, got {} at node {}",
+                            "C backend sparse gather requires i32/i64 indices, got {} at node {}",
                             indices_ty.precision.name(),
                             node.id.0
                         );
@@ -2294,7 +2294,7 @@ impl CEmitter {
                     let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
                     if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
                         panic!(
-                            "C backend sparse scatter_add requires int32/int64 indices, got {} at node {}",
+                            "C backend sparse scatter_add requires i32/i64 indices, got {} at node {}",
                             indices_ty.precision.name(),
                             node.id.0
                         );
@@ -2317,7 +2317,7 @@ impl CEmitter {
                     let updates_ty = &dag.get(node.inputs[2]).unwrap().output_type;
                     if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
                         panic!(
-                            "C backend sparse scatter_replace requires int32/int64 indices, got {} at node {}",
+                            "C backend sparse scatter_replace requires i32/i64 indices, got {} at node {}",
                             indices_ty.precision.name(),
                             node.id.0
                         );
@@ -2530,7 +2530,7 @@ impl CEmitter {
             self.line(&format!("if ({right} != {left}) {{"));
             self.indent += 1;
             self.line(&diagnostic);
-            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
             self.indent -= 1;
             self.line("}");
         }
@@ -2581,7 +2581,7 @@ impl CEmitter {
             .iter()
             .map(|dim| {
                 let extent = Self::emit_dim_info(dim);
-                // The constructor's uint64 bits parameter preserves an int64
+                // The constructor's uint64 bits parameter preserves an i64
                 // extent's bits by C's defined modulo conversion, including
                 // negative values that the metadata owner then rejects.
                 format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {extent})")
@@ -2628,7 +2628,7 @@ impl CEmitter {
     ///
     /// **WS-A0 footgun fix.** This used to fall through to `"float"` for
     /// any unhandled `Prim`, which silently downgraded the wider
-    /// active dtypes (f16, bf16, int8, int16) to single-precision in
+    /// active dtypes (f16, bf16, i8, i16) to single-precision in
     /// emitted C code. WS-A1 expands the C backend to handle those
     /// dtypes; until then this function panics with the unhandled
     /// variant so the silent downgrade cannot recur and so any new
@@ -2705,7 +2705,7 @@ impl CEmitter {
 
     /// Render a portable exact-width signed literal. In particular,
     /// `INT64_C(-9223372036854775808)` is not a portable spelling because
-    /// the positive magnitude is outside int64 before unary negation.
+    /// the positive magnitude is outside i64 before unary negation.
     fn i64_c_literal(value: i64) -> String {
         if value == i64::MIN {
             "INT64_MIN".to_string()
@@ -2818,7 +2818,7 @@ impl CEmitter {
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
         // The sealed payload (chelis#856) reads exactly per family: the
-        // integer arms take the exact i64 (an int64 constant above 2^53
+        // integer arms take the exact i64 (an i64 constant above 2^53
         // now emits its exact value instead of an f64-rounded one), the
         // float arms take the exact f64 image. A payload the target
         // cannot represent is a structured diagnostic through the
@@ -3017,7 +3017,7 @@ impl CEmitter {
             return Err(invalid("storage dtype differs from result dtype"));
         }
         let count =
-            i64::try_from(storage.len()).map_err(|_| invalid("literal count exceeds int64"))?;
+            i64::try_from(storage.len()).map_err(|_| invalid("literal count exceeds i64"))?;
         let dtype = Self::dtype_macro(ty);
         let rank = Self::ndim(ty);
         let shape = Self::tagged_shape_literal(ty);
@@ -3488,9 +3488,9 @@ impl CEmitter {
     /// resolved from the input DAG nodes — not through the boolean
     /// output type. The result uses the canonical one-byte Bool8
     /// representation,
-    /// but a runtime-produced int32/int64/f64/bf16/f16 operand read
+    /// but a runtime-produced i32/i64/f64/bf16/f16 operand read
     /// through a raw `float*` would reinterpret its bit pattern (the
-    /// #347/#476 bug class: e.g. a negative int32 reinterpreted as
+    /// #347/#476 bug class: e.g. a negative i32 reinterpreted as
     /// `float` is NaN, so `-7 < -3` would wrongly yield false, and an
     /// f64 read through `float*` truncates the 8-byte payload). Both
     /// operands share precision `p` per the signature, but each type is
@@ -5383,7 +5383,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
 
     /// [05-OP-29] dedicated multi-axis bool count. The input is visited in
     /// original row-major order within each result group, then folded through
-    /// an adjacent-pair balanced checked-int64 tree. No cast+sum lowering is
+    /// an adjacent-pair balanced checked-i64 tree. No cast+sum lowering is
     /// used, and the first typed boundary validates both the bool tag and its
     /// exact 0/1 payload.
     fn emit_count(
@@ -5687,7 +5687,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // chelis#730 Phase 1 (census row 11, chelis#692): a clean
             // diagnostic through the section C3 channel, not a compiler
             // panic. Reachable from ordinary Surf (`max_reduce` over an
-            // int64 tensor).
+            // i64 tensor).
             return Err(Unsupported::new(
                 UnsupportedKind::Op("max_reduce".to_string()),
                 format!(
@@ -5938,12 +5938,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 .map(|&value| {
                     let value = i64::try_from(value).map_err(|_| {
                         Unsupported::new(
-                            UnsupportedKind::Construct("a window parameter outside int64".into()),
+                            UnsupportedKind::Construct("a window parameter outside i64".into()),
                             format!("the C DAG emitter (node {id})"),
                             Stage::Codegen("c"),
                             chelis_types::deliberate_rejection!(
                                 "[05-RWIN-1]",
-                                "window extents and strides require positive int64 values"
+                                "window extents and strides require positive i64 values"
                             ),
                         )
                     })?;
@@ -6814,9 +6814,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete
-        // user-facing line is `numeric trap: domain in <op> at int64` with no
+        // user-facing line is `numeric trap: domain in <op> at i64` with no
         // prefix and no suffix, `<op>` naming the operation that introduces
-        // the extent, and `<prim>` always `int64` because the guard finalizes
+        // the extent, and `<prim>` always `i64` because the guard finalizes
         // an extent under [05-DIM-1]. Section 4.7's required context - the
         // disagreeing names, the axis and each observed value - is its own
         // `fprintf`, so the trap line stays exactly one line.
@@ -6879,7 +6879,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
             ));
             self.line(&format!(
-                "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+                "chelis_numeric_trap(\"numeric trap: domain in {op} at i64\");"
             ));
             self.indent -= 1;
             self.line("}");
@@ -7020,7 +7020,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .inherited_result_rank
             .expect("inherited result sites require an existing result root");
         let op = sites[0].operation();
-        self.line(&format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at int64\");",
+        self.line(&format!("__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){{ {} }}, {}, \"{op}\", \"numeric trap: domain in {op} at i64\");",
             rank, observations.join(", "), observations.len()));
     }
 
@@ -7121,7 +7121,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .expect("verified pad dtype")
             .c_macro();
         if ty.precision == Prim::Int64 {
-            let value = fill.as_i64_exact().expect("verified int64 pad fill");
+            let value = fill.as_i64_exact().expect("verified i64 pad fill");
             self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));", Self::i64_c_literal(value)));
         } else {
             let literal = match ty.precision {
@@ -7202,7 +7202,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // next reader does not re-derive it.
         for (axis, (start, end)) in bounds.iter().enumerate() {
             if start.node_input().is_some() || end.node_input().is_some() {
-                self.line(&format!("if (t{id}_start[{axis}].bits == t{id}_end[{axis}].bits) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at int64\"); }}"));
+                self.line(&format!("if (t{id}_start[{axis}].bits == t{id}_end[{axis}].bits) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at i64\"); }}"));
             }
         }
         self.emit_slot_wrapper(id, ty);
@@ -7271,8 +7271,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     //
     // `cast` is a precision conversion, not a bit-reinterpret. The previous
     // implementation issued a `memcpy(dst, src, n * sizeof(float))` and was
-    // wrong on every cross-precision arm (f32<->f64, f32<->int32,
-    // int32<->int64, ...). See
+    // wrong on every cross-precision arm (f32<->f64, f32<->i32,
+    // i32<->i64, ...). See
     // `docs/investigations/cbackend_cast_memcpy_diagnosis.md`. The host
     // runtime parallel was fixed in PR #59
     // (`crates/chelis-compiler-api/src/runtime/host_ops.rs::cast_tensor_value` /
@@ -7492,7 +7492,7 @@ mod tests {
         let c =
             emit_test_dag(&direct, "integer_abs").expect("direct integer abs has a typed C kernel");
         assert!(c.contains("chelis_int_abs_guard"));
-        assert!(c.contains("numeric trap: overflow in abs at int64"));
+        assert!(c.contains("numeric trap: overflow in abs at i64"));
         assert!(!c.contains("fabsf(__in_a_"));
 
         let mut fused = Dag::new();
@@ -7566,7 +7566,7 @@ mod tests {
         )));
         assert!(
             !c.contains("9007199254740992"),
-            "the exact int64 fill must never pass through its rounded f64 image:\n{c}"
+            "the exact i64 fill must never pass through its rounded f64 image:\n{c}"
         );
     }
 
@@ -8605,7 +8605,7 @@ mod tests {
 
     #[test]
     fn int64_const_does_not_panic() {
-        // Regression: dtype_macro used to panic for int64 tensors.
+        // Regression: dtype_macro used to panic for i64 tensors.
         let mut dag = Dag::new();
         dag.add_node(
             RiscOp::synth_const(
@@ -8632,7 +8632,7 @@ mod tests {
             c.contains(
                 "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64,"
             ),
-            "generated C must carry the exact int64 tag and bits through chelis_fill_scalar"
+            "generated C must carry the exact i64 tag and bits through chelis_fill_scalar"
         );
     }
 
@@ -8747,7 +8747,7 @@ mod tests {
 
     #[test]
     fn int64_add_does_not_panic() {
-        // Regression: binary elementwise over int64 tensors used to panic.
+        // Regression: binary elementwise over i64 tensors used to panic.
         let mut dag = Dag::new();
         let ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
@@ -9207,7 +9207,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("float sparse indices must not become verified backend input"),
         };
-        assert!(error.to_string().contains("requires int32/int64 indices"));
+        assert!(error.to_string().contains("requires i32/i64 indices"));
     }
 
     #[test]
@@ -9281,7 +9281,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("float sparse indices must not become verified backend input"),
         };
-        assert!(error.to_string().contains("requires int32/int64 indices"));
+        assert!(error.to_string().contains("requires i32/i64 indices"));
     }
 
     #[test]

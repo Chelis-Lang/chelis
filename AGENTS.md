@@ -473,7 +473,7 @@ numeric data, whether or not you have read that document:
   not a C-style untagged carrier seam. Integer fields follow the same rule. Every
   such constructor, irrespective of age, owes the semantic registration below.
   Source-faithful ingestion still preserves distinct variants such as
-  `JsonInt(int64)` and `JsonFloat(f64)`; one float funnel is not an equivalent
+  `JsonInt(i64)` and `JsonFloat(f64)`; one float funnel is not an equivalent
   tagged source model. The
   complete inventory is exact and bijective with its authority map; regeneration
   cannot bless an unclassified row. A rename, signature change, or reclassification
@@ -509,11 +509,11 @@ numeric data, whether or not you have read that document:
   generated membership artifact is required in addition to, and is not a substitute
   for, the exact `SemanticRegistration`.
 - **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
-  (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
+  (i64 IDs into an f32 tensor) is a decision: use the named lossy form (the
   chelis#759 pattern) or the exact dtype, never a quiet convenience cast. Better
   still, type the boundary so the checker can defend it: ingestion APIs preserve
   the source format's numeric distinctions as ADT variants (`io/json`'s
-  `JsonInt(int64)` beside `JsonFloat(f64)` is the precedent), never one float
+  `JsonInt(i64)` beside `JsonFloat(f64)` is the precedent), never one float
   funnel.
 - **A new surface KIND** (a new serialization format, IPC channel, or export
   mechanism that can carry numbers) extends the §C6 enumerators in the same change
@@ -1483,7 +1483,7 @@ When writing or rewriting Surf in this repository:
 - No implicit precision promotion
 - Named tensor dimensions match by name
 - No implicit broadcasting; explicit `expand` only
-- Integer literals default to `int32`, float literals to `f32`
+- Integer literals default to `i32`, float literals to `f32`
 
 ### Build Reality
 
@@ -1630,7 +1630,7 @@ selected explicitly, then audit every item below:
   claim.
 - When a skipped version range crosses canonical Surf v0.19, run
   `chelis migrate surf --from 0.18 --inplace` over maintained `.ch` sources, then handle
-  semantic migrations the tool cannot choose: explicit literal suffixes, int64 extents,
+  semantic migrations the tool cannot choose: explicit literal suffixes, i64 extents,
   and checked `cast` versus truncating `cast_trunc`.
 - `chelis test` deliberately does not run the style gate. A shell that generates Chelis
   source must run `chelis check` or `chelis fmt --check` over emitted files; do not hide

@@ -34,7 +34,7 @@ fn eval_source(source: &str, json: bool, deep: bool) -> std::process::Output {
 }
 
 fn program(body: &str) -> String {
-    format!("def run() -> int64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n")
+    format!("def run() -> i64 ! {{ IO }} = {{\n{body}\n}}\nout = run()\n")
 }
 
 #[test]

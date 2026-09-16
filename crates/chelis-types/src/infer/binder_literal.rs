@@ -9,7 +9,7 @@ use chelis_deep::{Atom, BinderLiteralUse, LiteralFamilyFit, visit_binder_literal
 ///
 /// The integer range rule takes BOTH atoms together, and the diagnostic names
 /// both for that reason. §5.6 says the range checks apply "at `p`" and offers
-/// `cast(3000000000, int64)` as the escape hatch the position exists to
+/// `cast(3000000000, i64)` as the escape hatch the position exists to
 /// preserve, so a reader who follows that citation alone can conclude the
 /// family-wide rule contradicts it. It does not: under [04-INF-6] `p` denotes
 /// every admissible instantiation of the binder, so "at `p`" already means at
@@ -67,7 +67,7 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                                  spec/04-type-system.md §5.6 applies the adopted literal's \
                                  range checks at `{binder}`, and [04-INF-6] makes `{binder}` \
                                  denote every admissible instantiation, so the literal must \
-                                 fit every member of the family, including int8 [-128, 127]",
+                                 fit every member of the family, including i8 [-128, 127]",
                                 family.surf_name()
                             ),
                             vec![

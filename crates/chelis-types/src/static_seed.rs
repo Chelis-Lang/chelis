@@ -34,7 +34,7 @@ fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     }
 }
 
-/// Evaluate lowering's existing closed scalar grammar as signed-int64 seed
+/// Evaluate lowering's existing closed scalar grammar as signed-i64 seed
 /// bits under [05-RNG-1]. Source admission additionally checks §P5's literal form.
 /// The caller must identify whether lexical scope leaves `neg` as the builtin.
 /// Returning the tagged scalar preserves the seed's type across this boundary.
@@ -126,8 +126,8 @@ fn extract_type_checked_scalar(expr: &Expr, neg_is_builtin: bool) -> Option<crat
         // which classifies a bare integer atom as an UNSUFFIXED seed literal
         // and rejects it (`crate::infer::expr::seed_literal_form`); and
         // any stamp it picked would contradict spec/04-type-system.md §5.3,
-        // where an integer literal defaults to `int32` and a float literal to
-        // `f32` rather than to the int64/f64 a seed wants. So
+        // where an integer literal defaults to `i32` and a float literal to
+        // `f32` rather than to the i64/f64 a seed wants. So
         // `extract_type_checked_literal` stays the fold's ONLY literal
         // ingress, as its doc says, and a bare atom reaches the caller's loud
         // rejection instead of a guessed value (chelis#794).

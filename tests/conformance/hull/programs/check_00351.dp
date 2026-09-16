@@ -1,1 +1,6 @@
-(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 89) (d-lit {} 4) (t-prim {} int64))})) (app {} (var {} sum) (var {} ta) (d-lit {} 89))))
+(def {}
+  answer
+  (fn {}
+    (params {}
+      (ta {type: (t-tensor {} (d-lit {} 89) (d-lit {} 4) (t-prim {} i64))}))
+    (app {} (var {} sum) (var {} ta) (d-lit {} 89))))

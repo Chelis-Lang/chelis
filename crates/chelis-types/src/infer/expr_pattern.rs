@@ -771,8 +771,8 @@ fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
 /// A literal pattern selects no width, because a `pat-lit` has no precision
 /// slot and admits no suffix (spec/02 §P10a), so an unsuffixed integer pattern
 /// is admissible against every integer primitive. Unifying it with §5.3's
-/// `int32` default instead would reject `match x_int64 with { | 1 => ... }` and
-/// leave no spelling for an `int64` literal pattern.
+/// `i32` default instead would reject `match x_int64 with { | 1 => ... }` and
+/// leave no spelling for an `i64` literal pattern.
 fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,

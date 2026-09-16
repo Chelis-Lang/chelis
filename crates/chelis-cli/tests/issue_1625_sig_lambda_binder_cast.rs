@@ -121,7 +121,7 @@ fn variable_source_cast_under_unbounded_sig_lambda_binder_is_rejected() {
     let (surf, deep) = check_both_ingresses(
         dir.path(),
         "Issue1625Variable",
-        "sig recast: p -> p\nrecast = fn (v) -> cast(v, p)\nout = recast(cast(7, int32))\n",
+        "sig recast: p -> p\nrecast = fn (v) -> cast(v, p)\nout = recast(cast(7, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_ne!(
@@ -146,7 +146,7 @@ fn literal_source_cast_under_unbounded_sig_lambda_binder_is_rejected() {
     let (surf, deep) = check_both_ingresses(
         dir.path(),
         "Issue1625Literal",
-        "sig recast: p -> p\nrecast = fn (v) -> cast(7, p)\nout = recast(cast(7, int32))\n",
+        "sig recast: p -> p\nrecast = fn (v) -> cast(7, p)\nout = recast(cast(7, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_ne!(
@@ -172,7 +172,7 @@ fn concrete_primitive_target_in_sig_lambda_binding_still_checks_clean() {
     let (surf, deep) = check_both_ingresses(
         dir.path(),
         "Issue1625Concrete",
-        "sig widen: int32 -> f64\nwiden = fn (v) -> cast(v, f64)\nout = widen(cast(7, int32))\n",
+        "sig widen: i32 -> f64\nwiden = fn (v) -> cast(v, f64)\nout = widen(cast(7, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_eq!(
@@ -228,8 +228,8 @@ fn a_same_named_bounded_binder_in_another_function_does_not_leak_into_the_unboun
         "def helper[p: Int](value: p) -> p = cast(value, p)\n\
          sig recast: p -> p\n\
          recast = fn (v) -> cast(v, p)\n\
-         out = recast(cast(7, int32))\n\
-         also = helper(cast(3, int32))\n",
+         out = recast(cast(7, i32))\n\
+         also = helper(cast(3, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_ne!(

@@ -44,12 +44,12 @@
 //!    sig+bare-def shape.
 //!
 //! 3. tensor_form_transcendentals_accept_integers:
-//!    SPEC-DIVERGENCE. `exp(tensor[N, int32])`, `log(tensor[N,
-//!    int32])`, `sin(tensor[N, int32])`, `sqrt(tensor[N, int32])`,
-//!    and `softmax(tensor[N, M, int32], -1)` are silently accepted
+//!    SPEC-DIVERGENCE. `exp(tensor[N, i32])`, `log(tensor[N,
+//!    i32])`, `sin(tensor[N, i32])`, `sqrt(tensor[N, i32])`,
+//!    and `softmax(tensor[N, M, i32], -1)` are silently accepted
 //!    by `chelis check` even though spec sec 5.4 lists them as
 //!    "f32, f64, bf16, f16 only (not integer)". Note that the
-//!    *scalar* form (`exp(int32)`) IS rejected; the tensor form has
+//!    *scalar* form (`exp(i32)`) IS rejected; the tensor form has
 //!    no analog. This is the upstream root cause of findings 1 and 2.
 //!
 //! 4. wsa6_fresh_hashmap_per_param_breaks_matmul_def_quantifier:
@@ -99,7 +99,7 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
-const INTEGER_DTYPES: &[&str] = &["int8", "int16", "int32", "int64"];
+const INTEGER_DTYPES: &[&str] = &["i8", "i16", "i32", "i64"];
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
@@ -179,7 +179,7 @@ fn polymorphic_linear_rejects_integer_call_site() {
         let src = format!(
             r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
-  bias = insert(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -229,7 +229,7 @@ fn polymorphic_linear_accepts_float_call_site() {
         let src = format!(
             r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
-  bias = insert(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -432,7 +432,7 @@ def call(y: tensor[4, {dtype}]) -> tensor[4, {dtype}] = my_recip(y)
 fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
     // WS-A8: spec/04-type-system.md \u{00a7}5.4 transcendental row
     // is now enforced for tensor forms (not just scalar forms). All
-    // five ops must reject `tensor[..., int32]` operands.
+    // five ops must reject `tensor[..., i32]` operands.
     let probes = &[
         ("exp", "exp(x)"),
         ("log", "log(x)"),
@@ -450,7 +450,7 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join(format!("trans_int_{name}.ch"));
         let src = format!(
-            r#"def call(x: tensor[3, int32]) -> tensor[3, int32] = {body}
+            r#"def call(x: tensor[3, i32]) -> tensor[3, i32] = {body}
 "#
         );
         write_file(&path, &src);
@@ -458,65 +458,65 @@ fn tensor_exp_log_sin_sqrt_softmax_now_reject_int32() {
         let errs = errors(&json);
         assert!(
             !errs.is_empty(),
-            "WS-A8: tensor form of `{name}(int32)` must be rejected per \
+            "WS-A8: tensor form of `{name}(i32)` must be rejected per \
              spec/04-type-system.md \u{00a7}5.4; got clean. errs={errs:?}"
         );
         let messages = error_messages(&json);
         assert!(
             messages.iter().any(|m| m.contains("5.4")),
-            "WS-A8: rejection of `{name}(int32)` must cite spec section \
+            "WS-A8: rejection of `{name}(i32)` must cite spec section \
              5.4; got messages {messages:?}"
         );
     }
 
-    // softmax(tensor[..., int32], axis) is also a transcendental row op
+    // softmax(tensor[..., i32], axis) is also a transcendental row op
     // and must reject under the same rule.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("softmax_int.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, 4, int32]) -> tensor[3, 4, int32] = softmax(x, -1)
+        r#"def call(x: tensor[3, 4, i32]) -> tensor[3, 4, i32] = softmax(x, -1)
 "#,
     );
     let json = run_check(&path);
     let errs = errors(&json);
     assert!(
         !errs.is_empty(),
-        "WS-A8: tensor softmax(int32) must be rejected per \
+        "WS-A8: tensor softmax(i32) must be rejected per \
          spec/04-type-system.md \u{00a7}5.4; got clean. errs={errs:?}"
     );
     let messages = error_messages(&json);
     assert!(
         messages.iter().any(|m| m.contains("5.4")),
-        "WS-A8: rejection of softmax(int32) must cite spec section 5.4; \
+        "WS-A8: rejection of softmax(i32) must cite spec section 5.4; \
          got messages {messages:?}"
     );
 }
 
 #[test]
 fn tensor_div_rejects_int32() {
-    // chelis#178: the direct tensor form `div(int32, int32)` is a type
+    // chelis#178: the direct tensor form `div(i32, i32)` is a type
     // error. The diagnostic cites spec/05-risc-primitives.md §2.1 and
     // names the migration ops `floor_div` / `trunc_div`.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("div_int.ch");
     write_file(
         &path,
-        r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = div(x, y)
+        r#"def call(x: tensor[3, i32], y: tensor[3, i32]) -> tensor[3, i32] = div(x, y)
 "#,
     );
     let json = run_check(&path);
     let errs = errors(&json);
     assert!(
         !errs.is_empty(),
-        "chelis#178: tensor `div(int32, int32)` must be rejected; got clean. errs={errs:?}"
+        "chelis#178: tensor `div(i32, i32)` must be rejected; got clean. errs={errs:?}"
     );
     let messages = error_messages(&json);
     assert!(
         messages
             .iter()
             .any(|m| m.contains("2.1") && m.contains("floor_div") && m.contains("trunc_div")),
-        "chelis#178: rejection of div(int32) must cite \u{00a7}2.1 and name \
+        "chelis#178: rejection of div(i32) must cite \u{00a7}2.1 and name \
          `floor_div` and `trunc_div`; got messages {messages:?}"
     );
 }
@@ -532,7 +532,7 @@ fn tensor_floor_div_trunc_div_accept_int32() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join(format!("{name}_int.ch"));
         let src = format!(
-            r#"def call(x: tensor[3, int32], y: tensor[3, int32]) -> tensor[3, int32] = {body}
+            r#"def call(x: tensor[3, i32], y: tensor[3, i32]) -> tensor[3, i32] = {body}
 "#
         );
         write_file(&path, &src);
@@ -540,7 +540,7 @@ fn tensor_floor_div_trunc_div_accept_int32() {
         let errs = errors(&json);
         assert!(
             errs.is_empty(),
-            "chelis#178: tensor `{name}(int32, int32)` must type-check clean; got {errs:?}"
+            "chelis#178: tensor `{name}(i32, i32)` must type-check clean; got {errs:?}"
         );
     }
 }
@@ -567,28 +567,28 @@ fn tensor_trunc_div_rejects_f32() {
 #[test]
 fn finding_3_scalar_form_correctly_rejects_integer() {
     // Negative parity: confirm that the SCALAR form of exp DOES
-    // reject int32 today. This isolates the bug to the tensor form
+    // reject i32 today. This isolates the bug to the tensor form
     // and prevents a fix from accidentally regressing the scalar
     // path.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("exp_scalar_int.ch");
     write_file(
         &path,
-        r#"def call(x: int32) -> int32 = exp(x)
+        r#"def call(x: i32) -> i32 = exp(x)
 "#,
     );
     let json = run_check(&path);
     let errs = errors(&json);
     assert!(
         !errs.is_empty(),
-        "scalar exp(int32) should be rejected per spec sec 5.4 transcendental row"
+        "scalar exp(i32) should be rejected per spec sec 5.4 transcendental row"
     );
     let messages = error_messages(&json);
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("exp") && m.contains("int32")),
-        "scalar exp(int32) error should name `exp` and `int32`; got {messages:?}"
+            .any(|m| m.contains("exp") && m.contains("i32")),
+        "scalar exp(i32) error should name `exp` and `i32`; got {messages:?}"
     );
 }
 
@@ -808,8 +808,8 @@ fn embedding_table_integer_dtypes_legitimately_accepted() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("emb_int.ch");
         let src = format!(
-            r#"def forward[batch, seq, vocab, hidden, p](ids: &tensor[batch, seq, int64], table: &tensor[vocab, hidden, p]) -> tensor[batch, seq, hidden, p] = gather(table, ids, 0)
-def call(ids: &tensor[1, 2, int64], t: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, t)
+            r#"def forward[batch, seq, vocab, hidden, p](ids: &tensor[batch, seq, i64], table: &tensor[vocab, hidden, p]) -> tensor[batch, seq, hidden, p] = gather(table, ids, 0)
+def call(ids: &tensor[1, 2, i64], t: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, t)
 "#
         );
         write_file(&path, &src);

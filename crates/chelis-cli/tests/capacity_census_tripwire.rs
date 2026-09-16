@@ -70,7 +70,7 @@ const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
 static PLANTED_INCLUDE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const NUMERIC_PRIMS: &[&str] = &[
-    "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
+    "f64", "f32", "f16", "bf16", "f8e4m3", "i8", "i16", "i32", "i64",
 ];
 /// The subset of `NUMERIC_PRIMS` whose appearance in an untagged public
 /// position is a capacity SEAM, mirroring `double`/`float` on the C side.
@@ -723,7 +723,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
         &["numeric-op"],
         "[05-OP-33]",
-        "`chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical"
+        "`chelis_metadata_plan_byte_offset` takes a canonical tagged i64 logical"
     ),
     final_numeric_row!(
         "header-export",
@@ -737,7 +737,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
         &[],
         "[05-OP-33]",
-        "`chelis_metadata_plan_view` instead retains rank-many exact tagged int64"
+        "`chelis_metadata_plan_view` instead retains rank-many exact tagged i64"
     ),
     final_numeric_row!(
         "header-export",
@@ -786,7 +786,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
         &[],
         "[05-OP-33]",
-        "`chelis_metadata_plan_check_capacity` validates a canonical nonnegative int64"
+        "`chelis_metadata_plan_check_capacity` validates a canonical nonnegative i64"
     ),
     final_numeric_row!(
         "header-export",
@@ -994,35 +994,35 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
         &["float-carrier", "numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+        "time::Date: () (variant {} Date (field {} year (t-prim {} i64)) (field {} month (t-prim {} i64)) (field {} day (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+        "time::Duration: () (variant {} Duration (field {} days (t-prim {} i64)) (field {} hours (t-prim {} i64)) (field {} minutes (t-prim {} i64)) (field {} seconds (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} i64) (t-prim {} string)) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
@@ -1036,14 +1036,14 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1071,7 +1071,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1085,7 +1085,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+        "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1155,21 +1155,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1253,7 +1253,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} i64)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1337,28 +1337,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64) (t-adt {} List (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1386,7 +1386,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+        "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} i32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} i64))))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1400,35 +1400,35 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
+        "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} i64) (t-tensor {} (d-var {} n) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1463,21 +1463,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} i64)) (t-prim {} string) (t-unit {}))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+        "time::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1533,28 +1533,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+        "time::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+        "time::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1568,35 +1568,35 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+        "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} i64) (t-prim {} i64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} i64)) (t-prim {} string))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} i64)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1653,7 +1653,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "nonnegative int64 sizes whose checked sum equals the selected extent",
+        authority_anchor: "nonnegative i64 sizes whose checked sum equals the selected extent",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2043,7 +2043,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &[],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "`chelis_tensor_unravel_index` converts an exact tagged int64 linear index into",
+        authority_anchor: "`chelis_tensor_unravel_index` converts an exact tagged i64 linear index into",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2053,7 +2053,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "`chelis_tensor_flat_index` converts rank-many exact tagged int64 coordinates",
+        authority_anchor: "`chelis_tensor_flat_index` converts rank-many exact tagged i64 coordinates",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2113,7 +2113,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "`chelis_tensor_affine_index` takes rank-many exact tagged int64 coordinates,",
+        authority_anchor: "`chelis_tensor_affine_index` takes rank-many exact tagged i64 coordinates,",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2563,7 +2563,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &[],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "`chelis_tensor_reshape` accepts a live, flat `List<int64>`",
+        authority_anchor: "`chelis_tensor_reshape` accepts a live, flat `List<i64>`",
     },
 ];
 
@@ -2608,7 +2608,7 @@ const BACKEND_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
         &["numeric-op"],
         "[05-OP-33]",
-        "`chelis_device_tensor_device` returns the owner's exact nonnegative int32"
+        "`chelis_device_tensor_device` returns the owner's exact nonnegative i32"
     ),
     final_numeric_row!(
         "header-export",
@@ -2869,7 +2869,7 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     // off-leg blind spot, not something this entry closes.
     SemanticRegistration {
         callable: "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
-                   target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
+                   target: i8 | i16 | i32 | i64) -> i8 | i16 | i32 | i64",
         atom: "[05-OP-6]",
     },
     SemanticRegistration {
@@ -2884,12 +2884,12 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     },
     SemanticRegistration {
         callable: "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], \
-                   width: int64, pad: T) -> tensor[len(sequences), width, T]",
+                   width: i64, pad: T) -> tensor[len(sequences), width, T]",
         atom: "[05-OP-10]",
     },
     SemanticRegistration {
-        callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
-                   -> tensor[D\\axes, int64]",
+        callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: i32...) \
+                   -> tensor[D\\axes, i64]",
         atom: "[05-OP-29]",
     },
     SemanticRegistration {
@@ -5268,7 +5268,7 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
     let decls = chelis_surf::parser::parse_str(
         "module Planted\n\
          export (public_numeric)\n\
-         def public_numeric(x: int64) -> int64 = x\n",
+         def public_numeric(x: i64) -> i64 = x\n",
     )
     .expect("planted stdlib source parses");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -5604,7 +5604,7 @@ fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
     let tprim = Expr::node(
         DeepTag::TPrim,
         Default::default(),
-        vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+        vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
         span,
     );
     let variant = Expr::node(
@@ -6334,7 +6334,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         "planted",
         "module Std.Planted\n\
          export (planted_scale)\n\
-         sig planted_scale: int32 -> int32\n\
+         sig planted_scale: i32 -> i32\n\
          def planted_scale(n) = n\n",
     );
     let row = rows
@@ -6361,7 +6361,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "std-def-numeric",
-            "planted::planted_scale: (t-fn {} (t-prim {} int32) (t-prim {} int32))",
+            "planted::planted_scale: (t-fn {} (t-prim {} i32) (t-prim {} i32))",
             &["numeric-op"],
         ),
         atom: "[05-OP-1]",
@@ -6429,7 +6429,7 @@ fn a_stdlib_registration_against_a_nonexistent_atom_fails() {
         "planted",
         "module Std.Planted\n\
          export (planted_scale)\n\
-         sig planted_scale: int32 -> int32\n\
+         sig planted_scale: i32 -> i32\n\
          def planted_scale(n) = n\n",
     );
     let mut row = rows
@@ -6537,7 +6537,7 @@ fn planted_prelude_adt_with_f64_variant_is_detected() {
 #[test]
 fn cast_trunc_is_registered_against_its_authority_atom() {
     const CAST_TRUNC: &str = "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
-         target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64";
+         target: i8 | i16 | i32 | i64) -> i8 | i16 | i32 | i64";
     let registration = SEMANTIC_REGISTRATIONS
         .iter()
         .find(|r| r.callable == CAST_TRUNC)
@@ -6614,7 +6614,7 @@ fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
             "[05-OP-9]",
         ),
         (
-            "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], width: int64, pad: T) -> tensor[len(sequences), width, T]",
+            "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], width: i64, pad: T) -> tensor[len(sequences), width, T]",
             "[05-OP-10]",
         ),
     ];
@@ -6635,8 +6635,8 @@ fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
 
 #[test]
 fn count_is_registered_against_its_exact_authority_atom() {
-    const COUNT: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
-         -> tensor[D\\axes, int64]";
+    const COUNT: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: i32...) \
+         -> tensor[D\\axes, i64]";
     let registration = SEMANTIC_REGISTRATIONS
         .iter()
         .find(|registration| registration.callable == COUNT)

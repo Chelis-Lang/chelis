@@ -136,7 +136,7 @@ fn transpose_lie_with_inline_return_is_rejected() {
 fn return_contract_drop_with_inline_param_is_rejected() {
     let json = check_json(
         "sig h: &tensor[batch, seq, f32] -> tensor[batch, seq, f32]\n\
-         def h(x: &tensor[batch, seq, f32]) = sum(x, cast(0, int32))\n",
+         def h(x: &tensor[batch, seq, f32]) = sum(x, cast(0, i32))\n",
     );
     assert_body_sig_rejected(&json, "return drop (sig + inline param, no ret_ty)");
 }

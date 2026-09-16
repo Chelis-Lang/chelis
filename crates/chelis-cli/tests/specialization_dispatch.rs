@@ -94,8 +94,8 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
     let matmul = "def f(a: tensor[64, 128, f32], b: tensor[128, 32, f32]) -> tensor[64, 32, f32] = matmul(a, b)\n";
     let softmax = "def f(x: tensor[64, 128, f32]) -> tensor[64, 128, f32] = softmax(x, 1)\n";
     let layernorm = "def f(x: tensor[64, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]) -> tensor[64, 128, f32] = layer_norm(x, gamma, beta, 0.00001f32)\n";
-    let scatter = "def f(base: tensor[10, 4, f32], bin_ids: tensor[64, int64], updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = scatter(base, bin_ids, updates, 0, \"add\")\n";
-    let gather = "def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n";
+    let scatter = "def f(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = scatter(base, bin_ids, updates, 0, \"add\")\n";
+    let gather = "def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) -> tensor[64, 128, f32] = gather(table, indices, 0)\n";
 
     let m = build_and_classify("matmul", matmul);
     let s = build_and_classify("softmax", softmax);

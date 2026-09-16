@@ -340,7 +340,7 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
-                // the value environment — a bound `int32` var is the
+                // the value environment — a bound `i32` var is the
                 // issue #259 runtime-value class instead.
                 let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
                     symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
@@ -646,7 +646,7 @@ pub(super) fn finish_unified_app(
                 } else {
                     None
                 };
-                // Issue #216: cast-aware so `shape(x, cast(N, int32))`
+                // Issue #216: cast-aware so `shape(x, cast(N, i32))`
                 // (the idiomatic form from issue #206 for runtime-dim
                 // reshape) surfaces the same diagnostic as the bare-
                 // literal form.
@@ -688,8 +688,8 @@ pub(super) fn finish_unified_app(
                 }
                 if let Some(axis_arg) = arg_tys.get(1) {
                     match subst.apply(axis_arg) {
-                        // [05-DIM-2]: extent-domain out (int64), axis-domain
-                        // in (int32).
+                        // [05-DIM-2]: extent-domain out (i64), axis-domain
+                        // in (i32).
                         Type::Prim(Prim::Int32) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
                         }
@@ -708,7 +708,7 @@ pub(super) fn finish_unified_app(
                                     CheckErrorKind::TypeMismatch,
                                     with_macro_provenance(
                                         &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("shape expects int32 axis, got {other}"),
+                                        format!("shape expects i32 axis, got {other}"),
                                     ),
                                     vec![],
                                 ),
@@ -1481,7 +1481,7 @@ pub(super) fn finish_unified_app(
                 let sizes_ty = subst.apply(&arg_tys[2]);
                 // The pre-guard predicate here was `precision.is_integer()`,
                 // the same acceptance hole `concat` carried: it admitted an
-                // int64 axis while `sum` rejected one.
+                // i64 axis while `sum` rejected one.
                 if let Err(err) = reject_non_int32_axis("split", &axis_ty, list, errors) {
                     return err;
                 }
@@ -1512,7 +1512,7 @@ pub(super) fn finish_unified_app(
                         }
                         // Negative axes index from the end.
                         // Issue #216: cast-aware so a
-                        // `cast(N, int32)`-wrapped split axis still
+                        // `cast(N, i32)`-wrapped split axis still
                         // surfaces the bounds diagnostic at infer.
                         let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                         let axis = match raw_axis {
@@ -1843,7 +1843,7 @@ pub(super) fn finish_unified_app(
                 return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
             }
             "tensor_scan" => {
-                // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
                 //
                 // Issue #257: host-runtime scan that produces a tensor
                 // directly, sidestepping the right-recursive list build
@@ -1856,7 +1856,7 @@ pub(super) fn finish_unified_app(
                     return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let int64 = Type::Prim(Prim::Int64);
+                let i64 = Type::Prim(Prim::Int64);
                 let list_expr = deep::Expr::List(list.clone(), zero_span());
                 // arg 0: initial accumulator of type T.
                 if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
@@ -1870,11 +1870,11 @@ pub(super) fn finish_unified_app(
                         ),
                     );
                 }
-                // arg 1: callback `(T, int64) -> T`.
+                // arg 1: callback `(T, i64) -> T`.
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[1]),
                     &Type::Fn(
-                        vec![elem_ty.clone(), int64.clone()],
+                        vec![elem_ty.clone(), i64.clone()],
                         Box::new(elem_ty.clone()),
                     ),
                     subst,
@@ -1884,19 +1884,19 @@ pub(super) fn finish_unified_app(
                         collection_helper_type_error(
                             &list_expr,
                             "tensor_scan",
-                            "expects a callback (T, int64) -> T",
+                            "expects a callback (T, i64) -> T",
                             te,
                         ),
                     );
                 }
-                // arg 2: length `n: int64`.
-                if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
+                // arg 2: length `n: i64`.
+                if let Err(te) = unify(&subst.apply(&arg_tys[2]), &i64, subst) {
                     return report(
                         errors,
                         collection_helper_type_error(
                             &list_expr,
                             "tensor_scan",
-                            "expects a length `n: int64`",
+                            "expects a length `n: i64`",
                             te,
                         ),
                     );
@@ -1915,7 +1915,7 @@ pub(super) fn finish_unified_app(
                         // resolve it once outer inference pins T.
                         // Using F32 as a placeholder (the previous
                         // behavior) silently lies about the dtype
-                        // when T is later pinned to int64 or bool.
+                        // when T is later pinned to i64 or bool.
                         TensorPrec::Var(*tv)
                     }
                     other => {
@@ -2152,7 +2152,7 @@ pub(super) fn finish_unified_app(
                                                             zero_span(),
                                                         ),
                                                         format!(
-                                                            "dict_of keys must be int64 or string, got {other}"
+                                                            "dict_of keys must be i64 or string, got {other}"
                                                         ),
                                                     ),
                                                     vec![],
@@ -2759,7 +2759,7 @@ pub(super) fn finish_unified_app(
                 }
                 // The padded (axis-1) dimension equals the `width`
                 // argument. When `width` is a literal — including
-                // `cast(N, int64)`, the form every caller uses —
+                // `cast(N, i64)`, the form every caller uses —
                 // propagate `Dim::Lit(N)` so the padded width is a
                 // concrete dim that participates in shape checking.
                 // A non-literal or non-positive width stays

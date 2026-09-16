@@ -26,8 +26,8 @@ fn migrate_surf_prints_canonical_v019_without_writing() {
 fn migrate_surf_requires_manual_renaming_for_newly_reserved_identifiers() {
     let dir = tempdir().expect("tempdir");
     for (name, source) in [
-        ("future", "def resume(x: int32) -> int32 = x\n"),
-        ("keyword", "def quote(x: int32) -> int32 = x\n"),
+        ("future", "def resume(x: i32) -> i32 = x\n"),
+        ("keyword", "def quote(x: i32) -> i32 = x\n"),
     ] {
         let path = dir.path().join(format!("{name}.ch"));
         fs::write(&path, source).expect("write reserved-identifier fixture");
@@ -124,7 +124,7 @@ fn migrate_surf_reports_every_preflight_failure_in_one_run() {
         "def g(x) = f({- attachment is ambiguous -} x)\n",
     )
     .expect("write ambiguous fixture");
-    fs::write(&reserved_path, "def resume(x: int32) -> int32 = x\n")
+    fs::write(&reserved_path, "def resume(x: i32) -> i32 = x\n")
         .expect("write reserved-identifier fixture");
 
     Command::cargo_bin("chelis")
@@ -200,7 +200,7 @@ fn migrate_surf_reports_an_untaken_write_only_when_writing_was_asked_for() {
         "def g(x) = f({- attachment is ambiguous -} x)\n",
     )
     .expect("write ambiguous fixture");
-    fs::write(&reserved_path, "def resume(x: int32) -> int32 = x\n")
+    fs::write(&reserved_path, "def resume(x: i32) -> i32 = x\n")
         .expect("write reserved-identifier fixture");
 
     Command::cargo_bin("chelis")

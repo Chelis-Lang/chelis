@@ -1,4 +1,4 @@
-def step(state: tensor[4, f32], index: int64) -> tensor[4, f32] =
+def step(state: tensor[4, f32], index: i64) -> tensor[4, f32] =
   if gte(index, 288i64) then state else {
     offset = to_tensor([1.0, 1.0, 1.0, 1.0])
     shifted = add(state, offset)

@@ -159,15 +159,15 @@ def source_contracts() -> tuple[SourceContract, ...]:
         SourceContract(
             "current exactness regression narrative",
             "crates/chelis-cli/tests/issue_680_int_exactness.rs",
-            ("direct `min_elem` compares the stored int64 operands",),
+            ("direct `min_elem` compares the stored i64 operands",),
             ("`min_elem` lowers via `neg(max_elem(neg, neg))`",),
         ),
         SourceContract(
             "current precision matrix narrative",
             "crates/chelis-cli/tests/precision_matrix.rs",
             (
-                "Direct `max_elem` compares both int64 operands at their declared width",
-                "Direct `min_elem` compares both int64 operands at their declared width",
+                "Direct `max_elem` compares both i64 operands at their declared width",
+                "Direct `min_elem` compares both i64 operands at their declared width",
             ),
             (
                 "Verified: returns the SMALLER operand",

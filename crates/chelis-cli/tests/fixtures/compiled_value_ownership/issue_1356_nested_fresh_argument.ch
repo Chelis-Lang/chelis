@@ -1,2 +1,2 @@
-def identity(values: List[List[int64]]) -> List[List[int64]] = values
+def identity(values: List[List[i64]]) -> List[List[i64]] = values
 out = identity([[1i64], [2i64]])

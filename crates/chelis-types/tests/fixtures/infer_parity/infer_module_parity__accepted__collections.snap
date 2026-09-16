@@ -1,99 +1,90 @@
 == annotated deep ==
 (module {surf_path: "Parity.Collections"}
   parity.collections
-  (defsig {} values (t-adt {} List (t-prim {} int32)))
-  (def {type: (t-adt {} List (t-prim {} int32))}
+  (defsig {} values (t-adt {} List (t-prim {} i32)))
+  (def {type: (t-adt {} List (t-prim {} i32))}
     values
-    (app {span: "surf:48..60", type: (t-adt {} List (t-prim {} int32))}
+    (app {span: "surf:46..58", type: (t-adt {} List (t-prim {} i32))}
       (var {} Cons)
-      (lit {span: "surf:49..50", type: (t-prim {} int32)} 1)
-      (app {type: (t-adt {} List (t-prim {} int32))}
+      (lit {span: "surf:47..48", type: (t-prim {} i32)} 1)
+      (app {type: (t-adt {} List (t-prim {} i32))}
         (var {} Cons)
-        (lit {span: "surf:52..53", type: (t-prim {} int32)} 2)
-        (app {type: (t-adt {} List (t-prim {} int32))}
+        (lit {span: "surf:50..51", type: (t-prim {} i32)} 2)
+        (app {type: (t-adt {} List (t-prim {} i32))}
           (var {} Cons)
-          (lit {span: "surf:55..56", type: (t-prim {} int32)} 3)
-          (app {type: (t-adt {} List (t-prim {} int32))}
+          (lit {span: "surf:53..54", type: (t-prim {} i32)} 3)
+          (app {type: (t-adt {} List (t-prim {} i32))}
             (var {} Cons)
-            (lit {span: "surf:58..59", type: (t-prim {} int32)} 4)
+            (lit {span: "surf:56..57", type: (t-prim {} i32)} 4)
             (var {} Nil))))))
-  (def {type: (t-adt {} List (t-prim {} int32))}
+  (def {type: (t-adt {} List (t-prim {} i32))}
     doubled
-    (app {span: "surf:71..110", type: (t-adt {} List (t-prim {} int32))}
-      (var {span: "surf:71..74"} map)
-      (fn {span: "surf:75..101",
-            type: (t-fn {} (t-prim {} int32) (t-prim {} int32))
-          }
-        (params {} (v {type: (t-prim {} int32)}))
-        (app {span: "surf:92..101", type: (t-prim {} int32)}
-          (var {span: "surf:92..95"} mul)
-          (var {span: "surf:96..97"} v)
-          (lit {span: "surf:99..100", type: (t-prim {} int32)} 2)))
-      (var {span: "surf:103..109"} values)))
-  (def {type: (t-adt {} List (t-prim {} int32))}
+    (app {span: "surf:69..106", type: (t-adt {} List (t-prim {} i32))}
+      (var {span: "surf:69..72"} map)
+      (fn {span: "surf:73..97", type: (t-fn {} (t-prim {} i32) (t-prim {} i32))}
+        (params {} (v {type: (t-prim {} i32)}))
+        (app {span: "surf:88..97", type: (t-prim {} i32)}
+          (var {span: "surf:88..91"} mul)
+          (var {span: "surf:92..93"} v)
+          (lit {span: "surf:95..96", type: (t-prim {} i32)} 2)))
+      (var {span: "surf:99..105"} values)))
+  (def {type: (t-adt {} List (t-prim {} i32))}
     kept
-    (app {span: "surf:118..159", type: (t-adt {} List (t-prim {} int32))}
-      (var {span: "surf:118..124"} filter)
-      (fn {span: "surf:125..150",
-            type: (t-fn {} (t-prim {} int32) (t-prim {} bool))
+    (app {span: "surf:114..153", type: (t-adt {} List (t-prim {} i32))}
+      (var {span: "surf:114..120"} filter)
+      (fn {span: "surf:121..144",
+            type: (t-fn {} (t-prim {} i32) (t-prim {} bool))
           }
-        (params {} (v {type: (t-prim {} int32)}))
-        (app {span: "surf:142..150", type: (t-prim {} bool)}
-          (var {span: "surf:142..144"} gt)
-          (var {span: "surf:145..146"} v)
-          (lit {span: "surf:148..149", type: (t-prim {} int32)} 2)))
-      (var {span: "surf:152..158"} values)))
-  (def {type: (t-prim {} int32)}
+        (params {} (v {type: (t-prim {} i32)}))
+        (app {span: "surf:136..144", type: (t-prim {} bool)}
+          (var {span: "surf:136..138"} gt)
+          (var {span: "surf:139..140"} v)
+          (lit {span: "surf:142..143", type: (t-prim {} i32)} 2)))
+      (var {span: "surf:146..152"} values)))
+  (def {type: (t-prim {} i32)}
     total
-    (app {span: "surf:168..225", type: (t-prim {} int32)}
-      (var {span: "surf:168..172"} fold)
-      (fn {span: "surf:173..213",
-            type: (t-fn {}
-                    (t-prim {} int32)
-                    (t-prim {} int32)
-                    (t-prim {} int32))
+    (app {span: "surf:162..215", type: (t-prim {} i32)}
+      (var {span: "surf:162..166"} fold)
+      (fn {span: "surf:167..203",
+            type: (t-fn {} (t-prim {} i32) (t-prim {} i32) (t-prim {} i32))
           }
-        (params {}
-          (acc {type: (t-prim {} int32)})
-          (v {type: (t-prim {} int32)}))
-        (app {span: "surf:202..213", type: (t-prim {} int32)}
-          (var {span: "surf:202..205"} add)
-          (var {span: "surf:206..209"} acc)
-          (var {span: "surf:211..212"} v)))
-      (lit {span: "surf:215..216", type: (t-prim {} int32)} 0)
-      (var {span: "surf:218..224"} values)))
-  (def {type: (t-prim {} int64)}
+        (params {} (acc {type: (t-prim {} i32)}) (v {type: (t-prim {} i32)}))
+        (app {span: "surf:192..203", type: (t-prim {} i32)}
+          (var {span: "surf:192..195"} add)
+          (var {span: "surf:196..199"} acc)
+          (var {span: "surf:201..202"} v)))
+      (lit {span: "surf:205..206", type: (t-prim {} i32)} 0)
+      (var {span: "surf:208..214"} values)))
+  (def {type: (t-prim {} i64)}
     item_total
-    (app {span: "surf:239..250", type: (t-prim {} int64)}
-      (var {span: "surf:239..242"} len)
-      (var {span: "surf:243..249"} values)))
-  (def {type: (t-adt {} List (t-prim {} int32))}
+    (app {span: "surf:229..240", type: (t-prim {} i64)}
+      (var {span: "surf:229..232"} len)
+      (var {span: "surf:233..239"} values)))
+  (def {type: (t-adt {} List (t-prim {} i32))}
     first_two
-    (app {span: "surf:263..291", type: (t-adt {} List (t-prim {} int32))}
-      (var {span: "surf:263..267"} take)
-      (var {span: "surf:268..274"} values)
-      (cast {span: "surf:276..290", type: (t-prim {} int64)}
-        (lit {span: "surf:281..282", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 2)
-        (t-prim {} int64))))
-  (def {type: (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))}
+    (app {span: "surf:253..279", type: (t-adt {} List (t-prim {} i32))}
+      (var {span: "surf:253..257"} take)
+      (var {span: "surf:258..264"} values)
+      (cast {span: "surf:266..278", type: (t-prim {} i64)}
+        (lit {span: "surf:271..272", surf_literal_style: "unsuffixed", type: (t-prim {} i64)} 2)
+        (t-prim {} i64))))
+  (def {type: (t-adt {} List (t-tuple {} (t-prim {} i32) (t-prim {} i32)))}
     paired
-    (app {span: "surf:301..320",
-           type: (t-adt {}
-                   List
-                   (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
+    (app {span: "surf:289..308",
+           type: (t-adt {} List (t-tuple {} (t-prim {} i32) (t-prim {} i32)))
          }
-      (var {span: "surf:301..304"} zip)
-      (var {span: "surf:305..311"} values)
-      (var {span: "surf:313..319"} values))))
+      (var {span: "surf:289..292"} zip)
+      (var {span: "surf:293..299"} values)
+      (var {span: "surf:301..307"} values))))
 
 == type env ==
-doubled : (t-adt {} List (t-prim {} int32))
-first_two : (t-adt {} List (t-prim {} int32))
-item_total : (t-prim {} int64)
-kept : (t-adt {} List (t-prim {} int32))
-paired : (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
-total : (t-prim {} int32)
-values : (t-adt {} List (t-prim {} int32))
+doubled : (t-adt {} List (t-prim {} i32))
+first_two : (t-adt {} List (t-prim {} i32))
+item_total : (t-prim {} i64)
+kept : (t-adt {} List (t-prim {} i32))
+paired : (t-adt {} List (t-tuple {} (t-prim {} i32) (t-prim {} i32)))
+total : (t-prim {} i32)
+values : (t-adt {} List (t-prim {} i32))
 
 == signature inference ==
 

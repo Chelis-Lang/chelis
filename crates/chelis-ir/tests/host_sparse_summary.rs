@@ -440,7 +440,7 @@ fn helper_with_non_load_operand_for_scatter_add_is_rejected() {
 
 #[test]
 fn helper_with_mismatched_indices_precision_is_rejected() {
-    // Indices must be int32 or int64. An f32 "indices" load should
+    // Indices must be i32 or i64. An f32 "indices" load should
     // reject (this is not reachable from a well-typed Surf program,
     // but is locked here against ad-hoc DAG construction).
     let mut dag = Dag::new();

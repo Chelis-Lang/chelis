@@ -126,13 +126,13 @@ fn c_run(program: &str, name: &str) -> Result<(bool, String, String), String> {
 #[test]
 fn rt_p1a_unsupported_tensor_root_surfaces_in_eval() {
     let program = "module M.Main\n\
-         def bad(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
+         def bad(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
          def good(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
          out = print(good(to_tensor([1.0, -2.0, 3.0, -4.0])))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => {
             assert!(
-                stderr.contains("dtype family `Float`") && stderr.contains("int32"),
+                stderr.contains("dtype family `Float`") && stderr.contains("i32"),
                 "invalid cos operand must be rejected by the checked family contract: {stderr}"
             );
         }
@@ -152,14 +152,14 @@ fn rt_p1c_consumed_unsupported_def_is_never_absorbed() {
         (
             "print",
             "module M.Main\n\
-             def bad(x: tensor[2, int32]) -> tensor[2, int32] = cos(x)\n\
-             out = print(bad(to_tensor([cast(0, int32), cast(1, int32)])))\n",
+             def bad(x: tensor[2, i32]) -> tensor[2, i32] = cos(x)\n\
+             out = print(bad(to_tensor([cast(0, i32), cast(1, i32)])))\n",
         ),
         (
             "to_list",
             "module M.Main\n\
-             def bad(x: tensor[2, int32]) -> tensor[2, int32] = cos(x)\n\
-             out = print(to_list(bad(to_tensor([cast(0, int32), cast(1, int32)]))))\n",
+             def bad(x: tensor[2, i32]) -> tensor[2, i32] = cos(x)\n\
+             out = print(to_list(bad(to_tensor([cast(0, i32), cast(1, i32)]))))\n",
         ),
     ];
     for (label, program) in consumers {
@@ -195,8 +195,8 @@ fn rt_p1c_consumed_unsupported_def_is_never_absorbed() {
 #[test]
 fn rt_p1b_host_classified_def_is_host_correct_or_loud() {
     let program = "module M.Main\n\
-         def wrap(x: tensor[2, int32]) -> string = to_string(cos(x))\n\
-         out = print(wrap(to_tensor([cast(0, int32), cast(1, int32)])))\n";
+         def wrap(x: tensor[2, i32]) -> string = to_string(cos(x))\n\
+         out = print(wrap(to_tensor([cast(0, i32), cast(1, i32)])))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => assert!(
             !stderr.trim().is_empty(),
@@ -221,7 +221,7 @@ fn rt_p1b_host_classified_def_is_host_correct_or_loud() {
 fn rt_p1b_inline_forward_exact_output_no_fabricated_roots() {
     let program = "module M.Main\n\
          out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
-         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), f32)), 0))\n";
+         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), i64)), f32)), 0))\n";
     let stdout = eval_full(program, ".ch").expect("the inline host forward must evaluate");
     let first = stdout.lines().next().unwrap_or_default();
     // Re-baselined at the chelis#792 rebase ([05-OBS-4]): a rank-0 eval
@@ -404,15 +404,15 @@ fn rt_keep2_unknown_tag_with_children_is_rejected() {
 // Orchestrator probe 4 - frozen-shape byte parity across lanes
 // ===========================================================================
 
-/// The checked Float-family rejection for cos on an int32 tensor must be
+/// The checked Float-family rejection for cos on an i32 tensor must be
 /// present on eval and both build lanes. The build lanes share the same
 /// checker boundary and therefore retain byte parity.
 #[test]
 fn rt_p4_branded_bytes_agree_across_lanes() {
     let program = "module M.Main\n\
-         def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
-         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-         cast(4, int32)]))\n";
+         def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
+         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+         cast(4, i32)]))\n";
     let eval_err = eval_full(program, ".ch").expect_err("eval must reject the cos-int program");
     let (c_ok, c_err, _) = build_target(program, ".ch", "rt_parity_c", "c");
     let (h_ok, h_err, _) = build_target(program, ".ch", "rt_parity_hip", "hip");
@@ -423,7 +423,7 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
         ("build-hip", &h_err),
     ] {
         assert!(
-            diagnostic.contains("dtype family `Float`") && diagnostic.contains("int32"),
+            diagnostic.contains("dtype family `Float`") && diagnostic.contains("i32"),
             "{lane} must report the checked Float-family rejection; got: {diagnostic}"
         );
     }
@@ -435,7 +435,7 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
 #[test]
 fn rt_p4_effect_kind_bytes_agree_across_lanes() {
     let dp = "(defsig {} f (t-fn {} (t-prim {} f32)))\n\n(def {}\n  f\n  (fn {}\n    (params {})\n    \
-              (handle-effect {effect: teleport}\n      (lit {type: (t-prim {} int64)} 42)\n      \
+              (handle-effect {effect: teleport}\n      (lit {type: (t-prim {} i64)} 42)\n      \
               (lit {type: (t-prim {} f32)} 2.5))))\n\n(def {}\n  out\n  (app {}\n    \
               (var {} print)\n    (app {} (var {} f))))\n";
     let eval_out = eval_full(dp, ".dp");

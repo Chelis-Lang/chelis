@@ -441,16 +441,16 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     // product overflow
     (
         "shape-overflow",
-        "Overflow: chelis_tensor_entry_borrow extent product exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow extent product exceeds i64",
     ),
     // byte overflow
     (
         "byte-overflow",
-        "Overflow: chelis_tensor_entry_borrow byte size exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow byte size exceeds i64",
     ),
     (
         "alloc-byte-overflow",
-        "Overflow: chelis_alloc byte size exceeds int64",
+        "Overflow: chelis_alloc byte size exceeds i64",
     ),
     // declared capacity and base pointer
     (
@@ -463,7 +463,7 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     ),
     (
         "view-alignment",
-        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for int64",
+        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for i64",
     ),
 ];
 

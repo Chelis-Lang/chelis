@@ -16,7 +16,7 @@ pub mod toolchain;
 /// Primitive types the C backend's tensor-DAG path can realize.
 /// A def whose declared return type or intermediates use a prim NOT in this
 /// set must route to the host lane. Verified by execution (issue #912 Task 1):
-/// int32/int64 DO lower through the DAG path as general tensor ops, not only
+/// i32/i64 DO lower through the DAG path as general tensor ops, not only
 /// as sparse indices. Only f64 is actually rejected.
 pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
     chelis_types::types::Prim::F32,
@@ -2449,13 +2449,13 @@ int main(int argc, char **argv) {{
     inputs[SLOT] = values;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
-                // #476: a CHELIS_DTYPE_I32 index tensor stores int32 values
+                // #476: a CHELIS_DTYPE_I32 index tensor stores i32 values
                 // bit-packed into the float-typed `data` buffer; they MUST be
                 // written through an `(int32_t*)` cast, not as floats. The
                 // pre-fix fixture wrote an f32 through an i32 tensor (the FLOAT
-                // 2.0, whose int32 reinterpretation is 0x40000000), which only
+                // 2.0, whose i32 reinterpretation is 0x40000000), which only
                 // round-tripped because the buggy reader did `(int)data[i]` and
-                // truncated the float back. Writing the int32 value directly is
+                // truncated the float back. Writing the i32 value directly is
                 // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
                     r#"int64_t shape_indices[1] = { 3 };

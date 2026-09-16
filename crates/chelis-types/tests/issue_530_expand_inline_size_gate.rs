@@ -77,27 +77,27 @@ fn assert_form3_reject_message(source: &str, label: &str) {
 #[test]
 fn issue530_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
+        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
         "tuple-get size",
     );
 }
 
-/// `cast(t.0, int64)`: the `cast` wrapper must not launder the sourceless
+/// `cast(t.0, i64)`: the `cast` wrapper must not launder the sourceless
 /// tuple-get into an accept (the provenance walk follows through `cast`).
 #[test]
 fn issue530_cast_wrapped_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, int64))\n",
+        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, i64))\n",
         "cast(tuple-get) size",
     );
 }
 
-/// `add(t.0, cast(0, int64))`: integer arithmetic CONTAINING a sourceless
+/// `add(t.0, cast(0, i64))`: integer arithmetic CONTAINING a sourceless
 /// operand is itself sourceless (`Sourceless` is absorbing) and rejects.
 #[test]
 fn issue530_arith_over_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, int64)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, i64)))\n",
         "add(tuple-get, ...) size",
     );
 }
@@ -107,7 +107,7 @@ fn issue530_arith_over_tuple_get_size_rejected() {
 #[test]
 fn issue530_inline_match_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, match k with {\n\
+        "def g[a, n](b: tensor[n, f32], k: i64) -> tensor[a, n, f32] = insert(b, 0, match k with {\n\
          \x20   | 0 => 1i64\n\
          \x20   | _ => 2i64\n\
          \x20 })\n",
@@ -134,8 +134,8 @@ fn issue530_inline_if_size_rejected() {
 #[test]
 fn issue530_ident_callee_size_rejects_identically() {
     assert_form3_reject_message(
-        "def ident(x: int64) -> int64 = x\n\
-         def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, ident(k))\n",
+        "def ident(x: i64) -> i64 = x\n\
+         def g[a, n](b: tensor[n, f32], k: i64) -> tensor[a, n, f32] = insert(b, 0, ident(k))\n",
         "ident(k) callee size",
     );
 }
@@ -143,7 +143,7 @@ fn issue530_ident_callee_size_rejects_identically() {
 #[test]
 fn issue530_bare_scalar_size_rejects_identically() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, k)\n",
+        "def g[a, n](b: tensor[n, f32], k: i64) -> tensor[a, n, f32] = insert(b, 0, k)\n",
         "bare runtime scalar size",
     );
 }
@@ -195,17 +195,16 @@ fn issue530_static_literal_size_still_accepted() {
     );
 }
 
-/// A static `cast`-wrapped literal size (`cast(2, int64)`) must still
+/// A static `cast`-wrapped literal size (`cast(2, i64)`) must still
 /// check clean — the provenance walk classifies it `Static`.
 #[test]
 fn issue530_cast_literal_size_still_accepted() {
-    let source =
-        "def g[n](b: tensor[n, f32]) -> tensor[2, n, f32] = insert(b, 0, cast(2, int64))\n";
+    let source = "def g[n](b: tensor[n, f32]) -> tensor[2, n, f32] = insert(b, 0, cast(2, i64))\n";
     let deep = surf_to_deep(source);
     let rep = check_ir_program(&deep);
     assert!(
         rep.is_ok(),
-        "a cast(2, int64) static expand size must still check clean; got {:?}",
+        "a cast(2, i64) static expand size must still check clean; got {:?}",
         rep.err().map(|r| messages(&r))
     );
 }
@@ -238,26 +237,26 @@ fn issue530_cast_literal_size_still_accepted() {
 // the one that still checked clean on `08e46ebe6`.
 // ---------------------------------------------------------------------------
 
-/// The issue's reproducer B, whose size `a_dim` is a cast over a bare `int32`
+/// The issue's reproducer B, whose size `a_dim` is a cast over a bare `i32`
 /// parameter and therefore has no tensor shape source.
-const SOURCELESS_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
-def f(x: tensor[a, f32], k: int32) = {\n  \
-a_dim = k |> cast(int64)\n  \
+const SOURCELESS_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: i32) = {\n  \
+a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
 }\n";
 
 /// The same program with the `expand` written directly, which is the spelling
 /// that already rejected.
-const SOURCELESS_IN_DIRECT_POSITION: &str = "sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
-def f(x: tensor[a, f32], k: int32) = {\n  \
-a_dim = k |> cast(int64)\n  \
+const SOURCELESS_IN_DIRECT_POSITION: &str = "sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: i32) = {\n  \
+a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
 }\n";
 
 /// The same pipe chain whose size IS shape-sourced, so nothing should reject.
 const SHAPE_SOURCED_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
-a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
 }\n";
 
@@ -313,8 +312,8 @@ fn issue1791_the_direct_spelling_keeps_its_exact_rendering() {
         messages(&direct),
         vec![
             "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in scope \
-             carries it. Runtime extents use exact `int64`; source the value from an in-scope \
-             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has \
+             carries it. Runtime extents use exact `i64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, i32-axis)` read. A bare runtime scalar has \
              no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 \
              (spec/04-type-system.md \u{00a7}4.7.2)"
                 .to_string()
@@ -350,7 +349,7 @@ fn issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean() {
 /// it reaches the direct one. The alternative repair this replaces, hoisting
 /// the section 4.7.2 provenance rule above the operand-type match, was
 /// measured to replace the direct-position rendering for
-/// `insert(b, m, cast(k, int64), n)` with the sourceless one: a silent change
+/// `insert(b, m, cast(k, i64), n)` with the sourceless one: a silent change
 /// to an established diagnostic that nothing asked for. Stating the pipe's
 /// meaning once cannot have that effect, because it changes no rule.
 ///
@@ -367,8 +366,8 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
 
     // Direct position, four-argument anchored form: the lock.
     let anchored = check_ir_program(&surf_to_deep(
-        "def g(b: tensor[n, f32], k: int32) -> tensor[m, n, f32] = \
-         insert(b, m, cast(k, int64), n)\n",
+        "def g(b: tensor[n, f32], k: i32) -> tensor[m, n, f32] = \
+         insert(b, m, cast(k, i64), n)\n",
     ))
     .expect_err("the named-axis form requires a literal size");
     assert!(
@@ -379,9 +378,9 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
 
     // Pipe position, three-argument named form: the regression.
     let named_in_pipe = check_ir_program(&surf_to_deep(
-        "sig f: int32 -> tensor[m, 1, f32]\n\
-         def f(k: int32) = {\n  \
-         a_dim = k |> cast(int64)\n  \
+        "sig f: i32 -> tensor[m, 1, f32]\n\
+         def f(k: i32) = {\n  \
+         a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim)\n\
          }\n",
     ))
@@ -395,9 +394,9 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
     // Pipe position, four-argument anchored form: the spelling that checked
     // clean on the base.
     let anchored_in_pipe = check_ir_program(&surf_to_deep(
-        "sig f: int32 -> tensor[m, 1, f32]\n\
-         def f(k: int32) = {\n  \
-         a_dim = k |> cast(int64)\n  \
+        "sig f: i32 -> tensor[m, 1, f32]\n\
+         def f(k: i32) = {\n  \
+         a_dim = k |> cast(i64)\n  \
          [0.25f32] |> to_tensor |> insert(m, a_dim, n)\n\
          }\n",
     ))

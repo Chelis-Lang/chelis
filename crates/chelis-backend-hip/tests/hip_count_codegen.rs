@@ -9,12 +9,12 @@ use support::{codegen_hip, lowered_host_program};
 
 const ONE_COUNT_HELPER: &str = "\
 mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-rows: tensor[2, int64] = count(&mask, 1)\n";
+rows: tensor[2, i64] = count(&mask, 1)\n";
 
 const TWO_COUNT_HELPERS: &str = "\
 mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
-rows: tensor[2, int64] = count(&mask, 1)\n\
-columns: tensor[3, int64] = count(&mask, 0)\n";
+rows: tensor[2, i64] = count(&mask, 1)\n\
+columns: tensor[3, i64] = count(&mask, 0)\n";
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }
@@ -79,8 +79,8 @@ fn hip_count_emits_one_dedicated_multi_axis_checked_balanced_kernel() {
     assert!(source.contains("while ((__count_split << 1) < (unsigned long long)__count_len)"));
     assert!(source.contains("INT64_MAX - __count_right"));
     assert!(source.contains("chelis_count_record_error(count_error, 2)"));
-    assert!(source.contains("numeric trap: overflow in count at int64"));
-    // Peak bytes: 30 one-byte inputs + 3 int64 outputs + the 4-byte status word.
+    assert!(source.contains("numeric trap: overflow in count at i64"));
+    // Peak bytes: 30 one-byte inputs + 3 i64 outputs + the 4-byte status word.
     assert_eq!(generated.peak_device_bytes_estimate, Some(30 + 3 * 8 + 4));
 
     for forbidden in [
@@ -163,7 +163,7 @@ fn hip_count_grammar_is_rejected_at_the_sealed_ownership_boundary() {
                 vec![1],
                 lit_ty(&[2], Prim::Int32),
             ),
-            "requires int64 output",
+            "requires i64 output",
         ),
         (
             count_dag(

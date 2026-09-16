@@ -491,7 +491,7 @@ fn reduce(
         if let Some(value) = consts.get(name) {
             // CR2-4: preserve the constant's DECLARED numeric type. The
             // ConstEnv only carries an f64, so an int-typed constant
-            // (`def n() -> int32 = 3`, or the value binding `n = 3`) would
+            // (`def n() -> i32 = 3`, or the value binding `n = 3`) would
             // otherwise be inlined as an f32 literal and silently lower to
             // SmtSort::Real. Read the const def's declared literal type from
             // the module and emit a matching typed literal node.
@@ -573,7 +573,7 @@ fn reduce(
 
 /// A typed `(lit {type: (t-prim {} <ty>)} value)` Deep node for an inlined
 /// constant, preserving the constant's DECLARED numeric type (CR2-4 / U2).
-/// An integer-typed constant (int8/int16/int32/int64) inlines as an integer
+/// An integer-typed constant (i8/i16/i32/i64) inlines as an integer
 /// literal so it lowers to `SmtSort::Int`; otherwise it inlines as an f32
 /// literal (CR-8). The declared-type decision is the SINGLE shared resolver
 /// in `crate::opaque` -- the same one the invariant/precondition path

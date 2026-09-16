@@ -473,7 +473,7 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
 }
 
 fn rt_axis(axis: usize) -> RtAxis {
-    RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits the int32 axis carrier"))
+    RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits the i32 axis carrier"))
 }
 
 /// Extract a runtime-capable dimension expression from a tensor type at the given axis.
@@ -1148,11 +1148,11 @@ pub fn lower_conv(
     assert!(input_ty.precision.is_float(), "conv requires float data");
     let checked = |n: Option<usize>| {
         n.filter(|n| i64::try_from(*n).is_ok())
-            .expect("conv shape arithmetic exceeds int64")
+            .expect("conv shape arithmetic exceeds i64")
     };
     // Products are typed dimension expressions. Their existing checked finite
     // evaluator owns the machine projection; this operation additionally enforces
-    // the language's int64 extent domain. They are never capacity-equality keys.
+    // the language's i64 extent domain. They are never capacity-equality keys.
     let product = |dims: &[usize]| {
         let expression = dims.iter().fold(DimExpr::Concrete(1), |lhs, &rhs| {
             DimExpr::Mul(Box::new(lhs), Box::new(DimExpr::Concrete(rhs)))
@@ -1250,7 +1250,7 @@ pub fn lower_conv(
                     Prim::Int64,
                     i64::try_from(index).expect("checked index"),
                 )
-                .expect("int64 index"),
+                .expect("i64 index"),
             );
         }
     }
@@ -2130,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "conv shape arithmetic exceeds int64")]
+    #[should_panic(expected = "conv shape arithmetic exceeds i64")]
     fn conv_rejects_extent_product_overflow_before_materializing_windows() {
         let mut dag = Dag::new();
         let extent = usize::try_from(i64::MAX).expect("64-bit target");

@@ -1,16 +1,16 @@
 //! Issue #230 regression: `argmax_reduce` / `argmin_reduce` output
-//! dtype must be `int64`, not the input tensor's dtype.
+//! dtype must be `i64`, not the input tensor's dtype.
 //!
 //! Per `packages/chelis-std/src/tensor/reduce.ch`, the canonical
 //! signatures are:
 //!
 //! ```text
-//! sig argmax: &tensor[a, b, p] -> int32 -> tensor[b, int64]
-//! sig argmin: &tensor[a, b, p] -> int32 -> tensor[b, int64]
+//! sig argmax: &tensor[a, b, p] -> i32 -> tensor[b, i64]
+//! sig argmin: &tensor[a, b, p] -> i32 -> tensor[b, i64]
 //! ```
 //!
 //! i.e. the reduced axis is collapsed (rank `n` -> rank `n-1`) and the
-//! output element type is always `int64` (indices), regardless of the
+//! output element type is always `i64` (indices), regardless of the
 //! input element type `p`. This contrasts with `sum`, `max_reduce`,
 //! `min_reduce`, `prod_reduce`, and `mean`, which preserve the input
 //! dtype (modulo the §5.7.1 widening for `sum` on narrow integer
@@ -21,7 +21,7 @@
 //! producing `tensor[b, f32]` for `argmax_reduce` on an `f32` input.
 //! Downstream consumers like hydronnx (which emits ONNX ArgMax /
 //! ArgMin into chelis) hit a `TypeMismatch` on the declared
-//! `tensor[..., int64]` signature.
+//! `tensor[..., i64]` signature.
 //!
 //! See `crates/chelis-ir/src/dag.rs::RiscOp::Argmax` for the
 //! storage-layer note: the host-runtime / IR evaluator still stores
@@ -46,15 +46,15 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 }
 
 // ---------------------------------------------------------------------
-// Positive: argmax_reduce / argmin_reduce output dtype is int64.
+// Positive: argmax_reduce / argmin_reduce output dtype is i64.
 // ---------------------------------------------------------------------
 
-/// EXPECT: `argmax_reduce` on an `f32` tensor produces `tensor[..., int64]`.
+/// EXPECT: `argmax_reduce` on an `f32` tensor produces `tensor[..., i64]`.
 /// This is the hydronnx PR #2 reproducer (issue #230).
 #[test]
 fn issue230_argmax_reduce_f32_input_yields_int64() {
     let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmax_reduce(x, 1)
+def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmax_reduce(x, 1)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -63,19 +63,19 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmax_reduce(x, 1)
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for argmax_reduce(f32) -> int64, got {} error(s)",
+            "expected clean check for argmax_reduce(f32) -> i64, got {} error(s)",
             rep.errors.len()
         );
     }
 }
 
-/// EXPECT: `argmax_reduce` on an `int32` tensor also produces
-/// `tensor[..., int64]`. The output dtype is independent of the input
+/// EXPECT: `argmax_reduce` on an `i32` tensor also produces
+/// `tensor[..., i64]`. The output dtype is independent of the input
 /// dtype.
 #[test]
 fn issue230_argmax_reduce_int32_input_yields_int64() {
     let src = r#"
-def forward(x: tensor[2, 3, int32]) -> tensor[2, int64] = argmax_reduce(x, 1)
+def forward(x: tensor[2, 3, i32]) -> tensor[2, i64] = argmax_reduce(x, 1)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -84,17 +84,17 @@ def forward(x: tensor[2, 3, int32]) -> tensor[2, int64] = argmax_reduce(x, 1)
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for argmax_reduce(int32) -> int64, got {} error(s)",
+            "expected clean check for argmax_reduce(i32) -> i64, got {} error(s)",
             rep.errors.len()
         );
     }
 }
 
-/// EXPECT: `argmin_reduce` on an `f32` tensor produces `tensor[..., int64]`.
+/// EXPECT: `argmin_reduce` on an `f32` tensor produces `tensor[..., i64]`.
 #[test]
 fn issue230_argmin_reduce_f32_input_yields_int64() {
     let src = r#"
-def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmin_reduce(x, 1)
+def forward(x: tensor[2, 3, f32]) -> tensor[2, i64] = argmin_reduce(x, 1)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -103,19 +103,19 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, int64] = argmin_reduce(x, 1)
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for argmin_reduce(f32) -> int64, got {} error(s)",
+            "expected clean check for argmin_reduce(f32) -> i64, got {} error(s)",
             rep.errors.len()
         );
     }
 }
 
-/// EXPECT: `argmin_reduce` on an `int64` tensor still produces
-/// `tensor[..., int64]`. This is the identity case for the dtype rule
+/// EXPECT: `argmin_reduce` on an `i64` tensor still produces
+/// `tensor[..., i64]`. This is the identity case for the dtype rule
 /// (input dtype happens to match the canonical output dtype).
 #[test]
 fn issue230_argmin_reduce_int64_input_yields_int64() {
     let src = r#"
-def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
+def forward(x: tensor[2, 3, i64]) -> tensor[2, i64] = argmin_reduce(x, 1)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -124,7 +124,7 @@ def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for argmin_reduce(int64) -> int64, got {} error(s)",
+            "expected clean check for argmin_reduce(i64) -> i64, got {} error(s)",
             rep.errors.len()
         );
     }
@@ -132,7 +132,7 @@ def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
 
 // ---------------------------------------------------------------------
 // Negative: declaring the wrong output dtype is rejected with the
-// usual signature-mismatch diagnostic, citing the inferred int64
+// usual signature-mismatch diagnostic, citing the inferred i64
 // body type.
 // ---------------------------------------------------------------------
 
@@ -140,7 +140,7 @@ def forward(x: tensor[2, 3, int64]) -> tensor[2, int64] = argmin_reduce(x, 1)
 /// `tensor[2, f32]` is rejected. Before the fix this silently passed
 /// because the checker computed the body type as `tensor[2, f32]`
 /// matching the declaration. After the fix, the body type is
-/// `tensor[2, int64]` and unification against the declared signature
+/// `tensor[2, i64]` and unification against the declared signature
 /// fails.
 #[test]
 fn issue230_argmax_reduce_wrong_output_dtype_f32_rejected() {
@@ -158,24 +158,24 @@ def forward(x: tensor[2, 3, f32]) -> tensor[2, f32] = argmax_reduce(x, 1)
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
     assert!(
-        rep.errors.iter().any(|e| e.message.contains("int64")),
-        "expected the diagnostic to surface the int64 body type, got {:?}",
+        rep.errors.iter().any(|e| e.message.contains("i64")),
+        "expected the diagnostic to surface the i64 body type, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 
-/// EXPECT: declaring `argmin_reduce(tensor[2, 3, int32], 1)` to return
-/// `tensor[2, int32]` is rejected for the same reason. The output dtype
+/// EXPECT: declaring `argmin_reduce(tensor[2, 3, i32], 1)` to return
+/// `tensor[2, i32]` is rejected for the same reason. The output dtype
 /// rule is independent of the input dtype; even when the input is an
-/// integer type, the output is still int64, not the input's int32.
+/// integer type, the output is still i64, not the input's i32.
 #[test]
 fn issue230_argmin_reduce_wrong_output_dtype_int32_rejected() {
     let src = r#"
-def forward(x: tensor[2, 3, int32]) -> tensor[2, int32] = argmin_reduce(x, 1)
+def forward(x: tensor[2, 3, i32]) -> tensor[2, i32] = argmin_reduce(x, 1)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check failure for argmin_reduce -> int32");
+    let rep = res.expect_err("expected check failure for argmin_reduce -> i32");
     assert!(
         rep.errors
             .iter()
@@ -184,8 +184,8 @@ def forward(x: tensor[2, 3, int32]) -> tensor[2, int32] = argmin_reduce(x, 1)
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
     assert!(
-        rep.errors.iter().any(|e| e.message.contains("int64")),
-        "expected the diagnostic to surface the int64 body type, got {:?}",
+        rep.errors.iter().any(|e| e.message.contains("i64")),
+        "expected the diagnostic to surface the i64 body type, got {:?}",
         rep.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }

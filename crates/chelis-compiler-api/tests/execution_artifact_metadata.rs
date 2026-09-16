@@ -91,7 +91,7 @@ const CONCAT_ENTRY: &str = "\
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
 
@@ -290,7 +290,7 @@ fn entry_named_main_does_not_emit_reserved_main_symbol() {
 #[test]
 fn sibling_host_def_does_not_disable_entry_lane() {
     let artifact = compile_c(
-        "def other(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+        "def other(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, i32))\n\
          def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
         Some("solve"),
     );
@@ -303,7 +303,7 @@ fn sibling_host_def_does_not_disable_entry_lane() {
 #[test]
 fn entry_calling_concat_helper_reports_real_metadata() {
     let artifact = compile_c(
-        "def helper(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+        "def helper(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, i32))\n\
          def solve(a: tensor[1, f32]) -> tensor[2, f32] = helper(a)\n",
         Some("solve"),
     );
@@ -316,7 +316,7 @@ fn entry_calling_concat_helper_reports_real_metadata() {
 fn entry_with_concat_calling_pure_helper_reports_real_metadata() {
     let artifact = compile_c(
         "def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n\
-         def solve(a: tensor[1, f32]) -> tensor[2, f32] = concat([helper(copy(a)), a], cast(0, int32))\n",
+         def solve(a: tensor[1, f32]) -> tensor[2, f32] = concat([helper(copy(a)), a], cast(0, i32))\n",
         Some("solve"),
     );
     assert_eq!(input_names(&artifact), vec!["a".to_string()]);
@@ -363,7 +363,7 @@ fn zero_input_entry_reports_one_output_no_inputs() {
 fn grad_entry_stays_on_host_lane_even_when_selected() {
     const GRAD_SRC: &str = "module Repro.GradEntry
 def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
+  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))
 def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
 ";
     let artifact = compile_c(GRAD_SRC, Some("dloss"));

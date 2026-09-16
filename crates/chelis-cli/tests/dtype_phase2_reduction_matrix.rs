@@ -120,21 +120,21 @@ fn window_sum_preserves_exact_int64_above_two_pow_53() {
 #[test]
 fn window_sum_traps_at_each_integer_operand_width() {
     for (dtype, values, control, expected_control) in [
-        ("int8", "100i8, 100i8, -100i8", "40i8, 40i8, -40i8", "[40]"),
+        ("i8", "100i8, 100i8, -100i8", "40i8, 40i8, -40i8", "[40]"),
         (
-            "int16",
+            "i16",
             "30000i16, 30000i16, -30000i16",
             "1000i16, 2000i16, -1000i16",
             "[2000]",
         ),
         (
-            "int32",
+            "i32",
             "2147483647i32, 1i32, -1i32",
             "1000000i32, 2000000i32, -1000000i32",
             "[2000000]",
         ),
         (
-            "int64",
+            "i64",
             "9223372036854775807i64, 1i64, -1i64",
             "9007199254740992i64, 1i64, -1i64",
             "[9007199254740992]",
@@ -159,7 +159,7 @@ fn window_sum_traps_at_each_integer_operand_width() {
 fn ordinary_sum_observes_stride4_intermediate_overflow() {
     assert_numeric_value_trap(
         "sum(to_tensor([2147483647i32, 1i32, -1i32]), 0)",
-        "numeric trap: overflow in sum at int32",
+        "numeric trap: overflow in sum at i32",
     );
     assert_eq!(
         eval_value("sum(to_tensor([2147483646i32, 1i32, -1i32]), 0)"),

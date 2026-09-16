@@ -89,8 +89,8 @@ fn alloc_like_rejects_invalid_input_or_exemplar() {
         assert_eq!(out.status.code(), Some(1), "{case}: {out:?}");
         let expected = match case {
             "null" => "Domain: chelis_tensor_alloc_like",
-            "bytes" => "numeric trap: overflow in alloc_like at int64",
-            _ => "numeric trap: domain in alloc_like at int64",
+            "bytes" => "numeric trap: overflow in alloc_like at i64",
+            _ => "numeric trap: domain in alloc_like at i64",
         };
         assert!(
             String::from_utf8_lossy(&out.stderr).contains(expected),

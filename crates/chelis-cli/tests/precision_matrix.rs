@@ -16,7 +16,7 @@
 //!   * at `f64`   -> `2^53` is **CORRECT**. `2^53 + 1` is not representable in
 //!     an f64 mantissa (53 bits), so IEEE-754 ties-to-even rounds it down. Any
 //!     "fix" that makes this return `2^53 + 1` has broken f64.
-//!   * at `int64` -> `2^53 + 1` is **REQUIRED**. The value is exactly
+//!   * at `i64` -> `2^53 + 1` is **REQUIRED**. The value is exactly
 //!     representable in an i64; the historical bug laundered it through f64.
 //!
 //! Same literal inputs, opposite verdicts. That collision is precisely why the
@@ -46,10 +46,10 @@
 //! | bf16  | 8 bits   | 257 (2^8+1)                    | ~3.4e38 |
 //! | f32   | 24 bits  | 16777217 (2^24+1)              | ~3.4e38 |
 //! | f64   | 53 bits  | 9007199254740993 (2^53+1)      | ~1.8e308 |
-//! | int8  | exact    | n/a                            | 127 |
-//! | int16 | exact    | n/a                            | 32767 |
-//! | int32 | exact    | n/a                            | 2147483647 |
-//! | int64 | exact    | n/a                            | 9223372036854775807 |
+//! | i8  | exact    | n/a                            | 127 |
+//! | i16 | exact    | n/a                            | 32767 |
+//! | i32 | exact    | n/a                            | 2147483647 |
+//! | i64 | exact    | n/a                            | 9223372036854775807 |
 //!
 //! Integer dtypes are exact by definition across their whole range; that is the
 //! entire content of #680.
@@ -229,7 +229,7 @@ fn check_row(row: &Row, ret_ty: &str) {
 /// f64 at its own mantissa boundary. `2^53 + 1` is not representable in f64, so
 /// rounding down to `2^53` is the CORRECT IEEE-754 answer.
 ///
-/// This is the exact numeric case that is a BUG at int64 (see
+/// This is the exact numeric case that is a BUG at i64 (see
 /// `int64_add_at_mantissa_boundary_is_exact` below). Same inputs, opposite
 /// verdicts.
 #[test]
@@ -304,18 +304,18 @@ fn int64_add_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_add_2p53",
-            expr: "add(cast(9007199254740992, int64), cast(1, int64))",
+            expr: "add(cast(9007199254740992, i64), cast(1, i64))",
             expected: "9007199254740993",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "int64 is exact across its whole range. f64's mantissa limit \
-                   is not int64's problem. Contrast f64_add_at_mantissa_boundary.",
+            note: "i64 is exact across its whole range. f64's mantissa limit \
+                   is not i64's problem. Contrast f64_add_at_mantissa_boundary.",
         },
-        "int64",
+        "i64",
     );
 }
 
-/// int64 below the f64 mantissa boundary already works. Negative parity: proves
+/// i64 below the f64 mantissa boundary already works. Negative parity: proves
 /// the failure is specifically the 2^53 mantissa limit leaking in, not that
 /// integer add is broken generally.
 #[test]
@@ -323,13 +323,13 @@ fn int64_add_below_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_add_small",
-            expr: "add(cast(2, int64), cast(3, int64))",
+            expr: "add(cast(2, i64), cast(3, i64))",
             expected: "5",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "Small int64 add works today; locks the common path.",
+            note: "Small i64 add works today; locks the common path.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -341,64 +341,64 @@ fn int64_mul_above_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_mul_above_2p53",
-            expr: "mul(cast(94906266, int64), cast(94906266, int64))",
+            expr: "mul(cast(94906266, i64), cast(94906266, i64))",
             expected: "9007199326062756",
             status: Status::Locked,
             lanes: Lanes::Both,
             note: "94906266^2 = 9007199326062756, exact in i64 and above 2^53. \
                    Guards against a fix that refuses/clamps above 2^53.",
         },
-        "int64",
+        "i64",
     );
 }
 
-/// int64 subtraction at the boundary.
+/// i64 subtraction at the boundary.
 #[test]
 fn int64_sub_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_sub_2p53",
-            expr: "sub(cast(9007199254740993, int64), cast(1, int64))",
+            expr: "sub(cast(9007199254740993, i64), cast(1, i64))",
             expected: "9007199254740992",
             status: Status::Locked,
             lanes: Lanes::Both,
             note: "The operand 2^53+1 is corrupted on the way in via f64.",
         },
-        "int64",
+        "i64",
     );
 }
 
-/// `abs` on int64. Verified: eval returns 9007199254740992 while compiled C
+/// `abs` on i64. Verified: eval returns 9007199254740992 while compiled C
 /// returns 9007199254740993.
 #[test]
 fn int64_abs_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_abs_2p53",
-            expr: "abs(cast(-9007199254740993, int64))",
+            expr: "abs(cast(-9007199254740993, i64))",
             expected: "9007199254740993",
             status: Status::Locked,
             lanes: Lanes::Both,
             note: "numeric_unop routes int through `op(as_f64()) as i64` \
                    (host_ops.rs:427).",
         },
-        "int64",
+        "i64",
     );
 }
 
-/// `neg` on int64 at the boundary.
+/// `neg` on i64 at the boundary.
 #[test]
 fn int64_neg_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_neg_2p53",
-            expr: "neg(cast(9007199254740993, int64))",
+            expr: "neg(cast(9007199254740993, i64))",
             expected: "-9007199254740993",
             status: Status::Locked,
             lanes: Lanes::Both,
             note: "Same numeric_unop f64 path as abs.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -415,7 +415,7 @@ fn int64_lt_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_lt_2p53",
-            expr: "lt(cast(9007199254740992, int64), cast(9007199254740993, int64))",
+            expr: "lt(cast(9007199254740992, i64), cast(9007199254740993, i64))",
             expected: "true",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
@@ -430,7 +430,7 @@ fn int64_gt_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_gt_2p53",
-            expr: "gt(cast(9007199254740993, int64), cast(9007199254740992, int64))",
+            expr: "gt(cast(9007199254740993, i64), cast(9007199254740992, i64))",
             expected: "true",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
@@ -445,7 +445,7 @@ fn int64_gte_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_gte_2p53",
-            expr: "gte(cast(9007199254740992, int64), cast(9007199254740993, int64))",
+            expr: "gte(cast(9007199254740992, i64), cast(9007199254740993, i64))",
             expected: "false",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
@@ -463,7 +463,7 @@ fn int64_eq_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_eq_2p53",
-            expr: "eq(cast(9007199254740992, int64), cast(9007199254740993, int64))",
+            expr: "eq(cast(9007199254740992, i64), cast(9007199254740993, i64))",
             expected: "false",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
@@ -475,35 +475,35 @@ fn int64_eq_at_mantissa_boundary_is_exact() {
     );
 }
 
-/// Direct `max_elem` compares both int64 operands at their declared width.
+/// Direct `max_elem` compares both i64 operands at their declared width.
 #[test]
 fn int64_max_elem_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_max_elem_2p53",
-            expr: "max_elem(cast(9007199254740992, int64), cast(9007199254740993, int64))",
+            expr: "max_elem(cast(9007199254740992, i64), cast(9007199254740993, i64))",
             expected: "9007199254740993",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "Direct int64 selection preserves the distinct operands above 2^53.",
+            note: "Direct i64 selection preserves the distinct operands above 2^53.",
         },
-        "int64",
+        "i64",
     );
 }
 
-/// Direct `min_elem` compares both int64 operands at their declared width.
+/// Direct `min_elem` compares both i64 operands at their declared width.
 #[test]
 fn int64_min_elem_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_min_elem_2p53",
-            expr: "min_elem(cast(9007199254740992, int64), cast(9007199254740993, int64))",
+            expr: "min_elem(cast(9007199254740992, i64), cast(9007199254740993, i64))",
             expected: "9007199254740992",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "Direct int64 selection preserves the distinct operands above 2^53.",
+            note: "Direct i64 selection preserves the distinct operands above 2^53.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -519,15 +519,15 @@ fn int_condition_selects_the_same_branch_in_every_lane() {
     check_row(
         &Row {
             name: "branch_2p53",
-            expr: "if lt(cast(9007199254740992, int64), cast(9007199254740993, int64)) \
-                   then cast(111, int64) else cast(222, int64)",
+            expr: "if lt(cast(9007199254740992, i64), cast(9007199254740993, i64)) \
+                   then cast(111, i64) else cast(222, i64)",
             expected: "111",
             status: Status::Locked,
             lanes: Lanes::Both,
             note: "eval=222, C=111. A wrong integer comparison changes which \
                    branch executes.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -549,7 +549,7 @@ macro_rules! bitwise_row {
                     note: "chelis#682 closed C-expression emission; eval and C \
                            must retain exact integer parity.",
                 },
-                "int64",
+                "i64",
             );
         }
     };
@@ -558,31 +558,31 @@ macro_rules! bitwise_row {
 bitwise_row!(
     bitand_is_correct_in_every_lane,
     "bitand",
-    "bitand(cast(12, int64), cast(10, int64))",
+    "bitand(cast(12, i64), cast(10, i64))",
     "8"
 );
 bitwise_row!(
     bitor_is_correct_in_every_lane,
     "bitor",
-    "bitor(cast(12, int64), cast(10, int64))",
+    "bitor(cast(12, i64), cast(10, i64))",
     "14"
 );
 bitwise_row!(
     bitxor_is_correct_in_every_lane,
     "bitxor",
-    "bitxor(cast(12, int64), cast(10, int64))",
+    "bitxor(cast(12, i64), cast(10, i64))",
     "6"
 );
 bitwise_row!(
     shl_is_correct_in_every_lane,
     "shl",
-    "shl(cast(1, int64), cast(10, int64))",
+    "shl(cast(1, i64), cast(10, i64))",
     "1024"
 );
 bitwise_row!(
     shr_is_correct_in_every_lane,
     "shr",
-    "shr(cast(1024, int64), cast(3, int64))",
+    "shr(cast(1024, i64), cast(3, i64))",
     "128"
 );
 
@@ -597,14 +597,14 @@ fn int64_literal_above_mantissa_boundary_is_exact_in_every_lane() {
     check_row(
         &Row {
             name: "lit_2p53_plus_1",
-            expr: "cast(9007199254740993, int64)",
+            expr: "cast(9007199254740993, i64)",
             expected: "9007199254740993",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "Front end is exact; corruption starts at the arithmetic ops. \
                    Locks that nobody 'simplifies' literal storage to f64.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -614,13 +614,13 @@ fn i64_max_literal_is_exact() {
     check_row(
         &Row {
             name: "lit_i64_max",
-            expr: &format!("cast({I64_MAX}, int64)"),
+            expr: &format!("cast({I64_MAX}, i64)"),
             expected: "9223372036854775807",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "i64::MAX round-trips as a literal.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -680,9 +680,9 @@ fn int64_suffix_literal_binding_is_exact() {
 #[test]
 fn int_recip_through_pipe_fails_loud_never_zero() {
     for (expr, label) in [
-        ("cast(2, int32) |> recip", "int32"),
-        ("cast(2, int8) |> recip", "int8"),
-        ("cast(2, int64) |> recip", "int64"),
+        ("cast(2, i32) |> recip", "i32"),
+        ("cast(2, i8) |> recip", "i8"),
+        ("cast(2, i64) |> recip", "i64"),
     ] {
         match eval_lane_str(expr) {
             Ok(v) => panic!(
@@ -704,9 +704,9 @@ fn int_recip_through_pipe_fails_loud_never_zero() {
 // OVERFLOW: per #680, errors not wraps, at EVERY width.
 //
 // Today there are TWO different behaviors split by width, neither authored:
-//   int8/16/32 WRAP  (ScalarBits::from_i64_as narrows with `as i8`, which
+//   i8/16/32 WRAP  (ScalarBits::from_i64_as narrows with `as i8`, which
 //                     truncates bits)
-//   int64      SATURATES (the f64 round-trip's `as i64` saturates)
+//   i64      SATURATES (the f64 round-trip's `as i64` saturates)
 // The split is decided purely by which Rust `as` cast runs last.
 // ===========================================================================
 
@@ -735,8 +735,8 @@ fn assert_traps_with_overflow(expr: &str, expected: &str, label: &str) {
 #[test]
 fn int64_add_overflow_traps() {
     assert_traps_with_overflow(
-        &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
-        "numeric trap: overflow in add at int64",
+        &format!("add(cast({I64_MAX}, i64), cast(1, i64))"),
+        "numeric trap: overflow in add at i64",
         "int64_add_overflow",
     );
 }
@@ -746,8 +746,8 @@ fn int64_add_overflow_traps() {
 #[test]
 fn int64_mul_overflow_traps() {
     assert_traps_with_overflow(
-        "mul(cast(4000000000, int64), cast(4000000000, int64))",
-        "numeric trap: overflow in mul at int64",
+        "mul(cast(4000000000, i64), cast(4000000000, i64))",
+        "numeric trap: overflow in mul at i64",
         "int64_mul_overflow",
     );
 }
@@ -756,8 +756,8 @@ fn int64_mul_overflow_traps() {
 #[test]
 fn int8_add_overflow_traps() {
     assert_traps_with_overflow(
-        "add(cast(127, int8), cast(1, int8))",
-        "numeric trap: overflow in add at int8",
+        "add(cast(127, i8), cast(1, i8))",
+        "numeric trap: overflow in add at i8",
         "int8_add_overflow",
     );
 }
@@ -766,8 +766,8 @@ fn int8_add_overflow_traps() {
 #[test]
 fn int16_add_overflow_traps() {
     assert_traps_with_overflow(
-        "add(cast(32767, int16), cast(1, int16))",
-        "numeric trap: overflow in add at int16",
+        "add(cast(32767, i16), cast(1, i16))",
+        "numeric trap: overflow in add at i16",
         "int16_add_overflow",
     );
 }
@@ -776,8 +776,8 @@ fn int16_add_overflow_traps() {
 #[test]
 fn int32_add_overflow_traps() {
     assert_traps_with_overflow(
-        "add(cast(2147483647, int32), cast(1, int32))",
-        "numeric trap: overflow in add at int32",
+        "add(cast(2147483647, i32), cast(1, i32))",
+        "numeric trap: overflow in add at i32",
         "int32_add_overflow",
     );
 }
@@ -789,14 +789,14 @@ fn int64_add_just_below_overflow_does_not_trap() {
     check_row(
         &Row {
             name: "int64_add_no_overflow",
-            expr: &format!("add(cast({}, int64), cast(1, int64))", I64_MAX - 1),
+            expr: &format!("add(cast({}, i64), cast(1, i64))", I64_MAX - 1),
             expected: "9223372036854775807",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "i64::MAX-1 + 1 == i64::MAX exactly, and must NOT trap. \
                    Negative parity for the overflow trap.",
         },
-        "int64",
+        "i64",
     );
 }
 
@@ -806,13 +806,13 @@ fn int8_add_just_below_overflow_does_not_trap() {
     check_row(
         &Row {
             name: "int8_add_no_overflow",
-            expr: "add(cast(126, int8), cast(1, int8))",
+            expr: "add(cast(126, i8), cast(1, i8))",
             expected: "127",
             status: Status::Locked,
             lanes: Lanes::EvalOnly,
-            note: "126 + 1 == 127 fits int8; must not trap.",
+            note: "126 + 1 == 127 fits i8; must not trap.",
         },
-        "int8",
+        "i8",
     );
 }
 
@@ -825,12 +825,12 @@ fn int8_add_just_below_overflow_does_not_trap() {
 ///   C    -> [9007199254740993]   (C runtime has dtype-tagged storage)
 #[test]
 fn int64_tensor_round_trip_is_exact_in_every_lane() {
-    let expr = "to_list(to_tensor([cast(9007199254740993, int64)]))";
+    let expr = "to_list(to_tensor([cast(9007199254740993, i64)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
-    common::assert_elements_in_domain("int64", &eval_got, "tensor_rt eval");
+    common::assert_elements_in_domain("i64", &eval_got, "tensor_rt eval");
     if c_toolchain_available() {
-        let c_got = c_lane_str(expr, "List[int64]", "tensor_rt").expect("c lane");
-        common::assert_elements_in_domain("int64", &c_got, "tensor_rt C");
+        let c_got = c_lane_str(expr, "List[i64]", "tensor_rt").expect("c lane");
+        common::assert_elements_in_domain("i64", &c_got, "tensor_rt C");
         assert_eq!(
             eval_got, c_got,
             "LANE DIVERGENCE on a pure to_tensor/to_list round-trip with no \
@@ -852,9 +852,9 @@ fn int64_tensor_round_trip_is_exact_in_every_lane() {
 /// i64::MAX as evidence that tensor storage is exact. Use 2^53+1 (above).
 #[test]
 fn i64_max_tensor_round_trip_passes_by_luck_not_by_correctness() {
-    let expr = &format!("to_list(to_tensor([cast({I64_MAX}, int64)]))");
+    let expr = &format!("to_list(to_tensor([cast({I64_MAX}, i64)]))");
     let got = eval_lane_str(expr).expect("eval lane");
-    common::assert_elements_in_domain("int64", &got, "i64_max_rt");
+    common::assert_elements_in_domain("i64", &got, "i64_max_rt");
     assert_eq!(
         got, "[9223372036854775807]",
         "i64::MAX round-trips through Vec<f64> storage only because f64 rounds \
@@ -867,7 +867,7 @@ fn i64_max_tensor_round_trip_passes_by_luck_not_by_correctness() {
 // ===========================================================================
 // BINDING FORMS: where the value LIVES decides whether it survives (#684).
 //
-// A top-level binding promotes an int64 scalar to a RANK-0 TENSOR, which lands
+// A top-level binding promotes an i64 scalar to a RANK-0 TENSOR, which lands
 // in the Vec<f64> storage and loses the value. A `def` body stays on the exact
 // scalar lane. So the same literal is exact or corrupted depending purely on
 // the syntactic form that holds it, with no cast and no arithmetic involved.
@@ -903,13 +903,12 @@ fn eval_program_first_line(program: &str) -> Result<String, String> {
 /// The control. A bare expression never becomes a tensor and is exact today.
 #[test]
 fn bare_expression_keeps_int64_exact() {
-    let got =
-        eval_program_first_line("module M.Main\nout = print(cast(9007199254740993, int64))\n")
-            .expect("eval");
-    common::assert_elements_in_domain("int64", &got, "bare_expr");
+    let got = eval_program_first_line("module M.Main\nout = print(cast(9007199254740993, i64))\n")
+        .expect("eval");
+    common::assert_elements_in_domain("i64", &got, "bare_expr");
     assert_eq!(
         got, "9007199254740993",
-        "a bare int64 expression must be exact (control for the binding cases)"
+        "a bare i64 expression must be exact (control for the binding cases)"
     );
 }
 
@@ -917,13 +916,12 @@ fn bare_expression_keeps_int64_exact() {
 /// UNannotated top-level binding is enough to promote and corrupt.
 #[test]
 fn unannotated_top_level_binding_keeps_int64_exact() {
-    let got = eval_program_first_line(
-        "module M.Main\nx = cast(9007199254740993, int64)\nout = print(x)\n",
-    )
-    .expect("eval");
+    let got =
+        eval_program_first_line("module M.Main\nx = cast(9007199254740993, i64)\nout = print(x)\n")
+            .expect("eval");
     assert_eq!(
         got, "9007199254740993",
-        "an int64 top-level binding must stay an exact int64 scalar; before \
+        "an i64 top-level binding must stay an exact i64 scalar; before \
          typed binding storage it was promoted to a rank-0 Vec<f64> tensor. \
          chelis#684"
     );
@@ -934,12 +932,12 @@ fn unannotated_top_level_binding_keeps_int64_exact() {
 #[test]
 fn annotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
-        "module M.Main\nx: int64 = cast(9007199254740993, int64)\nout = print(x)\n",
+        "module M.Main\nx: i64 = cast(9007199254740993, i64)\nout = print(x)\n",
     )
     .expect("eval");
     assert_eq!(
         got, "9007199254740993",
-        "annotating `: int64` must not change the value. Corrupts identically \
+        "annotating `: i64` must not change the value. Corrupts identically \
          to the unannotated form, so the promotion is the binding, not the \
          annotation. chelis#684"
     );
@@ -950,10 +948,10 @@ fn annotated_top_level_binding_keeps_int64_exact() {
 #[test]
 fn def_body_keeps_int64_exact() {
     let got = eval_program_first_line(
-        "module M.Main\ndef f() -> int64 = cast(9007199254740993, int64)\nout = print(f())\n",
+        "module M.Main\ndef f() -> i64 = cast(9007199254740993, i64)\nout = print(f())\n",
     )
     .expect("eval");
-    common::assert_elements_in_domain("int64", &got, "def_body");
+    common::assert_elements_in_domain("i64", &got, "def_body");
     assert_eq!(
         got, "9007199254740993",
         "a def body stays on the exact scalar lane; this is why the same value \
@@ -969,7 +967,7 @@ fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
     let path = dir.path().join("f.ch");
     write_file(
         &path,
-        "module M.Main\nx = cast(9007199254740993, int64)\na = print(x)\nb = print(x)\n",
+        "module M.Main\nx = cast(9007199254740993, i64)\na = print(x)\nb = print(x)\n",
     );
     let out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -986,7 +984,7 @@ fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
     );
     assert_eq!(
         reads[0], "9007199254740993",
-        "fan-out (auto-copy) of an int64 binding must preserve the value. \
+        "fan-out (auto-copy) of an i64 binding must preserve the value. \
          chelis#684"
     );
 }
@@ -996,41 +994,41 @@ fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
 // future change does not quietly make them another silent f64 path.
 // ===========================================================================
 
-/// `copy(x)` on an int64 scalar is rejected at check time:
-///   "copy requires tensor input, got int64"
+/// `copy(x)` on an i64 scalar is rejected at check time:
+///   "copy requires tensor input, got i64"
 /// Locked as a LOUD failure. If copy ever accepts scalars it must not route
 /// them through f64.
 #[test]
 fn copy_of_int64_scalar_is_rejected_loudly() {
     let err = eval_program_first_line(
-        "module M.Main\nx = cast(9007199254740993, int64)\ny = copy(x)\nout = print(y)\n",
+        "module M.Main\nx = cast(9007199254740993, i64)\ny = copy(x)\nout = print(y)\n",
     )
-    .expect_err("copy of an int64 scalar should be rejected");
+    .expect_err("copy of an i64 scalar should be rejected");
     assert!(
         err.contains("copy requires tensor input"),
-        "copy(int64) must fail loudly with a clear diagnostic, got: {err}"
+        "copy(i64) must fail loudly with a clear diagnostic, got: {err}"
     );
 }
 
-/// `&x` on an int64 scalar is rejected at check time:
-///   "borrow requires tensor or tensor-carrying input, got int64"
+/// `&x` on an i64 scalar is rejected at check time:
+///   "borrow requires tensor or tensor-carrying input, got i64"
 #[test]
 fn borrow_of_int64_scalar_is_rejected_loudly() {
     let err = eval_program_first_line(
         "module M.Main\n\
-         def ident(v: int64) -> int64 = v\n\
-         x = cast(9007199254740993, int64)\n\
+         def ident(v: i64) -> i64 = v\n\
+         x = cast(9007199254740993, i64)\n\
          out = print(ident(&x))\n",
     )
-    .expect_err("borrow of an int64 scalar should be rejected");
+    .expect_err("borrow of an i64 scalar should be rejected");
     assert!(
         err.contains("borrow requires tensor"),
-        "&int64 must fail loudly with a clear diagnostic, got: {err}"
+        "&i64 must fail loudly with a clear diagnostic, got: {err}"
     );
 }
 
 // ===========================================================================
-// C BACKEND formerly emitted float32 math for int64 tensors (#691).
+// C BACKEND formerly emitted float32 math for i64 tensors (#691).
 //
 // Verified by compiling and running: the C backend types the pointers
 // correctly as `int64_t*` but calls `fmaxf`, a float32 function:
@@ -1047,7 +1045,7 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 // the opposite of #680. A fix must make both lanes exact, not just move the
 // error to the other lane.
 //
-// Historical reachability: before chelis#730 Phase 3, whether this int64
+// Historical reachability: before chelis#730 Phase 3, whether this i64
 // program reached the C emitter depended on whether an unrelated declaration
 // forced the host lane. The divergent precision preflights are now deleted;
 // active dtype admission is independent of that lowering-path choice.
@@ -1057,30 +1055,30 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 /// returned `[16777216.0, 1.0, 2.0, 3.0]`.
 ///
 /// `16777217` is `2^24 + 1`: not representable in **float32**, trivially
-/// representable in int64. The threshold is 2^24, not 2^53, so this is far
+/// representable in i64. The threshold is 2^24, not 2^53, so this is far
 /// easier to reach than #680. Note the compiled output even renders as floats
-/// for a `tensor[4, int64]`.
+/// for a `tensor[4, i64]`.
 #[test]
 fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
     let expr = "to_list(max_elem(\
-        to_tensor([cast(16777217, int64), cast(1, int64), cast(2, int64), cast(3, int64)]), \
-        to_tensor([cast(1, int64), cast(1, int64), cast(1, int64), cast(1, int64)])))";
+        to_tensor([cast(16777217, i64), cast(1, i64), cast(2, i64), cast(3, i64)]), \
+        to_tensor([cast(1, i64), cast(1, i64), cast(1, i64), cast(1, i64)])))";
     let eval_got = eval_lane_str(expr).expect("eval lane should succeed");
-    common::assert_elements_in_domain("int64", &eval_got, "mx eval");
+    common::assert_elements_in_domain("i64", &eval_got, "mx eval");
     assert_eq!(
         eval_got, "[16777217, 1, 2, 3]",
-        "eval lane must be exact for int64 max_elem"
+        "eval lane must be exact for i64 max_elem"
     );
 
     if !c_toolchain_available() {
         eprintln!("skipping compiled lane: no host C toolchain");
         return;
     }
-    let c_got = c_lane_str(expr, "List[int64]", "mx").expect("compiled lane should succeed");
-    common::assert_elements_in_domain("int64", &c_got, "mx C");
+    let c_got = c_lane_str(expr, "List[i64]", "mx").expect("compiled lane should succeed");
+    common::assert_elements_in_domain("i64", &c_got, "mx C");
     assert_eq!(
         c_got, eval_got,
-        "compiled int64 max_elem must preserve the exact tensor elements"
+        "compiled i64 max_elem must preserve the exact tensor elements"
     );
 }
 
@@ -1096,7 +1094,7 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
 // These pass today. They are locks, not bug reports.
 // ===========================================================================
 
-/// REFUTES: "int32 tensors lose precision above 2^24 because the C runtime
+/// REFUTES: "i32 tensors lose precision above 2^24 because the C runtime
 /// stores them as f32."
 ///
 /// Source of the claim: `crates/chelis-runtime/src/lib.rs:144-152`, verbatim:
@@ -1114,34 +1112,34 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
 /// nobody "fixes" a bug the code does not have.
 #[test]
 fn int32_tensor_round_trip_is_exact_above_the_f32_boundary() {
-    let expr = "to_list(to_tensor([cast(16777217, int32)]))";
+    let expr = "to_list(to_tensor([cast(16777217, i32)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
-    common::assert_elements_in_domain("int32", &eval_got, "i32_rt eval");
+    common::assert_elements_in_domain("i32", &eval_got, "i32_rt eval");
     assert_eq!(
         eval_got, "[16777217]",
-        "int32 tensor round-trip must be exact at 2^24+1. If this fails, the \
+        "i32 tensor round-trip must be exact at 2^24+1. If this fails, the \
          claim at crates/chelis-runtime/src/lib.rs:144-152 has become true and \
          chelis#694 needs revisiting."
     );
     if c_toolchain_available() {
-        let c_got = c_lane_str(expr, "List[int32]", "i32_rt").expect("c lane");
-        common::assert_elements_in_domain("int32", &c_got, "i32_rt C");
+        let c_got = c_lane_str(expr, "List[i32]", "i32_rt").expect("c lane");
+        common::assert_elements_in_domain("i32", &c_got, "i32_rt C");
         assert_eq!(
             c_got, eval_got,
-            "int32 tensor round-trip must agree across lanes"
+            "i32 tensor round-trip must agree across lanes"
         );
     }
 }
 
-/// REFUTES: "the C backend corrupts int64 literals above 2^53 via
+/// REFUTES: "the C backend corrupts i64 literals above 2^53 via
 /// `RiscOp::Const { value: f64 }`."
 ///
 /// The claim: `crates/chelis-ir/src/dag.rs:883` really is `Const { value: f64 }`
 /// and `crates/chelis-ir/src/lower.rs:4841` really does `*n as f64`, so a
 /// literal above 2^53 should be rounded before either lane sees it.
 ///
-/// It is not. That is the DAG **tensor** lane, which rejects int64 outright;
-/// int64 scalars flow through the host lane and are exact. Verified: the
+/// It is not. That is the DAG **tensor** lane, which rejects i64 outright;
+/// i64 scalars flow through the host lane and are exact. Verified: the
 /// emitted C contains `__arg0_1 = 9007199254740993;` and the binary prints it.
 ///
 /// This matters for scoping: the corruption in #680 begins at the arithmetic
@@ -1149,7 +1147,7 @@ fn int32_tensor_round_trip_is_exact_above_the_f32_boundary() {
 /// the wrong place.
 #[test]
 fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
-    let expr = "add(cast(9007199254740993, int64), cast(0, int64))";
+    let expr = "add(cast(9007199254740993, i64), cast(0, i64))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
     // eval corrupts this via the ADD (chelis#680), not via the literal - see
     // int64_literal_above_mantissa_boundary_is_exact_in_every_lane for the
@@ -1159,17 +1157,17 @@ fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    let c_got = c_lane_str(expr, "int64", "lit_c").expect("c lane");
-    common::assert_elements_in_domain("int64", &c_got, "lit_c");
+    let c_got = c_lane_str(expr, "i64", "lit_c").expect("c lane");
+    common::assert_elements_in_domain("i64", &c_got, "lit_c");
     assert_eq!(
         c_got, "9007199254740993",
-        "the compiled lane must carry an int64 literal above 2^53 exactly. \
+        "the compiled lane must carry an i64 literal above 2^53 exactly. \
          The DAG-lane `RiscOp::Const {{ value: f64 }}` path does not apply to \
-         int64 scalars, which use the host lane."
+         i64 scalars, which use the host lane."
     );
 }
 
-/// The int64 scalar `abs` host-lane path remains exact after the eval and DAG
+/// The i64 scalar `abs` host-lane path remains exact after the eval and DAG
 /// tensor lanes adopted the same checked integer semantics.
 #[test]
 fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
@@ -1177,12 +1175,11 @@ fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    let c_got =
-        c_lane_str("abs(cast(-9007199254740993, int64))", "int64", "abs_host").expect("c lane");
-    common::assert_elements_in_domain("int64", &c_got, "abs_host");
+    let c_got = c_lane_str("abs(cast(-9007199254740993, i64))", "i64", "abs_host").expect("c lane");
+    common::assert_elements_in_domain("i64", &c_got, "abs_host");
     assert_eq!(
         c_got, "9007199254740993",
-        "compiled int64 scalar abs goes through the host lane and is exact"
+        "compiled i64 scalar abs goes through the host lane and is exact"
     );
 }
 
@@ -1200,8 +1197,8 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
     let out_dir = dir.path().join("abs-host-min-out");
     write_file(
         &path,
-        "def run() -> int64 = \
-         abs(sub(cast(-9223372036854775807, int64), cast(1, int64)))\n\
+        "def run() -> i64 = \
+         abs(sub(cast(-9223372036854775807, i64), cast(1, i64)))\n\
          out = run()\n",
     );
     Command::cargo_bin("chelis")
@@ -1229,7 +1226,7 @@ fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
     assert!(!run.status.success(), "integer abs MIN must trap");
     assert_eq!(
         String::from_utf8_lossy(&run.stderr).trim(),
-        "numeric trap: overflow in abs at int64",
+        "numeric trap: overflow in abs at i64",
         "scalar host abs trap bytes are frozen per C2"
     );
 }
@@ -1264,7 +1261,7 @@ fn decimal_classic_float_traps_are_exact() {
          b = print(decimal_to_string(decimal_sub(decimal(\"1.00\"), decimal(\"0.90\"))))\n\
          c = print(decimal_to_string(decimal_mul(decimal(\"1.1\"), decimal(\"1.1\"))))\n\
          d = print(decimal_to_string(decimal_mul(decimal(\"19.99\"), \
-         decimal_from_int(cast(3, int64)))))\n",
+         decimal_from_int(cast(3, i64)))))\n",
     );
     let out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -1305,15 +1302,15 @@ fn decimal_rounding_modes_are_correct_on_the_tie_case() {
          import Std.Decimal (decimal, decimal_div, decimal_to_string, \
          round_half_up, round_half_even, round_down, round_up)\n\
          a = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, int64), round_half_up())))\n\
+         cast(0, i64), round_half_up())))\n\
          b = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, int64), round_half_even())))\n\
+         cast(0, i64), round_half_even())))\n\
          c = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, int64), round_down())))\n\
+         cast(0, i64), round_down())))\n\
          d = print(decimal_to_string(decimal_div(decimal(\"5\"), decimal(\"2\"), \
-         cast(0, int64), round_up())))\n\
+         cast(0, i64), round_up())))\n\
          e = print(decimal_to_string(decimal_div(decimal(\"-5\"), decimal(\"2\"), \
-         cast(0, int64), round_half_up())))\n",
+         cast(0, i64), round_half_up())))\n",
     );
     let out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -1367,14 +1364,14 @@ fn decimal_rounding_modes_are_correct_on_the_tie_case() {
 // must fail the build, not evaluate to zero.
 // ===========================================================================
 
-/// Assert an int64-tensor unary op agrees across lanes and executes its
+/// Assert an i64-tensor unary op agrees across lanes and executes its
 /// compiled artifact, rather than treating source-shape inspection as parity.
 fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
     let eval_program = format!(
         "module M.Main\n\
-         def run(x: tensor[4, int64]) -> tensor[4, int64] = {op}(x)\n\
-         out = print(run(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)])))\n"
+         def run(x: tensor[4, i64]) -> tensor[4, i64] = {op}(x)\n\
+         out = print(run(to_tensor([cast(-100, i64), cast(200, i64), \
+         cast(-300, i64), cast(400, i64)])))\n"
     );
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("u.ch");
@@ -1392,10 +1389,10 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .unwrap_or("")
         .trim()
         .to_string();
-    common::assert_elements_in_domain("int64", &eval_got, name);
+    common::assert_elements_in_domain("i64", &eval_got, name);
     assert!(
         eval_got.contains(&format!("data={expected}")),
-        "{name}: eval lane must be correct for `{op}` on an int64 tensor; got {eval_got}"
+        "{name}: eval lane must be correct for `{op}` on an i64 tensor; got {eval_got}"
     );
 
     if !c_toolchain_available() {
@@ -1408,9 +1405,9 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
     write_file(
         &cpath,
         &format!(
-            "def run(x: tensor[4, int64]) -> tensor[4, int64] = {op}(x)\n\
-             out = run(to_tensor([cast(-100, int64), cast(200, int64), \
-             cast(-300, int64), cast(400, int64)]))\n"
+            "def run(x: tensor[4, i64]) -> tensor[4, i64] = {op}(x)\n\
+             out = run(to_tensor([cast(-100, i64), cast(200, i64), \
+             cast(-300, i64), cast(400, i64)]))\n"
         ),
     );
     Command::cargo_bin("chelis")
@@ -1429,7 +1426,7 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
     let emitted = std::fs::read_to_string(cout.join(format!("{name}.c"))).expect("emitted C");
     assert!(
         !emitted.contains("chelis_fill_i64(t0, (int64_t)0)"),
-        "{name}: `{op}` on an int64 tensor lowered to a zero constant with the \
+        "{name}: `{op}` on an i64 tensor lowered to a zero constant with the \
          operand dropped. lower_transcendental's non-float branch emits \
          `RiscOp::Const {{ value: 0.0 }}` with an empty input list and raises no \
          error, so the compiled program silently returns zeros while eval \
@@ -1460,7 +1457,7 @@ fn int64_tensor_abs_agrees_across_lanes() {
 
 /// `floor` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: floor on an int64 tensor still has no compiled integer kernel. \
+#[ignore = "chelis#699: floor on an i64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_floor_agrees_across_lanes() {
@@ -1469,7 +1466,7 @@ fn int64_tensor_floor_agrees_across_lanes() {
 
 /// `ceil` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: ceil on an int64 tensor still has no compiled integer kernel. \
+#[ignore = "chelis#699: ceil on an i64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_ceil_agrees_across_lanes() {
@@ -1478,7 +1475,7 @@ fn int64_tensor_ceil_agrees_across_lanes() {
 
 /// `round` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: round on an int64 tensor still has no compiled integer kernel. \
+#[ignore = "chelis#699: round on an i64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_round_agrees_across_lanes() {
@@ -1503,11 +1500,11 @@ fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
     let out_dir = dir.path().join("poison-out");
     write_file(
         &path,
-        "def run(x: tensor[4, int64]) -> tensor[4, int64] = \
-         add(abs(x), to_tensor([cast(1, int64), cast(1, int64), cast(1, int64), \
-         cast(1, int64)]))\n\
-         out = run(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)]))\n",
+        "def run(x: tensor[4, i64]) -> tensor[4, i64] = \
+         add(abs(x), to_tensor([cast(1, i64), cast(1, i64), cast(1, i64), \
+         cast(1, i64)]))\n\
+         out = run(to_tensor([cast(-100, i64), cast(200, i64), \
+         cast(-300, i64), cast(400, i64)]))\n",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -1664,18 +1661,18 @@ fn static_int_condition_does_not_delete_the_correct_branch() {
 }
 
 // ===========================================================================
-// pad_sequences formerly narrowed int64 to int32 in the compiled lane (#713).
+// pad_sequences formerly narrowed i64 to i32 in the compiled lane (#713).
 // ===========================================================================
 
 /// Before Phase 3, eval preserved `3000000000` while compiled C saturated it
 /// to `2147483647` (= i32::MAX). The typed runtime path must now allocate and
-/// write the declared int64 representation end to end.
+/// write the declared i64 representation end to end.
 #[test]
 fn pad_sequences_preserves_int64_ids_above_i32_max() {
-    let eval_expr = "pad_sequences([[cast(3000000000, int64), cast(1, int64)], \
-                     [cast(2, int64)]], cast(0, int64))";
+    let eval_expr = "pad_sequences([[cast(3000000000, i64), cast(1, i64)], \
+                     [cast(2, i64)]], cast(0, i64))";
     let eval_got = eval_lane_str(eval_expr).expect("eval lane");
-    common::assert_elements_in_domain("int64", &eval_got, "pads eval");
+    common::assert_elements_in_domain("i64", &eval_got, "pads eval");
     assert!(
         eval_got.contains("3000000000"),
         "eval must preserve a token id above i32::MAX; got {eval_got}"
@@ -1690,9 +1687,9 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
     let out_dir = dir.path().join("pads-out");
     write_file(
         &path,
-        "def run(rows: List[List[int64]]) -> tensor[2, 2, int64] = \
-         pad_sequences(rows, cast(0, int64))\n\
-         out = run([[cast(3000000000, int64), cast(1, int64)], [cast(2, int64)]])\n",
+        "def run(rows: List[List[i64]]) -> tensor[2, 2, i64] = \
+         pad_sequences(rows, cast(0, i64))\n\
+         out = run([[cast(3000000000, i64), cast(1, i64)], [cast(2, i64)]])\n",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -1714,7 +1711,7 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         .unwrap_or_else(|| panic!("generated C has no pad_sequences call:\n{generated}"));
     assert!(
         pad_call.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64"),
-        "pad_sequences must receive an exact tagged int64 scalar:\n{pad_call}"
+        "pad_sequences must receive an exact tagged i64 scalar:\n{pad_call}"
     );
     assert!(
         !pad_call.contains("chelis_value_from_scalar"),
@@ -1730,6 +1727,6 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         !stdout.contains("2147483647"),
         "pad_sequences saturated a token id of 3000000000 to i32::MAX in the \
          compiled lane while eval returned it exactly. The declared return type \
-         is tensor[2, 2, int64]. chelis#713. Got: {stdout}"
+         is tensor[2, 2, i64]. chelis#713. Got: {stdout}"
     );
 }

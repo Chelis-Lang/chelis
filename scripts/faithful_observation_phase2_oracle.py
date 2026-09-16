@@ -234,8 +234,8 @@ def exclusion_labels(rows: Sequence[tuple[str, str, str, str]]) -> tuple[str, ..
 # that makes it an EXIT, which is the least a replacement would have to
 # preserve to still be the row it is named after.
 CROSS_LANE_CORPUS_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("int8-exits", ("int8",)),
-    ("int64-exits", ("int64",)),
+    ("i8-exits", ("i8",)),
+    ("i64-exits", ("i64",)),
     ("bool-exits", ("bool", "to_tensor")),
     ("f32-dyadic-exits", ("f32", "to_tensor")),
     ("f16-dyadic-print", ("f16", "print", "to_list")),
@@ -875,8 +875,8 @@ def cross_lane_corpus_programs(source: str) -> dict[str, str] | None:
 def split_tuple_entries(text: str) -> dict[str, str]:
     """Split a Rust array of `("label", program)` tuples by paren depth.
 
-    A regex split cannot do this: `("int8-exits", int_table_program("int8",
-    ...))` contains an INNER `("int8",` that matches the same shape, so a
+    A regex split cannot do this: `("i8-exits", int_table_program("i8",
+    ...))` contains an INNER `("i8",` that matches the same shape, so a
     pattern scan cuts each entry in half and leaves the label sitting alone
     with no program to check. Depth tracking (with string literals skipped,
     since the programs are Rust strings full of parentheses) gives the real

@@ -230,7 +230,7 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
         "the guard's name-bearing context line must be emitted; source:\n{src}"
     );
     assert!(
-        src.contains("numeric trap: domain in load at int64"),
+        src.contains("numeric trap: domain in load at i64"),
         "and the trap line is [04-NUM-9]'s exact rendering; source:\n{src}"
     );
 }

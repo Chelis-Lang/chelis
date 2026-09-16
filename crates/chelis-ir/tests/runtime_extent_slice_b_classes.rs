@@ -1520,7 +1520,7 @@ fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
 //
 // The rule is in the same paragraph as the interface list, and a cast is how a
 // scalar parameter of the wrong width reaches an extent: `reshape(x, [cast(m,
-// int64)])` for an `int32` parameter `m` lands its `RtDim::Node` at the Cast,
+// i64)])` for an `i32` parameter `m` lands its `RtDim::Node` at the Cast,
 // not at the `Load`. Classifying by the slot's immediate producer would make
 // that Local while the bare parameter is Entry, which is the same claim placed
 // two different ways depending on a width conversion.
@@ -1698,7 +1698,7 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
 /// Measured on the shipped compiler with
 /// `def f(x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
 /// insert(b, 0, shape(y, 0)) }`, whose emitted C carries
-/// `numeric trap: domain in expand at int64` at the operation. Removing the arm
+/// `numeric trap: domain in expand at i64` at the operation. Removing the arm
 /// would make the eval lane skip a site the C lane guards, which is the lane
 /// divergence this slice exists to remove, so the arm stays and this row is
 /// what says so.
@@ -1899,7 +1899,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
     })
     .expect_err("the reshape computes 16 against a claim of 4");
     assert!(
-        err.contains("numeric trap: domain in reshape at int64"),
+        err.contains("numeric trap: domain in reshape at i64"),
         "the eval lane renders [04-NUM-9] for a resolved canonical too: {err}"
     );
     assert!(

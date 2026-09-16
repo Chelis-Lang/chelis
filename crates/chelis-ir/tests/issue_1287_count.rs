@@ -99,7 +99,7 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
         (vec![1, 1], Prim::Bool, vec![2], Prim::Int64, "descending"),
         (vec![2], Prim::Bool, vec![2], Prim::Int64, "out of range"),
         (vec![1], Prim::F32, vec![2], Prim::Int64, "bool"),
-        (vec![1], Prim::Bool, vec![2], Prim::F32, "int64"),
+        (vec![1], Prim::Bool, vec![2], Prim::F32, "i64"),
         (vec![1], Prim::Bool, vec![3], Prim::Int64, "shape"),
     ] {
         let mut dag = Dag::default();
@@ -137,7 +137,7 @@ fn lower_surf(source: &str) -> Result<Dag, String> {
 fn lowering_emits_one_count_with_original_axes_normalized_descending() {
     let dag = lower_surf(
         r#"
-def main() -> tensor[3, int64] = {
+def main() -> tensor[3, i64] = {
   x: tensor[2, 3, 4, bool] = [
     [[true, false, true, false], [true, false, true, false], [true, false, true, false]],
     [[true, false, true, false], [true, false, true, false], [true, false, true, false]]

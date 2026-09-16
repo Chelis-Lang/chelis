@@ -35,7 +35,7 @@ use chelis_types::infer::{
 /// stage (`to_tensor`) and a call stage the desugarer wraps in a synthesized
 /// unary lambda (`sum(..)`).
 const PIPED: &str = "def f() -> tensor[f32] = \
-                     [1.0f32, 2.0f32] |> to_tensor |> sum(cast(0, int32))\n";
+                     [1.0f32, 2.0f32] |> to_tensor |> sum(cast(0, i32))\n";
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");

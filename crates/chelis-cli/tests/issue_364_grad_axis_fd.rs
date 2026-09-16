@@ -1,9 +1,9 @@
-//! Issue #364 (grad acceptance arm): `grad` through a `cast(N, int32)`-axis
+//! Issue #364 (grad acceptance arm): `grad` through a `cast(N, i32)`-axis
 //! reduce and through `softmax(_, -1)` must differentiate the CORRECT axis.
 //!
 //! ## Why this file exists
 //!
-//! #364's headline is "the DAG lane silently lowers `cast(N, int32)`
+//! #364's headline is "the DAG lane silently lowers `cast(N, i32)`
 //! reduction axes as axis 0". The FORWARD half of that is already fixed on
 //! `main`: `extract_axis_raw` (chelis-ir/src/lower.rs) now routes through
 //! `extract_int_axis`, which unwraps `cast`/`lit` (#473) and resolves the
@@ -59,34 +59,34 @@ use std::path::Path;
 use assert_cmd::Command;
 use tempfile::tempdir;
 
-/// `grad` of `sum(square(sum(x, cast(1, int32))))` on a non-square rank-2
+/// `grad` of `sum(square(sum(x, cast(1, i32))))` on a non-square rank-2
 /// operand. Reduces axis 1 (per-row sums), squares, sums. The wrong-axis
 /// (0) lowering reduces COLUMNS and gives a different gradient.
 const CAST_AXIS1_RANK2: &str = "module Repro.GradCastAxis1\n\
 def f(x: tensor[2, 3, f32]) -> f32 = {\n\
-  r = sum(x, cast(1, int32))\n\
-  sum(mul(r, r), cast(0, int32)) |> tensor_to_scalar\n\
+  r = sum(x, cast(1, i32))\n\
+  sum(mul(r, r), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
 
 /// Wrong-axis control for the rank-2 cast case: the SAME loss with the
-/// reduce axis written as `cast(0, int32)` instead of `cast(1, int32)`.
+/// reduce axis written as `cast(0, i32)` instead of `cast(1, i32)`.
 /// Its gradient is what a silent default-to-0 lowering of the `cast(1)`
 /// form would have produced; pinning it proves `CAST_AXIS1_RANK2` is not
 /// vacuously equal to the wrong answer.
 const CAST_AXIS0_RANK2_CONTROL: &str = "module Repro.GradCastAxis0\n\
 def f(x: tensor[2, 3, f32]) -> f32 = {\n\
-  r = sum(x, cast(0, int32))\n\
-  sum(mul(r, r), cast(0, int32)) |> tensor_to_scalar\n\
+  r = sum(x, cast(0, i32))\n\
+  sum(mul(r, r), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
 
-/// `grad` of `sum(square(sum(x, cast(2, int32))))` on a rank-3 operand.
+/// `grad` of `sum(square(sum(x, cast(2, i32))))` on a rank-3 operand.
 /// Reduces the LAST axis; the cross-rank control reduces axis 1.
 const CAST_AXIS2_RANK3: &str = "module Repro.GradCastAxis2\n\
 def f(x: tensor[1, 3, 2, f32]) -> f32 = {\n\
-  r = sum(x, cast(2, int32))\n\
-  sum(sum(mul(r, r), cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  r = sum(x, cast(2, i32))\n\
+  sum(sum(mul(r, r), cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32)]]]))\n";
 
@@ -94,8 +94,8 @@ out = grad(f)(to_tensor([[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cas
 /// axis 2.
 const CAST_AXIS1_RANK3_CONTROL: &str = "module Repro.GradCastAxis1R3\n\
 def f(x: tensor[1, 3, 2, f32]) -> f32 = {\n\
-  r = sum(x, cast(1, int32))\n\
-  sum(sum(mul(r, r), cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  r = sum(x, cast(1, i32))\n\
+  sum(sum(mul(r, r), cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32)]]]))\n";
 
@@ -108,7 +108,7 @@ def f(q: tensor[2, 2, f32], k: tensor[2, 2, f32], v: tensor[2, 2, f32], scale: t
   scores = mul(matmul(q, k), scale)\n\
   w = softmax(scores, -1)\n\
   o = matmul(w, v)\n\
-  sum(sum(o, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(o, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(2.0, f32), cast(2.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(3.0, f32)]]), to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]])).0\n";
 
@@ -121,7 +121,7 @@ def f(q: tensor[2, 2, f32], k: tensor[2, 2, f32], v: tensor[2, 2, f32], scale: t
   scores = mul(matmul(q, k), scale)\n\
   w = softmax(scores, 1)\n\
   o = matmul(w, v)\n\
-  sum(sum(o, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(o, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(2.0, f32), cast(2.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(3.0, f32)]]), to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]])).0\n";
 
@@ -136,7 +136,7 @@ def f(q: tensor[2, 2, f32], k: tensor[2, 2, f32], v: tensor[2, 2, f32], scale: t
   scores = mul(matmul(q, k), scale)\n\
   w = softmax(scores, 0)\n\
   o = matmul(w, v)\n\
-  sum(sum(o, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(o, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(2.0, f32), cast(2.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]]), to_tensor([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(3.0, f32)]]), to_tensor([[cast(1.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]])).0\n";
 
@@ -242,7 +242,7 @@ fn assert_grad(source: &str, stem: &str, shape: &[usize], expected: &[f64]) {
     }
 }
 
-/// Acceptance: `grad` through a `cast(1, int32)`-axis reduce on a rank-2
+/// Acceptance: `grad` through a `cast(1, i32)`-axis reduce on a rank-2
 /// operand matches the row-sum (finite-difference) gradient
 /// `[[12,12,12],[30,30,30]]` — NOT the column gradient a default-to-0
 /// lowering would yield. `loss = (x0+x1+x2)^2 + (x3+x4+x5)^2`, row sums
@@ -281,7 +281,7 @@ fn issue_364_grad_cast_axis0_rank2_is_distinct_control() {
     );
 }
 
-/// Acceptance: `grad` through a `cast(2, int32)`-axis reduce on a rank-3
+/// Acceptance: `grad` through a `cast(2, i32)`-axis reduce on a rank-3
 /// operand matches the last-axis (finite-difference) gradient
 /// `[6,6,14,14,22,22]`. Reduce axis 2 -> r = [[3,7,11]], `loss = sum(r^2)`,
 /// `dL/dx = 2*r_j` shared across the size-2 last axis.

@@ -575,9 +575,9 @@ fn int64_emit_uses_msl_long_with_apple_silicon_assumption() {
     let src = &result.mm_source;
     assert!(
         src.contains("device const long* a") && src.contains("device long* out"),
-        "int64 add kernel must use MSL `long` for buffers:\n{src}"
+        "i64 add kernel must use MSL `long` for buffers:\n{src}"
     );
-    // sizeof(long) on macOS LP64 = 8, matches int64 width. Document
+    // sizeof(long) on macOS LP64 = 8, matches i64 width. Document
     // the platform assumption.
     assert_eq!(
         std::mem::size_of::<i64>(),

@@ -309,7 +309,7 @@ fn raw_dto_and_preserved_unknown_forms_do_not_establish_source_admission() {
         })
         .is_err()
     );
-    let valid = "(def {type: (t-prim {} int32), doc: \"keep\"} value (lit {} 1))";
+    let valid = "(def {type: (t-prim {} i32), doc: \"keep\"} value (lit {} 1))";
     assert!(
         compiler::parse(ParseRequest {
             source_kind: SourceKind::Deep,
@@ -319,7 +319,7 @@ fn raw_dto_and_preserved_unknown_forms_do_not_establish_source_admission() {
     );
     for invalid in [
         "(def {type: false} value (lit {} 1))",
-        "(def {type: (t-prim {} int32), type: (t-prim {} int32)} value (lit {} 1))",
+        "(def {type: (t-prim {} i32), type: (t-prim {} i32)} value (lit {} 1))",
     ] {
         assert!(
             compiler::parse(ParseRequest {

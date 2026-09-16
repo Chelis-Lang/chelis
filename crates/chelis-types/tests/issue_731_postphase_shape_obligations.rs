@@ -73,7 +73,7 @@ def driver(a: tensor[2, 3, f32], b: tensor[3, 4, f32], c: tensor[5, 6, f32], d: 
 fn unconstrained_identity_lambda_remains_polymorphic() {
     let errors = diagnostics(
         r#"
-def keep_poly(x: int32) -> string = {
+def keep_poly(x: i32) -> string = {
   identity = fn (value) -> value
   one = identity(x)
   identity("ok")
@@ -216,7 +216,7 @@ def driver(
     assert!(
         errors
             .iter()
-            .any(|error| error.message.contains("int32") || error.message.contains("int64")),
+            .any(|error| error.message.contains("i32") || error.message.contains("i64")),
         "deferred scatter_elements must reject floating-point indices: {}",
         summary(&errors)
     );
@@ -228,7 +228,7 @@ fn consistent_deferred_scatter_elements_is_accepted() {
         r#"
 def driver(
   data: tensor[2, 3, f32],
-  indices: tensor[2, 2, int32],
+  indices: tensor[2, 2, i32],
   updates: tensor[2, 2, f32]
 ) -> tensor[2, 3, f32] = {
   scatter_at = fn (x, i, u) -> scatter_elements(x, i, u, 1)
@@ -259,7 +259,7 @@ def jacobian_row[n, m](
     seed_local: tensor[m, f32]
   ) -> {
     prediction = model(theta_local, x_local)
-    tensor_to_scalar(sum(mul(prediction, seed_local), cast(0, int32)))
+    tensor_to_scalar(sum(mul(prediction, seed_local), cast(0, i32)))
   }
   grad(target, wrt=theta_local)(theta, x_data, output_seed)
 }

@@ -1,5 +1,8 @@
 //! #1269: a pinned reader must see every operation-vocabulary change.
-use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag, WireRiscOp};
+use chelis_compiler_api::schema::{
+    WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagNode, WireRiscOp, WireTensorType,
+};
+use chelis_types::{scalar_from_i64, types::Prim};
 use serde::Deserialize;
 
 // Capture the actual serde decoder's closed vocabulary, rather than maintaining
@@ -149,4 +152,39 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
     }
     encoded.as_object_mut().unwrap().remove("schema_version");
     assert!(WireDag::from_validated_json(&encoded.to_string()).is_err());
+}
+
+#[test]
+fn wire_dag_integer_dtype_vocabulary_stays_ecosystem_spelled() {
+    let dag = WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
+            id: 0,
+            op: WireRiscOp::Pad {
+                padding: vec![],
+                fill: scalar_from_i64("wire vocabulary test", Prim::Int64, 1)
+                    .expect("int64 scalar"),
+            },
+            inputs: vec![],
+            output_type: WireTensorType {
+                dims: vec![],
+                precision: "int64".to_string(),
+            },
+        }],
+        roots: vec![0],
+    };
+    let canonical = serde_json::to_value(&dag).expect("encode WireDag");
+    WireDag::from_validated_json(&canonical.to_string()).expect("canonical WireDag");
+
+    for language_name in ["i8", "i16", "i32", "i64"] {
+        let mut encoded = canonical.clone();
+        encoded["nodes"][0]["output_type"]["precision"] = language_name.into();
+        assert!(
+            WireDag::from_validated_json(&encoded.to_string()).is_err(),
+            "WireDag v{WIRE_DAG_SCHEMA_VERSION} must reject language dtype {language_name}"
+        );
+    }
 }

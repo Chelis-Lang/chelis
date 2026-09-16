@@ -1,3 +1,3 @@
 module PipelineRejected.Main
-def first() -> int32 = missing_first
-def second() -> int32 = missing_second
+def first() -> i32 = missing_first
+def second() -> i32 = missing_second
