@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 CHELIS = os.environ.get("CHELIS_BIN", "target/debug/chelis")
-BAD = "add(cast(1.0, f32), cast(2, int64))"
+BAD = "add(cast(1.0, f32), cast(2, i64))"
 DIR = Path(__file__).parent / "probes" / "checker"
 DIR.mkdir(parents=True, exist_ok=True)
 

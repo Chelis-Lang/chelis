@@ -38,7 +38,19 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "nextest",
         "run",
         "-p",
+        "chelis-ir",
+        "--test",
+        "issue_1948_same_shape_result_claim_sources",
+        "--no-fail-fast",
+    ),
+    (
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
         "chelis-types",
+        "--test",
+        "issue_1537_ingress_pass_set_parity",
         "--test",
         "issue_1592_integer_dtype_spelling",
         "--no-fail-fast",
@@ -53,7 +65,17 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "issue_1587_short_integer_alias",
         "--test",
         "issue_1592_integer_dtype_spelling",
+        "--test",
+        "issue_1948_same_shape_result_claim",
         "--no-fail-fast",
+    ),
+    (
+        ".venv/bin/python",
+        "-m",
+        "unittest",
+        "-v",
+        "tests.conformance.hull.test_corpus_integrity",
+        "tests.conformance.hull.test_wire_canonical",
     ),
     (
         "cargo",
@@ -166,6 +188,11 @@ def _require(path: str, fragments: tuple[str, ...]) -> list[str]:
     return [f"{path}: missing {fragment!r}" for fragment in fragments if fragment not in text]
 
 
+def _forbid(path: str, fragments: tuple[str, ...]) -> list[str]:
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    return [f"{path}: retained {fragment!r}" for fragment in fragments if fragment in text]
+
+
 def boundary_contract_errors() -> list[str]:
     errors: list[str] = []
     errors.extend(
@@ -198,6 +225,12 @@ def boundary_contract_errors() -> list[str]:
                 "language spelling",
                 "interchange spelling",
             ),
+        )
+    )
+    errors.extend(
+        _require(
+            "spec/design/chelis_hull_design_spec.md",
+            ("exact-int64 extents, dynamic-int32 rank",),
         )
     )
     errors.extend(
@@ -238,6 +271,48 @@ def boundary_contract_errors() -> list[str]:
                 "cast(0, i64))",
                 "j: i64",
             ),
+        )
+    )
+    errors.extend(
+        _require(
+            "editors/vscode/syntaxes/chelis.tmLanguage.json",
+            ("|i8|i16|i32|i64|bool|string|unit)",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "editors/vscode/syntaxes/chelis.tmLanguage.json",
+            ("|int8|", "|int16|", "|int32|", "|int64|"),
+        )
+    )
+    errors.extend(
+        _require(
+            "grammars/tree-sitter-chelis-surf/queries/highlights.scm",
+            ("|i8|i16|i32|i64|bool|string)",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "grammars/tree-sitter-chelis-surf/queries/highlights.scm",
+            ("|int8|", "|int16|", "|int32|", "|int64|"),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "docs/CHELIS_SURFACE.md",
+            ("int8", "int16", "int32", "int64"),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "tests/conformance/hull/build_corpus.py",
+            ("(t-prim {} int8)", "(t-prim {} int16)", "(t-prim {} int32)", "(t-prim {} int64)"),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "tests/conformance/hull/known_conservative.json",
+            ("(t-prim {} int8)", "(t-prim {} int16)", "(t-prim {} int32)", "(t-prim {} int64)"),
         )
     )
     return errors

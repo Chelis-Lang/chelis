@@ -51,6 +51,11 @@ class ContractTests(unittest.TestCase):
         for required in (
             "issue_1592_integer_dtype_spelling",
             "issue_1587_short_integer_alias",
+            "issue_1948_same_shape_result_claim",
+            "issue_1948_same_shape_result_claim_sources",
+            "issue_1537_ingress_pass_set_parity",
+            "tests.conformance.hull.test_corpus_integrity",
+            "tests.conformance.hull.test_wire_canonical",
             "execution_wire_v3",
             "wire_dag_vocabulary",
             "cache_wire_compatibility",

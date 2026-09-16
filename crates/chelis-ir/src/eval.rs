@@ -1472,7 +1472,7 @@ fn resolve_eval_stride_step(
             }
             let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
                 format!(
-                    "stride step at node {}: step-source input slot {i} must be int64",
+                    "stride step at node {}: step-source input slot {i} must be i64",
                     node.id.0
                 )
             })?;

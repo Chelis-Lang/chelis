@@ -34,18 +34,18 @@ ROWS = [
         "f32_mod_ctl",
         "module M.Main\ndef run() -> f32 = mod(cast(5.5, f32), cast(2.0, f32))\nout = print(run())\n",
     ),
-    # int8/int16 tensor add overflow, both lanes
+    # i8/i16 tensor add overflow, both lanes
     (
         "int8_tensor_add_overflow",
         "module M.Main\n"
-        "def f(x: tensor[2, int8], y: tensor[2, int8]) -> tensor[2, int8] = add(x, y)\n"
-        "out = print(f(to_tensor([cast(100, int8), cast(1, int8)]), to_tensor([cast(100, int8), cast(2, int8)])))\n",
+        "def f(x: tensor[2, i8], y: tensor[2, i8]) -> tensor[2, i8] = add(x, y)\n"
+        "out = print(f(to_tensor([cast(100, i8), cast(1, i8)]), to_tensor([cast(100, i8), cast(2, i8)])))\n",
     ),
     (
         "int16_tensor_add_overflow",
         "module M.Main\n"
-        "def f(x: tensor[2, int16], y: tensor[2, int16]) -> tensor[2, int16] = add(x, y)\n"
-        "out = print(f(to_tensor([cast(30000, int16), cast(1, int16)]), to_tensor([cast(30000, int16), cast(2, int16)])))\n",
+        "def f(x: tensor[2, i16], y: tensor[2, i16]) -> tensor[2, i16] = add(x, y)\n"
+        "out = print(f(to_tensor([cast(30000, i16), cast(1, i16)]), to_tensor([cast(30000, i16), cast(2, i16)])))\n",
     ),
     # scalar casts re-probe with fixed driver
     (

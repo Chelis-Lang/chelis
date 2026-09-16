@@ -15001,7 +15001,7 @@ impl<'program> LowerCtx<'program> {
         else {
             return;
         };
-        if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32")) {
+        if *claimed_axis != RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32")) {
             let RiscOp::ExtentWitness {
                 site:
                     crate::dag::ExtentWitnessSite::ResultClaim {
@@ -15012,7 +15012,7 @@ impl<'program> LowerCtx<'program> {
             else {
                 unreachable!()
             };
-            *claimed_axis = RtAxis::Lit(i32::try_from(axis).expect("producer rank fits int32"));
+            *claimed_axis = RtAxis::Lit(i32::try_from(axis).expect("producer rank fits i32"));
         }
         assert!(
             required.0 < producer.0,

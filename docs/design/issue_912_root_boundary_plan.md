@@ -180,11 +180,11 @@ computation. Invariant 4 is confirmed.
 
 ### Integer capability (C DAG path)
 
-Tested: `add(a, b)` over int32 and int64 tensors.
+Tested: `add(a, b)` over i32 and i64 tensors.
 - Both compile and produce correct C code (`int32_t`, `int64_t` operations).
 - The C backend's rejection message ("only supports f32/bool/bf16/f16 tensors,
-  plus int32/int64 when consumed as sparse indices") is **outdated** — the actual
-  behavior supports int32/int64 for general tensor ops.
+  plus i32/i64 when consumed as sparse indices") is **outdated** — the actual
+  behavior supports i32/i64 for general tensor ops.
 - C backend `TENSOR_CAPABLE_PRIMS` = `{F32, Bool, Bf16, F16, Int32, Int64}`.
   Only F64 is actually rejected.
 
@@ -202,8 +202,8 @@ Tested: `add(a, b)` over int32 and int64 tensors.
   the exported global, prints the result. Compare against the same program
   through host-C path. Also measure eval-manifested-under-C-target vs
   eval-manifested-under-eval-target for f64. Document bit-level or tolerance.
-- **Integer capability verification**: compile a boundary program with int32 and
-  int64 tensors through the C DAG path. Confirm whether they lower or reject.
+- **Integer capability verification**: compile a boundary program with i32 and
+  i64 tensors through the C DAG path. Confirm whether they lower or reject.
   This determines the C capability constant in Task 2.
 - Tracker: comment on #912 confirming repro shape with vrk210, requesting
   sequencing ratification.

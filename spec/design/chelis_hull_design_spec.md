@@ -46,19 +46,19 @@ type Expr =
   | ESqrt(Expr)
   | ESin(Expr)
   | ECast(Expr, Type)               -- Deep `(cast {} expr target-type)`; target is a full type
-  | ESum(Expr, int64)             -- positional axis; int64 is model storage, Deep uses int32
-  | EGather(Expr, Expr, int64)
+  | ESum(Expr, i64)             -- positional axis; i64 is model storage, Deep uses i32
+  | EGather(Expr, Expr, i64)
   | EScatter(Expr, Expr, Expr, ScatterMode)
   | EMatmul(Expr, Expr)
   | EWhere(Expr, Expr, Expr)
-  | EConcat(List[Expr], int64)
+  | EConcat(List[Expr], i64)
   | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
-  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain int32; this int64 encoding disagrees and needs reconciling when hull is built.
-  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64 here; spec/05 [05-DIM-1] classifies rank indices as int32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
-  | ECumsum(Expr, int64)
-  | ESort(Expr, int64)
+  | EPermute(Expr, List[i64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain i32; this i64 encoding disagrees and needs reconciling when hull is built.
+  | EExpand(Expr, i64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (i64 here; spec/05 [05-DIM-1] classifies rank indices as i32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
+  | ECumsum(Expr, i64)
+  | ESort(Expr, i64)
   | EGrad(Expr)
-  | EVmap(Expr, int64)
+  | EVmap(Expr, i64)
   -- Effect-handling forms. The shipped Deep grammar has NO `with-seed` /
   -- `with-handler` tags; the real form is `(handle-effect {effect: name} arg body)`
   -- (spec/03-deep-syntax.md §2.3, "Phase 2a effect handler block"). EWithSeed is
@@ -66,16 +66,16 @@ type Expr =
   -- BOTH are OUTSIDE the v0.1.0 supported fragment: the parser may build them, but
   -- `type_check` returns `None` for them in v0.1.0 (effect handling lands in a later
   -- phase). See §3 "v0.1.0 supported fragment".
-  | EWithSeed(int64, Expr)              -- discharges Random; v0.1.0: parsed, not checked
+  | EWithSeed(i64, Expr)              -- discharges Random; v0.1.0: parsed, not checked
   | EHandleEffect(Effect, Expr, Expr)   -- `(handle-effect {effect: name} arg body)`; v0.1.0: parsed, not checked
   | EMatch(Expr, List[MatchArm])
   | ETuple(List[Expr])
-  | ETupleGet(Expr, int64)
+  | ETupleGet(Expr, i64)
   | EConstruct(String, List[Expr])
 
 -- Literals
 type Literal =
-  | LInt(int64)
+  | LInt(i64)
   | LFloat(f32)
   | LBool(bool)
   | LString(String)
@@ -101,7 +101,7 @@ type ElemType = EF32 | EInt64 | EBool
 -- Dimensions
 type Dim =
   | DName(String)           -- named dimension: batch, hidden, etc.
-  | DLit(int64)             -- literal dimension: 3, 784, etc.
+  | DLit(i64)             -- literal dimension: 3, 784, etc.
   | DVar(String)            -- dimension variable (for polymorphism)
 
 -- Effects -- mirror the shipped `Effect` enum at
@@ -240,7 +240,7 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- T-Gather (LaCaDiLE Section 3)
     -- gather(input, indices, axis) -> output
     -- input: tensor[..., n, ..., T]
-    -- indices: tensor[..., k, ..., int64]
+    -- indices: tensor[..., k, ..., i64]
     -- output: tensor[..., k, ..., T]  (n replaced by k at axis position)
     EGather(input, indices, axis) -> {
       (t_in, effs1) = type_check(ctx, input)?
@@ -283,8 +283,8 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- Mirrors the shipped checker's `infer_reshape_app`
     -- (`crates/chelis-types/src/infer.rs`, dispatched from the `reshape` builtin).
     -- reshape(e, new_dims): e must be a tensor; new_dims is a value-level shape list.
-    -- The shape list elements are int64 (the shipped path unifies the list against
-    -- List[Int64]; an int32 shape element is a PrecisionMismatch there). The output
+    -- The shape list elements are i64 (the shipped path unifies the list against
+    -- List[Int64]; an i32 shape element is a PrecisionMismatch there). The output
     -- element type is INVARIANT (precision is copied unchanged from the input). The
     -- output dims are rebuilt element-by-element from new_dims (lit/cast -> DLit, a
     -- shape(input, k) reference -> the input's dim at axis k, otherwise DVar/wildcard).
@@ -612,7 +612,7 @@ def step_binary(e1: Expr, e2: Expr, rebuild: Expr -> Expr -> Expr) -> Option[Exp
 
 
 -- Multi-step evaluation to a value (or stuck)
-def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
+def eval_to_value(e: Expr, max_steps: i64) -> (Expr, i64) = {
   if max_steps <= 0 then (e, 0)
   else match step(e) {
     Some(ep) -> eval_to_value(ep, max_steps - 1)
@@ -675,7 +675,7 @@ alone cannot establish that the original source declared f32.
 The reference derives Random state and masks independently from source order.
 Implement [05-RNG-1]'s exact modulo-2^64 word operations without invoking a compiler
 random primitive, consulting a candidate trace or transporting words through
-floating values. A signed int64 may carry the exact word bits; checked arithmetic
+floating values. A signed i64 may carry the exact word bits; checked arithmetic
 must not accidentally replace modular arithmetic. Convert the high 53 bits to
 their exact unit value before the single f32 arithmetic-width rounding. Apply
 [05-OP-37]'s strict comparison and finalized subtraction then division, including
@@ -717,7 +717,7 @@ the existing ordinary campaigns, released host pin and full package gates.
 **Broadcast-coordinate repair (Hull #20, 2026-09-09; acceptance pending).**
 The `EExpand`/`TExpand` model implements the same-rank unit-axis rule above.
 For concrete `TData`, validate nonnegative extents, exact buffer cardinality,
-an in-range int32-compatible axis, operand extent 1 and nonnegative new size.
+an in-range i32-compatible axis, operand extent 1 and nonnegative new size.
 Preserve all other axes. For each row-major output coordinate, read the input
 at the same coordinates except that the selected coordinate is zero. Repeating
 the entire flat buffer is correct only for an outer axis, not in general.
@@ -766,7 +766,7 @@ extents do not require inventing a unique dimension.
 
 This repair does not add named-axis expression resolution, multi-axis sums,
 explicit accumulators, exact integer evaluation, or new dtype transport. Those
-remain Hull's dated model-alignment work; the int64 element type may be checked
+remain Hull's dated model-alignment work; the i64 element type may be checked
 but is not thereby given an exact numerical evaluator. Acceptance requires
 coordinate-distinct 2-by-3 and equal-extent 2-by-2 cases, rank-three middle axes,
 negative indices, singleton/empty axes, invalid axes/buffers, canonical Deep text
@@ -1324,7 +1324,7 @@ Generate random well-typed Deep programs. Naive approach (generate random AST, c
 
 ```chelis
 -- Generate a random expression of a given type at a given depth
-def gen_expr(ctx: Ctx, target: Type, depth: int64, rng: RngState)
+def gen_expr(ctx: Ctx, target: Type, depth: i64, rng: RngState)
     -> (Expr, RngState) =
   if depth <= 0 then gen_leaf(ctx, target, rng)
   else {
@@ -1420,7 +1420,7 @@ def gen_leaf(ctx: Ctx, target: Type, rng: RngState) -> (Expr, RngState) =
 
 
 -- Generate random types for argument positions
-def gen_type(rng: RngState, depth: int64) -> (Type, RngState) = {
+def gen_type(rng: RngState, depth: i64) -> (Type, RngState) = {
   (choice, rng) = random_int(rng, 0, 5)
   match choice {
     0 -> (TF32, rng)

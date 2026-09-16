@@ -28,7 +28,7 @@ def assert_true(cond: bool, label: string) -> unit ! { Test }
 def assert_false(cond: bool, label: string) -> unit ! { Test }
 
 -- Tensor shape / properties
-def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test }
+def assert_shape[p](t: &tensor[..r, p], expected: List[i64], label: string) -> unit ! { Test }
 
 -- Failure (unconditional)
 def fail(msg: string) -> unit ! { Test }

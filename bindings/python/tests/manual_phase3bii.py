@@ -25,7 +25,7 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 CONCAT_PROGRAM = """def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 """
 

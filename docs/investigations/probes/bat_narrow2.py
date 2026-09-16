@@ -39,18 +39,18 @@ ROWS = [
     ("f16_mod", "mod(cast(5.5, f16), cast(2.0, f16))", "f16"),
     # f32_mod control
     ("f32_mod", "mod(cast(5.5, f32), cast(2.0, f32))", "f32"),
-    # int8 tensor ops: does the tensor lane wrap at width in each lane?
+    # i8 tensor ops: does the tensor lane wrap at width in each lane?
     (
         "int8_tensor_add_overflow",
         "module M.Main\n"
-        "def f(x: tensor[2, int8], y: tensor[2, int8]) -> tensor[2, int8] = add(x, y)\n"
-        "out = print(f(to_tensor([cast(100, int8), cast(1, int8)]), to_tensor([cast(100, int8), cast(2, int8)])))\n",
+        "def f(x: tensor[2, i8], y: tensor[2, i8]) -> tensor[2, i8] = add(x, y)\n"
+        "out = print(f(to_tensor([cast(100, i8), cast(1, i8)]), to_tensor([cast(100, i8), cast(2, i8)])))\n",
     ),
     (
         "int16_tensor_add_overflow",
         "module M.Main\n"
-        "def f(x: tensor[2, int16], y: tensor[2, int16]) -> tensor[2, int16] = add(x, y)\n"
-        "out = print(f(to_tensor([cast(30000, int16), cast(1, int16)]), to_tensor([cast(30000, int16), cast(2, int16)])))\n",
+        "def f(x: tensor[2, i16], y: tensor[2, i16]) -> tensor[2, i16] = add(x, y)\n"
+        "out = print(f(to_tensor([cast(30000, i16), cast(1, i16)]), to_tensor([cast(30000, i16), cast(2, i16)])))\n",
     ),
     # f16 scalar cast alone (re-probe with fixed driver)
     ("f16_cast_2049_redo", "cast(2049.0, f16)", "f16"),

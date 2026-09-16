@@ -38,7 +38,7 @@ map from claim to evidence:
 - `rw_nonlit.ch` - literal-window `reduce_window` correct in both lanes
   (the control that isolates #725 to the non-literal extraction).
 - `fold_fail*.ch` - an effectful (`fail`) branch keeps a def host-lane
-  where the compiled int64 comparison at 2^53 is EXACT; bounds #711/#720
+  where the compiled i64 comparison at 2^53 is EXACT; bounds #711/#720
   to the DAG-lane pure-const fold path.
 - `nullary.ch`/`unary.ch` (+ generated `.dp`) - isolates #721 to nullary
   defs; unary Deep round-trips through eval fine.
@@ -56,10 +56,10 @@ map from claim to evidence:
 - `tctl_*.ch` / `f64t*.ch` - tensor forms of the #715-stubbed ops are
   correct, and f64 tensor `div` is exact in both lanes (bounds #717 to
   the unary wrapper and the f32 binary gaps).
-- `i64_sum_exact*.ch` - the compiled int64 tensor sum is EXACT at 2^53+1;
+- `i64_sum_exact*.ch` - the compiled i64 tensor sum is EXACT at 2^53+1;
   only the print lies (#723). The probe that stops #684's fix from being
   mis-scored against the C lane.
-- `suffix_i8.ch` - int8 suffixed literals exist and eval wraps at width
+- `suffix_i8.ch` - i8 suffixed literals exist and eval wraps at width
   (fixture knowledge for #718/#720 probes).
 
 ## Reproduction

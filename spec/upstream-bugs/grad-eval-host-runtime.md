@@ -146,7 +146,7 @@ import Repro.Lib (deltas)
 def test_grad_evaluates() -> unit ! { Test } = {
   spots = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])
   ds = deltas(spots)
-  d0 = index(to_list(ds), cast(0, int64))
+  d0 = index(to_list(ds), cast(0, i64))
   assert_close(d0, cast(2.0, f32), cast(0.001, f32), "d/dx0 of sum(x^2) at x0=1 is 2")
 }
 ```
