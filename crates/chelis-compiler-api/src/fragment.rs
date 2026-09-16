@@ -17,6 +17,7 @@
 //!   body into a function declared pure must be rejected because a sibling that
 //!   calls it and is itself declared pure now violates its own declared purity.
 //!   A def-local effect check never sees the sibling.
+//!
 //! The deferred optimization is NOT "incremental validation is unsound" and NOT
 //! "whole-module forever." Single-def scoping is unsound; CLOSURE-scoped
 //! validation is sound and is the real later optimization: validate effects over
