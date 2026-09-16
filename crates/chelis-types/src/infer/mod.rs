@@ -13,6 +13,7 @@ pub use stack::{
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use chelis_deep::annotations::BindingTypeOrigin;
 use chelis_deep::ast as deep;
 use chelis_deep::role::SlotShape;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
@@ -129,7 +130,8 @@ use validate::*;
 use vmap_extent::*;
 
 pub use checked::{
-    CheckedProgram, FunctionSignatureInference, InferResult, InferStats, ParamSignatureInference,
+    CheckedLocalTensorAscription, CheckedProgram, FunctionSignatureInference, InferResult,
+    InferStats, LocalAscriptionAxisClaim, LocalAscriptionId, ParamSignatureInference,
     SignatureInferenceMetadata,
 };
 pub use program::{

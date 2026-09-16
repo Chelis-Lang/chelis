@@ -341,6 +341,11 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+    /// Explicit local tensor ascriptions, recorded independently from the
+    /// ordinary inferred `type` metadata that annotation writes on every
+    /// checked expression. Lowering consumes this checker-owned carrier at
+    /// the matching `let` before aliases can erase the authored boundary.
+    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
 }
 
 struct InferredAdmissionContract {
@@ -502,6 +507,44 @@ pub(super) struct FinalOwnerType {
 }
 
 impl InferenceProduct {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_local_tensor_ascription(
+        &mut self,
+        binding_name: &str,
+        binding_span: Span,
+        ascription_span: Span,
+        initializer_span: Span,
+        authored_type: deep::Expr,
+        declared_type: Type,
+        rhs_type_before_ascription: &Type,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let Some(outstanding_claims) =
+            outstanding_local_ascription_claims(&declared_type, rhs_type_before_ascription)
+        else {
+            return;
+        };
+        let Ok(raw_id) = u64::try_from(self.local_tensor_ascriptions.len()) else {
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                "local tensor-ascription identity space exhausted".to_string(),
+                vec!["Rejecting rather than aliasing two authored local bindings".to_string()],
+            ));
+            return;
+        };
+        self.local_tensor_ascriptions
+            .push(CheckedLocalTensorAscription {
+                id: LocalAscriptionId(raw_id),
+                binding_name: binding_name.to_string(),
+                binding_span,
+                ascription_span,
+                initializer_span,
+                authored_type,
+                declared_type,
+                outstanding_claims,
+            });
+    }
+
     /// chelis#1801: record the fresh dimension variables one scheme
     /// instantiation just minted, in quantifier order.
     pub(super) fn record_instantiation_dvars(&mut self, fresh: impl IntoIterator<Item = DimVar>) {
@@ -2177,6 +2220,129 @@ pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> UnordSet<String>
     names
 }
 
+/// Artifact-local identity of one explicit local tensor ascription.
+///
+/// Independently checked programs allocate separate domains.
+/// [`CheckedProgram::compose`] explicitly remaps the new-code domain before
+/// combining it with a checked library.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct LocalAscriptionId(u64);
+
+impl LocalAscriptionId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One declared tensor axis that checking could not independently discharge.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LocalAscriptionAxisClaim {
+    axis: usize,
+    required_extent: Dim,
+}
+
+impl LocalAscriptionAxisClaim {
+    pub fn axis(&self) -> usize {
+        self.axis
+    }
+
+    pub fn required_extent(&self) -> &Dim {
+        &self.required_extent
+    }
+}
+
+/// Exact checker-owned record of an authored local tensor ascription.
+///
+/// The authored Deep type remains distinct from the checked type so wildcard
+/// spelling and source structure cannot be reconstructed from ordinary
+/// inferred metadata. `outstanding_claims` contains only declared axes whose
+/// agreement was not statically proved from the RHS before ascription
+/// unification.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CheckedLocalTensorAscription {
+    id: LocalAscriptionId,
+    binding_name: String,
+    binding_span: Span,
+    ascription_span: Span,
+    initializer_span: Span,
+    authored_type: deep::Expr,
+    declared_type: Type,
+    outstanding_claims: Vec<LocalAscriptionAxisClaim>,
+}
+
+impl CheckedLocalTensorAscription {
+    pub fn id(&self) -> LocalAscriptionId {
+        self.id
+    }
+
+    pub fn binding_name(&self) -> &str {
+        &self.binding_name
+    }
+
+    pub fn binding_span(&self) -> Span {
+        self.binding_span
+    }
+
+    pub fn ascription_span(&self) -> Span {
+        self.ascription_span
+    }
+
+    pub fn initializer_span(&self) -> Span {
+        self.initializer_span
+    }
+
+    pub fn authored_type(&self) -> &deep::Expr {
+        &self.authored_type
+    }
+
+    pub fn declared_type(&self) -> &Type {
+        &self.declared_type
+    }
+
+    pub fn outstanding_claims(&self) -> &[LocalAscriptionAxisClaim] {
+        &self.outstanding_claims
+    }
+}
+
+fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
+    match ty {
+        Type::Tensor(dims, _) => Some(dims),
+        Type::Ref(inner) => tensor_dims(inner),
+        _ => None,
+    }
+}
+
+fn outstanding_local_ascription_claims(
+    declared_type: &Type,
+    rhs_type_before_ascription: &Type,
+) -> Option<Vec<LocalAscriptionAxisClaim>> {
+    let declared_dims = tensor_dims(declared_type)?;
+    let rhs_dims = tensor_dims(rhs_type_before_ascription);
+    let mut claims = Vec::new();
+    for (axis, required_extent) in declared_dims.iter().enumerate() {
+        if matches!(required_extent, Dim::Wildcard | Dim::Rank(_)) {
+            continue;
+        }
+        let independently_proved =
+            rhs_dims
+                .and_then(|dims| dims.get(axis))
+                .is_some_and(|observed| match (required_extent, observed) {
+                    (Dim::Lit(required), Dim::Lit(actual)) => required == actual,
+                    (Dim::Var(required), Dim::Var(actual)) => required == actual,
+                    _ => false,
+                });
+        if !independently_proved {
+            claims.push(LocalAscriptionAxisClaim {
+                axis,
+                required_extent: required_extent.clone(),
+            });
+        }
+    }
+    Some(claims)
+}
+
 /// Result of running type inference on a program.
 #[derive(Debug)]
 pub struct InferResult {
@@ -2195,6 +2361,7 @@ pub struct InferStats {
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: BTreeMap<String, deep::Expr>,
+    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
     type_headers: TypeResolutionEnv,
@@ -2220,6 +2387,7 @@ impl CheckedProgram {
         Self {
             annotated_exprs,
             type_env,
+            local_tensor_ascriptions: Vec::new(),
             linearity: LinearityInfo::default(),
             signature_inference: SignatureInferenceMetadata::default(),
             type_headers: TypeResolutionEnv::default(),
@@ -2253,6 +2421,10 @@ impl CheckedProgram {
 
     pub fn type_env(&self) -> &BTreeMap<String, deep::Expr> {
         &self.type_env
+    }
+
+    pub fn local_tensor_ascriptions(&self) -> &[CheckedLocalTensorAscription] {
+        &self.local_tensor_ascriptions
     }
 
     pub fn linearity(&self) -> &LinearityInfo {
@@ -2319,6 +2491,9 @@ impl CheckedProgram {
     ///   `_with_context` builder, so this just back-fills any
     ///   library-only entries.
     /// - `linearity`: the two `reusable_inputs_by_offset` maps merged.
+    /// - `local_tensor_ascriptions`: library records followed by new-code
+    ///   records whose artifact-local identities are remapped above the
+    ///   library's identity domain.
     /// - `signature_inference`: the two `functions` maps merged,
     ///   `new_code` winning on a name clash.
     ///
@@ -2344,6 +2519,22 @@ impl CheckedProgram {
         }
 
         let linearity = library.linearity.merged_with(&new_code.linearity);
+
+        let new_code_id_offset = match library
+            .local_tensor_ascriptions
+            .iter()
+            .map(|ascription| ascription.id.0)
+            .max()
+        {
+            Some(last) => last.checked_add(1)?,
+            None => 0,
+        };
+        let mut local_tensor_ascriptions = library.local_tensor_ascriptions.clone();
+        for ascription in &new_code.local_tensor_ascriptions {
+            let mut remapped = ascription.clone();
+            remapped.id = LocalAscriptionId(remapped.id.0.checked_add(new_code_id_offset)?);
+            local_tensor_ascriptions.push(remapped);
+        }
 
         let mut signature_inference = library.signature_inference.clone();
         for (name, sig) in &new_code.signature_inference.functions {
@@ -2375,6 +2566,7 @@ impl CheckedProgram {
         Some(Self {
             annotated_exprs,
             type_env,
+            local_tensor_ascriptions,
             linearity,
             signature_inference,
             type_headers,
@@ -2411,6 +2603,7 @@ pub(super) fn finalize_checked_program(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env,
+        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
         linearity: LinearityInfo::default(),
         signature_inference,
         type_headers: product.type_headers.clone(),
@@ -2436,10 +2629,69 @@ pub(super) fn validate_checked_program_totality(
     traces.extend(annotated_totality_invariant_traces(
         checked.annotated_exprs(),
     ));
+    traces.extend(local_ascription_invariant_traces(
+        checked.local_tensor_ascriptions(),
+    ));
     traces.extend(totality_invariant_traces(checked.signature_inference()));
     if !traces.is_empty() {
         errors.push(totality_violation_error(&traces));
     }
+}
+
+fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription]) -> Vec<String> {
+    let mut traces = Vec::new();
+    let mut ids = BTreeSet::new();
+    for ascription in ascriptions {
+        if !ids.insert(ascription.id) {
+            traces.push(format!(
+                "duplicate local tensor-ascription identity {}",
+                ascription.id.get()
+            ));
+        }
+        if ascription.binding_name.is_empty() {
+            traces.push(format!(
+                "local tensor-ascription {} has an empty binding name",
+                ascription.id.get()
+            ));
+        }
+        let Some(declared_dims) = tensor_dims(&ascription.declared_type) else {
+            traces.push(format!(
+                "local tensor-ascription {} does not carry a tensor type",
+                ascription.id.get()
+            ));
+            continue;
+        };
+        let mut previous_axis = None;
+        for claim in &ascription.outstanding_claims {
+            if previous_axis.is_some_and(|axis| claim.axis <= axis) {
+                traces.push(format!(
+                    "local tensor-ascription {} claims are not in authored axis order",
+                    ascription.id.get()
+                ));
+            }
+            previous_axis = Some(claim.axis);
+            match declared_dims.get(claim.axis) {
+                Some(declared) if declared == &claim.required_extent => {}
+                Some(_) => traces.push(format!(
+                    "local tensor-ascription {} axis {} claim differs from its declared type",
+                    ascription.id.get(),
+                    claim.axis
+                )),
+                None => traces.push(format!(
+                    "local tensor-ascription {} claims out-of-rank axis {}",
+                    ascription.id.get(),
+                    claim.axis
+                )),
+            }
+            if matches!(claim.required_extent, Dim::Wildcard | Dim::Rank(_)) {
+                traces.push(format!(
+                    "local tensor-ascription {} manufactures a claim from an unclaimed axis",
+                    ascription.id.get()
+                ));
+            }
+        }
+    }
+    traces
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2503,6 +2755,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env: original.type_env.clone(),
+        local_tensor_ascriptions: original.local_tensor_ascriptions.clone(),
         linearity: original.linearity.clone(),
         signature_inference: original.signature_inference.clone(),
         type_headers: original.type_headers.clone(),

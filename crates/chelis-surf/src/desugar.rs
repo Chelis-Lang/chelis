@@ -2036,8 +2036,14 @@ fn tuple_index_expr(target: deep::Expr, index: i64) -> deep::Expr {
     )
 }
 
-fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
-    let bind_node = node(DeepTag::Bind, vec![sym(name), value]);
+fn bind_name_value(name: &str, name_span: Span, value: deep::Expr, body: deep::Expr) -> deep::Expr {
+    let bind_node = node(
+        DeepTag::Bind,
+        vec![
+            deep::Expr::Atom(deep::Atom::Name(name.to_string()), name_span),
+            value,
+        ],
+    );
     node(DeepTag::Let, vec![bind_node, body])
 }
 
@@ -2126,7 +2132,7 @@ impl DesugarCtx {
         let next_tmp = &self.next_destructure_temp;
         for binding in bindings.iter().rev() {
             match &binding.pattern {
-                LetPattern::Var(name, _) => {
+                LetPattern::Var(name, binding_span) => {
                     // Position 1 (spec §P10b / §5.6) at block scope:
                     // `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]` inside
                     // a block uses the same contextual rule as the
@@ -2143,23 +2149,35 @@ impl DesugarCtx {
                         _ => self.desugar_expr(&binding.value),
                     };
                     if let Some(ty) = &binding.ty {
-                        let value = inject_type_metadata(value, desugar_type(ty));
-                        out = bind_name_value(name, value, out);
+                        let value = with_metadata_value(
+                            inject_type_metadata(value, desugar_type(ty)),
+                            M::SurfBindingType(Spanned::new(
+                                BindingTypeOrigin::Explicit,
+                                type_expr_span(ty),
+                            )),
+                        );
+                        out = bind_name_value(name, *binding_span, value, out);
                     } else {
-                        let value = if matches!(&binding.value, Expr::Annotate(..)) {
+                        let value = if let Expr::Annotate(_, ty, _) = &binding.value {
                             with_metadata_value(
                                 value,
-                                M::SurfBindingType(Spanned::new(BindingTypeOrigin::Explicit, sp())),
+                                M::SurfBindingType(Spanned::new(
+                                    BindingTypeOrigin::Explicit,
+                                    type_expr_span(ty),
+                                )),
                             )
                         } else if has_type_metadata(&value) {
                             with_metadata_value(
                                 value,
-                                M::SurfBindingType(Spanned::new(BindingTypeOrigin::Inferred, sp())),
+                                M::SurfBindingType(Spanned::new(
+                                    BindingTypeOrigin::Inferred,
+                                    *binding_span,
+                                )),
                             )
                         } else {
                             value
                         };
-                        out = bind_name_value(name, value, out);
+                        out = bind_name_value(name, *binding_span, value, out);
                     }
                 }
                 pattern => {
