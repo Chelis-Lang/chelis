@@ -894,10 +894,11 @@ fn format_lit(lit: &Literal) -> String {
         Literal::Float(value) => canonical_float(*value),
         // Typed-suffix literals (spec/02-surf-syntax.md §P10a): the
         // canonical formatter preserves the suffix on the literal token
-        // since dropping it would change the program's typing.
-        Literal::TypedInt(value, suffix) if suffix.is_float() => {
-            format!("{}{}", canonical_float(*value as f64), suffix.as_str())
-        }
+        // since dropping it would change the program's typing. It preserves
+        // the integer body for the same reason: under a float suffix that body
+        // is [04-LIT-1]'s exact `literal_source: integer` form, finalized once
+        // at the declared width, so printing `8000000.0f64` for `8000000f64`
+        // would put a decimal decode in its place (chelis#2119).
         Literal::TypedInt(value, suffix) => format!("{value}{}", suffix.as_str()),
         Literal::TypedFloat(value, suffix) => {
             format!("{}{}", canonical_float(*value), suffix.as_str())

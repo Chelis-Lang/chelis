@@ -80,6 +80,8 @@ fn canonical_declaration_and_expression_spellings_parse() {
         "result = 1.0f64",
         "result = 42i32",
         "result = 1.0f32",
+        "result = 42f32",
+        "result = 8000000f64",
         "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true",
         "tiny = 5e-324",
         "huge = 1.7976931348623157e308",
@@ -273,6 +275,182 @@ fn value_preserving_literal_aliases_format_canonically() {
     }
 }
 
+/// chelis#2119: a float body carrying digits past the shortest round-trippable
+/// spelling is a value-preserving input alias, not a parse error. Rejecting it
+/// at parse time is what stopped `chelis fmt` from applying the canonical
+/// spelling it printed, because the formatter parses through the same
+/// validator.
+#[test]
+fn redundant_precision_float_bodies_are_value_preserving_aliases() {
+    for (source, expected) in [
+        // Transcribed reference constants: Lanczos g=7 gamma coefficients,
+        // the A&S 7.1.26 erf coefficient, and 1/sqrt(2*pi).
+        ("result = 0.319381530f64", "result = 0.31938153f64\n"),
+        (
+            "result = 0.99999999999980993f64",
+            "result = 0.9999999999998099f64\n",
+        ),
+        (
+            "result = 86.50532032941677f64",
+            "result = 86.50532032941678f64\n",
+        ),
+        (
+            "result = 771.32342877765313f64",
+            "result = 771.3234287776531f64\n",
+        ),
+        (
+            "result = 0.398942280401432677939946059934f64",
+            "result = 0.3989422804014327f64\n",
+        ),
+        // Padded trailing zeroes and redundant fractional digits.
+        ("result = 1.00", "result = 1.0\n"),
+        ("result = 1.10f64", "result = 1.1f64\n"),
+        ("result = 0.0010", "result = 0.001\n"),
+        ("result = 687.0600000000f32", "result = 687.06f32\n"),
+        ("result = 1.500e+0", "result = 1.5\n"),
+        // A leading zero on a float body has no octal reading, so it is
+        // normalized rather than refused (the integer rule still refuses it).
+        ("result = 007.5", "result = 7.5\n"),
+    ] {
+        assert_alias_formats_to(source, expected);
+    }
+}
+
+/// chelis#2119 negative parity: the alias family stops at value preservation.
+/// Nothing here decodes to the value its suggested spelling round-trips to, or
+/// else it is an integer body, where a redundant leading zero reads as octal.
+#[test]
+fn non_value_preserving_numeric_spellings_stay_rejected() {
+    for source in [
+        // Integer bodies keep the canonical decimal rule, with or without a
+        // float suffix.
+        "result = 007",
+        "result = 007f64",
+        "result = 0_07i64",
+        // An integer radix form carries no float suffix
+        // (spec/04-type-system.md §5.5).
+        "result = 0b1010f32",
+        // Malformed separators stay a lex error even inside a float body.
+        "result = 1.0_",
+        "result = 1_.0",
+        "result = 1.0e3_",
+        // A decoded value that is not finite has no Surf literal at all.
+        "result = 1.0000000e400",
+        // An integer suffix never attaches to a float body.
+        "result = 1.00i8",
+    ] {
+        rejects(source);
+    }
+}
+
+/// chelis#2119: the reported cost was O(n) edit/run round trips, because one
+/// literal was reported per invocation and the formatter could not apply the
+/// fix. One `format_source` pass must now canonicalize every such literal.
+#[test]
+fn one_formatting_pass_canonicalizes_every_redundant_precision_literal() {
+    let source = concat!(
+        "a = 0.319381530f64\n",
+        "b = 0.99999999999980993f64\n",
+        "c = 86.50532032941677f64\n",
+        "d = 771.32342877765313f64\n",
+        "e = 1.10f64\n",
+        "f = 687.0600000000f32\n",
+    );
+    let expected = concat!(
+        "a = 0.31938153f64\n",
+        "b = 0.9999999999998099f64\n",
+        "c = 86.50532032941678f64\n",
+        "d = 771.3234287776531f64\n",
+        "e = 1.1f64\n",
+        "f = 687.06f32\n",
+    );
+    let formatted = format_source(source).expect("redundant-precision constants format");
+    assert_eq!(formatted, expected);
+    assert_eq!(
+        format_source(&formatted).expect("canonical output reparses"),
+        formatted,
+        "canonical output must be a formatter fixed point",
+    );
+}
+
+/// chelis#2119 / spec/02-surf-syntax.md §P10a: an integer body under a float
+/// suffix is [04-LIT-1]'s exact `literal_source: integer` form, which is
+/// finalized once at the declared width. It is therefore a canonical form the
+/// formatter preserves, not an alias of the decimal-bodied literal.
+#[test]
+fn a_float_suffixed_integer_body_is_canonical_and_distinct() {
+    for source in [
+        "result = 42f32\n",
+        "result = 8000000f64\n",
+        "result = 42bf16\n",
+        "result = 42f16\n",
+    ] {
+        assert_eq!(
+            format_source(source).expect("float-suffixed integer body formats"),
+            source,
+            "the formatter must preserve the integer body",
+        );
+    }
+
+    let integer_bodied = desugar_program(&parse_str("result = 8000000f64\n").expect("parses"));
+    let decimal_bodied = desugar_program(&parse_str("result = 8000000.0f64\n").expect("parses"));
+    assert!(
+        print_canonical(&integer_bodied).contains("literal_source: integer"),
+        "the integer body must desugar to [04-LIT-1]'s marked cross-family form",
+    );
+    assert_ne!(
+        print_canonical(&integer_bodied),
+        print_canonical(&decimal_bodied),
+        "the two bodies are distinct source forms, not spellings of one another",
+    );
+}
+
+/// chelis#2119 / spec/02-surf-syntax.md §P10a: an integer body binds at the
+/// suffix width, so the width decides its range. Admitting a body that rounds
+/// to infinity there would make a program that `fmt --check` calls canonical
+/// and whose own Deep has no Surf representation, breaking §0.1's rule that
+/// every valid Deep node resugars. The parser's boundary is the resugarer's
+/// own rounding, so the two cannot drift apart.
+#[test]
+fn an_integer_body_that_overflows_its_suffix_width_is_rejected_as_non_finite() {
+    // f16 is the only reachable width: an `i64` body cannot exceed the finite
+    // range of bf16, f32, or f64, and a body above `i64::MAX` is already a lex
+    // error before this check is consulted.
+    for source in [
+        "result = 65520f16\n",
+        "result = 65536f16\n",
+        "result = 100000f16\n",
+        "result = 9223372036854775807f16\n",
+    ] {
+        let error = parse_str(source)
+            .expect_err("an integer body rounding to infinity has no Surf literal");
+        assert!(
+            error.to_string().contains("non-finite numeric literal"),
+            "unexpected diagnostic for {source:?}: {error}",
+        );
+    }
+
+    // The largest representable f16 integer still binds, and still round-trips
+    // through Deep, so the repair narrows exactly the unrepresentable range.
+    for (source, formatted) in [
+        ("result = 65504f16\n", "result = 65504f16\n"),
+        ("result = 65519f16\n", "result = 65519f16\n"),
+        (
+            "result = 9223372036854775807f64\n",
+            "result = 9223372036854775807f64\n",
+        ),
+    ] {
+        assert_eq!(
+            format_source(source).expect("a representable integer body formats"),
+            formatted,
+        );
+        let deep = desugar_program(&parse_str(source).expect("parses"));
+        resugar_program(&deep).unwrap_or_else(|error| {
+            panic!("canonical Surf must have a resugarable Deep: {error}\n{source}")
+        });
+    }
+}
+
 #[test]
 fn whitespace_before_parenthesized_calls_is_a_cosmetic_input_alias() {
     for (source, expected) in [
@@ -386,7 +564,6 @@ fn semantic_ambiguous_and_non_reviewed_legacy_aliases_are_rejected() {
         "result = vmap(f, 1)",
         "result = vmap(f, axis=0)",
         "result = grad(f, wrt=(x))",
-        "result = 42f32",
         "@property grouped forall(x: int32) where (x <= 1): true",
         "type EmptyAlias = | EmptyAlias()",
         "typed: Option[] = None",
@@ -1094,7 +1271,10 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "mapped_zero = vmap(f)(xs)\n",
         "def unit_value() -> unit = ()\n",
         "legacy_number = 16\n",
-        "legacy_float = 42.0f32\n",
+        // chelis#2119: `42f32` is no longer rewritten. Migration used to print
+        // `42.0f32` here, which substituted a decimal decode for [04-LIT-1]'s
+        // exact width-finalized form rather than migrating a legacy spelling.
+        "legacy_float = 42f32\n",
         "nullary_constructor = None()\n",
         "@property grouped forall(x: int32) where x <= 1:\n",
         "  true\n",

@@ -87,6 +87,12 @@ mod tests {
             "wide_float = 1.0f64\n",
             "default_int_commitment = 42i32\n",
             "default_float_commitment = 1.0f32\n",
+            // spec/02 §P10a: an integer body under a float suffix is
+            // [04-LIT-1]'s exact `literal_source: integer` form (chelis#2119).
+            "integer_bodied_float = 42f64\n",
+            "wide_integer_bodied_float = 8000000f32\n",
+            "largest_f16_integer_body = 65504f16\n",
+            "largest_finite_f16_integer_body = 65519f16\n",
             "negative_int_pattern = match x with { | -42 => 0 }\n",
             "negative_float_pattern = match x with { | -0.0 => 0 }\n",
             "minimum_int_pattern = match x with { | -9223372036854775808 => 0 }\n",
@@ -279,6 +285,18 @@ mod tests {
             "result = 1.5(x)\n",
             "result = \"a\"(x)\n",
             "result = 50.f\n",
+            // chelis#2119: a float body carrying digits past the shortest
+            // round-trippable spelling decodes to the same value, so both
+            // parsers admit it and `chelis fmt` canonicalizes it.
+            "value = 1.00\n",
+            "value = 42.00f32\n",
+            "value = 1.00000000000000001\n",
+            "value = 0.10000000000000001\n",
+            "value = 0.10000000000000001f64\n",
+            "value = 0.319381530f64\n",
+            "value = 0.99999999999980993f64\n",
+            "value = 86.50532032941677f64\n",
+            "value = 007.5\n",
         ] {
             assert_surf_parser_parity(source, true);
         }
@@ -296,7 +314,6 @@ mod tests {
             "result = a < b < c\n",
             "result = vmap(f, 1)\n",
             "result = vmap(f, axis=0)\n",
-            "result = 42f64\n",
             "value: Option[] = None\n",
             "def f[](x) = x\n",
             "type Empty = | Empty()\n",
@@ -306,11 +323,6 @@ mod tests {
             "export ()\n",
             "value = match x with { | 42i64 => 0 }\n",
             "value = match x with { | 1.0f64 => 0 }\n",
-            "value = 1.00\n",
-            "value = 42.00f32\n",
-            "value = 1.00000000000000001\n",
-            "value = 0.10000000000000001\n",
-            "value = 0.10000000000000001f64\n",
             "value = 9223372036854775808\n",
             "value = 9223372036854775808i64\n",
             "value = 9223372036854775809\n",
@@ -331,6 +343,18 @@ mod tests {
             "value = 0x10_\n",
             "value = 0b_10\n",
             "value = 1e3_\n",
+            // chelis#2119: an integer body keeps the canonical decimal rule,
+            // with or without a float suffix, and no radix form carries one.
+            "value = 007\n",
+            "value = 007f64\n",
+            "value = 0b1010f32\n",
+            "value = 0x10f64\n",
+            // chelis#2119: an integer body binds at the suffix width, so a
+            // magnitude that rounds to infinity there is not a literal of that
+            // type. f16 is the only width an i64 body can overflow.
+            "value = 65520f16\n",
+            "value = 65536f16\n",
+            "value = 9223372036854775807f16\n",
             "result = Point { x: x }\n",
             "result = match p with { | Point { x: x } => x }\n",
             "result = x |> fn (v) -> f(v, y)\n",

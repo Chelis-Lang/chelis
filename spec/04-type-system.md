@@ -1956,10 +1956,17 @@ narrowing. The closed suffix set is:
 | `i32` | `(t-prim {} int32)` | `42i32` |
 | `i64` | `(t-prim {} int64)` | `42i64` |
 
-Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) bind the decoded float at
-that type. Canonical Surf requires the canonical float body (`42.0f32`, not
-`42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
-attach to integer literal tokens only; `1.0i8` is a parse error.
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) accept a float body or a
+decimal integer body, and the two bind differently. `42.0f32` binds the decoded
+float at that type. `42f32` binds the exact integer directly at that width and
+is [04-LIT-1]'s suffix-bound cross-family form, an exact Int atom marked
+`literal_source: integer`; it SHALL NOT be finalized through `f64`. Both are
+canonical Surf, and `chelis fmt` preserves the body it was given rather than
+converting between them; Deep-to-Surf output follows
+`spec/03-deep-syntax.md` §6.3.2 instead. An integer body whose exact value
+rounds to infinity at the declared width is not a literal of that type.
+Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer literal
+tokens only; `1.0i8` is a parse error.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -1968,12 +1975,13 @@ float followed by an identifier) and binds at the literal default per §5.3,
 which is then subject to the surrounding-position rules in the type checker.
 
 The normal Surf parser accepts value-preserving hexadecimal/binary integer
-spellings, digit separators strictly between digits, and equivalent finite
-exponent spellings. Integer radix forms may carry an integer suffix; they may
-not carry a float suffix. These lexical choices do not change the exact suffix
-binding rule, and the canonical printer emits the decoded decimal token.
-Canonical decimal float literals carry float suffixes without ambiguity
-(`1.0f32`, `1000.0f32`).
+spellings, digit separators strictly between digits, and every finite decimal
+float body that decodes to the literal's value, including equivalent exponent
+spellings and bodies with digits past the shortest round-trippable spelling.
+Integer radix forms may carry an integer suffix; they may not carry a float
+suffix. These lexical choices do not change the exact suffix binding rule, and
+the canonical printer emits the decoded token. Canonical decimal float literals
+carry float suffixes without ambiguity (`1.0f32`, `1000.0f32`).
 
 Rejected suffixes:
 

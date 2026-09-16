@@ -1497,3 +1497,11 @@ tracking_issue = "chelis#729"
 prefix = "examples/pure_helper_result_claims.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+# chelis#2119: tree-sitter-chelis/build.rs compiles this grammar's parser and
+# external scanner into the crate, so its Rust/tree-sitter parity corpus is
+# what a scanner or grammar edit must re-run.
+[[path_rule]]
+prefix = "grammars/tree-sitter-chelis-surf/"
+disposition = "packages"
+packages = ["tree-sitter-chelis"]
