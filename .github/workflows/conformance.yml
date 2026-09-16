@@ -224,6 +224,7 @@ jobs:
           ACTION: ${{ github.event.action }}
           LIFECYCLE: ${{ steps.candidate-lifecycle.outcome }}
           BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
         working-directory: candidate
         run: |
           record_full() {

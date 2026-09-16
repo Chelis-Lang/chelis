@@ -174,6 +174,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         step for step in changes["steps"] if step.get("id") == "rebase-reuse"
     )
     test.assertEqual(reuse["if"], "always()")
+    test.assertEqual(reuse["env"]["GH_TOKEN"], "${{ github.token }}")
     test.assertIn(
         "../trusted-rebase/scripts/ci_rebase_reuse.py",
         reuse["run"],
@@ -459,6 +460,10 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         "../trusted-rebase/scripts/ci_rebase_reuse.py",
         str(changes),
     )
+    reuse = next(
+        step for step in changes["steps"] if step.get("id") == "rebase-reuse"
+    )
+    test.assertEqual(reuse["env"]["GH_TOKEN"], "${{ github.token }}")
     bootstrap = next(
         step
         for step in changes["steps"]
