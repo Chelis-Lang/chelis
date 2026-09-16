@@ -640,6 +640,7 @@
       "expected": [
         "a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
         "a_cross_let_alias_traps_at_the_producer_before_intervening_effects",
+        "a_disagreeing_nested_same_name_ascription_traps_at_its_initializer",
         "a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
         "a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
         "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
@@ -659,6 +660,7 @@
         "an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
         "an_agreeing_literal_result_and_local_claim_execute_exactly",
         "an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        "an_agreeing_nested_same_name_ascription_attaches_to_only_its_initializer",
         "an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
         "an_inferred_result_claim_does_not_replace_the_local_claim",
         "an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
@@ -677,7 +679,7 @@
         "inferred_metadata_does_not_create_a_local_runtime_claim",
         "multiple_local_axis_claims_fail_in_authored_axis_order"
       ],
-      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/local-closure/dead/consumer paths, cross-let host alias attribution, single execution and nested shadowing, selected and untaken control-flow arms, host-effect placement, activation-scoped uninvoked closures, direct top-level grad/vmap transport, result-claim coexistence, wildcard and inferred controls, and authored axis order."
+      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/local-closure/dead/consumer paths, cross-let host alias attribution, single execution, nested shadowing and same-name positive/negative ownership, selected and untaken control-flow arms, host-effect placement, activation-scoped uninvoked closures, direct top-level grad/vmap transport, result-claim coexistence, wildcard and inferred controls, and authored axis order."
     },
     {
       "phase": "b",

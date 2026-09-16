@@ -9217,14 +9217,14 @@ impl<'program> LowerCtx<'program> {
         initializer: &Expr,
     ) -> bool {
         ascription.binding_name() == binding_name
-            && (Self::expr_contains_source_span(binding, ascription.binding_span())
-                || Self::expr_contains_source_span(initializer, ascription.initializer_span())
+            && (Self::expr_has_source_span(binding, ascription.binding_span())
+                || Self::expr_has_source_span(initializer, ascription.initializer_span())
                 || stamped_parts(initializer)
                     .and_then(|(_, meta, _)| meta.surf_binding_type())
                     .is_some_and(|origin| origin.span() == ascription.ascription_span()))
     }
 
-    fn expr_contains_source_span(expr: &Expr, target: Span) -> bool {
+    fn expr_has_source_span(expr: &Expr, target: Span) -> bool {
         fn source_range(source: &str) -> Option<(usize, usize)> {
             let range = source.strip_prefix("surf:")?;
             let (start, end) = range.split_once("..")?;
@@ -9234,7 +9234,7 @@ impl<'program> LowerCtx<'program> {
         expr.span() == target
             || expr.span_id().is_some_and(|source| {
                 source_range(source)
-                    .is_some_and(|(start, end)| target.offset >= start && target.end() <= end)
+                    .is_some_and(|(start, end)| (start, end) == (target.offset, target.end()))
             })
     }
 
@@ -19549,6 +19549,7 @@ mod tests {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
+            local_tensor_ascriptions: Arc::new(Vec::new()),
         };
         let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,

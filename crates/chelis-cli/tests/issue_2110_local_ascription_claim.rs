@@ -118,7 +118,7 @@ fn assert_initializer_axis_trap(
     axis: usize,
 ) {
     let context = format!("extent `{claim}`: claimed = 2, {operation} axis {axis} = 3");
-    let trap = format!("numeric trap: domain in {operation} at int64");
+    let trap = format!("numeric trap: domain in {operation} at i64");
     for (lane, result) in both_lanes(dir, stem, source) {
         assert!(
             !result.success,
@@ -158,6 +158,19 @@ fn direct(body: &str) -> String {
     )
 }
 
+fn nested_same_name_ascription(required: usize) -> String {
+    format!(
+        "def f(x: tensor[*, f32]) -> tensor[*, f32] = {{\n  \
+         y = add({{\n    \
+         y: tensor[{required}, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n    \
+         y\n  \
+         }}, x)\n  \
+         y\n\
+         }}\n\
+         out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    )
+}
+
 fn deep_runtime_source(required: i64) -> String {
     format!(
         r#"
@@ -180,10 +193,10 @@ fn deep_runtime_source(required: i64) -> String {
             (var {{}} Cons)
             (app {{}}
               (var {{}} Cons)
-              (lit {{type: (t-prim {{}} int64)}} 0)
+              (lit {{type: (t-prim {{}} i64)}} 0)
               (app {{}}
                 (var {{}} Cons)
-                (lit {{type: (t-prim {{}} int64)}} 0)
+                (lit {{type: (t-prim {{}} i64)}} 0)
                 (var {{}} Nil)))
             (var {{}} Nil))
           (lit {{type: (t-prim {{}} f32)}} 0.0)))
@@ -229,10 +242,10 @@ fn deep_cross_let_alias_source() -> String {
             (var {} Cons)
             (app {}
               (var {} Cons)
-              (lit {type: (t-prim {} int64)} 0)
+              (lit {type: (t-prim {} i64)} 0)
               (app {}
                 (var {} Cons)
-                (lit {type: (t-prim {} int64)} 0)
+                (lit {type: (t-prim {} i64)} 0)
                 (var {} Nil)))
             (var {} Nil))
           (lit {type: (t-prim {} f32)} 0.0)))
@@ -355,7 +368,7 @@ fn hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c() {
             result
                 .text
                 .lines()
-                .any(|line| line == "numeric trap: domain in pad at int64"),
+                .any(|line| line == "numeric trap: domain in pad at i64"),
             "{lane}: {}",
             result.text
         );
@@ -409,7 +422,7 @@ fn hand_authored_deep_cross_let_alias_traps_before_the_intervening_effect() {
             result
                 .text
                 .lines()
-                .any(|line| line == "numeric trap: domain in pad at int64"),
+                .any(|line| line == "numeric trap: domain in pad at i64"),
             "{lane}: {}",
             result.text
         );
@@ -703,7 +716,7 @@ fn a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not() {
             result
                 .text
                 .lines()
-                .any(|line| line == "numeric trap: domain in pad at int64"),
+                .any(|line| line == "numeric trap: domain in pad at i64"),
             "{lane}: {}",
             result.text
         );
@@ -765,7 +778,7 @@ fn a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner() {
             result
                 .text
                 .lines()
-                .any(|line| line == "numeric trap: domain in pad at int64"),
+                .any(|line| line == "numeric trap: domain in pad at i64"),
             "{lane}: {}",
             result.text
         );
@@ -844,7 +857,7 @@ fn a_cross_let_alias_traps_at_the_producer_before_intervening_effects() {
             result
                 .text
                 .lines()
-                .any(|line| line == "numeric trap: domain in pad at int64"),
+                .any(|line| line == "numeric trap: domain in pad at i64"),
             "{lane}: {}",
             result.text
         );
@@ -872,6 +885,33 @@ fn a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane() {
         );
     }
     assert_eq!(eval.text, compiled.text);
+}
+
+#[test]
+fn an_agreeing_nested_same_name_ascription_attaches_to_only_its_initializer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = nested_same_name_ascription(3);
+    let [(_, eval), (_, compiled)] = both_lanes(&dir, "nested_same_name_agrees", &source);
+    for (lane, result) in [("eval", &eval), ("c", &compiled)] {
+        assert!(result.success, "{lane}: {}", result.text);
+        assert_eq!(
+            result.text, "out = tensor(shape=[3], data=[2.0, 4.0, 6.0])\n",
+            "{lane}"
+        );
+        assert!(
+            !result.text.contains("initializer owners"),
+            "{lane}: one authored ascription must have exactly one owner: {}",
+            result.text
+        );
+    }
+    assert_eq!(eval.text, compiled.text);
+}
+
+#[test]
+fn a_disagreeing_nested_same_name_ascription_traps_at_its_initializer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = nested_same_name_ascription(2);
+    assert_pad_trap(&dir, "nested_same_name_disagrees", &source, "2");
 }
 
 #[test]

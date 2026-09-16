@@ -88,7 +88,7 @@ fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_init
     assert_eq!(
         error,
         "extent `2`: claimed = 2, pad axis 0 = 3\n\
-         numeric trap: domain in pad at int64"
+         numeric trap: domain in pad at i64"
     );
 }
 
@@ -218,7 +218,7 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
     assert_eq!(
         error,
         "extent `2`: claimed = 2, add axis 0 = 3\n\
-         numeric trap: domain in add at int64"
+         numeric trap: domain in add at i64"
     );
 }
 

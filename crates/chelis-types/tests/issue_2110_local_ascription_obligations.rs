@@ -101,10 +101,10 @@ const DEEP_RUNTIME_LOCAL_ASCRIPTION: &str = r#"
             (var {} Cons)
             (app {}
               (var {} Cons)
-              (lit {type: (t-prim {} int64)} 0)
+              (lit {type: (t-prim {} i64)} 0)
               (app {}
                 (var {} Cons)
-                (lit {type: (t-prim {} int64)} 0)
+                (lit {type: (t-prim {} i64)} 0)
                 (var {} Nil)))
             (var {} Nil))
           (lit {type: (t-prim {} f32)} 0.0)))
@@ -160,10 +160,10 @@ fn hand_authored_deep_static_mismatch_is_dimension_mismatch() {
           (var {} Cons)
           (app {}
             (var {} Cons)
-            (lit {type: (t-prim {} int64)} 1)
+            (lit {type: (t-prim {} i64)} 1)
             (app {}
               (var {} Cons)
-              (lit {type: (t-prim {} int64)} 0)
+              (lit {type: (t-prim {} i64)} 0)
               (var {} Nil)))
           (var {} Nil))
         (lit {type: (t-prim {} f32)} 0.0)))

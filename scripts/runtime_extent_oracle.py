@@ -3133,7 +3133,7 @@ _LOCAL_ASCRIPTION_EVAL_OBSERVATION = """\
     if observed != claimed {
         return Err(format!(
             "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\\n\\
-             numeric trap: domain in {} at int64",
+             numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));
     }

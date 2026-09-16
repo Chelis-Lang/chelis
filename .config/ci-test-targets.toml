@@ -1837,6 +1837,15 @@ reason = "the completion oracle validates structural wire roles against executed
 tracking_issue = "chelis#729"
 
 [[path_rule]]
+prefix = "scripts/test_capacity_census_wire_structural.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes the structural wire-role acceptance and rejection controls"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
 prefix = "examples/pure_helper_result_claims.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
