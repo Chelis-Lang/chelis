@@ -633,6 +633,7 @@ def build_report(
 
     candidate_rows: list[dict[str, Any]] = []
     candidate_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    candidate_seconds: dict[tuple[int, str], tuple[float, float]] = {}
     for pr_number in cohort:
         keys = [
             key for key in candidate_groups if key[0] == pr_number
@@ -683,6 +684,7 @@ def build_report(
             }
             candidate_rows.append(row)
             candidate_by_key[key] = row
+            candidate_seconds[key] = (job_seconds, wall_seconds)
 
     expansion_by_pr: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for run in expansion_runs:
@@ -692,6 +694,7 @@ def build_report(
         grouped.sort(key=_run_time)
 
     run_rows: list[dict[str, Any]] = []
+    run_seconds: dict[int, tuple[float, float]] = {}
     for run in sorted(runs, key=_run_time):
         run_id = _positive_int(run.get("id"), "workflow run id")
         pr_number = _positive_int(run.get("pr_number"), "workflow run PR number")
@@ -715,6 +718,9 @@ def build_report(
         pr_attribution = _optional_text(
             run.get("pr_attribution"), "workflow run PR attribution"
         )
+        job_seconds = _job_seconds(run)
+        wall_seconds = _workflow_wall_seconds(run)
+        run_seconds[run_id] = (job_seconds, wall_seconds)
         run_rows.append(
             {
                 "run_id": run_id,
@@ -741,16 +747,15 @@ def build_report(
                 "evidence": attribution["evidence"],
                 "note": attribution["note"],
                 "attempt_count": _attempt_count(run),
-                "raw_job_minutes": _minutes(_job_seconds(run)),
-                "workflow_wall_minutes": _minutes(
-                    _workflow_wall_seconds(run)
-                ),
+                "raw_job_minutes": _minutes(job_seconds),
+                "workflow_wall_minutes": _minutes(wall_seconds),
                 "untimed_job_count": _untimed_job_count(run),
                 "timing_anomaly_count": _timing_anomaly_count(run),
             }
         )
 
     wait_rows: list[dict[str, Any]] = []
+    wait_seconds_by_id: dict[str, float] = {}
     for row in ledger["agent_waits"]:
         if row["pr_number"] not in cohort:
             continue
@@ -759,6 +764,7 @@ def build_report(
             row["ended_at"],
             f"agent wait {row['wait_id']}",
         )
+        wait_seconds_by_id[row["wait_id"]] = wait_seconds
         wait_rows.append({**row, "wait_minutes": _minutes(wait_seconds)})
 
     cause_rows: list[dict[str, Any]] = []
@@ -774,6 +780,19 @@ def build_report(
             for row in cause_runs
             if row["workflow_path"] == EXPANSION_WORKFLOW
         ]
+        ci_seconds = sum(run_seconds[row["run_id"]][0] for row in ci_runs)
+        expansion_seconds = sum(
+            run_seconds[row["run_id"]][0] for row in expansion_cause_runs
+        )
+        hosted_seconds = sum(
+            run_seconds[row["run_id"]][0] for row in cause_runs
+        )
+        workflow_wall_seconds = sum(
+            run_seconds[row["run_id"]][1] for row in cause_runs
+        )
+        agent_wait_seconds = sum(
+            wait_seconds_by_id[row["wait_id"]] for row in cause_waits
+        )
         cause_rows.append(
             {
                 "cause": cause,
@@ -782,26 +801,16 @@ def build_report(
                 "workflow_attempt_count": sum(
                     row["attempt_count"] for row in cause_runs
                 ),
-                "ci_hull_raw_job_minutes": round(
-                    sum(row["raw_job_minutes"] for row in ci_runs), 3
+                "ci_hull_raw_job_minutes": _minutes(ci_seconds),
+                "package_expansion_raw_job_minutes": _minutes(
+                    expansion_seconds
                 ),
-                "package_expansion_raw_job_minutes": round(
-                    sum(
-                        row["raw_job_minutes"]
-                        for row in expansion_cause_runs
-                    ),
-                    3,
-                ),
-                "all_hosted_raw_job_minutes": round(
-                    sum(row["raw_job_minutes"] for row in cause_runs), 3
-                ),
-                "summed_workflow_wall_minutes": round(
-                    sum(row["workflow_wall_minutes"] for row in cause_runs), 3
+                "all_hosted_raw_job_minutes": _minutes(hosted_seconds),
+                "summed_workflow_wall_minutes": _minutes(
+                    workflow_wall_seconds
                 ),
                 "agent_wait_count": len(cause_waits),
-                "agent_wait_minutes": round(
-                    sum(row["wait_minutes"] for row in cause_waits), 3
-                ),
+                "agent_wait_minutes": _minutes(agent_wait_seconds),
             }
         )
 
@@ -813,8 +822,15 @@ def build_report(
         ]
         pr_candidates.sort(key=lambda row: row["ordinal"])
         latest = pr_candidates[-1] if pr_candidates else None
-        cumulative = sum(row["raw_job_minutes"] for row in pr_candidates)
-        latest_minutes = latest["raw_job_minutes"] if latest else 0.0
+        cumulative_seconds = sum(
+            candidate_seconds[(pr_number, row["candidate_sha"])][0]
+            for row in pr_candidates
+        )
+        latest_seconds = (
+            candidate_seconds[(pr_number, latest["candidate_sha"])][0]
+            if latest
+            else 0.0
+        )
         pr_expansions = [
             row
             for row in run_rows
@@ -822,6 +838,12 @@ def build_report(
             and row["workflow_path"] == EXPANSION_WORKFLOW
         ]
         pr_waits = [row for row in wait_rows if row["pr_number"] == pr_number]
+        expansion_seconds = sum(
+            run_seconds[row["run_id"]][0] for row in pr_expansions
+        )
+        agent_wait_seconds = sum(
+            wait_seconds_by_id[row["wait_id"]] for row in pr_waits
+        )
         pr_rows.append(
             {
                 "pr_number": pr_number,
@@ -832,17 +854,19 @@ def build_report(
                 "base_ref": pull["base_ref"],
                 "candidate_count": len(pr_candidates),
                 "package_expansion_count": len(pr_expansions),
-                "cumulative_ci_hull_raw_job_minutes": round(cumulative, 3),
-                "latest_candidate_ci_hull_raw_job_minutes": round(
-                    latest_minutes, 3
+                "cumulative_ci_hull_raw_job_minutes": _minutes(
+                    cumulative_seconds
                 ),
-                "amplification_ratio": _ratio(cumulative, latest_minutes),
-                "package_expansion_raw_job_minutes": round(
-                    sum(row["raw_job_minutes"] for row in pr_expansions), 3
+                "latest_candidate_ci_hull_raw_job_minutes": _minutes(
+                    latest_seconds
                 ),
-                "agent_wait_minutes": round(
-                    sum(row["wait_minutes"] for row in pr_waits), 3
+                "amplification_ratio": _ratio(
+                    cumulative_seconds, latest_seconds
                 ),
+                "package_expansion_raw_job_minutes": _minutes(
+                    expansion_seconds
+                ),
+                "agent_wait_minutes": _minutes(agent_wait_seconds),
                 "latest_head_sha": latest["head_sha"] if latest else None,
                 "latest_candidate_sha": (
                     latest["candidate_sha"] if latest else None
@@ -850,11 +874,13 @@ def build_report(
             }
         )
 
-    cumulative = sum(
-        row["cumulative_ci_hull_raw_job_minutes"] for row in pr_rows
+    cumulative_seconds = sum(
+        seconds[0] for seconds in candidate_seconds.values()
     )
-    latest = sum(
-        row["latest_candidate_ci_hull_raw_job_minutes"] for row in pr_rows
+    latest_seconds = sum(
+        candidate_seconds[(row["pr_number"], row["latest_candidate_sha"])][0]
+        for row in pr_rows
+        if row["latest_candidate_sha"] is not None
     )
     implementation_run_rows = [
         row for row in run_rows if row["workflow_path"] in CI_WORKFLOWS
@@ -862,6 +888,14 @@ def build_report(
     expansion_run_rows = [
         row for row in run_rows if row["workflow_path"] == EXPANSION_WORKFLOW
     ]
+    package_expansion_seconds = sum(
+        run_seconds[row["run_id"]][0] for row in expansion_run_rows
+    )
+    all_hosted_seconds = sum(seconds[0] for seconds in run_seconds.values())
+    all_workflow_wall_seconds = sum(
+        seconds[1] for seconds in run_seconds.values()
+    )
+    all_agent_wait_seconds = sum(wait_seconds_by_id.values())
     warnings: list[str] = []
     if not ledger["manual_run_scope_complete"]:
         warnings.append(
@@ -960,22 +994,26 @@ def build_report(
             "package_expansion_attempt_count": sum(
                 row["attempt_count"] for row in expansion_run_rows
             ),
-            "cumulative_ci_hull_raw_job_minutes": round(cumulative, 3),
-            "latest_candidate_ci_hull_raw_job_minutes": round(latest, 3),
-            "amplification_ratio": _ratio(cumulative, latest),
-            "package_expansion_raw_job_minutes": round(
-                sum(row["raw_job_minutes"] for row in expansion_run_rows), 3
+            "cumulative_ci_hull_raw_job_minutes": _minutes(
+                cumulative_seconds
             ),
-            "all_measured_hosted_raw_job_minutes": round(
-                sum(row["raw_job_minutes"] for row in run_rows), 3
+            "latest_candidate_ci_hull_raw_job_minutes": _minutes(
+                latest_seconds
             ),
-            "summed_workflow_wall_minutes": round(
-                sum(row["workflow_wall_minutes"] for row in run_rows), 3
+            "amplification_ratio": _ratio(
+                cumulative_seconds, latest_seconds
+            ),
+            "package_expansion_raw_job_minutes": _minutes(
+                package_expansion_seconds
+            ),
+            "all_measured_hosted_raw_job_minutes": _minutes(
+                all_hosted_seconds
+            ),
+            "summed_workflow_wall_minutes": _minutes(
+                all_workflow_wall_seconds
             ),
             "agent_wait_interval_count": len(wait_rows),
-            "agent_wait_minutes": round(
-                sum(row["wait_minutes"] for row in wait_rows), 3
-            ),
+            "agent_wait_minutes": _minutes(all_agent_wait_seconds),
             "untimed_job_count": untimed_jobs,
             "timing_anomaly_count": timing_anomalies,
         },

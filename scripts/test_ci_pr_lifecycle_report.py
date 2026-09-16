@@ -23,7 +23,7 @@ def job(
     job_id: int,
     *,
     start: str,
-    minutes: int,
+    minutes: float,
     attempt: int = 1,
 ) -> dict:
     started = datetime.fromisoformat(start.replace("Z", "+00:00"))
@@ -48,7 +48,7 @@ def workflow_run(
     candidate_sha: str | None,
     path: str,
     start: str,
-    job_minutes: int,
+    job_minutes: float,
     attempt: int = 1,
 ) -> dict:
     jobs = [job(run_id * 10, start=start, minutes=job_minutes, attempt=attempt)]
@@ -387,6 +387,103 @@ class LifecycleReportTests(unittest.TestCase):
         self.assertEqual(summary["implementation_workflow_attempt_count"], 2)
         self.assertEqual(summary["cumulative_ci_hull_raw_job_minutes"], 18)
         self.assertEqual(summary["summed_workflow_wall_minutes"], 13)
+
+    def test_fractional_seconds_do_not_accumulate_display_rounding(self) -> None:
+        payload = github_fixture()
+        payload["pull_requests"] = payload["pull_requests"][:1]
+        fractional_minutes = 20.02 / 60
+        payload["workflow_runs"] = [
+            workflow_run(
+                401,
+                pr_number=1,
+                head_sha=HEAD_A,
+                candidate_sha=CANDIDATE_A,
+                path=".github/workflows/ci.yml",
+                start="2026-09-16T10:00:00Z",
+                job_minutes=fractional_minutes,
+            ),
+            workflow_run(
+                402,
+                pr_number=1,
+                head_sha=HEAD_A,
+                candidate_sha=CANDIDATE_A,
+                path=".github/workflows/conformance.yml",
+                start="2026-09-16T10:01:00Z",
+                job_minutes=fractional_minutes,
+            ),
+            workflow_run(
+                403,
+                pr_number=1,
+                head_sha=HEAD_B,
+                candidate_sha=CANDIDATE_B,
+                path=".github/workflows/ci.yml",
+                start="2026-09-16T11:00:00Z",
+                job_minutes=fractional_minutes,
+            ),
+        ]
+        ledger = {
+            "schema": report.LEDGER_SCHEMA,
+            "manual_run_scope_complete": True,
+            "manual_run_scope_evidence": "no manual runs in fixture",
+            "candidate_attributions": [
+                {
+                    "pr_number": 1,
+                    "head_sha": HEAD_A,
+                    "candidate_sha": CANDIDATE_A,
+                    "cause": "initial-candidate",
+                    "evidence": "fixture opened event",
+                },
+                {
+                    "pr_number": 1,
+                    "head_sha": HEAD_B,
+                    "candidate_sha": CANDIDATE_B,
+                    "cause": "review-repair",
+                    "evidence": "fixture repair event",
+                },
+            ],
+            "run_attributions": [],
+            "agent_waits": [],
+        }
+
+        result = report.build_report(
+            payload,
+            prs=[1],
+            attribution_payload=ledger,
+            generated_at="2026-09-16T13:00:00Z",
+        )
+
+        summary = result["summary"]
+        pr_row = result["pull_requests"][0]
+        causes = {row["cause"]: row for row in result["causes"]}
+        cause_total = sum(
+            row["ci_hull_raw_job_minutes"] for row in result["causes"]
+        )
+        self.assertEqual(
+            summary["cumulative_ci_hull_raw_job_minutes"], 1.001
+        )
+        self.assertEqual(
+            summary["all_measured_hosted_raw_job_minutes"], 1.001
+        )
+        self.assertEqual(
+            pr_row["cumulative_ci_hull_raw_job_minutes"],
+            summary["cumulative_ci_hull_raw_job_minutes"],
+        )
+        self.assertEqual(
+            round(cause_total, 3),
+            summary["cumulative_ci_hull_raw_job_minutes"],
+        )
+        self.assertEqual(
+            causes["initial-candidate"]["ci_hull_raw_job_minutes"], 0.667
+        )
+        self.assertEqual(
+            causes["review-repair"]["ci_hull_raw_job_minutes"], 0.334
+        )
+        self.assertEqual(pr_row["amplification_ratio"], 3.0)
+        self.assertEqual(summary["amplification_ratio"], 3.0)
+        self.assertEqual(
+            sum(row["raw_job_minutes"] for row in result["run_ledger"]),
+            1.002,
+        )
 
     def test_offline_cli_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
