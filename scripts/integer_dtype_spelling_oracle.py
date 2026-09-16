@@ -214,6 +214,24 @@ def boundary_contract_errors() -> list[str]:
     )
     errors.extend(
         _require(
+            "crates/chelis-backend-hip/tests/device_entry_execution.rs",
+            ('Some("flat-index-int32")',),
+        )
+    )
+    errors.extend(
+        _require(
+            "crates/chelis-backend-metal/tests/gpu_correctness.rs",
+            ("one int64 output", "the int64 output"),
+        )
+    )
+    errors.extend(
+        _require(
+            "crates/chelis-runtime/tests/tensor_repurpose.rs",
+            ("non-int64 rank", "non-int64 shape extent"),
+        )
+    )
+    errors.extend(
+        _require(
             "scripts/nautilus_local_gate.py",
             (
                 "range(cast(0, i64),",

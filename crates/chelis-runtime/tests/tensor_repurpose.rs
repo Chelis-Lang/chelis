@@ -110,7 +110,7 @@ fn tensor_repurpose_contract_child() {
                     bits: u64::from(2.0_f32.to_bits()),
                 };
                 chelis_tensor_repurpose(tensor, wrong_rank, repurposed_tagged.as_ptr());
-                panic!("repurpose accepted a non-i64 rank");
+                panic!("repurpose accepted a non-int64 rank");
             }
             "rank-reserved" => {
                 let tensor = chelis_alloc(2, original.as_ptr(), CHELIS_DTYPE_F32);
@@ -124,7 +124,7 @@ fn tensor_repurpose_contract_child() {
                 let mut wrong_shape = repurposed_tagged;
                 wrong_shape[0].dtype = CHELIS_DTYPE_F32;
                 chelis_tensor_repurpose(tensor, repurposed_rank, wrong_shape.as_ptr());
-                panic!("repurpose accepted a non-i64 shape extent");
+                panic!("repurpose accepted a non-int64 shape extent");
             }
             "shape-null" => {
                 let tensor = chelis_alloc(2, original.as_ptr(), CHELIS_DTYPE_F32);
