@@ -1676,6 +1676,20 @@ reason = "required-clause, identity and acknowledgement mutation controls run in
 tracking_issue = "chelis#1868"
 
 [[path_rule]]
+prefix = "spec/design/capability_table.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected capability contract and exact change acknowledgements"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/capacity_census.json"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "spec/design/dtype_semantics.md"
 disposition = "owner"
 workflow = "ci.yml"
