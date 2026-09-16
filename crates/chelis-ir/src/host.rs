@@ -14329,8 +14329,7 @@ fn actualize_tensor_helper_types(
                         crate::dag::RtDim::Lit(0) => None,
                         crate::dag::RtDim::Lit(1) => Some(input_dim.clone()),
                         crate::dag::RtDim::Lit(stride) => known_extent(input_dim)
-                            .and_then(|extent| extent.checked_add(stride - 1))
-                            .map(|extent| crate::dag::DimInfo::Lit(extent / stride))
+                            .map(|extent| crate::dag::DimInfo::Lit(extent.div_ceil(*stride)))
                             .or_else(|| {
                                 Some(unresolved_axis(
                                     "stride",
@@ -14341,10 +14340,34 @@ fn actualize_tensor_helper_types(
                                     occupied_dim_names,
                                 ))
                             }),
-                        crate::dag::RtDim::Node(_) => Some(crate::dag::DimInfo::Named(
-                            reserve_runtime_dim_name(occupied_dim_names, "stride", node_id, axis),
-                            None,
-                        )),
+                        crate::dag::RtDim::Node(_) => {
+                            // A runtime step computes a fresh extent, but a
+                            // declared fallback dimension is a claim that the
+                            // local `StrideSpan` guard must retain and check.
+                            // Mint only when there is no usable declaration,
+                            // exactly as the admitted pad and shrink owners do
+                            // above.
+                            if crate::axis_sources::op_computed_axis_extent(op, axis).is_some() {
+                                Some(unresolved_axis(
+                                    "stride",
+                                    node_id,
+                                    axis,
+                                    input.dims.len(),
+                                    fallback,
+                                    occupied_dim_names,
+                                ))
+                            } else {
+                                Some(crate::dag::DimInfo::Named(
+                                    reserve_runtime_dim_name(
+                                        occupied_dim_names,
+                                        "stride",
+                                        node_id,
+                                        axis,
+                                    ),
+                                    None,
+                                ))
+                            }
+                        }
                         crate::dag::RtDim::ToEnd
                         | crate::dag::RtDim::Sym(_)
                         | crate::dag::RtDim::InputAxis { .. } => None,

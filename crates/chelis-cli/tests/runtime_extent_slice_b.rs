@@ -4049,74 +4049,303 @@ fn a_result_name_no_parameter_declares_is_not_stamped_as_a_claim() {
     );
 }
 
-/// The still-unadmitted op-computed owner, stated as a lock rather than left
-/// to be discovered. `spec/04-type-system.md` section 4.7 makes a non-unit
-/// `stride` step mint a fresh extent exactly as `shrink` does, and it remains
-/// unguarded: unchanged rather than newly silent. chelis#1379 owns the
-/// arithmetic-sized forms.
+fn assert_stride_failure(out: &str, context: &str) {
+    assert!(out.contains(context), "expected `{context}` in: {out}");
+    assert!(
+        out.contains(&domain_trap_line("stride")),
+        "[04-NUM-9]'s exact stride line is present: {out}"
+    );
+    assert!(
+        !out.contains("Domain: movement target shape mismatch"),
+        "the generic allocation backstop must not stand in for the stride guard: {out}"
+    );
+}
+
+/// chelis#1931: a positive non-unit stride computes its result extent before
+/// allocation and guards an independently declared claim at the stride.
 ///
-/// This row was `pad_and_stride_op_computed_extents_remain_unadmitted` until
-/// chelis#1837 admitted `pad`. Its pad half moved to
-/// `a_non_zero_pad_extent_is_guarded_on_both_lanes` below, as a receipt rather
-/// than a lock; the two must not share one test, because a lock and a receipt
-/// make opposite claims about whether the behaviour may change.
-///
-/// The disposition is LANE-DIVERGENT, and this row records both halves rather
-/// than the evaluator's alone. An unadmitted owner has no guard site, so the
-/// claim is dropped; the evaluator then returns the undeclared extent at exit
-/// zero, while the C binary aborts at `chelis_movement_check_target`, the
-/// movement plan's own target comparison, which names the allocation rather
-/// than the claim and carries no [04-NUM-9] context line. Tracked by
-/// chelis#1931, which must update this row when `stride` is admitted.
-///
-/// An earlier version of this row called `eval_result` only and asserted `ok`
-/// under "an unadmitted op-computed owner is unchanged by this change, not
-/// newly trapping", which reads as "both lanes execute" when one rejects. The
-/// pad row beside it says the combined lock it was split from "ran eval only";
-/// this is the other half of that same observation.
-///
-/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
-/// Measured at `f45a7848a`: eval exit 0 with
-/// `out = tensor(shape=[3], data=[1.0, 3.0, 5.0])` under a declared
-/// `tensor[2, f32]`, and the linked binary exit 1 with
-/// `Domain: movement target shape mismatch` before
-/// `numeric trap: domain in stride at int64`. This change alters neither.
+/// The literal and runtime step carriers exercise the two `RtDim` forms. The
+/// rank-two row proves that the retained operand-axis identity is used rather
+/// than silently reporting axis zero. Each C leg builds, links and runs.
 #[test]
-fn a_non_unit_stride_op_computed_extent_remains_unadmitted() {
+fn issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes() {
     assert!(
         gcc_available(),
-        "this row records a divergence, so neither lane may skip"
+        "these rows compare Eval with compiled C; neither lane may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(x: tensor[rows, f32]) -> tensor[2, f32] = stride(x, 2i64)\n\
-                  out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+    let rows = [
+        (
+            "literal",
+            "def f(x: tensor[rows, f32]) -> tensor[2, f32] = stride(x, 2i64)\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+            "extent `2`: claimed = 2, stride axis 0 = 3",
+        ),
+        (
+            "runtime",
+            "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+             stride(x, sub(shape(x, 0i32), 4i64))\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+            "extent `2`: claimed = 2, stride axis 0 = 3",
+        ),
+        (
+            "rank_two_axis_one",
+            "def f(x: tensor[rows, cols, f32]) -> tensor[2, 3, f32] = \
+             stride(x, 2i64, sub(shape(x, 1i32), 2i64))\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32], \
+                                [6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32], \
+                                [11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32], \
+                                [16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32]]))\n",
+            "extent `3`: claimed = 3, stride axis 1 = 2",
+        ),
+    ];
+    for (name, source, context) in rows {
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("stride_claim_{name}.ch"), source);
+        assert!(
+            !eval_ok,
+            "eval/{name}: a disagreeing claim traps: {eval_out}"
+        );
+        assert_stride_failure(&eval_out, context);
 
-    // The evaluator half: silently wrong, which is the defect chelis#1931
-    // tracks rather than a behaviour to preserve.
-    let (ok, out) = eval_result(&dir, "stride_unadmitted.ch", source);
-    assert!(ok, "eval returns the undeclared extent at exit zero: {out}");
-    assert!(
-        out.contains("out = tensor(shape=[3], data=[1.0, 3.0, 5.0])"),
-        "eval: and the extent is the stride's, not the declared 2: {out}"
-    );
-    assert!(
-        !out.contains("extent `2`"),
-        "eval: with no guard claiming to have checked it: {out}"
-    );
+        let (c_ok, c_out) = c_run_result(&dir, &format!("stride_claim_{name}_c"), source);
+        assert!(!c_ok, "c/{name}: a disagreeing claim traps: {c_out}");
+        assert_stride_failure(&c_out, context);
+    }
+}
 
-    // The C half: it rejects, but at the movement plan's target check rather
-    // than the claim's guard, so it names neither extent.
-    let (ok, out) = c_run_result(&dir, "stride_unadmitted_c", source);
-    assert!(!ok, "the C binary rejects: {out}");
+/// chelis#1931 positive controls: unit stride is identity-only, while positive
+/// non-unit literal/runtime steps execute the exact ceil-divided shape and
+/// values when the declaration agrees. The free-result row proves the
+/// computation is not contingent on a declaration.
+#[test]
+fn issue_1931_positive_stride_controls_execute_exactly_on_both_lanes() {
     assert!(
-        out.contains("Domain: movement target shape mismatch")
-            && out.contains(&domain_trap_line("stride")),
-        "c: reporting the allocation rather than the claim: {out}"
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
     );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rows = [
+        (
+            "unit",
+            "def f(x: tensor[rows, f32]) -> tensor[rows, f32] = stride(x, 1i64)\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+            "out = tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ),
+        (
+            "runtime_unit",
+            "def f(x: tensor[rows, f32]) -> tensor[3, f32] = \
+             stride(x, sub(shape(x, 0i32), 2i64))\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+            "out = tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ),
+        (
+            "literal_non_unit",
+            "def f(x: tensor[rows, f32]) -> tensor[3, f32] = stride(x, 2i64)\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+            "out = tensor(shape=[3], data=[1.0, 3.0, 5.0])",
+        ),
+        (
+            "runtime_non_unit",
+            "def f(x: tensor[rows, f32]) -> tensor[3, f32] = \
+             stride(x, sub(shape(x, 0i32), 4i64))\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+            "out = tensor(shape=[3], data=[1.0, 3.0, 5.0])",
+        ),
+        (
+            "free_result",
+            "def f(x: tensor[rows, f32]) = stride(x, sub(shape(x, 0i32), 4i64))\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+            "out = tensor(shape=[3], data=[1.0, 3.0, 5.0])",
+        ),
+    ];
+    for (name, source, expected) in rows {
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("stride_control_{name}.ch"), source);
+        assert!(
+            eval_ok,
+            "eval/{name}: an admitted stride executes: {eval_out}"
+        );
+        assert!(eval_out.contains(expected), "eval/{name}: {eval_out}");
+
+        let (c_ok, c_out) = c_run_result(&dir, &format!("stride_control_{name}_c"), source);
+        assert!(c_ok, "c/{name}: an admitted stride executes: {c_out}");
+        assert!(c_out.contains(expected), "c/{name}: {c_out}");
+    }
+}
+
+/// chelis#1907: a runtime zero or negative step is the stride operation's
+/// domain failure. It wins over a disagreeing result claim and over the
+/// movement target backstop on both host lanes.
+#[test]
+fn issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes() {
     assert!(
-        !out.contains("extent `2`: claimed = 2, stride axis 0 = 3"),
-        "c: an admitted owner's rendering would replace this one: {out}"
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
     );
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, step) in [
+        ("zero", "sub(shape(x, 0i32), 4i64)"),
+        ("negative", "sub(shape(x, 0i32), 5i64)"),
+    ] {
+        let source = format!(
+            "def f(x: tensor[rows, f32]) -> tensor[99, f32] = stride(x, {step})\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
+        );
+        for (lane, ok, out) in {
+            let eval = eval_result(&dir, &format!("stride_{name}.ch"), &source);
+            let c = c_run_result(&dir, &format!("stride_{name}_c"), &source);
+            [("eval", eval.0, eval.1), ("c", c.0, c.1)]
+        } {
+            assert!(!ok, "{lane}/{name}: a non-positive step traps: {out}");
+            assert!(
+                out.contains("Domain: stride step must be positive"),
+                "{lane}/{name}: operation-level stride context is present: {out}"
+            );
+            assert!(
+                out.contains(&domain_trap_line("stride")),
+                "{lane}/{name}: [04-NUM-9]'s exact line is present: {out}"
+            );
+            assert!(
+                !out.contains("extent `99`")
+                    && !out.contains("Domain: movement target shape mismatch"),
+                "{lane}/{name}: invalid step wins over claim/allocation checks: {out}"
+            );
+        }
+    }
+}
+
+/// chelis#1907 cross-axis positive controls: resolving the complete stride
+/// vector before any claim comparison preserves both runtime unit and
+/// non-unit steps, including their exact sampled values, on both host lanes.
+#[test]
+fn issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rows = [
+        (
+            "runtime_unit",
+            "sub(shape(x, 1i32), 4i64)",
+            "tensor[2, 5, f32]",
+            "out = tensor(shape=[2, 5], data=[1.0, 2.0, 3.0, 4.0, 5.0, 11.0, 12.0, 13.0, 14.0, 15.0])",
+        ),
+        (
+            "runtime_non_unit",
+            "sub(shape(x, 1i32), 3i64)",
+            "tensor[2, 3, f32]",
+            "out = tensor(shape=[2, 3], data=[1.0, 3.0, 5.0, 11.0, 13.0, 15.0])",
+        ),
+    ];
+    for (name, axis_one_step, result, expected) in rows {
+        let source = format!(
+            "def f(x: tensor[rows, cols, f32]) -> {result} = \
+             stride(x, 2i64, {axis_one_step})\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32], \
+                                [6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32], \
+                                [11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32], \
+                                [16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32]]))\n"
+        );
+        let (eval_ok, eval_out) =
+            eval_result(&dir, &format!("stride_multi_positive_{name}.ch"), &source);
+        assert!(eval_ok, "eval/{name}: positive steps execute: {eval_out}");
+        assert!(eval_out.contains(expected), "eval/{name}: {eval_out}");
+
+        let (c_ok, c_out) = c_run_result(&dir, &format!("stride_multi_positive_{name}_c"), &source);
+        assert!(c_ok, "c/{name}: positive steps execute: {c_out}");
+        assert!(c_out.contains(expected), "c/{name}: {c_out}");
+    }
+}
+
+/// chelis#1907 cross-axis ordering: spec/05 section 2.4.1 makes every
+/// non-positive step an operation precondition, so the complete step vector
+/// must be resolved before [04-NUM-9] compares any `StrideSpan` result claim.
+///
+/// Axis 0 has a valid positive step whose realized extent disagrees with the
+/// declaration. Axis 1 then carries the reporter's runtime zero/negative
+/// probes. The invalid axis-1 step must win on both lanes. A fully positive
+/// vector is the non-vacuity control and reaches the axis-0 claim instead.
+#[test]
+fn issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "these rows compare Eval with compiled C; neither lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, axis_one_step, expected_claim) in [
+        (
+            "positive_claim_control",
+            "sub(shape(x, 1i32), 3i64)",
+            Some("extent `99`: claimed = 99, stride axis 0 = 2"),
+        ),
+        ("zero", "sub(shape(x, 1i32), 5i64)", None),
+        ("negative", "sub(shape(x, 1i32), 6i64)", None),
+    ] {
+        let source = format!(
+            "def f(x: tensor[rows, cols, f32]) -> tensor[99, 99, f32] = \
+             stride(x, 2i64, {axis_one_step})\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32], \
+                                [6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32], \
+                                [11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32], \
+                                [16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32]]))\n"
+        );
+        for (lane, ok, out) in {
+            let eval = eval_result(&dir, &format!("stride_multi_{name}.ch"), &source);
+            let c = c_run_result(&dir, &format!("stride_multi_{name}_c"), &source);
+            [("eval", eval.0, eval.1), ("c", c.0, c.1)]
+        } {
+            assert!(!ok, "{lane}/{name}: the row must trap: {out}");
+            match expected_claim {
+                Some(context) => assert_stride_failure(&out, context),
+                None => {
+                    assert!(
+                        out.contains("Domain: stride step must be positive"),
+                        "{lane}/{name}: operation-level stride context is present: {out}"
+                    );
+                    assert!(
+                        out.contains(&domain_trap_line("stride")),
+                        "{lane}/{name}: [04-NUM-9]'s exact line is present: {out}"
+                    );
+                    assert!(
+                        !out.contains("extent `99`")
+                            && !out.contains("Domain: movement target shape mismatch"),
+                        "{lane}/{name}: the invalid step wins over every claim: {out}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Literal non-positive steps are known before execution, so spec/04 §4.7's
+/// literal rule rejects them at check time while the runtime rows above prove
+/// the operation-level execution failure for values known only at run time.
+#[test]
+fn issue_1907_literal_non_positive_stride_steps_are_rejected_statically() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, step) in [("zero", "0i64"), ("negative", "-1i64")] {
+        let source = format!("def f(x: tensor[4, f32]) -> tensor[4, f32] = stride(x, {step})\n");
+        let path = fixture(&dir, &format!("stride_literal_{name}.ch"), &source);
+        let checked = Command::cargo_bin("chelis")
+            .expect("chelis")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", "--allow-style-violations", path.to_str().unwrap()])
+            .output()
+            .expect("check");
+        let mut out = String::from_utf8_lossy(&checked.stdout).to_string();
+        out.push_str(&String::from_utf8_lossy(&checked.stderr));
+        assert!(
+            !checked.status.success(),
+            "{name}: literal step rejects: {out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "stride axis 0 step {} must be positive",
+                if name == "zero" { "0" } else { "-1" }
+            )),
+            "{name}: the checker names the stride step: {out}"
+        );
+    }
 }
 
 /// A declared literal over a non-zero `pad` with LITERAL bounds is guarded at

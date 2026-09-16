@@ -2430,14 +2430,10 @@ pub enum LocalGuardObservation {
 /// non-zero padding and a `stride` with a non-unit step mint fresh extents
 /// under the same sentence.
 ///
-/// `stride` is still NOT admitted, and keeps the behaviour it has rather than
-/// becoming newly silent: no site existed for it before this enum and none
-/// exists after it. chelis#1379 owns the arithmetic-sized forms.
-///
 /// The admission test is whether the extent is readable BEFORE the owner
 /// runs, which is what C2.5 requires of a computed-extent observation: "An
 /// extent computed by the operation must be computed/validated before its
-/// first shape-dependent allocation/access". Both admitted owners pass it
+/// first shape-dependent allocation/access". Every admitted owner passes it
 /// from their own carriers and the operand's realized shape, and both of
 /// those are the owner's producers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2513,6 +2509,16 @@ pub enum ComputedAxisExtent {
         after: RtDim,
         operand_axis: usize,
     },
+    /// `stride`'s narrowed axis: the extent is
+    /// `ceil(operand_extent / step)` (`spec/05-risc-primitives.md` section
+    /// 2.4.1).
+    ///
+    /// The signed runtime step is retained as its exact carrier so each lane
+    /// can validate it before converting to an unsigned host extent or
+    /// performing this division. A literal step of one is an identity and
+    /// therefore never produces this variant; a runtime carrier remains
+    /// op-computed even when its realized value is one.
+    StrideSpan { step: RtDim, operand_axis: usize },
 }
 
 /// The op-computed origin a declared result axis reaches through
@@ -2599,6 +2605,14 @@ pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisE
                     operand_axis: axis,
                 })
         }
+        RiscOp::Stride { strides } => match strides.get(axis)? {
+            RtDim::Lit(0 | 1) => None,
+            RtDim::Lit(_) | RtDim::Node(_) => Some(ComputedAxisExtent::StrideSpan {
+                step: strides[axis].clone(),
+                operand_axis: axis,
+            }),
+            RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => None,
+        },
         _ => None,
     }
 }
@@ -2666,6 +2680,11 @@ pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> O
             let before = static_bound(&before, Some(extent))?;
             let after = static_bound(&after, Some(extent))?;
             extent.checked_add(before)?.checked_add(after)
+        }
+        ComputedAxisExtent::StrideSpan { step, operand_axis } => {
+            let extent = operand_extent(operand_axis)?;
+            let step = static_bound(&step, Some(extent))?;
+            (step > 0).then(|| extent.div_ceil(step))
         }
     }
 }

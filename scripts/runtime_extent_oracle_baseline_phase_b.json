@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "dcad3230409376cfc87db3c1677d661525b3f919ad4b57ebfb1638ee078873af",
+  "corpus_sha256": "d473db58dd4edc45f6eab6560e786dd8e3bdeb10ab5a1d00c38618a0785f0231",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1141,6 +1141,54 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
+    },
+    {
+      "id": "stride.nonunit_claim.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes"
+    },
+    {
+      "id": "stride.nonunit_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes"
+    },
+    {
+      "id": "stride.runtime_zero.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.runtime_zero.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes"
     }
   ]
 }
