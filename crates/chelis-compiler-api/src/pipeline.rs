@@ -190,7 +190,13 @@ impl fmt::Display for PipelineRejection {
         match self {
             Self::Cancelled { .. } => formatter.write_str(chelis_types::EVAL_CANCELLED_MSG),
             Self::Preparation(error) => write!(formatter, "{error}"),
-            Self::Type { fitness } => write!(formatter, "Type errors: {:?}", fitness.errors),
+            // [04-FIT-26]: one projected line per diagnostic, never `{:?}`.
+            Self::Type { fitness } => {
+                match crate::check_report::render_check_errors(&fitness.errors) {
+                    Ok(lines) => write!(formatter, "Type errors:\n{lines}"),
+                    Err(reason) => write!(formatter, "Type errors: {reason}"),
+                }
+            }
             Self::Effects { errors } => {
                 write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
             }

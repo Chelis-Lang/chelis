@@ -233,10 +233,10 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
          cast(4, int32)]))\n",
         "c",
-        "error: Check errors: Type errors: [CheckError { kind: PrecisionMismatch, message: \
-         \"type variable bounded by dtype family `Float` (the active float dtypes) cannot be \
-         instantiated at `int32`\", suggestions: [\"Insert explicit cast\"], severity: 0.8, \
-         expected: None, got: None, span_offset: Some(51), span_id: Some(\"surf:51..57\") }]\n",
+        // [04-FIT-26] (chelis#1853): one projected line per diagnostic.
+        "error: Check errors: Type errors:\n  PrecisionMismatch: type variable bounded by dtype \
+         family `Float` (the active float dtypes) cannot be instantiated at `int32` at byte 51 \
+         [surf:51..57] (suggestion: Insert explicit cast)\n",
     ),
     (
         "c_nonliteral_window",
