@@ -2315,8 +2315,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         defs.clone(),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
@@ -2396,8 +2396,8 @@ fn lower_named_tensor_entry_execution_with<T>(
     else {
         return Ok(None);
     };
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
@@ -14895,8 +14895,8 @@ fn cached_subexpr_lowering_context(
             .map(deep_expr_nodes)
             .sum::<usize>();
     });
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );

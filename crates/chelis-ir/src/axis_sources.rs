@@ -2255,7 +2255,8 @@ pub fn witness_entry_obligations(
         crate::dag::ExtentWitnessSite::Caller => "load",
         crate::dag::ExtentWitnessSite::LocalExpand => "expand",
         crate::dag::ExtentWitnessSite::ResultClaim { .. }
-        | crate::dag::ExtentWitnessSite::LiteralResultClaim => return None,
+        | crate::dag::ExtentWitnessSite::LiteralResultClaim
+        | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => return None,
     };
     let read_for = |id: NodeId| -> Option<ExtentRecord> {
         let observed = dag.get(id)?;
@@ -3324,6 +3325,47 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // the observation and their dependency owns the canonical value.
     for node in dag.nodes() {
         for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                                claim,
+                                axis: RtAxis::Lit(axis),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                let axis = usize::try_from(*axis).expect("verified local ascription axis");
+                let site = result_extent_sites(dag, node.id)
+                    .into_iter()
+                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
+                    .expect("verified local ascription producer");
+                let (producer, observed) = if required.0 < site.producer.0 {
+                    (site.producer, site.observation)
+                } else {
+                    (
+                        node.id,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
+                };
+                sites.push((
+                    (producer.0, axis),
+                    LocalGuardClaim {
+                        claim: claim.clone(),
+                        canonical: CanonicalExtent::Witness(*required),
+                        op: site.operation,
+                        observed,
+                    },
+                ));
+                continue;
+            }
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {

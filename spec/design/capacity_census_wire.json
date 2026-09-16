@@ -183,6 +183,15 @@
     },
     {
       "authority": "TaggedTransport",
+      "contract": "local-ascription-identity",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireExtentWitnessSite::LocalAscriptionClaim.ascription_id: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
       "contract": "fused-external-input",
       "flags": [
         "numeric-field"

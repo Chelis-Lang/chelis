@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 13 is explicitly
+WireDag JSON is an exact-version contract. Schema version 14 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 12, and every future version are decode errors before any IR
+versions 1 through 13, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -62,6 +62,22 @@ that requirement. Its normalized `RtAxis` identifies the returned axis of the
 producing operation that retains the token through `shape_deps`. The token's
 node identity identifies the declaration; equal literal values do not identify
 or discharge another declaration's obligation.
+
+Its distinct `local_ascription_claim` role is an object with mandatory
+`ascription_id`, `binding`, `claim`, and `axis` fields. The identifier preserves
+the checker-owned authored-ascription identity as an opaque artifact-local
+`u64`; it is not an extent or another numeric value. `binding` and `claim` are
+nonempty diagnostic provenance; `axis` is a normalized nonnegative
+`WireRtAxis` equal to the enclosing witness's axis. A literal local claim has
+no value inputs or shape dependencies, empty `parameter` and `claims`, and
+exactly one `NonnegativeExtent` requirement. A named local claim has one tensor
+input, no requirements or entry claims, a nonempty declaring parameter, and
+exactly one shape dependency on an earlier `caller` witness observing the
+identical tensor and axis. Exactly one producing operation owns either form
+through `shape_deps`, and that operation must support the claimed output axis.
+Missing, empty, hybrid, unknown, multiply owned, unowned, or inconsistent
+representations are encoding and decoding errors; no absent role decodes as an
+empty obligation set.
 
 The retaining operation preserves the primitive that produced the declared
 result. A cast retains its own primitive attribution and takes its input's

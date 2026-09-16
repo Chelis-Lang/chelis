@@ -6985,6 +6985,17 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                     claim: claim.clone(),
                     axis: WireRtAxis::Lit { value: *axis },
                 },
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id,
+                    binding,
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: *ascription_id,
+                    binding: binding.clone(),
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
             },
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
@@ -7285,7 +7296,10 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 13);
+        assert_eq!(
+            json["schema_version"],
+            crate::schema::WIRE_DAG_SCHEMA_VERSION
+        );
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])
@@ -7302,6 +7316,36 @@ mod tests {
         assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
         assert_eq!(json["nodes"][2]["span_id"], serde_json::Value::Null);
         let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_projection_preserves_live_local_ascription_claims() {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+             y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+             y\n\
+             }\n",
+        )
+        .unwrap();
+        let checked =
+            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
+                .unwrap();
+        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        let site = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|node| node["op"]["site"].get("local_ascription_claim"))
+            .expect("native lowering projects the local claim into WireDag");
+        assert_eq!(site["ascription_id"], 0);
+        assert_eq!(site["binding"], "y");
+        assert_eq!(site["claim"], "2");
+        assert_eq!(site["axis"], serde_json::json!({"axis": "lit", "value": 0}));
+        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+            .expect("the projected current-version artifact validates");
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
 

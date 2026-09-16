@@ -51,6 +51,258 @@
       "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
     },
     {
+      "id": "claim.local_ascription.activation_identity",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.each_inlined_activation_gets_a_distinct_one_owner_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.agreeing_literal_result.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly"
+    },
+    {
+      "id": "claim.local_ascription.agreeing_literal_result.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly"
+    },
+    {
+      "id": "claim.local_ascription.alias_liveness",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.aliasing_and_dead_value_elimination_retain_the_initializer_obligation"
+    },
+    {
+      "id": "claim.local_ascription.axis_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order"
+    },
+    {
+      "id": "claim.local_ascription.axis_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order"
+    },
+    {
+      "id": "claim.local_ascription.cache_composition",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "api_issue_2110_local_ascription_cache.stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
+    },
+    {
+      "id": "claim.local_ascription.dead.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps"
+    },
+    {
+      "id": "claim.local_ascription.dead.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps"
+    },
+    {
+      "id": "claim.local_ascription.direct.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_kernel",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.host_evaluation_kernel_carries_the_same_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.host_partition",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.staged_host_partition_retains_the_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.nondata",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_staged_partition.host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.structure",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.inferred_result.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_result.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.initializer_alias.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation"
+    },
+    {
+      "id": "claim.local_ascription.initializer_alias.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation"
+    },
+    {
+      "id": "claim.local_ascription.inlined.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.inlined.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer"
+    },
+    {
+      "id": "claim.local_ascription.named.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent"
+    },
+    {
+      "id": "claim.local_ascription.named.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent"
+    },
+    {
+      "id": "claim.local_ascription.native_malformed",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_issue_2110_local_ascription.malformed_local_claim_roles_are_rejected_by_the_native_verifier"
+    },
+    {
+      "id": "claim.local_ascription.rebuilds",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.rebuild_cse_dce_and_specialization_preserve_the_exact_site"
+    },
+    {
+      "id": "claim.local_ascription.return_alias.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer"
+    },
+    {
+      "id": "claim.local_ascription.return_alias.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer"
+    },
+    {
+      "id": "claim.local_ascription.same_shape_consumer.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim"
+    },
+    {
+      "id": "claim.local_ascription.same_shape_consumer.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim"
+    },
+    {
+      "id": "claim.local_ascription.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_static_local_disagreement_is_a_checker_error_on_every_entry_lane"
+    },
+    {
+      "id": "claim.local_ascription.vmap",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.vmap_shifts_the_local_claim_and_initializer_axis_together"
+    },
+    {
+      "id": "claim.local_ascription.wildcard.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation"
+    },
+    {
+      "id": "claim.local_ascription.wildcard.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation"
+    },
+    {
+      "id": "claim.local_ascription.wire_live_lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "wire_issue_2110_local_ascription_projection.compiler::tests::native_wire_projection_preserves_live_local_ascription_claims"
+    },
+    {
+      "id": "claim.local_ascription.wire_roundtrip",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "wire_issue_2110_local_ascription.local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
+    },
+    {
       "id": "claim.named.nested_fresh_result.c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",

@@ -524,6 +524,24 @@ class SchemaCases(unittest.TestCase):
             ):
                 self.assertIsNone(cases[prefix + name].expected, name)
 
+    def test_local_ascription_identity_is_opaque_u64_with_exact_codec_rejections(self):
+        from capacity_census_wire_envelopes import dag_cases
+
+        cases = {case.identity: case for case in dag_cases()}
+        for codec in ("json", "construct", "admit"):
+            prefix = f"WireDag/{codec}/"
+            good = cases[prefix + "local-ascription-owned"]
+            self.assertEqual(
+                good.expected["nodes"][1]["op"]["site"][
+                    "local_ascription_claim"
+                ]["ascription_id"],
+                18446744073709551615,
+            )
+            self.assertIsNone(
+                cases[prefix + "local-ascription-id-negative"].expected
+            )
+            self.assertIsNone(cases[prefix + "local-ascription-id-float"].expected)
+
 
 class ActualSchemaCodec(unittest.TestCase):
     @classmethod

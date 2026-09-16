@@ -116,6 +116,12 @@ class StructuralRoles(unittest.TestCase):
         source = "chelis_compiler_api::schema::DiagnosticSpan::Point.offset"
         self.assertEqual(by_field[source].role, "source-byte-coordinate")
         self.assertEqual(by_field[source].primitive, "u64")
+        local = (
+            "chelis_compiler_api::schema::"
+            "WireExtentWitnessSite::LocalAscriptionClaim.ascription_id"
+        )
+        self.assertEqual(by_field[local].role, "local-ascription-identity")
+        self.assertEqual(by_field[local].primitive, "u64")
         for arbitrary in (
             "chelis_compiler_api::schema::Metadata::Value.value",
             "chelis_compiler_api::schema::DiagnosticSpan::Point.value",

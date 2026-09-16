@@ -794,7 +794,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// V22 is allocated to typed callable restrictions (#2071).
 /// V23 carries exact result-claim witness roles in the lowered library.
 /// V24 retains literal-result declaration tokens in the lowered library.
-const CACHE_FORMAT_VERSION: u32 = 24;
+/// V25 retains checker-owned local tensor-ascription obligations.
+const CACHE_FORMAT_VERSION: u32 = 25;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1386,12 +1387,12 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 24);
+        assert_eq!(CACHE_FORMAT_VERSION, 25);
     }
 
     #[test]
     fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 24);
+        assert_eq!(CACHE_FORMAT_VERSION, 25);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1587,7 +1588,7 @@ mod tests {
         let unversioned = bincode::serialize(&context).expect("raw positional payload");
         let error = CompiledContext::decode(&unversioned).expect_err("no raw fallback");
         assert!(error.contains("magic"), "{error}");
-        for version in [21_u32, 22, 23, CACHE_FORMAT_VERSION + 1] {
+        for version in [21_u32, 22, 23, 24, CACHE_FORMAT_VERSION + 1] {
             let mut truncated = CACHE_MAGIC.to_vec();
             truncated.extend_from_slice(&version.to_le_bytes());
             let error = CompiledContext::decode(&truncated)

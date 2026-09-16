@@ -39,6 +39,7 @@ def f(x: tensor[*, f32]) -> tensor[*, f32] = {
     };
 
     assert_eq!(ascription.id().get(), 0);
+    assert_eq!(ascription.declaration_name(), Some("f"));
     assert_eq!(ascription.binding_name(), "y");
     assert_eq!(source_at(source, ascription.binding_span()), "y");
     assert_eq!(
@@ -247,6 +248,8 @@ def application_f(x: tensor[*, f32]) -> tensor[*, f32] = {
 
     let ascriptions = composed.local_tensor_ascriptions();
     assert_eq!(ascriptions.len(), 2);
+    assert_eq!(ascriptions[0].declaration_name(), Some("library_f"));
+    assert_eq!(ascriptions[1].declaration_name(), Some("application_f"));
     assert_eq!(ascriptions[0].binding_name(), "library_y");
     assert_eq!(ascriptions[1].binding_name(), "application_y");
     assert_ne!(

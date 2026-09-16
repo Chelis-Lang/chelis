@@ -115,6 +115,7 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 // V13: authored program signatures and checked extent carriers are mandatory.
 // V12: scalar/storage payloads use the exact dtype-tagged bit codecs;
 // the changed key rejects previous positional payloads before decode.
+// V17 retains checker-owned local tensor-ascription obligations.
 const LIBRARY_CACHE_FORMAT_VERSION: u32 =
     <LibraryContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
@@ -614,7 +615,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 16);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 17);
     }
 
     #[test]

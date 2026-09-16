@@ -346,6 +346,11 @@ pub(super) struct InferenceProduct {
     /// checked expression. Lowering consumes this checker-owned carrier at
     /// the matching `let` before aliases can erase the authored boundary.
     local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
+    /// Exact top-level declaration currently being inferred. This is source
+    /// provenance for local ascriptions, not an inferred type fact: composed
+    /// checked units may reuse the same byte offsets, so spans alone cannot
+    /// identify the declaration that authored a binding.
+    active_declaration_name: Option<String>,
 }
 
 struct InferredAdmissionContract {
@@ -535,6 +540,7 @@ impl InferenceProduct {
         self.local_tensor_ascriptions
             .push(CheckedLocalTensorAscription {
                 id: LocalAscriptionId(raw_id),
+                declaration_name: self.active_declaration_name.clone(),
                 binding_name: binding_name.to_string(),
                 binding_span,
                 ascription_span,
@@ -588,6 +594,13 @@ impl InferenceProduct {
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
+        self.active_declaration_name = stamped_parts(root)
+            .and_then(|(tag, _, children)| {
+                (tag == DeepTag::Def)
+                    .then(|| children.first().and_then(symbol_name))
+                    .flatten()
+            })
+            .map(str::to_string);
     }
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
@@ -1585,6 +1598,7 @@ impl InferenceProduct {
             ));
             return;
         };
+        self.active_declaration_name = None;
 
         for (key, requirement) in epoch.owners.into_sorted() {
             let Some(writes) = epoch.writes.get(&key) else {
@@ -2263,6 +2277,7 @@ impl LocalAscriptionAxisClaim {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedLocalTensorAscription {
     id: LocalAscriptionId,
+    declaration_name: Option<String>,
     binding_name: String,
     binding_span: Span,
     ascription_span: Span,
@@ -2275,6 +2290,10 @@ pub struct CheckedLocalTensorAscription {
 impl CheckedLocalTensorAscription {
     pub fn id(&self) -> LocalAscriptionId {
         self.id
+    }
+
+    pub fn declaration_name(&self) -> Option<&str> {
+        self.declaration_name.as_deref()
     }
 
     pub fn binding_name(&self) -> &str {
@@ -2651,6 +2670,16 @@ fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription
         if ascription.binding_name.is_empty() {
             traces.push(format!(
                 "local tensor-ascription {} has an empty binding name",
+                ascription.id.get()
+            ));
+        }
+        if ascription
+            .declaration_name
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            traces.push(format!(
+                "local tensor-ascription {} has an empty declaration name",
                 ascription.id.get()
             ));
         }

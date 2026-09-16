@@ -568,6 +568,112 @@
     },
     {
       "phase": "b",
+      "id": "ir_issue_2110_local_ascription",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        "each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        "host_evaluation_kernel_carries_the_same_local_ascription_site",
+        "inferred_metadata_does_not_create_a_local_ascription_site",
+        "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+        "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        "rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        "staged_host_partition_retains_the_local_ascription_site",
+        "vmap_shifts_the_local_claim_and_initializer_axis_together"
+      ],
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inferred metadata creates no site and malformed roles fail closed."
+    },
+    {
+      "phase": "b",
+      "id": "cli_issue_2110_local_ascription",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        "a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        "a_named_local_claim_uses_its_declaring_runtime_extent",
+        "a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        "a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
+        "a_value_dead_except_for_the_obligation_still_traps",
+        "a_wildcard_local_ascription_creates_no_extent_obligation",
+        "an_agreeing_literal_result_and_local_claim_execute_exactly",
+        "an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        "an_inferred_result_claim_does_not_replace_the_local_claim",
+        "an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        "an_inlined_callee_retains_its_local_ascription_obligation",
+        "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        "inferred_metadata_does_not_create_a_local_runtime_claim",
+        "multiple_local_axis_claims_fail_in_authored_axis_order"
+      ],
+      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/dead/consumer paths, result-claim coexistence, wildcard and inferred controls, and authored axis order."
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_2110_staged_partition",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host/staged.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts"
+      ],
+      "note": "A local-ascription claim crossing a staged host cut remains a non-data token, is rematerialized beside its sole initializer owner, and is never exported or owned by a completion root."
+    },
+    {
+      "phase": "b",
+      "id": "api_issue_2110_local_ascription_cache",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_2110_local_ascription_cache.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
+      ],
+      "note": "Stdlib and dependency cache payloads retain the checked obligation, and cached-library plus entry composition lowers it to an explicit site."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_extent_witness.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
+      ],
+      "note": "WireDag v14 requires the exact local-ascription identity; missing, hybrid, empty or unknown representations reject."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription_projection",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims"
+      ],
+      "note": "Live checker and lowering output projects its exact local-ascription role into WireDag v14 and validates on decode."
+    },
+    {
+      "phase": "b",
       "id": "exec_c",
       "package": "chelis-backend-c",
       "kind": "test",

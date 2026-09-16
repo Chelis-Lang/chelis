@@ -2728,6 +2728,20 @@ where
                 ],
             )?,
             RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } if !requirements.is_empty() => finalize_wide_int(
+                "shape",
+                out_prim,
+                vec![],
+                vec![
+                    requirements[0]
+                        .as_i64_exact()
+                        .expect("verified local ascription requirement"),
+                ],
+            )?,
+            RiscOp::ExtentWitness {
                 site,
                 parameter,
                 axis,
@@ -2738,6 +2752,7 @@ where
                     crate::dag::ExtentWitnessSite::Caller => "load",
                     crate::dag::ExtentWitnessSite::LocalExpand => "expand",
                     crate::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
                     crate::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
@@ -2745,6 +2760,7 @@ where
                 let parameter = match site {
                     crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
                     crate::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => parameter.clone(),
                     crate::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }

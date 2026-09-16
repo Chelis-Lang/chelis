@@ -1569,6 +1569,13 @@ impl CEmitter {
                 ..
             } => self.emit_const(id, &requirements[0], &node.output_type)?,
             RiscOp::ExtentWitness {
+                site: chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } if !requirements.is_empty() => {
+                self.emit_const(id, &requirements[0], &node.output_type)?
+            }
+            RiscOp::ExtentWitness {
                 site,
                 parameter,
                 axis: RtAxis::Lit(axis),
@@ -1579,6 +1586,7 @@ impl CEmitter {
                     chelis_ir::dag::ExtentWitnessSite::Caller => "load",
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
                     chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
                     chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }
@@ -1590,6 +1598,9 @@ impl CEmitter {
                     }
                     chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
                     chelis_ir::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
+                    chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                        parameter.clone()
+                    }
                     chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
                         unreachable!("literal role handled above")
                     }

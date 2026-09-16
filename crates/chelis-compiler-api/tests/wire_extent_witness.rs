@@ -215,6 +215,77 @@ fn witness_site_is_explicit_and_survives_wire_transport() {
 }
 
 #[test]
+fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields() {
+    let mut dag = fixture();
+    let WireRiscOp::ExtentWitness {
+        site,
+        requirements,
+        parameter,
+        ..
+    } = &mut dag.nodes[1].op
+    else {
+        unreachable!()
+    };
+    *site = WireExtentWitnessSite::LocalAscriptionClaim {
+        ascription_id: 7,
+        binding: "y".into(),
+        claim: "9".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    *parameter = String::new();
+    *requirements = vec![extent(9)];
+    dag.nodes[1].inputs.clear();
+    dag.nodes[2].op = WireRiscOp::Pad {
+        padding: vec![(
+            WireRtDim::Lit { value: extent(0) },
+            WireRtDim::Lit { value: extent(0) },
+        )],
+        fill: chelis_types::scalar_from_f64("pad", Prim::F32, 0.0).unwrap(),
+    };
+    dag.nodes[2].inputs = vec![0];
+    dag.nodes[2].output_type = WireTensorType {
+        dims: vec![WireDimInfo::Named {
+            name: "*".into(),
+            size: None,
+        }],
+        precision: "f32".into(),
+    };
+    dag.nodes[2].shape_deps = vec![1];
+    let json = serde_json::to_value(&dag).unwrap();
+    let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+    for field in ["ascription_id", "binding", "claim", "axis"] {
+        let mut missing = json.clone();
+        missing["nodes"][1]["op"]["site"]["local_ascription_claim"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            WireDag::from_validated_json(&missing.to_string()).is_err(),
+            "missing {field} must fail closed"
+        );
+    }
+    for (field, value) in [("binding", ""), ("claim", "")] {
+        let mut empty = json.clone();
+        empty["nodes"][1]["op"]["site"]["local_ascription_claim"][field] = value.into();
+        assert!(
+            WireDag::from_validated_json(&empty.to_string()).is_err(),
+            "empty {field} must fail closed"
+        );
+    }
+    let mut hybrid = json.clone();
+    hybrid["nodes"][1]["inputs"] = serde_json::json!([0]);
+    assert!(
+        WireDag::from_validated_json(&hybrid.to_string()).is_err(),
+        "literal and observed representations must not be combined"
+    );
+    let mut unknown = json;
+    unknown["nodes"][1]["op"]["site"] = serde_json::json!("local_claim");
+    assert!(WireDag::from_validated_json(&unknown.to_string()).is_err());
+}
+
+#[test]
 fn wire_dag_v8_rejects_before_witness_body_decode() {
     let legacy_with_malformed_body = r#"{
         "schema_version": 8,
