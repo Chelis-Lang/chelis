@@ -60,6 +60,24 @@ reason = "the representation gate checks the reviewed foundation and executes it
 tracking_issue = "chelis#893"
 
 [[path_rule]]
+prefix = "scripts/runtime_representation_phase1.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 2 representation gate executes this Phase 1 selection, receipt, and native-control driver"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_phase1.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 1 selection and receipt unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
 prefix = "spec/design/runtime_representation_phase0_inventory.json"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
@@ -67,6 +85,33 @@ job = "runtime-representation-phase0-oracle"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "the representation gate compares the live inventory with this reviewed foundation"
 tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase1_tests.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 2 representation gate validates and executes this frozen Phase 1 test selection"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_unrepresentable_domain_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the domain-oracle fixture, roster, and rejection unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#908"
+
+[[path_rule]]
+prefix = "scripts/unrepresentable_domain_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the domain integration-support slice executes every compiled unrepresentable-domain oracle obligation"
+tracking_issue = "chelis#908"
 
 [[path_rule]]
 prefix = "examples/grad_extent_claim.ch"
