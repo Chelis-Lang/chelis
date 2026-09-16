@@ -19,9 +19,10 @@ PR_ONLY_JOB_IF = {
         "needs.changes.outputs.candidate_preflight == 'success' && "
         "(needs.changes.result != 'success' || "
         "needs.changes.outputs.rebase_lane == 'full' || "
-        "(needs.changes.outputs.rebase_lane != 'docs' && "
-        "(needs.changes.outputs.rebase_lane == 'targeted' || "
-        "needs.changes.outputs.docs_only != 'true'))) }}"
+        "(needs.changes.outputs.rebase_lane == 'targeted' && "
+        "needs.changes.outputs.rebase_run_integration == 'true') || "
+        "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+        "needs.changes.outputs.docs_only != 'true')) }}"
     ),
     "change-owned-shard": (
         "${{ !cancelled() && github.event_name != 'push' && "
@@ -31,9 +32,10 @@ PR_ONLY_JOB_IF = {
         "${{ always() && github.event_name != 'push' && "
         "(needs.changes.result != 'success' || "
         "needs.changes.outputs.rebase_lane == 'full' || "
-        "(needs.changes.outputs.rebase_lane != 'docs' && "
-        "(needs.changes.outputs.rebase_lane == 'targeted' || "
-        "needs.changes.outputs.docs_only != 'true'))) }}"
+        "(needs.changes.outputs.rebase_lane == 'targeted' && "
+        "needs.changes.outputs.rebase_run_integration == 'true') || "
+        "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+        "needs.changes.outputs.docs_only != 'true')) }}"
     ),
 }
 
@@ -121,6 +123,7 @@ def assert_change_owned_topology(
     test.assertEqual(planner["timeout-minutes"], 10)
     test.assertFalse(planner.get("continue-on-error", False))
     test.assertIn("needs.changes.outputs.docs_only != 'true'", planner["if"])
+    test.assertIn("rebase_run_integration == 'true'", planner["if"])
     test.assertIn("needs.changes.result != 'success'", planner["if"])
     _assert_pr_only_job(test, "integration-plan", planner)
     checkout = next(
@@ -133,6 +136,8 @@ def assert_change_owned_topology(
     test.assertIn("targeted_rebase", _run_steps(planner))
     test.assertIn("REBASE_LANE", _run_steps(planner))
     test.assertIn("REBASE_BEFORE", _run_steps(planner))
+    test.assertIn("REBASE_PACKAGES", _run_steps(planner))
+    test.assertIn("--targeted-packages", _run_steps(planner))
     test.assertIn("integration-change-plan", str(planner))
     test.assertIn("target/integration-change/plan.json", str(planner))
 
@@ -223,12 +228,22 @@ def assert_change_owned_topology(
     )
     test.assertEqual(
         targeted_step.get("if"),
-        "needs.changes.outputs.rebase_lane == 'targeted'",
+        "needs.changes.outputs.rebase_lane == 'targeted' && "
+        "needs.changes.outputs.rebase_run_integration == 'true'",
     )
     test.assertNotIn("ci-fast=", targeted_step["run"])
     test.assertIn(
         "change-owned-report=${{ needs.change-owned-report.result }}",
         targeted_step["run"],
+    )
+    owner_only_step = next(
+        step
+        for step in stable["steps"]
+        if step.get("name")
+        == "Preserve integration context for an owner-only rebase"
+    )
+    test.assertIn(
+        "rebase_run_integration != 'true'", owner_only_step.get("if")
     )
     test.assertNotIn("package-expansion", str(stable))
 

@@ -69,6 +69,14 @@ jobs:
       rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
       rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
       rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
+      rebase_run_rust: ${{ steps.rebase-reuse.outputs.rebase_run_rust }}
+      rebase_run_script_unit: ${{ steps.rebase-reuse.outputs.rebase_run_script_unit }}
+      rebase_run_integration: ${{ steps.rebase-reuse.outputs.rebase_run_integration }}
+      rebase_run_smt: ${{ steps.rebase-reuse.outputs.rebase_run_smt }}
+      rebase_run_backend: ${{ steps.rebase-reuse.outputs.rebase_run_backend }}
+      rebase_run_diagnostic: ${{ steps.rebase-reuse.outputs.rebase_run_diagnostic }}
+      rebase_run_hull: ${{ steps.rebase-reuse.outputs.rebase_run_hull }}
+      rebase_packages: ${{ steps.rebase-reuse.outputs.rebase_packages }}
     steps:
       - name: Checkout trusted retarget validator
         if: github.event_name == 'workflow_dispatch'
@@ -225,17 +233,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         working-directory: candidate
         run: |
+          record_frontier_defaults() {
+            echo "rebase_packages=" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_rust=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_script_unit=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_integration=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_smt=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_backend=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_diagnostic=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_hull=false" >> "$GITHUB_OUTPUT"
+          }
           record_full() {
             echo "rebase_lane=full" >> "$GITHUB_OUTPUT"
             echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
           }
           record_ordinary() {
             echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
             echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
           }
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             record_full "trusted exact-candidate dispatch"
@@ -372,7 +392,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_diagnostic == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.diagnostic_kind_changed != 'false')) }}
     permissions:
       contents: read
     env:
@@ -412,7 +432,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_rust == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -448,7 +468,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install cargo-nextest for targeted Rust units
-        if: needs.changes.outputs.rebase_lane == 'targeted'
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
         uses: taiki-e/install-action@nextest
 
       # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` so the
@@ -488,10 +508,13 @@ jobs:
       # and fails if any gate step is not produced by gate.py. See
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
+        if: needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''
         run: python3 scripts/gate.py lint-and-unit
 
-      - name: Run Rust units for targeted rebase
-        if: needs.changes.outputs.rebase_lane == 'targeted'
+      - name: Run affected Rust policy and units for targeted rebase
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
+        env:
+          CHELIS_TARGETED_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
         run: python3 scripts/gate.py targeted-units
 
   script-unit:
@@ -499,7 +522,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     permissions:
       contents: read
     steps:
@@ -560,8 +583,24 @@ jobs:
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      - name: Require every lint and unit worker
-        run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
+      - name: Require the selected lint and unit frontier
+        env:
+          REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
+          RUN_RUST: ${{ needs.changes.outputs.rebase_run_rust }}
+          RUN_SCRIPT_UNIT: ${{ needs.changes.outputs.rebase_run_script_unit }}
+        run: |
+          args=()
+          if [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_RUST" = "true" ]; then
+            args+=("lint-rust=${{ needs.lint-rust.result }}")
+          fi
+          if [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_SCRIPT_UNIT" = "true" ]; then
+            args+=("script-unit=${{ needs.script-unit.result }}")
+          fi
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "trusted rebase selected no lint or unit owner"
+          else
+            python3 scripts/ci_require_success.py "${args[@]}"
+          fi
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
@@ -585,7 +624,7 @@ jobs:
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_smt == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # cvc5 builds from source into target/ on top of the workspace build —
     # the heaviest disk consumer of any Linux job — so it gets both the
     # free-disk reclaim and the debuginfo strip (chelis#392). It was the
@@ -744,7 +783,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_smt == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # The immutable digest supplies Python, git, curl, and CA certificates
     # before checkout while retaining Debian 11's glibc 2.31. After checkout,
     # ci_apt_get replaces its moving mirrors with the repository-pinned
@@ -915,7 +954,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -940,6 +979,7 @@ jobs:
           AFTER: ${{ needs.changes.outputs.candidate_sha }}
           REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
           REBASE_BEFORE: ${{ needs.changes.outputs.rebase_before }}
+          REBASE_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
         run: |
           event_name="$EVENT_NAME"
           before="$BEFORE"
@@ -952,6 +992,7 @@ jobs:
             --pr-head "$PR_HEAD" \
             --before "$before" \
             --after "$AFTER" \
+            --targeted-packages "$REBASE_PACKAGES" \
             --output target/integration-change/plan.json
 
       - name: Upload integration change plan
@@ -1067,7 +1108,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, ci-fast, integration-plan, change-owned-shard]
-    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1173,10 +1214,14 @@ jobs:
           change-owned-report=${{ needs.change-owned-report.result }}
 
       - name: Require targeted rebase integration
-        if: needs.changes.outputs.rebase_lane == 'targeted'
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true'
         run: >-
           python3 scripts/ci_require_success.py
           change-owned-report=${{ needs.change-owned-report.result }}
+
+      - name: Preserve integration context for an owner-only rebase
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'
+        run: echo "trusted rebase selected no package integration frontier"
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
@@ -1227,7 +1272,7 @@ jobs:
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_backend == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1

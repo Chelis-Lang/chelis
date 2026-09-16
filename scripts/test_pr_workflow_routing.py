@@ -132,6 +132,17 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("rebase_lane", changes["outputs"])
     test.assertIn("rebase_before", changes["outputs"])
     test.assertIn("rebase_contract_changed", changes["outputs"])
+    for output in (
+        "rebase_packages",
+        "rebase_run_rust",
+        "rebase_run_script_unit",
+        "rebase_run_integration",
+        "rebase_run_smt",
+        "rebase_run_backend",
+        "rebase_run_diagnostic",
+        "rebase_run_hull",
+    ):
+        test.assertIn(output, changes["outputs"])
     test.assertEqual(
         changes["outputs"]["ci_contract_changed"],
         "${{ steps.candidate-preflight.outputs.ci_contract_changed }}",
@@ -305,15 +316,15 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         "needs.changes.outputs.rebase_lane == 'ordinary'",
         workflow["jobs"]["ci-fast"]["if"],
     )
-    for job_id in ("lint-rust", "script-unit"):
-        test.assertIn(
-            "needs.changes.outputs.rebase_lane != 'docs'",
-            workflow["jobs"][job_id]["if"],
-        )
+    for job_id, flag in (
+        ("lint-rust", "rebase_run_rust"),
+        ("script-unit", "rebase_run_script_unit"),
+    ):
         test.assertIn(
             "needs.changes.outputs.rebase_lane == 'targeted'",
             workflow["jobs"][job_id]["if"],
         )
+        test.assertIn(flag, workflow["jobs"][job_id]["if"])
     rust_policy = workflow["jobs"]["lint-rust"]
     nextest = next(
         step
@@ -322,42 +333,61 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     )
     test.assertEqual(
         nextest["if"],
-        "needs.changes.outputs.rebase_lane == 'targeted'",
+        "needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''",
+    )
+    full_owner = next(
+        step
+        for step in rust_policy["steps"]
+        if step.get("name") == "Gate (lint-and-unit subset)"
+    )
+    test.assertEqual(
+        full_owner["if"],
+        "needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''",
+    )
+    test.assertEqual(
+        full_owner["run"],
+        "python3 scripts/gate.py lint-and-unit",
     )
     targeted_units = next(
         step
         for step in rust_policy["steps"]
-        if step.get("name") == "Run Rust units for targeted rebase"
+        if step.get("name")
+        == "Run affected Rust policy and units for targeted rebase"
     )
     test.assertEqual(
         targeted_units["if"],
-        "needs.changes.outputs.rebase_lane == 'targeted'",
+        "needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''",
     )
     test.assertEqual(
         targeted_units["run"],
         "python3 scripts/gate.py targeted-units",
     )
+    test.assertEqual(
+        targeted_units["env"]["CHELIS_TARGETED_PACKAGES"],
+        "${{ needs.changes.outputs.rebase_packages }}",
+    )
     test.assertFalse(targeted_units.get("continue-on-error", False))
-    for job_id in (
-        "diagnostic-kind-oracle",
-        "backend-sanitizers",
-        "smt-build",
-        "smt-build-glibc231",
+    for job_id, flag in (
+        ("diagnostic-kind-oracle", "rebase_run_diagnostic"),
+        ("backend-sanitizers", "rebase_run_backend"),
+        ("smt-build", "rebase_run_smt"),
+        ("smt-build-glibc231", "rebase_run_smt"),
     ):
-        test.assertIn(
-            "needs.changes.outputs.rebase_lane != 'docs'",
-            workflow["jobs"][job_id]["if"],
-        )
+        test.assertIn(flag, workflow["jobs"][job_id]["if"])
     lint_summary = workflow["jobs"]["lint-and-unit"]
-    test.assertIn("needs.changes.outputs.rebase_lane != 'docs'", lint_summary["if"])
+    test.assertIn(
+        "needs.changes.outputs.rebase_lane == 'targeted'", lint_summary["if"]
+    )
     lint_gate = next(
         step
         for step in lint_summary["steps"]
-        if step.get("name") == "Require every lint and unit worker"
+        if step.get("name") == "Require the selected lint and unit frontier"
     )
     test.assertNotIn("if", lint_gate)
     test.assertIn("lint-rust=", lint_gate["run"])
     test.assertIn("script-unit=", lint_gate["run"])
+    test.assertIn("RUN_RUST", lint_gate["env"])
+    test.assertIn("RUN_SCRIPT_UNIT", lint_gate["env"])
 
     for job_id, required_name in REQUIRED_IMPLEMENTATION_JOBS.items():
         job = workflow["jobs"][job_id]
@@ -439,6 +469,8 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
     test.assertIn("rebase_lane", changes["outputs"])
     test.assertIn("rebase_before", changes["outputs"])
     test.assertIn("rebase_contract_changed", changes["outputs"])
+    test.assertIn("rebase_run_hull", changes["outputs"])
+    test.assertIn("rebase_packages", changes["outputs"])
     test.assertEqual(
         changes["permissions"],
         {
@@ -532,9 +564,10 @@ def assert_hull_retarget_dispatch(test: unittest.TestCase, workflow: dict) -> No
         "(needs.changes.outputs.candidate_preflight != 'success' || "
         "needs.changes.result != 'success' || "
         "needs.changes.outputs.rebase_lane == 'full' || "
-        "(needs.changes.outputs.rebase_lane != 'docs' && "
-        "(needs.changes.outputs.rebase_lane == 'targeted' || "
-        "needs.changes.outputs.docs_only != 'true'))) }}",
+        "(needs.changes.outputs.rebase_lane == 'targeted' && "
+        "needs.changes.outputs.rebase_run_hull == 'true') || "
+        "(needs.changes.outputs.rebase_lane == 'ordinary' && "
+        "needs.changes.outputs.docs_only != 'true')) }}",
     )
     preflight = conformance["steps"][0]
     test.assertEqual(

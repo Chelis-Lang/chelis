@@ -77,6 +77,14 @@ jobs:
       rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
       rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
       rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
+      rebase_run_rust: ${{ steps.rebase-reuse.outputs.rebase_run_rust }}
+      rebase_run_script_unit: ${{ steps.rebase-reuse.outputs.rebase_run_script_unit }}
+      rebase_run_integration: ${{ steps.rebase-reuse.outputs.rebase_run_integration }}
+      rebase_run_smt: ${{ steps.rebase-reuse.outputs.rebase_run_smt }}
+      rebase_run_backend: ${{ steps.rebase-reuse.outputs.rebase_run_backend }}
+      rebase_run_diagnostic: ${{ steps.rebase-reuse.outputs.rebase_run_diagnostic }}
+      rebase_run_hull: ${{ steps.rebase-reuse.outputs.rebase_run_hull }}
+      rebase_packages: ${{ steps.rebase-reuse.outputs.rebase_packages }}
     steps:
       - name: Checkout trusted retarget validator
         if: github.event_name == 'workflow_dispatch'
@@ -227,17 +235,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         working-directory: candidate
         run: |
+          record_frontier_defaults() {
+            echo "rebase_packages=" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_rust=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_script_unit=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_integration=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_smt=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_backend=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_diagnostic=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_hull=false" >> "$GITHUB_OUTPUT"
+          }
           record_full() {
             echo "rebase_lane=full" >> "$GITHUB_OUTPUT"
             echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
           }
           record_ordinary() {
             echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
             echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
             echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
             echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
           }
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             record_full "trusted exact-candidate dispatch"
@@ -373,7 +393,7 @@ jobs:
     # success, and the `if` fails safe (runs when the changes job did not
     # succeed) so a broken detector never skips the gate on a code PR.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
+    if: ${{ !cancelled() && (needs.changes.outputs.candidate_preflight != 'success' || needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

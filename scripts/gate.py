@@ -370,6 +370,7 @@ NEXTEST_TARGETED_UNITS: list[str] = [
     "--ignore-default-filter",
     "--no-fail-fast",
 ]
+TARGETED_PACKAGES_ENV = "CHELIS_TARGETED_PACKAGES"
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
 # a compile-fail contract needs an explicit rustdoc command. The current
 # gate covers the type-system and compiler-pipeline contracts. The
@@ -395,6 +396,12 @@ DOCTEST_PIPELINE_CORE: list[str] = [
     "chelis-pipeline-core",
     "--doc",
 ]
+TARGETED_DOCTESTS: dict[str, list[str]] = {
+    "chelis-types": DOCTEST_TYPES,
+    "chelis-ir": DOCTEST_IR,
+    "chelis-compiler-api": DOCTEST_COMPILER_API,
+    "chelis-pipeline-core": DOCTEST_PIPELINE_CORE,
+}
 # This script verifies the exact compiler diagnostic from the standalone
 # raw-offset fixture. The marker is replaced with the same validated managed
 # interpreter exported to child commands as PYO3_PYTHON.
@@ -2773,9 +2780,56 @@ def selected_stage_commands(
     support_only: bool,
     partition: str | None,
     support_slice: str | None = None,
+    environ: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Return one CI stage slice without duplicating canonical commands."""
     commands = STAGES[stage]
+    if stage == "targeted-units":
+        raw = (environ or {}).get(TARGETED_PACKAGES_ENV, "")
+        if not raw:
+            raise ValueError(
+                f"{TARGETED_PACKAGES_ENV} must name the exact package frontier"
+            )
+        packages = raw.split(",")
+        if any(
+            not package
+            or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", package) is None
+            for package in packages
+        ):
+            raise ValueError(
+                f"{TARGETED_PACKAGES_ENV} must be comma-separated Cargo package names"
+            )
+        if len(packages) != len(set(packages)):
+            raise ValueError(f"{TARGETED_PACKAGES_ENV} contains duplicates")
+        if packages:
+            package_args = [
+                argument
+                for package in packages
+                for argument in ("-p", package)
+            ]
+            targeted_clippy = [
+                "cargo",
+                "clippy",
+                *package_args,
+                "--lib",
+                "--bins",
+                "--tests",
+                "--",
+                "-D",
+                "warnings",
+            ]
+            targeted_units = [
+                part
+                for part in NEXTEST_TARGETED_UNITS
+                if part != "--workspace"
+            ]
+            targeted_units[3:3] = package_args
+            commands = [FMT_CHECK, targeted_clippy, targeted_units]
+            commands.extend(
+                TARGETED_DOCTESTS[package]
+                for package in packages
+                if package in TARGETED_DOCTESTS
+            )
     if tests_only:
         selected = [list(commands[0])]
     elif support_only:
@@ -3141,6 +3195,7 @@ def main(
                 support_only=args.support_only,
                 partition=args.partition,
                 support_slice=args.support_slice,
+                environ=environment_in,
             )
             exit_code = run_commands(
                 commands,

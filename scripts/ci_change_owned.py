@@ -72,6 +72,14 @@ STANDING_EXECUTION = {
     "no_fail_fast": True,
 }
 TARGETED_REBASE_REUSED_OWNER_JOBS = frozenset({("ci.yml", "ci-fast")})
+TARGETED_REBASE_SUPPORTED_OWNER_JOBS = frozenset(
+    {
+        ("ci.yml", "docs"),
+        ("ci.yml", "lint-rust"),
+        ("ci.yml", "script-unit"),
+        ("conformance.yml", "conformance"),
+    }
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -469,6 +477,132 @@ def package_infos(metadata: Mapping[str, Any]) -> tuple[PackageInfo, ...]:
     return tuple(sorted(result, key=lambda item: item.name))
 
 
+def workspace_reverse_dependency_closure(
+    metadata: Mapping[str, Any], seeds: Iterable[str]
+) -> set[str]:
+    """Include every workspace package whose build can consume a seed package."""
+    packages = _workspace_packages(metadata)
+    names = {package["name"] for package in packages}
+    closure = set(seeds)
+    unknown = sorted(closure - names)
+    if unknown:
+        raise ValueError(f"unknown workspace package seeds: {unknown}")
+    dependencies: dict[str, set[str]] = {}
+    for package in packages:
+        rows = package.get("dependencies", [])
+        if not isinstance(rows, list):
+            raise ValueError(
+                f"malformed dependency list for {package.get('name')}"
+            )
+        direct: set[str] = set()
+        for dependency in rows:
+            if not isinstance(dependency, Mapping):
+                raise ValueError(
+                    f"malformed dependency row for {package.get('name')}"
+                )
+            name = dependency.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"malformed dependency name for {package.get('name')}"
+                )
+            if name in names:
+                direct.add(name)
+        dependencies[package["name"]] = direct
+    changed = True
+    while changed:
+        changed = False
+        for package, direct in dependencies.items():
+            if package not in closure and direct & closure:
+                closure.add(package)
+                changed = True
+    return closure
+
+
+def targeted_rebase_frontier(
+    paths: Sequence[str],
+    *,
+    base_metadata: Mapping[str, Any],
+    candidate_metadata: Mapping[str, Any],
+    config: Config,
+) -> dict[str, object]:
+    """Classify the exact synthetic-candidate delta into executable owners."""
+    base_targets = all_integration_targets(base_metadata)
+    candidate_targets = all_integration_targets(candidate_metadata)
+    base_packages = package_infos(base_metadata)
+    candidate_packages = package_infos(candidate_metadata)
+    candidate_names = {package.name for package in candidate_packages}
+    seeds: set[str] = set()
+    owner_jobs: set[tuple[str, str]] = set()
+    unsafe_paths: set[str] = set()
+
+    for path in paths:
+        targets = {
+            identity
+            for identity in (
+                *_target_at_path(path, base_targets),
+                *_target_at_path(path, candidate_targets),
+            )
+        }
+        if len(targets) > 1:
+            unsafe_paths.add(path)
+            continue
+        if targets:
+            if any(identity in config.target_exclusions for identity in targets):
+                unsafe_paths.add(path)
+                continue
+            package = next(iter(targets)).package
+            if package not in candidate_names:
+                unsafe_paths.add(path)
+            else:
+                seeds.add(package)
+            continue
+
+        classification, package_matches, matching_rules = static_path_classification(
+            path, (*base_packages, *candidate_packages), config
+        )
+        if classification == "package":
+            package = package_matches[0]
+            if package not in candidate_names:
+                unsafe_paths.add(path)
+            else:
+                seeds.add(package)
+            continue
+        if classification == "docs":
+            continue
+        if classification != "rule":
+            unsafe_paths.add(path)
+            continue
+        rule = matching_rules[0]
+        if rule.disposition == "packages":
+            if not set(rule.packages) <= candidate_names:
+                unsafe_paths.add(path)
+            else:
+                seeds.update(rule.packages)
+            continue
+        if rule.owner is None:
+            unsafe_paths.add(path)
+            continue
+        owner = (rule.owner.workflow, rule.owner.job)
+        if owner not in TARGETED_REBASE_SUPPORTED_OWNER_JOBS:
+            unsafe_paths.add(path)
+            continue
+        owner_jobs.add(owner)
+
+    packages = (
+        workspace_reverse_dependency_closure(candidate_metadata, seeds)
+        if seeds
+        else set()
+    )
+    return {
+        "packages": sorted(packages),
+        "owner_jobs": [
+            {"workflow": workflow, "job": job}
+            for workflow, job in sorted(owner_jobs)
+        ],
+        "unsafe_paths": sorted(unsafe_paths),
+    }
+
+
 def test_functions(source: str) -> set[str]:
     return set(TEST_FUNCTION.findall(source))
 
@@ -748,6 +882,7 @@ def make_plan(
     source_reader: Callable[[str], str],
     event_pr_head: str | None = None,
     base_tracked_paths: set[str] | None = None,
+    targeted_packages: Sequence[str] = (),
 ) -> dict[str, Any]:
     if mode not in {"pull_request", "push", "targeted_rebase"}:
         raise ValueError(f"unsupported planning mode: {mode}")
@@ -765,7 +900,25 @@ def make_plan(
     candidate_packages = package_infos(candidate_metadata)
     candidate_package_names = {package.name for package in candidate_packages}
 
-    selected_packages: set[str] = set()
+    trusted_targeted_packages = set(targeted_packages)
+    if len(trusted_targeted_packages) != len(targeted_packages):
+        raise ValueError("targeted package frontier contains duplicates")
+    if any(not IDENTIFIER.fullmatch(package) for package in targeted_packages):
+        raise ValueError("targeted package frontier contains an invalid package")
+    if mode != "targeted_rebase" and trusted_targeted_packages:
+        raise ValueError(
+            "only targeted_rebase planning accepts a targeted package frontier"
+        )
+    unknown_targeted_packages = sorted(
+        trusted_targeted_packages - candidate_package_names
+    )
+    if unknown_targeted_packages:
+        raise ValueError(
+            "targeted package frontier contains unknown workspace packages: "
+            f"{unknown_targeted_packages}"
+        )
+
+    selected_packages: set[str] = set(trusted_targeted_packages)
     change_owned: set[Identity] = set()
     dispositions: list[dict[str, Any]] = []
     target_dispositions: list[dict[str, Any]] = []
@@ -938,6 +1091,16 @@ def make_plan(
     if change_owned & expansion:
         raise ValueError("change-owned and package-expansion selections overlap")
     if mode == "targeted_rebase":
+        selected_packages = workspace_reverse_dependency_closure(
+            candidate_metadata, selected_packages
+        )
+        expansion = {
+            identity
+            for identity in candidate_eligible
+            if identity.package in selected_packages
+            and identity not in change_owned
+            and identity not in config.target_exclusions
+        }
         change_owned |= expansion
         expansion = set()
         standing_coverage_reuse: set[Identity] = set()
@@ -1587,6 +1750,7 @@ def generate_plan(
     before: str,
     after: str,
     config_path: Path,
+    targeted_packages: Sequence[str] = (),
 ) -> dict[str, Any]:
     head = _commit(repo, "HEAD")
     if event_name == "pull_request":
@@ -1597,9 +1761,10 @@ def generate_plan(
         mode = "pull_request"
         event_pr_head: str | None = pr_head
     elif event_name == "targeted_rebase":
-        if not pr_head or not before:
+        if not pr_head or not before or not targeted_packages:
             raise ValueError(
-                "targeted_rebase planning requires --pr-head and --before"
+                "targeted_rebase planning requires --pr-head, --before, "
+                "and --targeted-packages"
             )
         pr_head = _commit(repo, pr_head)
         _, candidate = resolve_pr_commits(repo, head, pr_head)
@@ -1618,6 +1783,10 @@ def generate_plan(
         event_pr_head = None
     else:
         raise ValueError(f"unsupported --event-name: {event_name!r}")
+    if mode != "targeted_rebase" and targeted_packages:
+        raise ValueError(
+            "--targeted-packages is valid only for targeted_rebase planning"
+        )
 
     config = read_config(config_path)
     base_metadata = metadata_at(repo, base)
@@ -1637,6 +1806,7 @@ def generate_plan(
         tracked_paths=tracked,
         base_tracked_paths=base_tracked,
         source_reader=lambda path: source_at(repo, candidate, path),
+        targeted_packages=targeted_packages,
     )
 
 
@@ -2605,6 +2775,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--pr-head", default="")
     plan.add_argument("--before", default="")
     plan.add_argument("--after", default="")
+    plan.add_argument(
+        "--targeted-packages",
+        default="",
+        help="trusted comma-separated package frontier for targeted_rebase",
+    )
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument(
         "--config",
@@ -2641,12 +2816,18 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--standing-coverage", type=Path)
     report.add_argument("--output", type=Path, required=True)
     report.add_argument("--required", action="store_true")
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "plan":
+        targeted_packages = (
+            tuple(args.targeted_packages.split(","))
+            if args.targeted_packages
+            else ()
+        )
         result = generate_plan(
             ROOT,
             event_name=args.event_name,
@@ -2654,6 +2835,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             before=args.before,
             after=args.after,
             config_path=args.config,
+            targeted_packages=targeted_packages,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(canonical_json(result))
@@ -2688,7 +2870,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         disposition = "EMPTY" if receipt is not None else "SELECTED"
         print(f"{args.lane.upper()} SHARD {args.shard}: {disposition}")
         return 0
-
     if args.lane == "change-owned" and not args.required:
         raise ValueError("change-owned report requires --required")
     if args.lane == "package-expansion" and args.required:
