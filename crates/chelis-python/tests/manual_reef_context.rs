@@ -38,7 +38,7 @@
 //!
 //! NOTE (Shoals — chelis#825): the plan's original acceptance imported
 //! `Shoals.Pricing` (Black-Scholes → 10.4506). On this branch the post-0.16.1
-//! compiler tightened the `with seed(...)` int64 rule, which the published
+//! compiler tightened the `with seed(...)` i64 rule, which the published
 //! Shoals 0.23.1 dependency graph (built for the `=0.16.1` toolchain) trips
 //! during library-context compilation — reproducible with the branch's own CLI
 //! (`chelis eval --file`), independent of these bindings. Tracked as chelis#825

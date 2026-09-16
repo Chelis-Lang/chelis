@@ -54,6 +54,8 @@ class ContractTests(unittest.TestCase):
             "issue_1948_same_shape_result_claim",
             "issue_1948_same_shape_result_claim_sources",
             "issue_1537_ingress_pass_set_parity",
+            "issue_1853_build_check_diagnostics",
+            "unresolved_operand_census",
             "tests.conformance.hull.test_corpus_integrity",
             "tests.conformance.hull.test_wire_canonical",
             "execution_wire_v3",

@@ -53,6 +53,8 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "issue_1537_ingress_pass_set_parity",
         "--test",
         "issue_1592_integer_dtype_spelling",
+        "--test",
+        "unresolved_operand_census",
         "--no-fail-fast",
     ),
     (
@@ -65,6 +67,8 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "issue_1587_short_integer_alias",
         "--test",
         "issue_1592_integer_dtype_spelling",
+        "--test",
+        "issue_1853_build_check_diagnostics",
         "--test",
         "issue_1948_same_shape_result_claim",
         "--no-fail-fast",
@@ -313,6 +317,54 @@ def boundary_contract_errors() -> list[str]:
         _forbid(
             "tests/conformance/hull/known_conservative.json",
             ("(t-prim {} int8)", "(t-prim {} int16)", "(t-prim {} int32)", "(t-prim {} int64)"),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "crates/chelis-cli/tests/issue_1853_build_check_diagnostics.rs",
+            ("def f() -> int32", "def g() -> int32"),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "crates/chelis-compiler-api/src/schema.rs",
+            ("(`f32`, `int64`, `bool`, ...)",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "crates/chelis-types/tests/fixtures/unresolved_operand_census.json",
+            ("unifies the slot with int64",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "grammars/tree-sitter-chelis-surf/src/scanner.cc",
+            ("`int64::max`",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "bindings/python/tests/manual_reef_context.py",
+            ("`with seed(...)` int64 rule",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "crates/chelis-python/tests/manual_reef_context.rs",
+            ("`with seed(...)` int64 rule",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "docs/gap_synthesis.md",
+            ("signed `int32` / `int64`",),
+        )
+    )
+    errors.extend(
+        _forbid(
+            "spec/design/remediation_roadmap.md",
+            ("`JsonInt(int64)`", "`cast(3.5, int32)`"),
         )
     )
     return errors

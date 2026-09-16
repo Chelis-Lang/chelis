@@ -1167,7 +1167,7 @@ impl<'de> Deserialize<'de> for OrderedInferredParameters {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireInferredType {
-    /// `Type::Prim` — a scalar primitive (`f32`, `int64`, `bool`, ...).
+    /// `Type::Prim` — a scalar primitive (`f32`, `i64`, `bool`, ...).
     /// `name` is the canonical `Prim::name()` spelling.
     Prim { name: String },
     /// `Type::Fn` — function type. `args` are the parameter types in
