@@ -435,7 +435,6 @@ class SchemaTests(unittest.TestCase):
                 "heavy-e2e.yml",
                 "faithful-observation-phase2-oracle",
             ),
-            "scripts/unrepresentable_domain_oracle.py": ("ci.yml", "integration"),
             "tests/conformance/hull/programs/": (
                 "conformance.yml",
                 "conformance",

@@ -912,15 +912,6 @@ reason = "the standing faithful observation job executes the complete Phase 2 or
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
-prefix = "scripts/unrepresentable_domain_oracle.py"
-disposition = "owner"
-workflow = "ci.yml"
-job = "integration"
-cadence = "pull_request and push"
-reason = "the required integration gate executes the behavioral unrepresentable-domain oracle"
-tracking_issue = "chelis#1592"
-
-[[path_rule]]
 prefix = "spec/05-risc-primitives.md"
 disposition = "packages"
 packages = ["chelis-cli"]
