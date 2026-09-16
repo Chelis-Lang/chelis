@@ -481,6 +481,7 @@
         "issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
         "issue_1931_positive_stride_controls_execute_exactly_on_both_lanes",
         "issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",
+        "issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
         "issue_597_positional_same_rank_replacement_executes_on_c",
         "issue_665_expand_over_stride_builds_and_runs",
         "literal_parameter_obligations_keep_the_existing_helper_order",

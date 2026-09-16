@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "d473db58dd4edc45f6eab6560e786dd8e3bdeb10ab5a1d00c38618a0785f0231",
+  "corpus_sha256": "787a384b599e9d784ab2b0b4feb53f9b1e2e8d659cd0db179a2c1513d7b64c71",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -637,6 +637,54 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_nonzero.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_nonzero.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_zero.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_zero.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted_reordered.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted_reordered.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
     },
     {
       "id": "grad.wrt_aggregate.multi.dead_forward.c",

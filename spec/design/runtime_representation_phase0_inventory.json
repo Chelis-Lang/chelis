@@ -2830,7 +2830,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
-      "sample": "input . output_type . dims . len () . saturating_sub (1)"
+      "sample": "count . checked_mul (extent)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",

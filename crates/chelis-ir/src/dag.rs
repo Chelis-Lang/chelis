@@ -1760,6 +1760,42 @@ impl Dag {
         }
     }
 
+    /// Strict splice/rebuild variant of [`Self::preserve_shape_deps`].
+    ///
+    /// A pass that promises a complete node correspondence must not inherit
+    /// the permissive DCE behavior above: silently filtering one live
+    /// shape-only edge can turn a rejected runtime extent into an undeclared
+    /// rendered identifier. The destination is updated only after every
+    /// source dependency has a valid remapped node.
+    pub fn preserve_shape_deps_strict(
+        &mut self,
+        new_id: NodeId,
+        source_deps: &[NodeId],
+        remap: &UnordMap<NodeId, NodeId>,
+    ) -> Result<(), String> {
+        let mut mapped = Vec::with_capacity(source_deps.len());
+        for old in source_deps {
+            let Some(new) = remap.get(old).copied() else {
+                return Err(format!(
+                    "shape dependency {old:?} has no remapped node for {new_id:?}"
+                ));
+            };
+            if self.get(new).is_none() {
+                return Err(format!(
+                    "shape dependency {old:?} maps to invalid node {new:?} for {new_id:?}"
+                ));
+            }
+            mapped.push(new);
+        }
+        let Some(node) = self.nodes.get_mut(new_id.0) else {
+            return Err(format!(
+                "shape dependency owner {new_id:?} is not present in the rebuilt DAG"
+            ));
+        };
+        node.shape_deps = mapped;
+        Ok(())
+    }
+
     pub fn get(&self, id: NodeId) -> Option<&DagNode> {
         self.nodes.get(id.0)
     }
@@ -2556,6 +2592,39 @@ mod tests {
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
+    }
+
+    #[test]
+    fn strict_shape_dependency_remap_rejects_missing_correspondence() {
+        let mut source = Dag::new();
+        let dep = source.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let owner = source.add_node(RiscOp::Neg, vec![dep], scalar_f32(), None);
+        source.add_shape_dep(owner, dep);
+
+        let mut rebuilt = Dag::new();
+        let rebuilt_owner = rebuilt.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let error = rebuilt
+            .preserve_shape_deps_strict(
+                rebuilt_owner,
+                &source.get(owner).unwrap().shape_deps,
+                &UnordMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("shape dependency") && error.contains("no remapped node"),
+            "{error}"
+        );
+        assert!(rebuilt.get(rebuilt_owner).unwrap().shape_deps.is_empty());
     }
 
     #[test]

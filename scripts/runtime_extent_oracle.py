@@ -1702,6 +1702,61 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
         ),
+        # #1932, recovered exactly from PR #1912 round 3. Vmap cloned each
+        # authored ConstTensor payload while prepending the batch dimension,
+        # so Eval panicked on cardinality and C reached a nonconforming
+        # constant trap before the entry witness. The one receipt hashes the
+        # 290-byte source, executes the refuted activation, and proves
+        # agreeing zero/nonzero cotangents plus direct-grad and no-witness
+        # controls through Eval and compiled C.
+        _row(
+            "grad.mapped.entry_witness.refuted.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_zero.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_zero.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_nonzero.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_nonzero.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted_reordered.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted_reordered.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
         _row(
             "grad.wrt_aggregate.single.dead_forward.c",
             "silent_unguarded",

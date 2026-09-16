@@ -1,8 +1,9 @@
 //! DAG structural verification.
 
-use crate::dag::{Dag, DimInfo, RiscOp, RtDim};
+use crate::dag::{Dag, DimInfo, ExtentWitnessSite, NodeId, RiscOp, RtAxis, RtDim};
 #[allow(unused_imports)]
 use chelis_types::types::Prim;
+use chelis_unord::{UnordMap, UnordSet};
 
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
 // `collapsible_match` (rust 1.95+) flags `match { X => { if cond { ... } } }` patterns.
@@ -20,6 +21,251 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 /// identical to [`verify`].
 pub(crate) fn verify_ownership_input(dag: &Dag) -> Vec<String> {
     verify_with_dangling_policy(dag, false)
+}
+
+/// Complete correspondence required before a mapped gradient may leave
+/// lowering. These are typed node identities, not positional guesses:
+/// vectorization and splice both may insert nodes and therefore must provide
+/// explicit maps for every authored carrier.
+pub(crate) struct MappedGradientClosure<'a> {
+    pub source: &'a Dag,
+    pub mapped: &'a Dag,
+    pub node_map: &'a [NodeId],
+    pub root_map: &'a UnordMap<NodeId, NodeId>,
+    pub spliced: &'a Dag,
+    pub splice_map: &'a UnordMap<NodeId, NodeId>,
+    pub forward_source: NodeId,
+    pub forward_activation: NodeId,
+    pub cotangents: &'a [NodeId],
+    pub expected_cotangents: usize,
+}
+
+/// Fail closed after the mapped-gradient splice if any authored entry
+/// witness, root, shape-only dependency, rendered extent origin, forward
+/// activation, or cotangent loses its typed identity.
+pub(crate) fn verify_mapped_gradient_closure(
+    closure: MappedGradientClosure<'_>,
+) -> Result<(), String> {
+    let MappedGradientClosure {
+        source,
+        mapped,
+        node_map,
+        root_map,
+        spliced,
+        splice_map,
+        forward_source,
+        forward_activation,
+        cotangents,
+        expected_cotangents,
+    } = closure;
+
+    if node_map.len() != source.len() {
+        return Err(format!(
+            "vectorization node map has {} entries for {} source nodes",
+            node_map.len(),
+            source.len()
+        ));
+    }
+    let mut mapped_identities = UnordSet::new();
+    for source_node in source.nodes() {
+        let mapped_id = node_map[source_node.id.0];
+        let Some(mapped_node) = mapped.get(mapped_id) else {
+            return Err(format!(
+                "vectorization node map sends {:?} to invalid node {mapped_id:?}",
+                source_node.id
+            ));
+        };
+        if !mapped_identities.insert(mapped_id) {
+            return Err(format!(
+                "vectorization node map gives multiple source nodes the identity {mapped_id:?}"
+            ));
+        }
+        let expected_deps = source_node
+            .shape_deps
+            .iter()
+            .map(|dep| {
+                node_map.get(dep.0).copied().ok_or_else(|| {
+                    format!(
+                        "activation shape dependencies of {:?} include unmapped node {dep:?}",
+                        source_node.id
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if mapped_node.shape_deps != expected_deps {
+            return Err(format!(
+                "activation shape dependencies of {:?} were not preserved by vectorization",
+                source_node.id
+            ));
+        }
+        if let RiscOp::ExtentWitness {
+            site,
+            parameter,
+            axis: RtAxis::Lit(axis),
+            requirements,
+            claims,
+        } = &source_node.op
+        {
+            let shifted_site = match site {
+                ExtentWitnessSite::ResultClaim {
+                    claim,
+                    axis: RtAxis::Lit(result_axis),
+                } => ExtentWitnessSite::ResultClaim {
+                    claim: claim.clone(),
+                    axis: RtAxis::Lit(
+                        result_axis
+                            .checked_add(1)
+                            .ok_or_else(|| "entry witness result axis overflow".to_string())?,
+                    ),
+                },
+                other => other.clone(),
+            };
+            let expected = RiscOp::ExtentWitness {
+                site: shifted_site,
+                parameter: parameter.clone(),
+                axis: RtAxis::Lit(
+                    axis.checked_add(1)
+                        .ok_or_else(|| "entry witness axis overflow".to_string())?,
+                ),
+                requirements: requirements.clone(),
+                claims: claims.clone(),
+            };
+            if mapped_node.op != expected {
+                return Err(format!(
+                    "entry witness {:?} lost its site, parameter, shifted axes, requirements, or claims",
+                    source_node.id
+                ));
+            }
+            let expected_inputs = source_node
+                .inputs
+                .iter()
+                .map(|input| node_map[input.0])
+                .collect::<Vec<_>>();
+            if mapped_node.inputs != expected_inputs {
+                return Err(format!(
+                    "entry witness {:?} lost its observing input correspondence",
+                    source_node.id
+                ));
+            }
+        }
+    }
+
+    if root_map.len() != source.roots().len() || mapped.roots().len() != source.roots().len() {
+        return Err("mapped gradient root correspondence is incomplete".into());
+    }
+    for (&source_root, &mapped_root) in source.roots().iter().zip(mapped.roots()) {
+        if root_map.get(&source_root) != Some(&mapped_root) {
+            return Err(format!(
+                "mapped gradient root {source_root:?} has no exact vectorized identity"
+            ));
+        }
+    }
+
+    for mapped_node in mapped.nodes() {
+        let Some(spliced_id) = splice_map.get(&mapped_node.id).copied() else {
+            return Err(format!(
+                "mapped node {:?} has no splice correspondence",
+                mapped_node.id
+            ));
+        };
+        let Some(spliced_node) = spliced.get(spliced_id) else {
+            return Err(format!(
+                "mapped node {:?} splices to invalid node {spliced_id:?}",
+                mapped_node.id
+            ));
+        };
+        if !matches!(mapped_node.op, RiscOp::Load { .. }) {
+            let expected_inputs = mapped_node
+                .inputs
+                .iter()
+                .map(|input| {
+                    splice_map.get(input).copied().ok_or_else(|| {
+                        format!(
+                            "value input {input:?} of mapped node {:?} has no splice correspondence",
+                            mapped_node.id
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if spliced_node.inputs != expected_inputs {
+                return Err(format!(
+                    "mapped node {:?} lost its value-input splice correspondence",
+                    mapped_node.id
+                ));
+            }
+            let expected_deps = mapped_node
+                .shape_deps
+                .iter()
+                .map(|dep| {
+                    splice_map.get(dep).copied().ok_or_else(|| {
+                        format!(
+                            "shape dependency {dep:?} of mapped node {:?} has no splice correspondence",
+                            mapped_node.id
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut expected_deps = expected_deps;
+            if cotangents.contains(&spliced_id)
+                && spliced_id != forward_activation
+                && !expected_deps.contains(&forward_activation)
+            {
+                expected_deps.push(forward_activation);
+            }
+            if spliced_node.shape_deps != expected_deps {
+                return Err(format!(
+                    "spliced shape dependencies of mapped node {:?} are incomplete: expected {:?}, got {:?} at {:?}",
+                    mapped_node.id, expected_deps, spliced_node.shape_deps, spliced_id
+                ));
+            }
+            if spliced_node.op != mapped_node.op
+                || spliced_node.output_type != mapped_node.output_type
+            {
+                return Err(format!(
+                    "mapped node {:?} changed operator or type during splice",
+                    mapped_node.id
+                ));
+            }
+        }
+    }
+
+    let expected_forward = node_map
+        .get(forward_source.0)
+        .and_then(|mapped_id| splice_map.get(mapped_id))
+        .copied()
+        .ok_or_else(|| "forward activation has no complete vectorize/splice mapping".to_string())?;
+    if expected_forward != forward_activation || spliced.get(forward_activation).is_none() {
+        return Err("forward activation identity disagrees with its correspondence maps".into());
+    }
+    if cotangents.len() != expected_cotangents {
+        return Err(format!(
+            "cotangent packing produced {} values for {expected_cotangents} selected parameters",
+            cotangents.len()
+        ));
+    }
+    for cotangent in cotangents {
+        let Some(node) = spliced.get(*cotangent) else {
+            return Err(format!(
+                "cotangent {cotangent:?} is not present after splice"
+            ));
+        };
+        if *cotangent != forward_activation && !node.shape_deps.contains(&forward_activation) {
+            return Err(format!(
+                "cotangent {cotangent:?} does not retain forward activation {forward_activation:?}"
+            ));
+        }
+    }
+
+    // The vectorized callee is an intermediate graph: its mapped batch extent
+    // may be supplied only by the caller actual introduced by splice. Validate
+    // rendered identifiers at the post-splice artifact boundary, where that
+    // correspondence must be complete.
+    crate::axis_sources::check_rendered_dim_origins(
+        spliced,
+        chelis_types::unsupported::Stage::Lowering,
+    )
+    .map_err(|error| format!("spliced rendered dimension origin is unresolved: {error}"))?;
+    Ok(())
 }
 
 #[allow(clippy::collapsible_match)]
@@ -540,6 +786,36 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         "memory op at node {} has {} inputs (expected 0)",
                         node.id.0, arity
                     ));
+                }
+                if let RiscOp::ConstTensor { data } = &node.op {
+                    let mut expected = Some(1usize);
+                    for dim in &node.output_type.dims {
+                        let extent = match dim {
+                            DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => *extent,
+                            DimInfo::Named(_, None) => {
+                                expected = None;
+                                break;
+                            }
+                        };
+                        expected = expected.and_then(|count| count.checked_mul(extent));
+                        if expected.is_none() {
+                            errors.push(format!(
+                                "constant tensor at node {} has a concrete shape whose cardinality overflows usize",
+                                node.id.0
+                            ));
+                            break;
+                        }
+                    }
+                    if let Some(expected) = expected
+                        && data.len() != expected
+                    {
+                        errors.push(format!(
+                            "constant tensor at node {} stores {} values but its concrete shape requires {}",
+                            node.id.0,
+                            data.len(),
+                            expected
+                        ));
+                    }
                 }
             }
             RiscOp::FusedElem { ops } => {
@@ -2031,7 +2307,7 @@ fn dims_compatible(a: &DimInfo, b: &DimInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{NodeId, RiscOp, TensorType};
+    use crate::dag::{ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -2042,6 +2318,224 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    struct MappedFixture {
+        source: Dag,
+        mapped: Dag,
+        node_map: Vec<NodeId>,
+        root_map: chelis_unord::UnordMap<NodeId, NodeId>,
+        spliced: Dag,
+        splice_map: chelis_unord::UnordMap<NodeId, NodeId>,
+        forward_source: NodeId,
+        forward_activation: NodeId,
+        cotangent: NodeId,
+    }
+
+    fn mapped_fixture() -> MappedFixture {
+        let scalar_i64 = tensor_ty(&[], Prim::Int64);
+        let scalar_f32 = tensor_ty(&[], Prim::F32);
+        let vec2 = tensor_ty(&[2], Prim::F32);
+        let mat22 = tensor_ty(&[2, 2], Prim::F32);
+
+        let mut source = Dag::new();
+        let source_load = source.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec2.clone(),
+            None,
+        );
+        let source_witness = source.add_node(
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![],
+                claims: vec![],
+            },
+            vec![source_load],
+            scalar_i64.clone(),
+            None,
+        );
+        let source_forward = source.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32,
+            None,
+        );
+        source.add_shape_dep(source_forward, source_witness);
+        source.add_root(source_forward);
+
+        let mut mapped = Dag::new();
+        let mapped_load = mapped.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat22.clone(),
+            None,
+        );
+        let mapped_witness = mapped.add_node(
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "x".into(),
+                axis: RtAxis::Lit(1),
+                requirements: vec![],
+                claims: vec![],
+            },
+            vec![mapped_load],
+            scalar_i64,
+            None,
+        );
+        let mapped_forward = mapped.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 1.0]),
+            vec![],
+            vec2,
+            None,
+        );
+        mapped.add_shape_dep(mapped_forward, mapped_witness);
+        mapped.add_root(mapped_forward);
+
+        let mut spliced = Dag::new();
+        let actual = spliced.add_node(
+            RiscOp::Load {
+                name: "actual".into(),
+            },
+            vec![],
+            mat22.clone(),
+            None,
+        );
+        let spliced_witness = spliced.add_node(
+            mapped.get(mapped_witness).unwrap().op.clone(),
+            vec![actual],
+            mapped.get(mapped_witness).unwrap().output_type.clone(),
+            None,
+        );
+        let spliced_forward = spliced.add_node(
+            mapped.get(mapped_forward).unwrap().op.clone(),
+            vec![],
+            mapped.get(mapped_forward).unwrap().output_type.clone(),
+            None,
+        );
+        spliced.add_shape_dep(spliced_forward, spliced_witness);
+        let cotangent = spliced.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![0.0; 4]),
+            vec![],
+            mat22,
+            None,
+        );
+        spliced.add_shape_dep(cotangent, spliced_forward);
+
+        MappedFixture {
+            source,
+            mapped,
+            node_map: vec![mapped_load, mapped_witness, mapped_forward],
+            root_map: chelis_unord::UnordMap::from([(source_forward, mapped_forward)]),
+            spliced,
+            splice_map: chelis_unord::UnordMap::from([
+                (mapped_load, actual),
+                (mapped_witness, spliced_witness),
+                (mapped_forward, spliced_forward),
+            ]),
+            forward_source: source_forward,
+            forward_activation: spliced_forward,
+            cotangent,
+        }
+    }
+
+    fn verify_fixture(fixture: &MappedFixture) -> Result<(), String> {
+        verify_mapped_gradient_closure(MappedGradientClosure {
+            source: &fixture.source,
+            mapped: &fixture.mapped,
+            node_map: &fixture.node_map,
+            root_map: &fixture.root_map,
+            spliced: &fixture.spliced,
+            splice_map: &fixture.splice_map,
+            forward_source: fixture.forward_source,
+            forward_activation: fixture.forward_activation,
+            cotangents: &[fixture.cotangent],
+            expected_cotangents: 1,
+        })
+    }
+
+    #[test]
+    fn mapped_gradient_closure_accepts_complete_correspondence() {
+        verify_fixture(&mapped_fixture()).unwrap();
+    }
+
+    #[test]
+    fn mapped_gradient_closure_rejects_every_missing_identity_class() {
+        let mut fixture = mapped_fixture();
+        fixture.node_map.pop();
+        assert!(verify_fixture(&fixture).unwrap_err().contains("node map"));
+
+        let mut fixture = mapped_fixture();
+        fixture.root_map.clear();
+        assert!(verify_fixture(&fixture).unwrap_err().contains("root"));
+
+        let mut fixture = mapped_fixture();
+        fixture.mapped.node_mut(fixture.node_map[1]).unwrap().op = RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::Caller,
+            parameter: "x".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![],
+            claims: vec![],
+        };
+        assert!(
+            verify_fixture(&fixture)
+                .unwrap_err()
+                .contains("entry witness")
+        );
+
+        let mut fixture = mapped_fixture();
+        fixture
+            .mapped
+            .node_mut(fixture.node_map[fixture.forward_source.0])
+            .unwrap()
+            .shape_deps
+            .clear();
+        assert!(
+            verify_fixture(&fixture)
+                .unwrap_err()
+                .contains("activation shape dependencies")
+        );
+
+        let mut fixture = mapped_fixture();
+        fixture.splice_map.remove(&fixture.node_map[1]);
+        assert!(verify_fixture(&fixture).unwrap_err().contains("splice"));
+
+        let mut fixture = mapped_fixture();
+        fixture
+            .spliced
+            .node_mut(fixture.forward_activation)
+            .unwrap()
+            .shape_deps
+            .clear();
+        assert!(
+            verify_fixture(&fixture)
+                .unwrap_err()
+                .contains("spliced shape dependencies")
+        );
+
+        let mut fixture = mapped_fixture();
+        fixture
+            .spliced
+            .node_mut(fixture.cotangent)
+            .unwrap()
+            .shape_deps
+            .clear();
+        assert!(verify_fixture(&fixture).unwrap_err().contains("cotangent"));
+
+        let mut fixture = mapped_fixture();
+        fixture
+            .spliced
+            .node_mut(fixture.cotangent)
+            .unwrap()
+            .output_type
+            .dims[0] = DimInfo::Named("lost_rendered_extent".into(), None);
+        assert!(
+            verify_fixture(&fixture)
+                .unwrap_err()
+                .contains("rendered dimension origin")
+        );
     }
 
     #[test]
@@ -2089,6 +2583,26 @@ mod tests {
         );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn constant_tensor_payload_cardinality_must_match_its_concrete_type() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 2.0, 3.0]),
+            vec![],
+            tensor_ty(&[2, 3], Prim::F32),
+            None,
+        );
+        let errors = verify(&dag);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("constant tensor")
+                    && error.contains("3 values")
+                    && error.contains("requires 6")
+            }),
+            "a cloned unbatched payload may not claim a batched concrete type: {errors:?}"
+        );
     }
 
     #[test]

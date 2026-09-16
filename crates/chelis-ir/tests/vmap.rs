@@ -1,6 +1,6 @@
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::vmap::vectorize_axis0;
+use chelis_ir::vmap::{vectorize_axis0, vectorize_axis0_with_node_map};
 use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
@@ -152,6 +152,84 @@ fn vmap_elementwise_vectorizes_axis_zero() {
     assert_eq!(
         value.to_f64_lossy_vec(),
         vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]
+    );
+}
+
+#[test]
+fn vmap_broadcasts_nonshared_constant_tensors_with_a_real_batched_identity() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let constant = dag.add_node(
+        RiscOp::synth_const_tensor(Prim::F32, vec![10.0, 20.0, 30.0]),
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let sum = dag.add_node(RiscOp::Add, vec![x, constant], vec_f32(3), None);
+    dag.add_root(sum);
+
+    let (mapped, node_map) =
+        vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
+    let mapped_constant = node_map[constant.0];
+    let mapped_node = mapped
+        .get(mapped_constant)
+        .expect("mapped constant identity");
+    assert!(
+        matches!(
+            mapped_node.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::RtDim::Lit(2)
+            }
+        ),
+        "the original constant identity must map to its batch broadcast, got {mapped_node:?}"
+    );
+    let raw_constant = mapped_node.inputs[0];
+    let raw_node = mapped.get(raw_constant).expect("raw constant payload");
+    assert_eq!(raw_node.output_type, vec_f32(3));
+    assert!(
+        matches!(&raw_node.op, RiscOp::ConstTensor { data } if data.len() == 3),
+        "the raw payload must retain its original unbatched type and cardinality"
+    );
+    assert!(
+        chelis_ir::verify::verify(&mapped).is_empty(),
+        "mapped graph must satisfy structural verification: {:?}",
+        chelis_ir::verify::verify(&mapped)
+    );
+
+    let value = eval_root(
+        &mapped,
+        &UnordMap::from([(
+            "x".to_string(),
+            TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        )]),
+    );
+    assert_eq!(value.shape, vec![2, 3]);
+    assert_eq!(
+        value.to_f64_lossy_vec(),
+        vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
+    );
+}
+
+#[test]
+fn vmap_rejects_a_shape_dependency_without_a_mapped_identity() {
+    let mut dag = Dag::new();
+    let value = dag.add_node(
+        RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 2.0]),
+        vec![],
+        vec_f32(2),
+        None,
+    );
+    dag.node_mut(value)
+        .expect("constant")
+        .shape_deps
+        .push(chelis_ir::dag::NodeId(99));
+    dag.add_root(value);
+
+    let error = vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).unwrap_err();
+    assert!(
+        error.contains("shape dependency") && error.contains("no mapped identity"),
+        "{error}"
     );
 }
 
