@@ -237,9 +237,12 @@ pub fn vectorize_axis0_with_node_map(
             );
             mapped_ids.push(new_id);
             let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
+            let remapped_result_claims =
+                remap_result_claim_deps(node.id, &node.result_claim_deps, &mapped_ids)?;
             if let Some(new_node) = out.node_mut(new_id) {
                 new_node.merged_spans = node.merged_spans.clone();
                 new_node.shape_deps = remapped_shape_deps;
+                new_node.result_claim_deps = remapped_result_claims;
             }
             if let Some(reusable_input) = node.reusable_input {
                 out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
@@ -254,6 +257,8 @@ pub fn vectorize_axis0_with_node_map(
         let new_id = out.add_node(op, inputs, output_type, node.span_id.clone());
         mapped_ids.push(new_id);
         let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
+        let remapped_result_claims =
+            remap_result_claim_deps(node.id, &node.result_claim_deps, &mapped_ids)?;
         if let Some(new_node) = out.node_mut(new_id) {
             if !node.merged_spans.is_empty() {
                 new_node.merged_spans = node.merged_spans.clone();
@@ -266,6 +271,7 @@ pub fn vectorize_axis0_with_node_map(
             // returns the mapping. The remap below is therefore the
             // correctness step, not a no-op that happens to look like one.
             new_node.shape_deps = remapped_shape_deps;
+            new_node.result_claim_deps = remapped_result_claims;
         }
         if let Some(reusable_input) = node.reusable_input {
             out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
@@ -329,6 +335,23 @@ fn remap_shape_deps(
         .map(|dep| {
             mapped_ids.get(dep.0).copied().ok_or_else(|| {
                 format!("vmap shape dependency {dep:?} of node {owner:?} has no mapped identity")
+            })
+        })
+        .collect()
+}
+
+fn remap_result_claim_deps(
+    owner: NodeId,
+    source_deps: &[NodeId],
+    mapped_ids: &[NodeId],
+) -> Result<Vec<NodeId>, String> {
+    source_deps
+        .iter()
+        .map(|dep| {
+            mapped_ids.get(dep.0).copied().ok_or_else(|| {
+                format!(
+                    "vmap result claim dependency {dep:?} of node {owner:?} has no mapped identity"
+                )
             })
         })
         .collect()

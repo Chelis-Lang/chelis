@@ -54,7 +54,7 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
         None,
     );
     let add = dag.add_node(RiscOp::Add, vec![scalar, tensor], tensor_ty, None);
-    dag.add_shape_dep(add, claim);
+    dag.add_result_claim_dep(add, claim);
     dag.add_root(add);
 
     assert_eq!(
@@ -142,7 +142,23 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         scalar_ty,
         None,
     );
+    let claim = dag.add_node(
+        RiscOp::ExtentWitness {
+            site: ExtentWitnessSite::LiteralResultClaim,
+            parameter: String::new(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![scalar_from_i64("load", Prim::Int64, 2).unwrap()],
+            claims: vec![],
+        },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
     let add = dag.add_node(RiscOp::Add, vec![left, right], result_ty, None);
+    dag.add_result_claim_dep(add, claim);
     dag.add_root(add);
 
     let relation = same_shape_result_agreement(&dag, add).unwrap_err();

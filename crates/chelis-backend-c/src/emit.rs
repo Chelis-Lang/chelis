@@ -6613,7 +6613,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         new_shape: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: VerifiedDagView<'_>,
+        _dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         // chelis#616: a node-valued (runtime) target extent is read from its
@@ -6624,7 +6624,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .iter()
             .enumerate()
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
-            .map(|(axis, dim)| (axis, Self::bound_c_expr(dim, inputs, a, axis, dag)))
+            .map(|(axis, dim)| (axis, Self::bound_c_expr(dim, inputs, a, axis)))
             .collect();
         self.emit_runtime_dim_sites(id, &extents);
         for (axis, extent) in &extents {
@@ -6689,7 +6689,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
+        let extent = Self::bound_c_expr(size, inputs, a, axis);
         if self.runtime_dim_sites.contains_key(&(id, axis))
             || self.local_dim_guard_sites.contains_key(&id)
             || self
@@ -6726,22 +6726,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// checked runtime extent; `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
-    fn bound_c_expr(
-        bound: &RtDim,
-        inputs: &[NodeId],
-        a: usize,
-        axis: usize,
-        dag: VerifiedDagView<'_>,
-    ) -> String {
+    fn bound_c_expr(bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize) -> String {
         match bound {
             RtDim::Lit(n) => n.to_string(),
             RtDim::ToEnd => format!("chelis_tensor_shape(t{a}, {axis})"),
             RtDim::Node(i) => {
                 let n = inputs[*i].0;
-                debug_assert_eq!(
-                    dag.get(inputs[*i]).unwrap().output_type.precision,
-                    Prim::Int64
-                );
                 format!("((int64_t*)t{n}_data)[0]")
             }
             RtDim::InputAxis {
@@ -6803,7 +6793,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.emit_runtime_dim_site(id, *axis, extent_expr);
         }
         self.emit_local_dim_guards_matching(id, extents, false);
-        self.emit_inherited_result_guards_matching(id, extents, false);
+        self.emit_inherited_result_guards(id, extents, false);
     }
 
     fn is_same_shape_observation(
@@ -6877,7 +6867,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // or the checker-resolved literal, according to the guard plan.
             let operand = match &site.canonical {
                 chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => {
-                    format!("((const int64_t*)t{}_data)[0]", witness.0)
+                    Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis)
                 }
                 other => other.to_string(),
             };
@@ -6936,12 +6926,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.emit_runtime_dim_site(node.id.0, *axis, extent);
         }
         self.emit_local_dim_guards_matching(node.id.0, &extents, true);
-        self.emit_inherited_result_guards_matching(node.id.0, &extents, true);
+        self.emit_inherited_result_guards(node.id.0, &extents, true);
     }
 
     /// Shape-preserving producers know their result extent from input metadata.
     /// Check it before allocating or evaluating a potentially trapping element.
-    fn emit_input_axis_result_guards(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+    fn emit_input_axis_result_guards(&mut self, node: &DagNode, _dag: VerifiedDagView<'_>) {
         use chelis_ir::axis_sources::LocalGuardObservation;
         let mut carriers = Vec::new();
         if let Some(sites) = self.local_dim_guard_sites.get(&node.id.0) {
@@ -6986,7 +6976,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .map(|(axis, carrier)| {
                 (
                     axis,
-                    Self::bound_c_expr(&carrier, &node.inputs, operand, axis, dag),
+                    Self::bound_c_expr(&carrier, &node.inputs, operand, axis),
                 )
             })
             .collect::<Vec<_>>();
@@ -6994,7 +6984,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     /// Consume invocation frames in declaration/axis order at one producer.
-    fn emit_inherited_result_guards_matching(
+    fn emit_inherited_result_guards(
         &mut self,
         id: usize,
         extents: &[(usize, String)],
@@ -7095,19 +7085,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         fill: ScalarValue,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: VerifiedDagView<'_>,
+        _dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let before = padding
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let after = padding
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_before"), &before);
         self.emit_affine_bounds(&format!("t{id}_after"), &after);
@@ -7160,7 +7150,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         bounds: &[(RtDim, RtDim)],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: VerifiedDagView<'_>,
+        _dag: VerifiedDagView<'_>,
     ) {
         for (d, (lo, hi)) in bounds.iter().enumerate() {
             if !matches!(hi, RtDim::ToEnd) {
@@ -7183,12 +7173,12 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let start = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         let end = bounds
             .iter()
             .enumerate()
-            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
@@ -7235,14 +7225,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         strides: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: VerifiedDagView<'_>,
+        _dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let steps = strides
             .iter()
             .enumerate()
-            .map(|(axis, n)| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .map(|(axis, n)| Self::bound_c_expr(n, inputs, a, axis))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
         self.emit_affine_plan(id, a, ty, "stride", &format!("t{id}_steps, NULL"));

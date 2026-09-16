@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "787a384b599e9d784ab2b0b4feb53f9b1e2e8d659cd0db179a2c1513d7b64c71",
+  "corpus_sha256": "7717032d1e594c7ce3db2557295b0810465da81c28f7ba35053dcf3d445a6e6f",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",

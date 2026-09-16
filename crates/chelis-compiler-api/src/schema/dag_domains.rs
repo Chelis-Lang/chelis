@@ -82,6 +82,75 @@ fn rt_dim_supplies_extent(dim: &WireRtDim) -> bool {
     )
 }
 
+fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
+    matches!(
+        op,
+        WireRiscOp::Add
+            | WireRiscOp::Sub
+            | WireRiscOp::Mul
+            | WireRiscOp::Div
+            | WireRiscOp::FloorDiv
+            | WireRiscOp::TruncDiv
+            | WireRiscOp::Mod
+            | WireRiscOp::CmpLt
+            | WireRiscOp::MaxElem
+            | WireRiscOp::MinElem
+            | WireRiscOp::ExtremaAdjoint { .. }
+            | WireRiscOp::Relu
+            | WireRiscOp::ReluAdjoint
+            | WireRiscOp::Neg
+            | WireRiscOp::Recip
+            | WireRiscOp::Exp
+            | WireRiscOp::Log
+            | WireRiscOp::Sin
+            | WireRiscOp::Sqrt
+            | WireRiscOp::Cos
+            | WireRiscOp::Tan
+            | WireRiscOp::Atan
+            | WireRiscOp::Abs
+            | WireRiscOp::Floor
+            | WireRiscOp::Ceil
+            | WireRiscOp::Round
+            | WireRiscOp::UniformLike { .. }
+            | WireRiscOp::Dropout { .. }
+            | WireRiscOp::Cast { .. }
+            | WireRiscOp::CastTrunc { .. }
+            | WireRiscOp::FusedElem { .. }
+    )
+}
+
+/// Validate the complete positive-rank agreement relation carried by a
+/// same-shape producer. Rank-zero operands are scalar values, identical node
+/// references deduplicate naturally, and every distinct positive-rank member
+/// must have the result rank.
+fn same_shape_result_relation_is_supported(dag: &WireDag, node: &WireDagNode) -> bool {
+    if !is_same_shape_result_op(&node.op) {
+        return false;
+    }
+    let rank = node.output_type.dims.len();
+    if rank == 0 {
+        return false;
+    }
+    let mut members = std::collections::BTreeSet::new();
+    for input in &node.inputs {
+        let Some(input) = usize::try_from(*input)
+            .ok()
+            .and_then(|input| dag.nodes.get(input))
+        else {
+            return false;
+        };
+        let input_rank = input.output_type.dims.len();
+        if input_rank == 0 {
+            continue;
+        }
+        if input_rank != rank {
+            return false;
+        }
+        members.insert(input.id);
+    }
+    !members.is_empty()
+}
+
 /// Match lowering's admission rule for a declaration token retained by this
 /// producing axis. An op-computed extent is usable only where the existing
 /// guard derivation can compute it before the producer allocates its result.
@@ -90,47 +159,18 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
     if axis >= rank {
         return false;
     }
+    if is_same_shape_result_op(&node.op) {
+        return same_shape_result_relation_is_supported(dag, node);
+    }
     match &node.op {
-        WireRiscOp::Add
-        | WireRiscOp::Sub
-        | WireRiscOp::Mul
-        | WireRiscOp::Div
-        | WireRiscOp::FloorDiv
-        | WireRiscOp::TruncDiv
-        | WireRiscOp::Mod
-        | WireRiscOp::CmpLt
-        | WireRiscOp::MaxElem
-        | WireRiscOp::MinElem
-        | WireRiscOp::ExtremaAdjoint { .. }
-        | WireRiscOp::Relu
-        | WireRiscOp::ReluAdjoint
-        | WireRiscOp::Neg
-        | WireRiscOp::Recip
-        | WireRiscOp::Exp
-        | WireRiscOp::Log
-        | WireRiscOp::Sin
-        | WireRiscOp::Sqrt
-        | WireRiscOp::Cos
-        | WireRiscOp::Tan
-        | WireRiscOp::Atan
-        | WireRiscOp::Abs
-        | WireRiscOp::Floor
-        | WireRiscOp::Ceil
-        | WireRiscOp::Round
-        | WireRiscOp::UniformLike { .. }
-        | WireRiscOp::Dropout { .. }
-        | WireRiscOp::Copy
-        | WireRiscOp::Drop
-        | WireRiscOp::Realize
-        | WireRiscOp::Cast { .. }
-        | WireRiscOp::CastTrunc { .. }
-        | WireRiscOp::FusedElem { .. }
-        | WireRiscOp::Store { .. } => node.inputs.iter().any(|id| {
-            usize::try_from(*id)
-                .ok()
-                .and_then(|id| dag.nodes.get(id))
-                .is_some_and(|input| input.output_type.dims.len() == rank)
-        }),
+        WireRiscOp::Copy | WireRiscOp::Drop | WireRiscOp::Realize | WireRiscOp::Store { .. } => {
+            node.inputs.iter().any(|id| {
+                usize::try_from(*id)
+                    .ok()
+                    .and_then(|id| dag.nodes.get(id))
+                    .is_some_and(|input| input.output_type.dims.len() == rank)
+            })
+        }
         WireRiscOp::Sum { axis: reduced, .. }
         | WireRiscOp::MaxReduce { axis: reduced }
         | WireRiscOp::MinReduce { axis: reduced }
@@ -250,6 +290,7 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
         | WireRiscOp::ScatterElements { .. } => {
             input_rank(dag, node, 0).is_some_and(|input_rank| input_rank == rank)
         }
+        _ => false,
     }
 }
 
@@ -311,7 +352,7 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                     Some(WireRtDim::Node { .. } | WireRtDim::InputAxis { .. })
                 ),
                 WireRiscOp::Shrink { .. } | WireRiscOp::Pad { .. } => true,
-                _ => false,
+                _ => same_shape_result_relation_is_supported(dag, node),
             };
             if !supported || result_axis >= node.output_type.dims.len() {
                 return Err(reject(

@@ -2409,7 +2409,12 @@ fn require_dag_arity(
 }
 
 fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
-    for input in node.inputs.iter().chain(&node.shape_deps) {
+    for input in node
+        .inputs
+        .iter()
+        .chain(&node.shape_deps)
+        .chain(&node.result_claim_deps)
+    {
         if input.0 >= node.id.0 || dag.get(*input).is_none() {
             return Err(OwnershipError::DagInput {
                 node: node.id.0,
@@ -2421,11 +2426,11 @@ fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<()
 }
 
 fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
-    dag.nodes()
-        .iter()
-        .skip(consumer.0 + 1)
-        .any(|node| node.inputs.contains(&owner) || node.shape_deps.contains(&owner))
-        || dag.roots().contains(&owner)
+    dag.nodes().iter().skip(consumer.0 + 1).any(|node| {
+        node.inputs.contains(&owner)
+            || node.shape_deps.contains(&owner)
+            || node.result_claim_deps.contains(&owner)
+    }) || dag.roots().contains(&owner)
 }
 
 fn require_live_dag_owner(

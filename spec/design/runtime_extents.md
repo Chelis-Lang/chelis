@@ -516,18 +516,22 @@ choose one. For the exact witness this makes `add`, not either input-side
 `shrink`, the context and [04-NUM-9] operation.
 
 Lowering attaches the existing literal/named result-claim token to the
-same-shape producer itself. Guard derivation represents the observation as the
-complete nonempty set of positive-rank inputs whose rank equals the result
-rank, paired with the result axis. Rank-0 scalar inputs remain outside that
-set. The representation has no selected-origin field: repeated edges may be
-deduplicated as the same agreement member, while distinct operand paths remain
-distinct members. A constructor that cannot establish a complete nonempty
-agreement set for a positive-rank same-shape result returns an explicit
-lowering/verifier error rather than `None`; a missing or malformed relation
-therefore cannot drop a claim. Multiple claim-capable operand origins are not
-collapsed or treated as a request to choose: the complete member set remains
-the observation, and successful operand agreement establishes its one result
-extent.
+same-shape producer itself through a dedicated `result_claim_deps` lane. That
+lane is an execution obligation, not a value input or an ordinary
+`shape_deps` consumer: it keeps the token live and ordered without changing
+tensor fanout, copy insertion or storage ownership. Guard derivation
+represents the observation as the complete nonempty set of positive-rank
+inputs whose rank equals the result rank, paired with the result axis. Rank-0
+scalar inputs remain outside that set. The representation has no
+selected-origin field: repeated edges may be deduplicated as the same
+agreement member, while distinct operand paths remain distinct members. A
+producer carrying a claim without a complete nonempty agreement relation is a
+verifier error rather than an empty observation, so a missing or malformed
+relation cannot drop a claim. Rank-erased staged-control handles that carry no
+producer claim remain outside this envelope. Multiple claim-capable operand
+origins are not collapsed or treated as a request to choose: the complete
+member set remains the observation, and successful operand agreement
+establishes its one result extent.
 
 At execution the operation's independent operand-rank/shape agreement runs
 first across that complete set. Only after agreement succeeds does the
@@ -542,9 +546,11 @@ transport and unrelated dimension-class derivation. That implementation
 representative has no diagnostic authority. The result-claim observation is
 derived in memory from the complete agreement relation, while the existing
 `LiteralResultClaim` / `ResultClaim` token remains the durable graph identity.
-No new `ExtentWitnessSite`, WireDag field or schema version is required for
-#1948; adding one would duplicate an obligation the producer's `shape_deps`
-already transports.
+WireDag publication projects the dedicated internal lane into the existing
+role-tagged non-value dependency transport; the witness site distinguishes a
+result claim from an ordinary shape dependency at admission. No new
+`ExtentWitnessSite`, WireDag field or schema version is required for #1948,
+and arbitrary producer-origin selection is unrepresentable.
 
 The #1948 matrix includes the exact operand-1 witness, its reversed-operand
 twin, an agreeing declaration, runtime operand disagreement and precedence,

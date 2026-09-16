@@ -1603,6 +1603,7 @@ fn root_reach(dag: &Dag) -> Vec<u128> {
             if let Some(node) = dag.get(id) {
                 stack.extend(node.inputs.iter().copied());
                 stack.extend(node.shape_deps.iter().copied());
+                stack.extend(node.result_claim_deps.iter().copied());
             }
         }
     }
@@ -2183,8 +2184,9 @@ pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
             ..
         })
     ) {
-        // ResultClaim's producer reads its scalar through shape_deps. It
-        // cannot be discharged as a host entry-only witness on any target.
+        // A producer-owned ResultClaim is not itself an entry witness. Target
+        // adapters may still lower the complete producer relation to a host
+        // guard when every observation is available from interface metadata.
         return false;
     }
     if dag.roots().contains(&id) {
@@ -2987,15 +2989,18 @@ pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
 
 pub(crate) fn directly_owns_literal_result_claim(dag: &Dag, owner: NodeId) -> bool {
     dag.get(owner).is_some_and(|node| {
-        node.shape_deps.iter().any(|dependency| {
-            matches!(
-                dag.get(*dependency).map(|node| &node.op),
-                Some(RiscOp::ExtentWitness {
-                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                    ..
-                })
-            )
-        })
+        node.shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .any(|dependency| {
+                matches!(
+                    dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                )
+            })
     })
 }
 
@@ -3202,7 +3207,7 @@ fn literal_result_interface_claims(
 )> {
     let mut claims = Vec::new();
     for owner in dag.nodes() {
-        for token in &owner.shape_deps {
+        for token in owner.shape_deps.iter().chain(&owner.result_claim_deps) {
             let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {
@@ -3280,7 +3285,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // labels the checked caller retains on its result. Their producer owns
     // the observation and their dependency owns the canonical value.
     for node in dag.nodes() {
-        for required in &node.shape_deps {
+        for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {

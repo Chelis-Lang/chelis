@@ -269,17 +269,22 @@ impl Partition<'_> {
             .copied()
             .collect::<BTreeSet<_>>();
         for node in &self.logical.nodes()[end..] {
-            exports.extend(node.inputs.iter().chain(&node.shape_deps).copied().filter(
-                |dependency| {
-                    !matches!(
-                        self.logical.get(*dependency).map(|node| &node.op),
-                        Some(RiscOp::ExtentWitness {
-                            site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                            ..
-                        })
-                    )
-                },
-            ));
+            exports.extend(
+                node.inputs
+                    .iter()
+                    .chain(&node.shape_deps)
+                    .chain(&node.result_claim_deps)
+                    .copied()
+                    .filter(|dependency| {
+                        !matches!(
+                            self.logical.get(*dependency).map(|node| &node.op),
+                            Some(RiscOp::ExtentWitness {
+                                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                                ..
+                            })
+                        )
+                    }),
+            );
         }
         for source in self.sources.iter().filter(|source| source.before >= end) {
             exports.extend(
@@ -296,7 +301,12 @@ impl Partition<'_> {
         let mut remap = BTreeMap::new();
         let mut outputs = Vec::new();
         for node in &self.logical.nodes()[start..end] {
-            for &dependency in node.inputs.iter().chain(&node.shape_deps) {
+            for &dependency in node
+                .inputs
+                .iter()
+                .chain(&node.shape_deps)
+                .chain(&node.result_claim_deps)
+            {
                 if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
                     let dependency_node = self
                         .logical
@@ -345,6 +355,7 @@ impl Partition<'_> {
             let copied = dag.node_mut(id).expect("new staged node");
             copied.merged_spans = node.merged_spans.clone();
             copied.shape_deps = node.shape_deps.iter().map(|i| remap[i]).collect();
+            copied.result_claim_deps = node.result_claim_deps.iter().map(|i| remap[i]).collect();
             copied.reusable_input = node
                 .reusable_input
                 .and_then(|input| remap.get(&input).copied());

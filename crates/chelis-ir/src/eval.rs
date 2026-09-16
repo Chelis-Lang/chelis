@@ -2172,6 +2172,7 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
             // actually EVALUATE so the mid-evaluation binding sees its
             // extent (the consumer reads the dim, not the value).
             stack.extend(node.shape_deps.iter().copied());
+            stack.extend(node.result_claim_deps.iter().copied());
         }
     }
     live

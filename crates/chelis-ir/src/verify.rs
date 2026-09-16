@@ -98,6 +98,24 @@ pub(crate) fn verify_mapped_gradient_closure(
                 source_node.id
             ));
         }
+        let expected_result_claims = source_node
+            .result_claim_deps
+            .iter()
+            .map(|dep| {
+                node_map.get(dep.0).copied().ok_or_else(|| {
+                    format!(
+                        "activation result claims of {:?} include unmapped node {dep:?}",
+                        source_node.id
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if mapped_node.result_claim_deps != expected_result_claims {
+            return Err(format!(
+                "activation result claims of {:?} were not preserved by vectorization",
+                source_node.id
+            ));
+        }
         if let RiscOp::ExtentWitness {
             site,
             parameter,
@@ -218,6 +236,24 @@ pub(crate) fn verify_mapped_gradient_closure(
                     mapped_node.id, expected_deps, spliced_node.shape_deps, spliced_id
                 ));
             }
+            let expected_result_claims = mapped_node
+                .result_claim_deps
+                .iter()
+                .map(|dep| {
+                    splice_map.get(dep).copied().ok_or_else(|| {
+                        format!(
+                            "result claim dependency {dep:?} of mapped node {:?} has no splice correspondence",
+                            mapped_node.id
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if spliced_node.result_claim_deps != expected_result_claims {
+                return Err(format!(
+                    "spliced result claims of mapped node {:?} are incomplete",
+                    mapped_node.id
+                ));
+            }
             if spliced_node.op != mapped_node.op
                 || spliced_node.output_type != mapped_node.output_type
             {
@@ -288,6 +324,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 consumers[dep.0] += 1;
             }
         }
+        for &dep in &node.result_claim_deps {
+            if dep.0 < consumers.len() {
+                consumers[dep.0] += 1;
+            }
+        }
 
         if let RiscOp::Load { name } = &node.op {
             if let Some(prev_ty) = load_types.get(name.as_str()) {
@@ -316,6 +357,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 errors.push(format!(
                     "node {} references nonexistent node {}",
                     node.id.0, input_id.0
+                ));
+            }
+        }
+        for &dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if dependency.0 >= node.id.0 {
+                errors.push(format!(
+                    "node {} references non-earlier dependency {}",
+                    node.id.0, dependency.0
+                ));
+            }
+            if dag.get(dependency).is_none() {
+                errors.push(format!(
+                    "node {} references nonexistent dependency {}",
+                    node.id.0, dependency.0
                 ));
             }
         }
@@ -825,12 +880,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
-        if crate::axis_sources::is_same_shape_result_op(&node.op)
-            && let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id)
-        {
-            errors.push(reason);
-        }
-
         if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
             if !node.output_type.precision.is_float() {
                 errors.push(format!(
@@ -918,7 +967,10 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 let owners = dag
                     .nodes()
                     .iter()
-                    .filter(|owner| owner.shape_deps.contains(&node.id))
+                    .filter(|owner| {
+                        owner.shape_deps.contains(&node.id)
+                            || owner.result_claim_deps.contains(&node.id)
+                    })
                     .count();
                 if owners != 1 {
                     errors.push(format!(
@@ -934,6 +986,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || !claims.is_empty()
                     || !node.inputs.is_empty()
                     || !node.shape_deps.is_empty()
+                    || !node.result_claim_deps.is_empty()
                     || requirements.len() != 1
                     || requirements.first().is_none_or(|value| {
                         value.prim() != Prim::Int64
@@ -1027,7 +1080,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             }
         }
 
-        for required in &node.shape_deps {
+        for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {
@@ -1072,6 +1125,32 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             });
             if required.0 >= node.id.0 || !supported {
                 errors.push(format!("result claim at node {} requires an earlier witness and a supported producing axis", node.id.0));
+            }
+        }
+        if !node.result_claim_deps.is_empty() {
+            if !crate::axis_sources::is_same_shape_result_op(&node.op) {
+                errors.push(format!(
+                    "producer result claims at node {} require a same-shape operation",
+                    node.id.0
+                ));
+            }
+            if let Err(reason) = crate::axis_sources::same_shape_result_agreement(dag, node.id) {
+                errors.push(reason);
+            }
+            for dependency in &node.result_claim_deps {
+                if !matches!(
+                    dag.get(*dependency).map(|claim| &claim.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: ExtentWitnessSite::ResultClaim { .. }
+                            | ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                ) {
+                    errors.push(format!(
+                        "producer result claim at node {} requires an extent-claim witness",
+                        node.id.0
+                    ));
+                }
             }
         }
 

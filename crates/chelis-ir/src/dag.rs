@@ -1672,6 +1672,15 @@ pub struct DagNode {
     /// codegen.
     #[serde(default)]
     pub shape_deps: Vec<NodeId>,
+    /// Producer-owned declared-result obligations.
+    ///
+    /// These are execution dependencies, but they are neither value inputs nor
+    /// shape sources. Keeping them in a distinct lane prevents ownership and
+    /// copy insertion from treating a result check as tensor fanout. The
+    /// referenced witness still executes before this node and remains live
+    /// until this producer discharges the obligation.
+    #[serde(default)]
+    pub result_claim_deps: Vec<NodeId>,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -1711,6 +1720,7 @@ impl Dag {
             span_id,
             merged_spans: Vec::new(),
             shape_deps: Vec::new(),
+            result_claim_deps: Vec::new(),
         });
         id
     }
@@ -1730,6 +1740,16 @@ impl Dag {
             && !node.shape_deps.contains(&dep)
         {
             node.shape_deps.push(dep);
+        }
+    }
+
+    /// Attach one producer-owned declared-result obligation without making it
+    /// an ordinary shape dependency or value consumer.
+    pub fn add_result_claim_dep(&mut self, id: NodeId, dep: NodeId) {
+        if let Some(node) = self.nodes.get_mut(id.0)
+            && !node.result_claim_deps.contains(&dep)
+        {
+            node.result_claim_deps.push(dep);
         }
     }
 
@@ -1793,6 +1813,52 @@ impl Dag {
             ));
         };
         node.shape_deps = mapped;
+        Ok(())
+    }
+
+    /// Preserve producer-owned result claims across a complete rebuild.
+    ///
+    /// A result claim may never disappear because a rebuilding pass omitted
+    /// one of its dependencies. Passes without a recoverable error channel
+    /// fail loudly here; fallible composition uses
+    /// [`Self::preserve_result_claim_deps_strict`] directly.
+    pub fn preserve_result_claim_deps(
+        &mut self,
+        new_id: NodeId,
+        source_deps: &[NodeId],
+        remap: &UnordMap<NodeId, NodeId>,
+    ) {
+        self.preserve_result_claim_deps_strict(new_id, source_deps, remap)
+            .unwrap_or_else(|message| panic!("{message}"));
+    }
+
+    /// Preserve every producer-owned result claim across a complete rebuild.
+    pub fn preserve_result_claim_deps_strict(
+        &mut self,
+        new_id: NodeId,
+        source_deps: &[NodeId],
+        remap: &UnordMap<NodeId, NodeId>,
+    ) -> Result<(), String> {
+        let mut mapped = Vec::with_capacity(source_deps.len());
+        for old in source_deps {
+            let Some(new) = remap.get(old).copied() else {
+                return Err(format!(
+                    "result claim dependency {old:?} has no remapped node for {new_id:?}"
+                ));
+            };
+            if self.get(new).is_none() {
+                return Err(format!(
+                    "result claim dependency {old:?} maps to invalid node {new:?} for {new_id:?}"
+                ));
+            }
+            mapped.push(new);
+        }
+        let Some(node) = self.nodes.get_mut(new_id.0) else {
+            return Err(format!(
+                "result claim owner {new_id:?} is not present in the rebuilt DAG"
+            ));
+        };
+        node.result_claim_deps = mapped;
         Ok(())
     }
 
@@ -2378,6 +2444,7 @@ pub fn bind_symbolic_dims(
         // Binding is a 1:1 rebuild: retain shape-only dependencies and roots.
         if let Some(new_node) = rebound.node_mut(new_id) {
             new_node.shape_deps = node.shape_deps.clone();
+            new_node.result_claim_deps = node.result_claim_deps.clone();
         }
         if dag.is_root(node.id) {
             rebound.add_root(new_id);

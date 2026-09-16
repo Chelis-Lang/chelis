@@ -211,6 +211,7 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
         }
         out.node_mut(id).unwrap().merged_spans = node.merged_spans.clone();
         out.preserve_shape_deps(id, &node.shape_deps, &remap);
+        out.preserve_result_claim_deps(id, &node.result_claim_deps, &remap);
         remap.insert(node.id, id);
     }
     for root in selected.roots() {

@@ -329,6 +329,20 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                     new_node.shape_deps = mapped;
                 }
             }
+            if !node.result_claim_deps.is_empty() {
+                let mapped = node
+                    .result_claim_deps
+                    .iter()
+                    .map(|old| {
+                        *id_map
+                            .get(&old.0)
+                            .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
+                    })
+                    .collect();
+                if let Some(new_node) = new_dag.node_mut(new_id) {
+                    new_node.result_claim_deps = mapped;
+                }
+            }
             id_map.insert(old_id, new_id);
         }
     }

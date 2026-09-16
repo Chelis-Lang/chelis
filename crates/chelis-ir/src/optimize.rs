@@ -4,6 +4,8 @@ use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 
+type CseKey = (String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
+
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
 /// Span propagation per spec/design/chelis_span_survival.md §2.3
@@ -256,6 +258,9 @@ fn dead_code_eliminate_impl(
             for &dep in &dag.nodes()[i].shape_deps {
                 live[dep.0] = true;
             }
+            for &dep in &dag.nodes()[i].result_claim_deps {
+                live[dep.0] = true;
+            }
         }
     }
 
@@ -342,6 +347,20 @@ fn dead_code_eliminate_impl(
                     new_node.shape_deps = mapped;
                 }
             }
+            if !node.result_claim_deps.is_empty() {
+                let mapped = node
+                    .result_claim_deps
+                    .iter()
+                    .map(|old| {
+                        *id_map
+                            .get(&old.0)
+                            .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
+                    })
+                    .collect();
+                if let Some(new_node) = new_dag.node_mut(new_id) {
+                    new_node.result_claim_deps = mapped;
+                }
+            }
             id_map.insert(old_id, new_id);
         }
     }
@@ -374,7 +393,7 @@ fn dead_code_eliminate_impl(
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
-    let mut seen: UnordMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = UnordMap::new();
+    let mut seen: UnordMap<CseKey, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -391,9 +410,23 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .iter()
             .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
             .collect();
+        let remapped_result_claims: Vec<NodeId> = node
+            .result_claim_deps
+            .iter()
+            .map(|old| {
+                *id_map
+                    .get(&old.0)
+                    .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
+            })
+            .collect();
 
         let op_key = format!("{:?}", node.op);
-        let cse_key = (op_key, remapped_inputs.clone(), remapped_shape_deps.clone());
+        let cse_key = (
+            op_key,
+            remapped_inputs.clone(),
+            remapped_shape_deps.clone(),
+            remapped_result_claims.clone(),
+        );
 
         if !matches!(
             node.op,
@@ -433,6 +466,11 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 && let Some(new_node) = new_dag.node_mut(new_id)
             {
                 new_node.shape_deps = remapped_shape_deps;
+            }
+            if !remapped_result_claims.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.result_claim_deps = remapped_result_claims;
             }
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)

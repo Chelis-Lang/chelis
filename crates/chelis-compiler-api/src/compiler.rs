@@ -6732,6 +6732,7 @@ fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
         shape_deps: node
             .shape_deps
             .iter()
+            .chain(&node.result_claim_deps)
             .map(|id| crate::schema::host_index(id.0))
             .collect(),
         span_id: node.span_id.clone(),

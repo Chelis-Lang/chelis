@@ -83,6 +83,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -173,6 +174,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             );
             append_consumed_provenance(&mut out, new_id, dag, node, &info);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -196,6 +198,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -223,6 +226,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
             );
             append_dense_gather_provenance(&mut out, new_id, dag, node, &info);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -246,6 +250,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -266,6 +271,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
             let indices = id_map[&node.inputs[0]];
             let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
@@ -289,6 +295,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 

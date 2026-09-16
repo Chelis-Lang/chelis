@@ -815,6 +815,7 @@ fn extend_lifetimes(
         // result-claim witness stores the canonical scalar the producer reads;
         // reusing its allocation earlier changes the obligation itself.
         effective_inputs.extend(node.shape_deps.iter().copied());
+        effective_inputs.extend(node.result_claim_deps.iter().copied());
         for input in effective_inputs {
             if let Some(owner) = owner_of[input.0]
                 && let Some(requirement) = requirements.get_mut(&owner)
