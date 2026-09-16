@@ -69,6 +69,20 @@ TEST_COMMANDS: tuple[tuple[str, ...], ...] = (
         "cache_wire_compatibility",
         "--no-fail-fast",
     ),
+    (
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "chelis-runtime",
+        "--test",
+        "exact_tagged_c_header",
+        "--test",
+        "exact_tagged_c_abi",
+        "--test",
+        "runtime_dtype_generated_header",
+        "--no-fail-fast",
+    ),
 )
 
 

@@ -54,6 +54,9 @@ class ContractTests(unittest.TestCase):
             "execution_wire_v3",
             "wire_dag_vocabulary",
             "cache_wire_compatibility",
+            "exact_tagged_c_header",
+            "exact_tagged_c_abi",
+            "runtime_dtype_generated_header",
         ):
             self.assertIn(required, plan)
 
