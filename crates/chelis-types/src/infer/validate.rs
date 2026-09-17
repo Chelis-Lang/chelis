@@ -478,18 +478,15 @@ pub(super) fn validate_tensor_precisions_in_program(
     // every def lives under def_context="" and errors collapse).
     for expr in top_level_decl_items(exprs) {
         let def_name = match expr.carrier() {
-            deep::ExprCarrier::DecodedNode(tag, _, children)
-                if matches!(
-                    tag,
-                    DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
-                ) =>
-            {
-                children
-                    .first()
-                    .and_then(symbol_name)
-                    .unwrap_or("")
-                    .to_string()
-            }
+            deep::ExprCarrier::DecodedNode(
+                DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias,
+                _,
+                children,
+            ) => children
+                .first()
+                .and_then(symbol_name)
+                .unwrap_or("")
+                .to_string(),
             deep::ExprCarrier::DecodedNode(_, _, _)
             | deep::ExprCarrier::StructuralList(_)
             | deep::ExprCarrier::UndecodableHead(_, _, _)
