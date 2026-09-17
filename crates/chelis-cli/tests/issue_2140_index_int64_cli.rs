@@ -1,6 +1,7 @@
 //! chelis#2140 through the serialized `chelis check` surface.
 
 use assert_cmd::Command;
+use chelis_surf::token::{LiteralSuffix, Token, TokenKind};
 use std::fs;
 use std::path::Path;
 use std::process::{ExitStatus, Output};
@@ -61,93 +62,144 @@ fn assert_index_type_rejected(label: &str, source: &str, index_type: &str) {
     );
 }
 
-fn non_i64_literal_index_arguments(source: &str) -> Vec<(usize, String)> {
-    let bytes = source.as_bytes();
-    let mut matches = Vec::new();
-    let mut cursor = 0;
-    while cursor + "index".len() <= bytes.len() {
-        let Some(offset) = source[cursor..].find("index") else {
-            break;
-        };
-        let start = cursor + offset;
-        cursor = start + "index".len();
-        if start > 0
-            && matches!(
-                bytes[start - 1],
-                b'.' | b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+fn strip_wrapping_parentheses(mut tokens: Vec<&Token>) -> Vec<&Token> {
+    loop {
+        if tokens.len() < 2
+            || !matches!(
+                tokens.first().map(|token| &token.kind),
+                Some(TokenKind::LParen)
+            )
+            || !matches!(
+                tokens.last().map(|token| &token.kind),
+                Some(TokenKind::RParen)
             )
         {
+            return tokens;
+        }
+        let mut depth = 0usize;
+        let mut wraps_all = true;
+        for (index, token) in tokens.iter().enumerate() {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 && index + 1 != tokens.len() {
+                        wraps_all = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !wraps_all || depth != 0 {
+            return tokens;
+        }
+        tokens = tokens[1..tokens.len() - 1].to_vec();
+    }
+}
+
+fn direct_numeric_literal(tokens: &[Token], start: usize, end: usize) -> Option<bool> {
+    let mut argument = tokens[start..end]
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Newline))
+        .collect::<Vec<_>>();
+    argument = strip_wrapping_parentheses(argument);
+    if matches!(
+        argument.first().map(|token| &token.kind),
+        Some(TokenKind::Minus)
+    ) {
+        argument.remove(0);
+        argument = strip_wrapping_parentheses(argument);
+    }
+    let [literal] = argument.as_slice() else {
+        return None;
+    };
+    match literal.kind {
+        TokenKind::TypedInt(_, LiteralSuffix::I64)
+        | TokenKind::IntMinMagnitude(Some(LiteralSuffix::I64)) => Some(true),
+        TokenKind::Int(_)
+        | TokenKind::IntMinMagnitude(_)
+        | TokenKind::Float(_)
+        | TokenKind::TypedInt(_, _)
+        | TokenKind::TypedFloat(_, _) => Some(false),
+        _ => None,
+    }
+}
+
+fn non_i64_direct_index_literals(source: &str) -> Result<Vec<(usize, String)>, String> {
+    let tokens = chelis_surf::lexer::lex(source).map_err(|error| error.to_string())?;
+    let mut matches = Vec::new();
+    for index in 0..tokens.len() {
+        if !matches!(&tokens[index].kind, TokenKind::Ident(name) if name == "index") {
             continue;
         }
-        let mut open = cursor;
-        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
-            open += 1;
+        let previous = tokens[..index]
+            .iter()
+            .rev()
+            .find(|token| !matches!(token.kind, TokenKind::Newline));
+        if matches!(previous.map(|token| &token.kind), Some(TokenKind::Dot)) {
+            continue;
         }
-        if bytes.get(open) != Some(&b'(') {
+        let Some(open) = tokens[index + 1..]
+            .iter()
+            .position(|token| !matches!(token.kind, TokenKind::Newline))
+            .map(|offset| index + 1 + offset)
+        else {
+            continue;
+        };
+        if !matches!(tokens[open].kind, TokenKind::LParen) {
             continue;
         }
 
-        let mut nested = Vec::new();
-        let mut quote = None;
-        let mut escaped = false;
+        let mut depth = 0usize;
         let mut second_start = None;
-        let mut end = open + 1;
-        while end < bytes.len() {
-            let byte = bytes[end];
-            if let Some(delimiter) = quote {
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == delimiter {
-                    quote = None;
+        let mut second_end = None;
+        for (cursor, token) in tokens.iter().enumerate().skip(open + 1) {
+            match token.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen if depth == 0 => {
+                    second_end = second_start.map(|_| cursor);
+                    break;
                 }
-            } else {
-                match byte {
-                    b'\'' | b'"' => quote = Some(byte),
-                    b'(' | b'[' | b'{' => nested.push(byte),
-                    b')' if nested.is_empty() => break,
-                    b')' | b']' | b'}' => {
-                        nested.pop();
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                TokenKind::Comma if depth == 0 => {
+                    if second_start.is_some() {
+                        second_end = Some(cursor);
+                        break;
                     }
-                    b',' if nested.is_empty() && second_start.is_none() => {
-                        second_start = Some(end + 1);
-                    }
-                    _ => {}
+                    second_start = Some(cursor + 1);
                 }
+                _ => {}
             }
-            end += 1;
         }
-        let Some(second_start) = second_start else {
+        let (Some(second_start), Some(second_end)) = (second_start, second_end) else {
             continue;
         };
-        let argument = source[second_start..end].trim();
-        let exact_i64 = argument
-            .strip_suffix("i64")
-            .is_some_and(|number| number.parse::<i128>().is_ok());
-        let recognized_non_i64 = argument.parse::<i128>().is_ok()
-            || argument.parse::<f64>().is_ok()
-            || [
-                "i8", "i16", "i32", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64",
-            ]
-            .iter()
-            .any(|suffix| {
-                argument
-                    .strip_suffix(suffix)
-                    .is_some_and(|number| number.parse::<f64>().is_ok())
-            });
-        if recognized_non_i64 && !exact_i64 {
+        if direct_numeric_literal(&tokens, second_start, second_end) == Some(false) {
+            let Some(first) = tokens[second_start..second_end]
+                .iter()
+                .find(|token| !matches!(token.kind, TokenKind::Newline))
+            else {
+                continue;
+            };
+            let Some(last) = tokens[second_start..second_end]
+                .iter()
+                .rev()
+                .find(|token| !matches!(token.kind, TokenKind::Newline))
+            else {
+                continue;
+            };
             matches.push((
-                source[..start]
+                source[..tokens[index].span.offset]
                     .bytes()
                     .filter(|byte| *byte == b'\n')
                     .count()
                     + 1,
-                argument.to_string(),
+                source[first.span.offset..last.span.end()].to_string(),
             ));
         }
     }
-    matches
+    Ok(matches)
 }
 
 #[test]
@@ -155,45 +207,43 @@ fn direct_index_literal_fixture_oracle_fails_closed() {
     let direct = "index";
     let source = format!(
         "\
+-- prose: index([1i64], 99)
+text = \"index([1i64], 98)\"
 bare = {direct}([1i64], 0)
 wrong_width = {direct}([1i64], 1i32)
 wrong_family = {direct}([1i64], 2.0f32)
 exact = {direct}([1i64], 3i64)
-nested = {direct}({direct}([[1i64]], 0i64), 4)
+nested = {direct}({direct}([[1i64]], 0i64), (4))
 method = values.{direct}(5)
 "
     );
     assert_eq!(
-        non_i64_literal_index_arguments(&source),
+        non_i64_direct_index_literals(&source).expect("lex control"),
         vec![
-            (1, "0".to_string()),
-            (2, "1i32".to_string()),
-            (3, "2.0f32".to_string()),
-            (5, "4".to_string()),
+            (3, "0".to_string()),
+            (4, "1i32".to_string()),
+            (5, "2.0f32".to_string()),
+            (7, "(4)".to_string()),
         ]
+    );
+    let constructed = ["out: i64 = index([1i64], ", "0)\n"].concat();
+    assert_eq!(
+        non_i64_direct_index_literals(&constructed).expect("lex constructed fixture"),
+        vec![(1, "0".to_string())]
     );
 }
 
 #[test]
-fn tracked_direct_index_numeric_literal_fixtures_use_exact_i64() {
-    // This is the executable-corpus migration oracle. Intentional non-i64
-    // rejection controls remain generated through `{literal}` in the focused
-    // matrix below; they are executed, not silently exempted by path.
+fn tracked_chelis_sources_use_exact_i64_for_direct_index_literals() {
+    // This is a source-language migration oracle over actual `.ch` files.
+    // Rust/Python-generated rejection controls remain owned by their focused
+    // executable tests below rather than an unsound static-string inventory.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let tracked = std::process::Command::new("git")
         .current_dir(&root)
-        .args([
-            "ls-files",
-            "-z",
-            "--",
-            "crates",
-            "examples",
-            "packages/chelis-std",
-            "scripts",
-            "tests",
-        ])
+        .args(["ls-files", "-z", "--", "*.ch"])
         .output()
-        .expect("list tracked source carriers");
+        .expect("list tracked Chelis sources");
     assert!(
         tracked.status.success(),
         "git ls-files failed: {}",
@@ -206,17 +256,11 @@ fn tracked_direct_index_numeric_literal_fixtures_use_exact_i64() {
             continue;
         }
         let relative = String::from_utf8(relative.to_vec()).expect("UTF-8 tracked path");
-        if !matches!(
-            Path::new(&relative)
-                .extension()
-                .and_then(|value| value.to_str()),
-            Some("ch" | "py" | "rs")
-        ) {
-            continue;
-        }
         let source = fs::read_to_string(root.join(&relative))
             .unwrap_or_else(|error| panic!("read {relative}: {error}"));
-        for (line, argument) in non_i64_literal_index_arguments(&source) {
+        let found = non_i64_direct_index_literals(&source)
+            .unwrap_or_else(|error| panic!("lex tracked Chelis source {relative}: {error}"));
+        for (line, argument) in found {
             violations.push(format!("{relative}:{line}: index argument `{argument}`"));
         }
     }
