@@ -19508,10 +19508,10 @@ mod tests {
             );
         }))
         .expect_err("incompatible checked branch producers must fail loudly");
-        let message = err
-            .downcast_ref::<LowerDiagnostic>()
-            .map(ToString::to_string)
-            .unwrap_or_default();
+        let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() else {
+            panic!("incompatible branch producers must raise a lowering diagnostic");
+        };
+        let message = diagnostic.to_string();
         assert!(
             message.contains("checked dynamic `if` branches lowered to incompatible tensor types")
         );
