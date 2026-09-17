@@ -17,9 +17,12 @@
 //! two lanes must print the same thing. Each program instantiates the binder
 //! at f32 AND f64, so a wrongly shared instantiation cannot pass.
 //!
-//! Negative parity: an unbounded binder target still rejects. [04-DTYPE-1]
-//! and chelis#1558 own that rejection. Making the gate accept more must not
-//! turn it into accepting everything.
+//! Negative parity: an unbounded binder target still rejects. The type checker
+//! owns that rejection ([04-DTYPE-1], chelis#1558), so it fires BEFORE host
+//! lowering and cannot fail because of a change to the host-lane gate. It is
+//! kept to pin the checker-level boundary this fix sits beside, and it asserts
+//! that the rejection is the checker's. It is not a negative test of the
+//! host-lane gate itself.
 use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
@@ -120,6 +123,29 @@ fn a_binder_bound_only_through_tensor_types_actualizes_a_scalar_cast() {
 }
 
 #[test]
+fn an_inlined_call_nested_in_another_inlined_body_keeps_the_callers_bindings() {
+    // `outer` is inlined into `main`, and `count_as` is inlined again inside
+    // `outer`'s body, once on `outer`'s own parameter `w`. The inner
+    // substitution must EXTEND the enclosing one: the argument substituted
+    // into `count_as` is `outer`'s expression, which still carries `outer`'s
+    // type variable `q`, and only the enclosing substitution resolves it.
+    // Starting from an empty map instead leaves `q` unactualized.
+    // 16777217 is exact in f64 and rounds in f32, so a shared instantiation
+    // would change the result.
+    assert_lanes_agree(
+        "def count_as[n, p: Float](v: tensor[n, p]) -> p = add(cast(numel(v), p), cast(16777217.0f64, p))\n\
+         def outer[m, q: Float](w: tensor[m, q]) -> tensor[2, q] = to_tensor([\
+            count_as(to_tensor([count_as(w), cast(count_as(to_tensor([1.0f32, 1.0f32, 1.0f32])), q)])), \
+            cast(0.5f64, q)])\n\
+         def main() -> tensor[4, f64] = concat([\
+            cast(outer(to_tensor([1.0f32])), f64), \
+            outer(to_tensor([1.0f64]))], 0)",
+        "nested_inline_extends_enclosing",
+        &[16777218.0, 0.5, 16777219.0, 0.5],
+    );
+}
+
+#[test]
 fn an_int_bounded_scalar_binder_target_lowers() {
     // The same inline path for an Int family. `p` is a tensor's precision, so
     // the call is inlined, not monomorphized. (With `p` only in a scalar
@@ -157,5 +183,10 @@ fn an_unbounded_binder_cast_target_still_rejects_in_the_build_lane() {
     assert!(
         !output.status.success(),
         "an unbounded binder cast target was accepted by the build lane"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("04-DTYPE-1") && !diagnostic.contains("in host lowering"),
+        "the unbounded target must be rejected by the checker, not reach host lowering: {diagnostic}"
     );
 }
