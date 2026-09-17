@@ -95,6 +95,28 @@ fn build_to_c(source: &str, name: &str) -> String {
     fs::read_to_string(&c_path).expect("read generated c")
 }
 
+/// Return the injective C symbol emitted for an authored Chelis definition.
+///
+/// Authored names never borrow their source spelling: each UTF-8 byte is
+/// encoded under the `chelis_fn_` namespace. Keep all sparse-summary oracle
+/// lookups on that emitted identity so a source-spelled decoy cannot satisfy a
+/// positive or negative assertion.
+fn authored_c_symbol(source_name: &str) -> String {
+    let mut symbol = String::from("chelis_fn_");
+    for byte in source_name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
+fn owned_body_symbol(source_name: &str) -> String {
+    format!("{}__chelis_owned_body", authored_c_symbol(source_name))
+}
+
+fn tensor_helper_prefix(source_name: &str) -> String {
+    format!("static void {}__tensor_", authored_c_symbol(source_name))
+}
+
 /// Slice the generated C between the start of a `chelis_tensor* <fn>(`
 /// definition and its closing brace. The opening declaration (the
 /// forward `chelis_tensor* <fn>(...);`) is ignored — we want the
@@ -103,12 +125,12 @@ fn build_to_c(source: &str, name: &str) -> String {
 /// Returns the substring from the `chelis_tensor* <fn>(` definition
 /// header up to the matching closing `}`. Panics if the function
 /// definition is not present in `c`.
-fn function_body(c: &str, function: &str) -> String {
+fn function_body(c: &str, source_name: &str) -> String {
     // Phase 2 gives every externally callable owned-formal function a
     // borrowing artifact adapter plus a consuming implementation body. Sparse
     // lowering belongs to the latter; inspecting the adapter would only test
     // its required retain-and-forward boundary.
-    let function = format!("{function}__chelis_owned_body");
+    let function = owned_body_symbol(source_name);
     let needle = format!("chelis_tensor* {function}(");
     // Find the definition: the prototype ends with `;`, the
     // definition with `{`. Scan candidate positions.
@@ -197,7 +219,7 @@ fn body_contains_tensor_helper_call(body: &str) -> bool {
 /// via `__result = <callee>(...);` — the C call-site fallback used
 /// when no function-level summary is registered.
 fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
-    body.contains(&format!("= {callee}__chelis_owned_body("))
+    body.contains(&format!("= {}(", owned_body_symbol(callee)))
 }
 
 // =========================================================================
@@ -241,7 +263,7 @@ fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
     // `cross_function_specialization.md`: the helper body is still
     // available even when callsites bypass it.
     assert!(
-        c.contains("static void my_g__tensor_"),
+        c.contains(&tensor_helper_prefix("my_g")),
         "generated tensor helper `my_g__tensor_*` MUST still be emitted \
          for debug/non-summary callers; not found in generated C"
     );
@@ -327,7 +349,7 @@ fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
     );
 
     assert!(
-        c.contains("static void my_sr__tensor_"),
+        c.contains(&tensor_helper_prefix("my_sr")),
         "generated tensor helper `my_sr__tensor_*` MUST still be emitted \
          for debug/non-summary callers"
     );
