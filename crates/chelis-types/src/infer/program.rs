@@ -726,7 +726,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     library_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
-    // Normalize Node/BareList → List (#908 producer switch).
+    // Normalize Node → List while preserving BareList structural role
+    // (#908 producer switch).
     let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained below
@@ -1222,7 +1223,8 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     new_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
-    // Normalize Node/BareList → List (#908 producer switch).
+    // Normalize Node → List while preserving BareList structural role
+    // (#908 producer switch).
     let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained into the
@@ -1399,7 +1401,8 @@ pub(crate) fn infer_ir_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    // Normalize Node/BareList → List (#908 producer switch).
+    // Normalize Node → List while preserving BareList structural role
+    // (#908 producer switch).
     let normalized = normalize_program_input(exprs);
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
@@ -2385,15 +2388,14 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     }
 }
 
-/// Iteratively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
-/// `Expr::List` so the pointer-keyed type-stamp system and existing
-/// List-based inference dispatch work on a single representation. The
-/// explicit heap worklist is required because this boundary runs before the
-/// guarded inference walkers: native recursion here would abort on the same
-/// deep input those walkers must reject with a typed diagnostic. This is the
-/// transitional normalization boundary for the #908 producer switch; once
-/// all inference functions are migrated to accept Node directly, this becomes
-/// dead code.
+/// Iteratively convert `Expr::Node` → `Expr::List` for the pointer-keyed type
+/// stamp system and existing List-based inference dispatch while preserving
+/// `Expr::BareList` as a structural carrier. The explicit heap worklist is
+/// required because this boundary runs before the guarded inference walkers:
+/// native recursion here would abort on the same deep input those walkers
+/// must reject with a typed diagnostic. This is the transitional normalization
+/// boundary for the #908 producer switch; once all inference functions are
+/// migrated to accept Node directly, this becomes dead code.
 fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     exprs.iter().map(normalize_node_to_list).collect()
 }
@@ -2416,6 +2418,10 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
     enum Action<'a> {
         Visit(&'a deep::Expr),
         FinishList {
+            element_count: usize,
+            span: Span,
+        },
+        FinishBareList {
             element_count: usize,
             span: Span,
         },
@@ -2510,7 +2516,7 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                     );
                 }
                 deep::Expr::BareList(elements, span) => {
-                    actions.push(Action::FinishList {
+                    actions.push(Action::FinishBareList {
                         element_count: elements.len(),
                         span: *span,
                     });
@@ -2533,6 +2539,13 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
             } => {
                 let elements = split_tail(&mut values, element_count);
                 values.push(deep::Expr::List(deep::List { elements }, span));
+            }
+            Action::FinishBareList {
+                element_count,
+                span,
+            } => {
+                let elements = split_tail(&mut values, element_count);
+                values.push(deep::Expr::BareList(elements, span));
             }
             Action::FinishMap { map, span } => {
                 let normalized = split_tail(&mut values, metadata_leaves(map).len());
@@ -2600,6 +2613,61 @@ pub(crate) fn builtin_selection_probe(
 #[cfg(test)]
 mod component_level_scope_tests {
     use super::*;
+
+    fn span() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn name(value: &str) -> deep::Expr {
+        deep::Expr::Atom(deep::Atom::Name(value.to_string()), span())
+    }
+
+    #[test]
+    fn carrier_normalization_preserves_structural_role_and_legacy_negatives() {
+        for structural in [
+            deep::Expr::BareList(
+                vec![
+                    name("x"),
+                    deep::Expr::Map(deep::Metadata::default(), span()),
+                ],
+                span(),
+            ),
+            deep::Expr::BareList(vec![name("copy"), name("fill")], span()),
+        ] {
+            assert!(matches!(
+                normalize_node_to_list(&structural).carrier(),
+                deep::ExprCarrier::StructuralList(_)
+            ));
+        }
+
+        let undecodable = deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    name("future-form"),
+                    deep::Expr::Map(deep::Metadata::default(), span()),
+                ],
+            },
+            span(),
+        );
+        assert!(matches!(
+            normalize_node_to_list(&undecodable).carrier(),
+            deep::ExprCarrier::UndecodableHead("future-form", _, _)
+        ));
+
+        let malformed = deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::Copy), span()),
+                    name("value"),
+                ],
+            },
+            span(),
+        );
+        assert!(matches!(
+            normalize_node_to_list(&malformed).carrier(),
+            deep::ExprCarrier::MalformedLegacyList(_)
+        ));
+    }
 
     fn mutual_defs() -> Vec<deep::Expr> {
         chelis_deep::parser::parse_str(

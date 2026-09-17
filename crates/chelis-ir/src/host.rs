@@ -16431,6 +16431,10 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
             Some(Expr::Map(meta, _)) => meta,
             _ => return None,
         },
+        Expr::BareList(elements, _) => match elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
         Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
@@ -18578,16 +18582,18 @@ fn children(list: &List) -> &[Expr] {
 }
 
 /// Borrow a canonical stamped node without reconstructing a legacy `List`.
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
-    match expr {
-        Expr::List(list, _) => {
-            let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-                return None;
-            };
-            Some((tag(list)?, meta, children(list)))
+    match expr.carrier() {
+        chelis_deep::ExprCarrier::DecodedNode(tag, metadata, children) => {
+            Some((tag, metadata, children))
         }
-        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        _ => None,
+        chelis_deep::ExprCarrier::StructuralList(_)
+        | chelis_deep::ExprCarrier::UndecodableHead(_, _, _)
+        | chelis_deep::ExprCarrier::Atom(_)
+        | chelis_deep::ExprCarrier::MetadataMap(_)
+        | chelis_deep::ExprCarrier::MetadataExpression(_)
+        | chelis_deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -18636,6 +18642,7 @@ fn param_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
         Expr::MetaExpr(meta, _) => param_name(&meta.expr),
+        Expr::BareList(elements, _) => elements.first().and_then(symbol_name).map(str::to_string),
         Expr::List(list, _) => list
             .elements
             .first()
@@ -18651,7 +18658,7 @@ fn param_host_type(expr: &Expr) -> Option<HostTypeTerm> {
         Expr::MetaExpr(meta, _) => expr_type(expr)
             .filter(|ty| !ty.is_unresolved())
             .or_else(|| param_host_type(&meta.expr)),
-        Expr::List(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
+        Expr::List(_, _) | Expr::BareList(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
         _ => None,
     }
 }
@@ -18722,6 +18729,10 @@ fn params_list_of(fn_expr: &Expr) -> Option<&List> {
 fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
     let meta = match param {
         Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::BareList(elements, _) => match elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
             _ => return None,
         },

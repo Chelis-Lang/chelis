@@ -18,9 +18,10 @@ const DEF_NAME_INDEX: usize = 2;
 const DEF_VALUE_INDEX: usize = 3;
 const FN_PARAMS_INDEX: usize = 2;
 
-/// Recursively bridge stamped trees to the legacy `List` carrier used by the
-/// mutating authoring implementation. Read-only authoring APIs must consume
-/// `Node` directly and therefore never call this adapter.
+/// Recursively bridge stamped vocabulary nodes to the legacy `List` carrier
+/// used by the mutating authoring implementation while preserving structural
+/// `BareList` role. Read-only authoring APIs must consume `Node` directly and
+/// therefore never call this adapter.
 fn normalize_for_mutation(exprs: &[Expr]) -> Vec<Expr> {
     exprs.iter().map(normalize_expr_for_mutation).collect()
 }
@@ -36,10 +37,8 @@ fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
                 .collect();
             Expr::List(List { elements }, *span)
         }
-        Expr::BareList(elements, span) => Expr::List(
-            List {
-                elements: elements.iter().map(normalize_expr_for_mutation).collect(),
-            },
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements.iter().map(normalize_expr_for_mutation).collect(),
             *span,
         ),
         Expr::List(list, span) => Expr::List(
@@ -1527,25 +1526,18 @@ fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
 }
 
 fn node_view(expr: &Expr) -> Option<NodeView<'_>> {
-    match expr {
-        Expr::Node(node, _) => Some(NodeView {
-            tag: node.tag(),
-            meta: Some(node.meta()),
-            children: node.children_slice(),
+    match expr.carrier() {
+        crate::ExprCarrier::DecodedNode(tag, metadata, children) => Some(NodeView {
+            tag,
+            meta: Some(metadata),
+            children,
         }),
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let meta = match list.elements.get(1) {
-                Some(Expr::Map(meta, _)) => Some(meta),
-                _ => None,
-            };
-            Some(NodeView {
-                tag,
-                meta,
-                children: list.elements.get(2..).unwrap_or_default(),
-            })
-        }
-        _ => None,
+        crate::ExprCarrier::StructuralList(_)
+        | crate::ExprCarrier::UndecodableHead(_, _, _)
+        | crate::ExprCarrier::Atom(_)
+        | crate::ExprCarrier::MetadataMap(_)
+        | crate::ExprCarrier::MetadataExpression(_)
+        | crate::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

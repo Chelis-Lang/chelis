@@ -520,9 +520,13 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     }
 }
 
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &Metadata, &[Expr]), HostTypeDecodeError> {
-    match expr {
-        Expr::List(list, _) => match list.elements.get(1) {
+    match expr.carrier() {
+        chelis_deep::ExprCarrier::DecodedNode(tag, metadata, children) => {
+            Ok((tag, metadata, children))
+        }
+        chelis_deep::ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
             Some(Expr::Map(meta, _)) => Ok((
                 list.tag()
                     .ok_or_else(|| malformed("type node has no symbolic tag"))?,
@@ -532,8 +536,13 @@ fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &Metadata, &[Expr]), HostTypeD
             Some(_) => Err(malformed("type node metadata slot is not a map")),
             None => Err(malformed("type node has no metadata slot")),
         },
-        Expr::Node(node, _) => Ok((node.tag(), node.meta(), node.children_slice())),
-        _ => Err(malformed("expected a Deep type node")),
+        chelis_deep::ExprCarrier::StructuralList(_)
+        | chelis_deep::ExprCarrier::UndecodableHead(_, _, _)
+        | chelis_deep::ExprCarrier::Atom(_)
+        | chelis_deep::ExprCarrier::MetadataMap(_)
+        | chelis_deep::ExprCarrier::MetadataExpression(_) => {
+            Err(malformed("expected a Deep type node"))
+        }
     }
 }
 

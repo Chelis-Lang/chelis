@@ -834,42 +834,174 @@ fn validate_core_transform_target(
 /// ascriptions, defsig tensor types, parameter type annotations, literal
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum TensorPrecisionOwnerKind {
+    Value,
+    Type,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionScope {
+    path: Option<String>,
+    occurrence: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionOwner {
+    scope: TensorPrecisionScope,
+    kind: TensorPrecisionOwnerKind,
+    name: Option<String>,
+    occurrence: usize,
+}
+
+struct TensorPrecisionItem<'a> {
+    scope: TensorPrecisionScope,
+    expr: &'a deep::Expr,
+}
+
+#[derive(Default)]
+struct TensorPrecisionValueOccurrences {
+    signatures: Vec<usize>,
+    definitions: Vec<usize>,
+}
+
+fn tensor_precision_items(exprs: &[deep::Expr]) -> Vec<TensorPrecisionItem<'_>> {
+    fn push<'a>(
+        expr: &'a deep::Expr,
+        scope: &TensorPrecisionScope,
+        next_scope_occurrence: &mut usize,
+        out: &mut Vec<TensorPrecisionItem<'a>>,
+    ) {
+        if let deep::ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+            let name = children.first().and_then(symbol_name);
+            let path = match (scope.path.as_deref(), name) {
+                (Some(prefix), Some(name)) => Some(format!("{prefix}.{name}")),
+                (None, Some(name)) => Some(name.to_string()),
+                (prefix, None) => prefix.map(str::to_string),
+            };
+            let module_scope = TensorPrecisionScope {
+                path,
+                occurrence: *next_scope_occurrence,
+            };
+            *next_scope_occurrence += 1;
+            for child in children.iter().skip(1) {
+                push(child, &module_scope, next_scope_occurrence, out);
+            }
+            return;
+        }
+        out.push(TensorPrecisionItem {
+            scope: scope.clone(),
+            expr,
+        });
+    }
+
+    let root = TensorPrecisionScope {
+        path: None,
+        occurrence: 0,
+    };
+    let mut next_scope_occurrence = 1;
+    let mut items = Vec::new();
+    for expr in exprs {
+        push(expr, &root, &mut next_scope_occurrence, &mut items);
+    }
+    items
+}
+
+fn tensor_precision_owner_plan(items: &[TensorPrecisionItem<'_>]) -> Vec<TensorPrecisionOwner> {
+    let mut owners = items
+        .iter()
+        .enumerate()
+        .map(|(occurrence, item)| TensorPrecisionOwner {
+            scope: item.scope.clone(),
+            kind: TensorPrecisionOwnerKind::Other,
+            name: None,
+            occurrence,
+        })
+        .collect::<Vec<_>>();
+    let mut value_occurrences: BTreeMap<
+        (TensorPrecisionScope, String),
+        TensorPrecisionValueOccurrences,
+    > = BTreeMap::new();
+    let mut type_occurrences: BTreeMap<(TensorPrecisionScope, String), usize> = BTreeMap::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let deep::ExprCarrier::DecodedNode(tag, _, children) = item.expr.carrier() else {
+            continue;
+        };
+        let Some(name) = children.first().and_then(symbol_name).map(str::to_string) else {
+            continue;
+        };
+        match tag {
+            DeepTag::Defsig => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .signatures
+                .push(index),
+            DeepTag::Def => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .definitions
+                .push(index),
+            DeepTag::Deftype | DeepTag::Typealias => {
+                let occurrence = type_occurrences
+                    .entry((item.scope.clone(), name.clone()))
+                    .or_default();
+                owners[index] = TensorPrecisionOwner {
+                    scope: item.scope.clone(),
+                    kind: TensorPrecisionOwnerKind::Type,
+                    name: Some(name),
+                    occurrence: *occurrence,
+                };
+                *occurrence += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Pair the nth signature and nth definition for a value declaration
+    // independently of which kind appears first in source. Extra declarations
+    // retain their own occurrence owner. The lexical scope occurrence keeps
+    // reopened module blocks distinct even when their path spelling matches.
+    for ((scope, name), occurrences) in value_occurrences {
+        for (occurrence, index) in occurrences.signatures.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+        for (occurrence, index) in occurrences.definitions.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+    }
+
+    owners
+}
+
 pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
     errors: &mut impl DiagnosticOutput,
 ) {
-    let mut seen: UnordSet<(String, String)> = UnordSet::new();
-    // Descend through `(module {} name ...)` wrappers so per-def dedup
-    // keeps each def's tensor types in their own key space (otherwise
-    // every def lives under def_context="" and errors collapse).
-    for expr in top_level_decl_items(exprs) {
-        let def_name = match expr {
-            deep::Expr::List(list, _)
-                if matches!(
-                    get_tag(list),
-                    Some(DeepTag::Def)
-                        | Some(DeepTag::Defsig)
-                        | Some(DeepTag::Deftype)
-                        | Some(DeepTag::Typealias)
-                ) =>
-            {
-                children(list)
-                    .first()
-                    .and_then(symbol_name)
-                    .unwrap_or("")
-                    .to_string()
-            }
-            _ => String::new(),
-        };
-        walk_for_tensor_precision(expr, errors, &mut seen, &def_name);
+    let mut seen: UnordSet<(TensorPrecisionOwner, String)> = UnordSet::new();
+    let items = tensor_precision_items(exprs);
+    let owners = tensor_precision_owner_plan(&items);
+    for (item, owner) in items.into_iter().zip(owners) {
+        walk_for_tensor_precision(item.expr, errors, &mut seen, &owner);
     }
 }
 
-pub(super) fn walk_for_tensor_precision(
+fn walk_for_tensor_precision(
     expr: &deep::Expr,
     errors: &mut impl DiagnosticOutput,
-    seen: &mut UnordSet<(String, String)>,
-    def_context: &str,
+    seen: &mut UnordSet<(TensorPrecisionOwner, String)>,
+    owner: &TensorPrecisionOwner,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the
     // native stack (gdb confirmed this is a real SIGSEGV site on deep `app`
@@ -881,20 +1013,15 @@ pub(super) fn walk_for_tensor_precision(
         "validate_tensor_precisions (walk_for_tensor_precision)",
         expr
     );
-    match expr {
-        deep::Expr::List(list, _span) => {
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, metadata, kids) => {
             // Check t-tensor nodes at this level.
-            if get_tag(list) == Some(DeepTag::TTensor) {
-                let kids = children(list);
+            if tag == DeepTag::TTensor {
                 // chelis#1125 PP7 / [04-TOT-5]: read the trailing `t-prim`
-                // through the carrier-preserving `stamped_parts`. The
-                // `Expr::Node` arm below bridges through `Node::to_list`, so
-                // this walker LOOKS carrier-complete to a grep for `Expr::Node`
-                // coverage -- but `to_list` copies children verbatim, so the
-                // rebuilt list's trailing precision child is still a `Node` and
-                // the old `Expr::List`-only destructure failed on it. The whole
-                // tensor-precision check was therefore skipped on the stamped
-                // ingress, by a walker with a `Node` arm (PP7 finding 3).
+                // through the shared carrier-total accessor. The former
+                // `Node::to_list` bridge copied children verbatim, so its
+                // trailing `t-prim` remained a `Node` and a List-only
+                // destructure silently skipped the check (PP7 finding 3).
                 if let Some(last) = kids.last()
                     && let Some((DeepTag::TPrim, _, prec_kids)) = stamped_parts(last)
                     && let Some(name) = prec_kids.first().and_then(symbol_name)
@@ -909,7 +1036,7 @@ pub(super) fn walk_for_tensor_precision(
                         && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
-                        && seen.insert((def_context.to_string(), name.to_string()))
+                        && seen.insert((owner.clone(), name.to_string()))
                     {
                         let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
                         // WS-A5 RT-3a F3: an identifier in a `t-prim`
@@ -949,50 +1076,47 @@ pub(super) fn walk_for_tensor_precision(
             // `cast` is inferred by infer_cast which already emits a clearer
             // site-local error for bad precisions. Skip the walker's recursion
             // inside a cast so we don't duplicate the diagnostic.
-            if get_tag(list) == Some(DeepTag::Cast) {
+            if tag == DeepTag::Cast {
                 return;
             }
 
-            // Recurse into metadata map (element[1]), which may carry
-            // `type:` ascriptions that also contain t-tensor types.
-            if list.elements.len() >= 2
-                && let deep::Expr::Map(map, _) = &list.elements[1]
-            {
-                map.visit_syntax(&mut |_, v| {
-                    walk_for_tensor_precision(v, errors, seen, def_context);
-                });
-            }
+            // Metadata may carry `type:` ascriptions containing tensor types.
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
 
-            // Recurse into children (elements after index 1).
-            for child in children(list) {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+            for child in kids {
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, v| {
-                walk_for_tensor_precision(v, errors, seen, def_context);
+        deep::ExprCarrier::MetadataMap(metadata) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
         }
-        deep::Expr::MetaExpr(meta, _) => {
-            meta.metadata.visit_syntax(&mut |_, v| {
-                walk_for_tensor_precision(v, errors, seen, def_context);
+        deep::ExprCarrier::MetadataExpression(metadata_expr) => {
+            metadata_expr.metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
-            walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
+            walk_for_tensor_precision(&metadata_expr.expr, errors, seen, owner);
         }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_tensor_precision(&bridged, errors, seen, def_context);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+        deep::ExprCarrier::Atom(_) => {}
+        deep::ExprCarrier::StructuralList(elements) => {
+            for child in elements {
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+        deep::ExprCarrier::UndecodableHead(_, metadata, children) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
+            for child in children {
+                walk_for_tensor_precision(child, errors, seen, owner);
+            }
+        }
+        deep::ExprCarrier::MalformedLegacyList(list) => {
+            for element in &list.elements {
+                walk_for_tensor_precision(element, errors, seen, owner);
             }
         }
     }

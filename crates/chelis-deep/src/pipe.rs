@@ -34,16 +34,14 @@ use crate::tag::DeepTag;
 /// other. Both are read here so the fold cannot depend on which producer
 /// built the tree.
 fn stamped(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
-    match expr {
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-                return None;
-            };
-            Some((tag, meta, &list.elements[2..]))
-        }
-        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        _ => None,
+    match expr.carrier() {
+        crate::ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        crate::ExprCarrier::StructuralList(_)
+        | crate::ExprCarrier::UndecodableHead(_, _, _)
+        | crate::ExprCarrier::Atom(_)
+        | crate::ExprCarrier::MetadataMap(_)
+        | crate::ExprCarrier::MetadataExpression(_)
+        | crate::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

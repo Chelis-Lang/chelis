@@ -44,6 +44,52 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
+/// chelis#1125: authoring normalization preserves legal structural parameter
+/// lists, so both runtime readers must accept an annotated `Expr::BareList`
+/// without admitting malformed name or metadata layouts.
+#[test]
+fn annotated_bare_list_parameter_preserves_runtime_name_and_declared_type() {
+    use chelis_deep::Span;
+    use chelis_deep::annotations::{MetadataValue, TypeSyntax};
+
+    let span = Span::new(0, 0);
+    let declared_type = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(Metadata::default(), span),
+                Expr::Atom(Atom::Name("f64".to_string()), span),
+            ],
+        },
+        span,
+    );
+    let parameter = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".to_string()), span),
+            Expr::Map(
+                Metadata::from(MetadataValue::Type(
+                    TypeSyntax::try_new(declared_type.clone()).expect("valid declared type"),
+                )),
+                span,
+            ),
+        ],
+        span,
+    );
+
+    assert_eq!(runtime_param_name(&parameter), Some("x"));
+    assert_eq!(param_decl_type_expr(&parameter), Some(&declared_type));
+
+    let malformed_name = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Int(0), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    assert_eq!(runtime_param_name(&malformed_name), None);
+    assert_eq!(param_decl_type_expr(&malformed_name), None);
+}
+
 /// chelis#1829: the interpreter entry derives each definition's kernel
 /// decision once, so the summary probes behind `def_kernel` are bounded by the
 /// number of definitions rather than expanding the call graph as a tree.
