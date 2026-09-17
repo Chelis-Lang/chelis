@@ -159,6 +159,188 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
     );
 }
 
+fn legacy_node(expr: &Expr) -> Expr {
+    let Expr::Node(node, span) = expr else {
+        panic!("test fixture must be a decoded node");
+    };
+    Expr::List(node.to_list(*span), *span)
+}
+
+fn type_metadata(type_expr: Expr) -> Metadata {
+    Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+        chelis_deep::annotations::TypeSyntax::try_new(type_expr)
+            .expect("canonical test type syntax"),
+    ))
+}
+
+#[test]
+fn raw_decoder_matches_successor_and_legacy_carriers() {
+    for source in [
+        "(t-prim {} i64)",
+        "(t-ref {} (t-prim {} f32))",
+        "(t-tensor {} (d-lit {} 4) (t-var {} p))",
+        "(t-adt {} Option (t-prim {} bool))",
+        "(t-tuple {} (t-prim {} i32) (t-unit {}))",
+        "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
+    ] {
+        let successor = parse_one(source);
+        let legacy = legacy_node(&successor);
+        assert_eq!(
+            decode_host_type(&legacy),
+            decode_host_type(&successor),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
+    let span = Span::new(0, 0);
+    let metadata = type_metadata(parse_one("(t-prim {} i64)"));
+    let successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: metadata.clone(),
+        children: vec![],
+        span,
+    }));
+    let legacy = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future-literal".into()), span),
+                Expr::Map(metadata, span),
+            ],
+        },
+        span,
+    );
+    assert!(matches!(
+        successor.carrier(),
+        chelis_deep::ExprCarrier::UndecodableHead(..)
+    ));
+    assert!(matches!(
+        legacy.carrier(),
+        chelis_deep::ExprCarrier::UndecodableHead(..)
+    ));
+    assert_eq!(
+        decode_host_type_metadata(&successor),
+        Ok(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+            Prim::Int64
+        )))
+    );
+    assert_eq!(
+        decode_host_type_metadata(&legacy),
+        decode_host_type_metadata(&successor)
+    );
+
+    let missing_successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: Metadata::default(),
+        children: vec![],
+        span,
+    }));
+    let missing_legacy = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future-literal".into()), span),
+                Expr::Map(Metadata::default(), span),
+            ],
+        },
+        span,
+    );
+    assert_eq!(
+        decode_host_type_metadata(&missing_successor),
+        Err(HostTypeDecodeError::MissingTypeMetadata)
+    );
+    assert_eq!(
+        decode_host_type_metadata(&missing_legacy),
+        decode_host_type_metadata(&missing_successor)
+    );
+}
+
+#[test]
+fn raw_decoder_preserves_nested_legacy_precision_parity() {
+    let span = Span::new(0, 0);
+    let dim = parse_one("(d-lit {} 4)");
+    let precision = parse_one("(t-var {} p)");
+    let successor = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![dim.clone(), precision.clone()],
+        span,
+    );
+    let nested_legacy = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![dim, legacy_node(&precision)],
+        span,
+    );
+    assert_eq!(
+        decode_host_type(&nested_legacy),
+        decode_host_type(&successor)
+    );
+    assert_eq!(
+        decode_host_type(&legacy_node(&nested_legacy)),
+        decode_host_type(&successor)
+    );
+
+    let malformed_precision = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TVar), span),
+                Expr::Atom(Atom::Name("not-metadata".into()), span),
+                Expr::Atom(Atom::Name("p".into()), span),
+            ],
+        },
+        span,
+    );
+    let malformed_tensor = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![parse_one("(d-lit {} 4)"), malformed_precision],
+        span,
+    );
+    assert!(matches!(
+        decode_host_type(&malformed_tensor),
+        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
+    ));
+}
+
+#[test]
+fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
+    let span = Span::new(0, 0);
+    let malformed = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
+                Expr::Atom(Atom::Name("not-metadata".into()), span),
+                Expr::Atom(Atom::Name("i64".into()), span),
+            ],
+        },
+        span,
+    );
+    let rejected = [
+        Expr::BareList(vec![], span),
+        Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-type".into(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        })),
+        Expr::Atom(Atom::Name("i64".into()), span),
+        Expr::Map(Metadata::default(), span),
+        malformed,
+    ];
+
+    for expr in rejected {
+        assert!(
+            matches!(
+                decode_host_type(&expr),
+                Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
+            ),
+            "{expr:?}"
+        );
+    }
+}
+
 #[test]
 fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
     // The parser now rejects a zero-child `t-prim` before it can reach the
@@ -255,6 +437,12 @@ fn raw_host_type_decoding_is_result_typed() {
         state.contains("Result<HostTypeTerm, HostTypeDecodeError>"),
         "raw Deep host-type decoding must return a typed Result; defining the error \
          vocabulary without using it at the boundary is insufficient"
+    );
+    let definition = ["fn stamped_", "parts"].concat();
+    let call = ["stamped_", "parts("].concat();
+    assert!(
+        !state.contains(&definition) && !state.contains(&call),
+        "E5b requires every host-type read to disposition ExprCarrier directly"
     );
 }
 

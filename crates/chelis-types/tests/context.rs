@@ -6,7 +6,7 @@
 
 use chelis_types::{
     TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
-    build_type_env_from_library, check_ir_with_context,
+    build_type_env_from_library, check_ir_program, check_ir_with_context, check_typed_program,
 };
 
 fn parse(src: &str) -> Vec<chelis_deep::Expr> {
@@ -16,6 +16,136 @@ fn parse(src: &str) -> Vec<chelis_deep::Expr> {
 fn build_ctx(library_src: &str) -> TypeEnv {
     let library = parse(library_src);
     build_type_env_from_library(&library).expect("library checks clean")
+}
+
+fn checker_messages(
+    result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>,
+) -> Vec<String> {
+    match result {
+        Ok(_) => Vec::new(),
+        Err(result) => {
+            let mut messages = result
+                .errors
+                .into_iter()
+                .map(|error| format!("[{:?}] {}", error.kind, error.message))
+                .collect::<Vec<_>>();
+            messages.sort();
+            messages
+        }
+    }
+}
+
+#[test]
+fn adt_variant_and_field_readers_match_both_carriers() {
+    for source in [
+        "(deftype {} Pair () \
+           (variant {} Pair \
+             (field {} left (t-prim {} i32)) \
+             (field {} right (t-prim {} bool))))",
+        "(deftype {} Pair () \
+           (variant {} Pair \
+             (field {} left (t-prim {} madeup))))",
+    ] {
+        let program = chelis_deep::parse_and_stamp_file(source).expect("fixture stamps");
+        assert_eq!(
+            checker_messages(check_typed_program(&program)),
+            checker_messages(check_ir_program(&program)),
+            "{source}"
+        );
+    }
+}
+
+fn replace_deftype_variant(program: &mut [chelis_deep::Expr], replacement: chelis_deep::Expr) {
+    let chelis_deep::Expr::Node(deftype, span) = &program[0] else {
+        panic!("fixture deftype must use the successor carrier");
+    };
+    let mut children = deftype.children_slice().to_vec();
+    children[2] = replacement;
+    program[0] = chelis_deep::Expr::node(deftype.tag(), deftype.meta().clone(), children, *span);
+}
+
+fn assert_mutated_adt_rejects_on_both_ingresses(program: &[chelis_deep::Expr], label: &str) {
+    let typed = checker_messages(check_typed_program(program));
+    let ir = checker_messages(check_ir_program(program));
+    assert!(!typed.is_empty(), "{label}: malformed ADT must reject");
+    assert_eq!(typed, ir, "{label}: carrier mutation must preserve parity");
+}
+
+#[test]
+fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
+    use chelis_deep::{Atom, DeepTag, Expr, List, Span};
+
+    let source = "(deftype {} Pair () \
+                    (variant {} Pair (field {} value (t-prim {} i32))))\n\
+                  (def {} make (app {} (var {} Pair) (lit {type: (t-prim {} i32)} 1)))";
+    let span = Span::new(0, 0);
+
+    let mut malformed_variant =
+        chelis_deep::parse_and_stamp_file(source).expect("variant fixture stamps");
+    replace_deftype_variant(
+        &mut malformed_variant,
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Variant), span),
+                    Expr::Atom(Atom::Name("not-metadata".into()), span),
+                    Expr::Atom(Atom::Name("Pair".into()), span),
+                ],
+            },
+            span,
+        ),
+    );
+    assert_mutated_adt_rejects_on_both_ingresses(&malformed_variant, "malformed legacy variant");
+
+    let mut malformed_field =
+        chelis_deep::parse_and_stamp_file(source).expect("field fixture stamps");
+    let (variant_tag, variant_meta, mut variant_children, variant_span) = {
+        let Expr::Node(deftype, _) = &malformed_field[0] else {
+            panic!("fixture deftype must use the successor carrier");
+        };
+        let Expr::Node(variant, variant_span) = &deftype.children_slice()[2] else {
+            panic!("fixture variant must use the successor carrier");
+        };
+        (
+            variant.tag(),
+            variant.meta().clone(),
+            variant.children_slice().to_vec(),
+            *variant_span,
+        )
+    };
+    let field_type = {
+        let Expr::Node(field, _) = &variant_children[1] else {
+            panic!("fixture field must use the successor carrier");
+        };
+        field.children_slice()[1].clone()
+    };
+    variant_children[1] = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Field), span),
+                Expr::Atom(Atom::Name("not-metadata".into()), span),
+                Expr::Atom(Atom::Name("value".into()), span),
+                field_type,
+            ],
+        },
+        span,
+    );
+    replace_deftype_variant(
+        &mut malformed_field,
+        Expr::node(variant_tag, variant_meta, variant_children, variant_span),
+    );
+    assert_mutated_adt_rejects_on_both_ingresses(&malformed_field, "malformed legacy field");
+}
+
+#[test]
+fn adt_reader_has_no_local_optional_carrier_adapter() {
+    let source = include_str!("../src/adt.rs");
+    let definition = ["fn stamped_", "parts"].concat();
+    let call = ["stamped_", "parts("].concat();
+    assert!(
+        !source.contains(&definition) && !source.contains(&call),
+        "E5b requires ADT variant and field reads to disposition ExprCarrier directly"
+    );
 }
 
 #[test]

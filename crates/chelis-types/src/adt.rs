@@ -221,51 +221,64 @@ impl AdtRegistry {
         };
 
         for variant_expr in variant_children {
-            if let Some((DeepTag::Variant, vchildren)) = stamped_parts(variant_expr) {
-                if vchildren.is_empty() {
-                    continue;
-                }
+            let vchildren = match variant_expr.carrier() {
+                deep::ExprCarrier::DecodedNode(DeepTag::Variant, _, children) => children,
+                deep::ExprCarrier::DecodedNode(_, _, _)
+                | deep::ExprCarrier::StructuralList(_)
+                | deep::ExprCarrier::UndecodableHead(_, _, _)
+                | deep::ExprCarrier::Atom(_)
+                | deep::ExprCarrier::MetadataMap(_)
+                | deep::ExprCarrier::MetadataExpression(_)
+                | deep::ExprCarrier::MalformedLegacyList(_) => continue,
+            };
+            if vchildren.is_empty() {
+                continue;
+            }
 
-                let vname = match &vchildren[0] {
-                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
-                    _ => continue,
-                };
+            let vname = match &vchildren[0] {
+                deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
+                _ => continue,
+            };
 
-                // Remaining children are either field definitions or positional type args.
-                // Field types are expanded through the alias registry so a field declared
-                // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
-                // unified as its expansion. Any alias the field references must already be
-                // registered; `collect_declarations` registers all `typealias` decls before
-                // any `deftype` so forward references (alias declared after the deftype that
-                // uses it) resolve too.
-                let mut fields: Vec<(Option<String>, Type)> = Vec::new();
-                for field_expr in &vchildren[1..] {
-                    match stamped_parts(field_expr) {
-                        Some((DeepTag::Field, fchildren)) => {
-                            if fchildren.len() >= 2 {
-                                let fname = match &fchildren[0] {
-                                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
-                                    _ => continue,
-                                };
-                                let ftype = self
-                                    .expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
-                                fields.push((Some(fname), ftype));
-                            }
-                        }
-                        _ => {
-                            // Positional type argument
+            // Remaining children are either field definitions or positional type args.
+            // Field types are expanded through the alias registry so a field declared
+            // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
+            // unified as its expansion. Any alias the field references must already be
+            // registered; `collect_declarations` registers all `typealias` decls before
+            // any `deftype` so forward references (alias declared after the deftype that
+            // uses it) resolve too.
+            let mut fields: Vec<(Option<String>, Type)> = Vec::new();
+            for field_expr in &vchildren[1..] {
+                match field_expr.carrier() {
+                    deep::ExprCarrier::DecodedNode(DeepTag::Field, _, fchildren) => {
+                        if fchildren.len() >= 2 {
+                            let fname = match &fchildren[0] {
+                                deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
+                                _ => continue,
+                            };
                             let ftype =
-                                self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
-                            fields.push((None, ftype));
+                                self.expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
+                            fields.push((Some(fname), ftype));
                         }
                     }
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::StructuralList(_)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_)
+                    | deep::ExprCarrier::MalformedLegacyList(_) => {
+                        // Positional type argument
+                        let ftype = self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
+                        fields.push((None, ftype));
+                    }
                 }
-
-                variants.push(VariantInfo {
-                    name: vname,
-                    fields,
-                });
             }
+
+            variants.push(VariantInfo {
+                name: vname,
+                fields,
+            });
         }
 
         let all_tvars = resolver.type_vars();
@@ -590,19 +603,6 @@ impl AdtRegistry {
             ),
             _ => ty.clone(),
         }
-    }
-}
-
-// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
-fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &[deep::Expr])> {
-    match expr.carrier() {
-        deep::ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
-        deep::ExprCarrier::StructuralList(_)
-        | deep::ExprCarrier::UndecodableHead(_, _, _)
-        | deep::ExprCarrier::Atom(_)
-        | deep::ExprCarrier::MetadataMap(_)
-        | deep::ExprCarrier::MetadataExpression(_)
-        | deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
