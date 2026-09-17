@@ -1717,6 +1717,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "spec/design/capacity_census_wire.json"
+disposition = "packages"
+packages = ["chelis-compiler-api"]
+
+[[path_rule]]
 prefix = "spec/design/dtype_semantics.md"
 disposition = "owner"
 workflow = "ci.yml"

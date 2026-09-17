@@ -413,6 +413,9 @@ class SchemaTests(unittest.TestCase):
                 "chelis#729",
             ),
         )
+        wire_census = by_path["spec/design/capacity_census_wire.json"]
+        self.assertEqual(wire_census.disposition, "packages")
+        self.assertEqual(wire_census.packages, ("chelis-compiler-api",))
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
         deep_spec = by_path["spec/03-deep-syntax.md"]
