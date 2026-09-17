@@ -526,6 +526,22 @@ class SchemaTests(unittest.TestCase):
         wire_census = by_path["spec/design/capacity_census_wire.json"]
         self.assertEqual(wire_census.disposition, "packages")
         self.assertEqual(wire_census.packages, ("chelis-compiler-api",))
+        timing_baseline = by_path["scripts/test_timing_baseline.json"]
+        self.assertEqual(timing_baseline.prefix, "scripts/test_timing_baseline.json")
+        self.assertEqual(timing_baseline.disposition, "owner")
+        self.assertEqual(
+            (
+                timing_baseline.owner.workflow,
+                timing_baseline.owner.job,
+                timing_baseline.owner.cadence,
+                timing_baseline.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "pull_request and push", "chelis#1824"),
+        )
+        self.assertFalse(
+            timing_baseline.matches("scripts/test_timing_baseline_extra.json"),
+            "a neighboring timing artifact inherited the exact baseline owner",
+        )
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
         deep_spec = by_path["spec/03-deep-syntax.md"]

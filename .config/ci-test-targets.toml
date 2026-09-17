@@ -1863,6 +1863,15 @@ reason = "direct arithmetic oracle mutation controls execute in the script unit 
 tracking_issue = "chelis#1306"
 
 [[path_rule]]
+prefix = "scripts/test_timing_baseline.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the timing unit suite loads the exact committed baseline and fails closed on malformed or empty data"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_structural.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"
