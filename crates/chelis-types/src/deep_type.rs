@@ -214,13 +214,9 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     type_vars: UnordMap<String, TypeVar>,
     dim_vars: UnordMap<String, DimVar>,
     rank_vars: UnordMap<String, RankVar>,
-    /// First diagnostic witness for each rejected primitive spelling in this
-    /// declaration/name scope. Repeated occurrences propagate that witness
-    /// instead of emitting one diagnostic per type-tree occurrence.
-    rejected_primitive_names: UnordMap<String, ErrorWitness>,
-    /// Session-wide declaration identity used to share one unknown-primitive
-    /// owner between a standalone signature and its matching definition's
-    /// inline annotations.
+    /// Declaration identity for the unknown-primitive compatibility owner.
+    /// Reserved and deferred primitive diagnostics deliberately bypass it and
+    /// retain one witness per authored type site.
     declaration_diagnostic_owner: Option<DeclarationDiagnosticOwner>,
     /// Declared dtype-family bounds, keyed by binder name
     /// (`spec/04-type-system.md` §5.9 [04-DTYPE-2]). Empty for every
@@ -257,7 +253,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             type_vars: UnordMap::new(),
             dim_vars: UnordMap::new(),
             rank_vars: UnordMap::new(),
-            rejected_primitive_names: UnordMap::new(),
             declaration_diagnostic_owner: None,
             dtype_bounds: UnordMap::new(),
             installed_bounds: Vec::new(),
@@ -545,7 +540,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     // through the same [04-DTYPE-1] rejection.
                     let tensor = self.resolving_tensor_precision;
                     let diagnostic = f8e4m3_diagnostic(tensor);
-                    return Err(self.report_primitive_diagnostic_once(name, diagnostic));
+                    return Err(self.report_primitive_diagnostic(diagnostic));
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -570,22 +565,20 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     .or_else(|| unsigned_family_diagnostic(name, tensor))
                     .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
-                    return Err(self.report_primitive_diagnostic_once(name, diagnostic));
+                    return Err(self.report_primitive_diagnostic(diagnostic));
                 }
                 let nearest = nearest_active_dtype(name);
-                Err(self.report_primitive_diagnostic_once(
-                    name,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!(
-                            "unknown primitive type `{name}` in {}",
-                            self.use_site.label()
-                        ),
-                        vec![format!(
-                            "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
-                        )],
+                let diagnostic = CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "unknown primitive type `{name}` in {}",
+                        self.use_site.label()
                     ),
-                ))
+                    vec![format!(
+                        "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
+                    )],
+                );
+                Err(self.report_unknown_primitive_diagnostic_once(name, diagnostic))
             }
             Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
@@ -912,34 +905,41 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         report_witness(self.errors, error)
     }
 
-    fn report_primitive_diagnostic_once(
+    fn report_primitive_diagnostic(&mut self, diagnostic: CheckError) -> ErrorWitness {
+        let diagnostic = self
+            .diagnostic_location()
+            .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+        report_witness(self.errors, diagnostic)
+    }
+
+    fn report_unknown_primitive_diagnostic_once(
         &mut self,
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
-        if let Some(witness) = self.rejected_primitive_names.get(name).copied() {
-            return witness;
-        }
-        if let Some(owner) = &self.declaration_diagnostic_owner
-            && let Some(witness) = self.errors.declaration_primitive_witness(owner, name)
+        // A declaration with an explicit nonempty binder list gives each
+        // unlisted use its own owner: the error is an undeclared binder use,
+        // even though it retains the shared unknown-primitive wording.
+        // Monomorphic typo spellings retain #1854's declaration/name owner.
+        let declaration_owner = match self.binder_mode {
+            BinderMode::ExplicitGeneric(names) if !names.is_empty() => None,
+            _ => self.declaration_diagnostic_owner.clone(),
+        };
+        if let Some(owner) = &declaration_owner
+            && let Some(witness) = self
+                .errors
+                .declaration_unknown_primitive_witness(owner, name)
         {
-            self.rejected_primitive_names
-                .insert(name.to_string(), witness);
             return witness;
         }
-        let diagnostic = self
-            .diagnostic_location()
-            .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
-        let witness = report_witness(self.errors, diagnostic);
-        if let Some(owner) = &self.declaration_diagnostic_owner {
-            self.errors.record_declaration_primitive_witness(
-                owner.clone(),
+        let witness = self.report_primitive_diagnostic(diagnostic);
+        if let Some(owner) = declaration_owner {
+            self.errors.record_declaration_unknown_primitive_witness(
+                owner,
                 name.to_string(),
                 witness,
             );
         }
-        self.rejected_primitive_names
-            .insert(name.to_string(), witness);
         witness
     }
 }

@@ -4,15 +4,14 @@ use assert_cmd::Command;
 use std::{fs, path::Path};
 use tempfile::tempdir;
 
-const REJECTED_DTYPES: [(&str, Option<&str>); 7] = [
+const UNKNOWN_DTYPES: [(&str, Option<&str>); 5] = [
     ("float32", Some("f32")),
     ("fp32", Some("f32")),
     ("int33", Some("i32")),
     ("double", Some("f64")),
     ("half", Some("f16")),
-    ("f8e4m3", None),
-    ("f8e5m2", None),
 ];
+const RESERVED_DTYPES: [&str; 2] = ["f8e4m3", "f8e5m2"];
 
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
     Command::cargo_bin("chelis")
@@ -54,7 +53,7 @@ fn error_messages(report: &serde_json::Value) -> Vec<&str> {
 #[test]
 fn check_rejects_unknown_surf_type_names_and_the_desugared_deep_agrees() {
     let dir = tempdir().expect("tempdir");
-    for (name, nearest) in REJECTED_DTYPES {
+    for (name, nearest) in UNKNOWN_DTYPES {
         let source = format!("def ident(x: {name}) -> {name} = x\n");
         fs::write(dir.path().join("case.ch"), source).expect("write Surf fixture");
 
@@ -90,6 +89,42 @@ fn check_rejects_unknown_surf_type_names_and_the_desugared_deep_agrees() {
                     deep_checked.to_string().contains(&format!("`{nearest}`"))
                 }),
             "Deep check must give `{name}` the same single owner: {deep_checked}"
+        );
+    }
+    for name in RESERVED_DTYPES {
+        let source = format!("def ident(x: {name}) -> {name} = x\n");
+        fs::write(dir.path().join("case.ch"), source).expect("write Surf fixture");
+
+        let checked = check_json(dir.path(), "case.ch");
+        let messages = error_messages(&checked);
+        assert!(
+            messages.len() == 2
+                && messages
+                    .iter()
+                    .all(|message| message.contains(&format!("`{name}`"))),
+            "Surf check must give every authored `{name}` site an owner: {checked}"
+        );
+
+        let deep = run(dir.path(), &["deep", "case.ch"]);
+        assert!(
+            deep.status.success(),
+            "`chelis deep` must succeed: {deep:?}"
+        );
+        let printed = String::from_utf8_lossy(&deep.stdout).to_string();
+        assert!(
+            printed.contains(&format!("(t-prim {{}} {name})"))
+                && !printed.contains(&format!("(t-var {{}} {name})")),
+            "Surf must preserve reserved dtype intent in Deep: {printed}"
+        );
+        fs::write(dir.path().join("case.dp"), printed).expect("write Deep fixture");
+        let deep_checked = check_json(dir.path(), "case.dp");
+        let deep_messages = error_messages(&deep_checked);
+        assert!(
+            deep_messages.len() == 2
+                && deep_messages
+                    .iter()
+                    .all(|message| message.contains(&format!("`{name}`"))),
+            "Deep check must retain every authored `{name}` owner: {deep_checked}"
         );
     }
 }

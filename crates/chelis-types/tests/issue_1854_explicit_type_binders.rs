@@ -4,15 +4,14 @@ use chelis_deep::{Expr, parser::parse_str as parse_deep, printer::print_canonica
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{check_ir_program, check_typed_program};
 
-const REJECTED_DTYPES: [(&str, Option<&str>); 7] = [
+const UNKNOWN_DTYPES: [(&str, Option<&str>); 5] = [
     ("float32", Some("f32")),
     ("fp32", Some("f32")),
     ("int33", Some("i32")),
     ("double", Some("f64")),
     ("half", Some("f16")),
-    ("f8e4m3", None),
-    ("f8e5m2", None),
 ];
+const RESERVED_DTYPES: [&str; 2] = ["f8e4m3", "f8e5m2"];
 
 fn surf(source: &str) -> Vec<Expr> {
     desugar_program(&parse_surf(source).expect("Surf fixture must parse"))
@@ -78,13 +77,39 @@ fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Opti
     }
 }
 
+fn assert_both_ingresses_reject_each_site(program: &[Expr], name: &str, expected: usize) {
+    let ir = diagnostics(check_ir_program(program));
+    let typed = diagnostics(check_typed_program(program));
+    assert_eq!(
+        typed, ir,
+        "checker ingresses must report the same ordered diagnostics for `{name}`"
+    );
+    assert_eq!(
+        ir.len(),
+        expected,
+        "`{name}` must report at every authored site: {ir:?}"
+    );
+    assert!(
+        ir.iter()
+            .all(|diagnostic| diagnostic.message.contains(&format!("`{name}`"))),
+        "every diagnostic must name the reserved spelling: {ir:?}"
+    );
+}
+
 #[test]
 fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
-    for (name, nearest) in REJECTED_DTYPES {
+    for (name, nearest) in UNKNOWN_DTYPES {
         assert_both_ingresses_reject_once(
             &surf(&format!("def ident(x: {name}) -> {name} = x")),
             name,
             nearest,
+        );
+    }
+    for name in RESERVED_DTYPES {
+        assert_both_ingresses_reject_each_site(
+            &surf(&format!("def ident(x: {name}) -> {name} = x")),
+            name,
+            2,
         );
     }
 }
@@ -246,7 +271,10 @@ fn unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope
 
 #[test]
 fn unknown_surf_tensor_precision_names_reject_once_at_both_checker_ingresses() {
-    for (name, nearest) in REJECTED_DTYPES {
+    for (name, nearest) in UNKNOWN_DTYPES
+        .into_iter()
+        .chain(RESERVED_DTYPES.map(|name| (name, None)))
+    {
         assert_both_ingresses_reject_once(
             &surf(&format!(
                 "sig ident: tensor[2, {name}] -> f32\ndef ident(x) = 0.0f32"
@@ -850,7 +878,7 @@ fn forbidden_dtype_names_reject_once_at_the_deep_binder_list() {
 
 #[test]
 fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
-    for (name, nearest) in REJECTED_DTYPES {
+    for (name, nearest) in UNKNOWN_DTYPES {
         let program = parse_deep(&format!(
             "(defsig {{}} ident
                (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
@@ -859,6 +887,16 @@ fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
         ))
         .expect("Deep fixture must parse");
         assert_both_ingresses_reject_once(&program, name, nearest);
+    }
+    for name in RESERVED_DTYPES {
+        let program = parse_deep(&format!(
+            "(defsig {{}} ident
+               (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
+             (def {{}} ident
+               (fn {{}} (params {{}} x) (var {{}} x)))"
+        ))
+        .expect("Deep fixture must parse");
+        assert_both_ingresses_reject_each_site(&program, name, 2);
     }
 }
 

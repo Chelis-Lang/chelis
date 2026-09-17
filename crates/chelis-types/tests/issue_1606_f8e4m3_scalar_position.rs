@@ -262,45 +262,21 @@ fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
     );
 }
 
-/// Each declaration owns one diagnostic per reserved spelling, even when the
-/// spelling appears at more than one type site.
+/// A source site owns one diagnostic, even when inference revisits its declaration.
 fn assert_one_report_per_site(source: &str, names: &[&str]) {
     let program = surf_to_deep(source);
-    let declaration_at = |offset: usize| {
-        let mut declaration = 0;
-        let mut line_start = 0;
-        for line in source.split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("def ")
-                || trimmed.starts_with("sig ")
-                || trimmed.starts_with("@property ")
-                || trimmed.starts_with("type ")
-            {
-                declaration = line_start;
-            }
-            if line_start + line.len() > offset {
-                break;
-            }
-            line_start += line.len();
-        }
-        declaration
-    };
-    let mut owner_keys = Vec::new();
-    let mut expected = Vec::new();
-    for name in names {
-        for (offset, _) in source.match_indices(name) {
-            let key = (declaration_at(offset), *name);
-            if owner_keys.contains(&key) {
-                continue;
-            }
-            owner_keys.push(key);
-            expected.push((
-                *name,
-                offset,
-                format!("source:{offset}..{}", offset + name.len()),
-            ));
-        }
-    }
+    let mut expected: Vec<_> = names
+        .iter()
+        .flat_map(|name| {
+            source.match_indices(name).map(move |(offset, _)| {
+                (
+                    *name,
+                    offset,
+                    format!("source:{offset}..{}", offset + name.len()),
+                )
+            })
+        })
+        .collect();
     expected.sort_by_key(|(_, offset, _)| *offset);
     for (entry, result) in [
         ("ir", check_ir_program(&program)),
@@ -519,7 +495,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                 ("ir", check_ir_program(&program)),
                 ("typed", check_typed_program(&program)),
             ] {
-                let report = result.expect_err("the declaration-owned reserved type must reject");
+                let report = result.expect_err("both independent reserved sites must reject");
                 assert_eq!(
                     report
                         .errors
@@ -528,7 +504,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                             matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision)
                         })
                         .count(),
-                    1,
+                    2,
                     "{entry}/{name}: {report:?}"
                 );
             }
@@ -584,7 +560,7 @@ fn property_copy_ownership_keeps_mixed_slot_dispositions_independent() {
             "(t-prim {} bool)".to_string(),
         ];
         let program = hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
-        assert_api_diagnostic_counts(&program, 1, 1, name);
+        assert_api_diagnostic_counts(&program, 2, 1, name);
     }
 }
 
@@ -717,8 +693,8 @@ fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
                        (t-ref {{}} (t-prim {{}} {name})) \
                        (t-prim {{}} f32))"
                 ),
-                2,
-                "nested composites preserve each declaration-owned spelling",
+                3,
+                "nested composites preserve every authored rejection",
             ),
             (
                 "(t-adt {} Pair (t-prim {} f32))".to_string(),
@@ -854,7 +830,7 @@ fn calls_propagate_the_failed_signature_without_a_second_report() {
 }
 
 #[test]
-fn one_declaration_reports_each_reserved_spelling_once() {
+fn distinct_parameter_sites_in_one_signature_each_report_once() {
     assert_one_report_per_site(
         "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
         &["f8e4m3", "f8e5m2"],
@@ -1071,7 +1047,7 @@ fn a_failed_signature_preserves_its_other_binder_bounds() {
 }
 
 #[test]
-fn independent_deep_annotations_share_the_declaration_diagnostic_owner() {
+fn independent_deep_annotations_do_not_share_a_display_span_identity() {
     for display_span in ["same", "source:16..22"] {
         let source = format!(
             "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} i32)))\n\
@@ -1079,8 +1055,8 @@ fn independent_deep_annotations_share_the_declaration_diagnostic_owner() {
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
-            let report = result.expect_err("the declaration-owned annotation must reject");
-            assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+            let report = result.expect_err("both independently authored annotations must reject");
+            assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
             assert!(
                 report
                     .errors
@@ -1250,7 +1226,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
         ),
         (
             "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
-            &["f8e4m3"][..],
+            &["f8e4m3", "f8e4m3"][..],
         ),
         (
             "def classify(x: f8e4m3) -> f8e5m2 = x",

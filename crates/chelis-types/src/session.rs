@@ -61,7 +61,8 @@ impl DeclarationDiagnosticOwner {
 /// preventing early extraction or replacement of the canonical vector.
 pub struct DiagnosticSink<'session> {
     errors: &'session mut Vec<CheckError>,
-    declaration_primitive_witnesses: UnordMap<(DeclarationDiagnosticOwner, String), ErrorWitness>,
+    declaration_unknown_primitive_witnesses:
+        UnordMap<(DeclarationDiagnosticOwner, String), ErrorWitness>,
 }
 
 impl DiagnosticSink<'_> {
@@ -69,23 +70,23 @@ impl DiagnosticSink<'_> {
         self.errors.push(error);
     }
 
-    pub(crate) fn declaration_primitive_witness(
+    pub(crate) fn declaration_unknown_primitive_witness(
         &self,
         owner: &DeclarationDiagnosticOwner,
         primitive_name: &str,
     ) -> Option<ErrorWitness> {
-        self.declaration_primitive_witnesses
+        self.declaration_unknown_primitive_witnesses
             .get(&(owner.clone(), primitive_name.to_string()))
             .copied()
     }
 
-    pub(crate) fn record_declaration_primitive_witness(
+    pub(crate) fn record_declaration_unknown_primitive_witness(
         &mut self,
         owner: DeclarationDiagnosticOwner,
         primitive_name: String,
         witness: ErrorWitness,
     ) {
-        self.declaration_primitive_witnesses
+        self.declaration_unknown_primitive_witnesses
             .insert((owner, primitive_name), witness);
     }
 
@@ -144,7 +145,7 @@ mod diagnostic_checkpoint_tests {
         let mut errors = Vec::new();
         let mut sink = DiagnosticSink {
             errors: &mut errors,
-            declaration_primitive_witnesses: UnordMap::new(),
+            declaration_unknown_primitive_witnesses: UnordMap::new(),
         };
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("first new diagnostic"));
@@ -162,7 +163,7 @@ mod diagnostic_checkpoint_tests {
         let mut errors = Vec::new();
         let mut sink = DiagnosticSink {
             errors: &mut errors,
-            declaration_primitive_witnesses: UnordMap::new(),
+            declaration_unknown_primitive_witnesses: UnordMap::new(),
         };
         sink.push(diagnostic("earlier diagnostic"));
         let checkpoint = sink.checkpoint();
@@ -210,7 +211,7 @@ mod rejected_signature_resolution_tests {
         let result = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::Defsig,
@@ -296,7 +297,7 @@ pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
         let stats = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_program_in_session(exprs, &mut sink),
@@ -321,7 +322,7 @@ mod authoritative_type_stamp_tests {
         let result = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             run_type_stamp_mutation_case(case, &mut sink)
         };
@@ -405,7 +406,7 @@ mod unresolved_operand_reconcile_tests {
         let (produced, bound) = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             run_reconcile_mutation_case(case, &mut sink)
         };
@@ -481,7 +482,7 @@ mod annotated_totality_finalization_tests {
         {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             run_finalization_mutation_case(case, &mut sink);
         }
@@ -539,7 +540,7 @@ fn run_result<T>(
     let result = {
         let mut sink = DiagnosticSink {
             errors: &mut errors,
-            declaration_primitive_witnesses: UnordMap::new(),
+            declaration_unknown_primitive_witnesses: UnordMap::new(),
         };
         run(&mut sink)
     };
@@ -665,7 +666,7 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
         let stats = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
-                declaration_primitive_witnesses: UnordMap::new(),
+                declaration_unknown_primitive_witnesses: UnordMap::new(),
             };
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_ir_program_in_session(exprs, &mut sink),
