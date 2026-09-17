@@ -336,7 +336,7 @@ fn assert_separate_sig_grad_matches_inline(
     call: &str,
 ) {
     let inline_src = format!(
-        "def verb({inline_params}) = {body}\n\
+        "def verb[s, d]({inline_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
            tensor_to_scalar(sum(sum(verb({call_args}), cast(0, i32)), cast(0, i32)))\n\
          out = grad(loss, wrt=q)({call})\n",

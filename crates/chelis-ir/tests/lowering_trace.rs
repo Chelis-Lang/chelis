@@ -1,19 +1,25 @@
 //! Spec-derived acceptance tests for the opt-in trace, not an AD certificate.
-#![cfg(feature = "lowering-trace")]
 
+#[cfg(feature = "lowering-trace")]
 use chelis_ir::dag::{Dag, RiscOp};
+#[cfg(feature = "lowering-trace")]
 use chelis_ir::lower::try_lower_program_to_library;
+#[cfg(feature = "lowering-trace")]
 use chelis_ir::lowering_trace::{
     BoundaryKind, ContextId, ContextKind, try_lower_program_to_library_with_trace,
 };
+#[cfg(feature = "lowering-trace")]
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
+#[cfg(feature = "lowering-trace")]
 use chelis_types::{CheckedProgram, check_typed_program};
 
+#[cfg(feature = "lowering-trace")]
 const SQUARE: &str = r#"
 def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
 def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
 "#;
 
+#[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
     let deep = desugar_program(&parse_str(source).expect("parse fixture"));
     let program = check_typed_program(&deep).expect("check fixture types");
@@ -23,6 +29,7 @@ fn checked(source: &str) -> CheckedProgram {
 
 // The existing DAG codec compares every stored bit and metadata field. This
 // helper is not a new trace wire format and does not serialize LoweringTrace.
+#[cfg(feature = "lowering-trace")]
 fn same_dag(left: &Dag, right: &Dag) {
     assert_eq!(
         bincode::serialize(left).unwrap(),
@@ -30,6 +37,17 @@ fn same_dag(left: &Dag, right: &Dag) {
     );
 }
 
+// The feature-enabled support lane below owns the trace oracle. The generic
+// change-owned lane lists directly modified integration targets without
+// features, so retain one active feature-off test instead of compiling an
+// empty integration binary.
+#[cfg(not(feature = "lowering-trace"))]
+#[test]
+fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {
+    assert!(!cfg!(feature = "lowering-trace"));
+}
+
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls() {
     use chelis_ir::execution_spine::{SourceKind, Step};
@@ -122,6 +140,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     assert_eq!(context.state().counter, 0);
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
     use chelis_ir::execution_spine::{Control, SourceKind};
@@ -162,6 +181,7 @@ sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }
     );
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
     use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
@@ -217,6 +237,7 @@ unrelated = with seed(99i64) { x }
     assert!(library.program().select_roots(&["choose".into()]).is_err());
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn context_composition_retains_declared_controls_without_confusing_local_aliases() {
     use chelis_ir::execution_spine::{Control, SourceKind};
@@ -281,6 +302,7 @@ unrelated = with seed(99i64) { x }
     }
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn trace_preserves_the_ordinary_library_and_actual_normalization() {
     let program = checked(&format!(
@@ -335,6 +357,7 @@ def dead(x: tensor[3, f32]) -> tensor[3, f32] = {{
     }
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
     let (_, trace) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
@@ -400,6 +423,7 @@ fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
     assert!(application.after_packing.get(expected).is_some());
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn empty_and_repeated_invocations_do_not_leak_capture_state() {
     for source in [SQUARE, "", SQUARE, ""] {
@@ -414,6 +438,7 @@ fn empty_and_repeated_invocations_do_not_leak_capture_state() {
     }
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace() {
     let source = r#"
@@ -430,6 +455,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
     assert_eq!(next.contexts.len(), 2);
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn multiple_wrt_inputs_keep_their_forward_order_and_distinct_results() {
     let source = r#"
@@ -465,6 +491,7 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> (tensor[3, f32], tensor[
     assert_ne!(application.wrt_actuals[0], application.wrt_actuals[1]);
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn nested_gradients_have_distinct_contexts_and_actual_parent_links() {
     let source = format!(
@@ -493,6 +520,7 @@ def second(x: tensor[3, f32]) -> tensor[3, f32] = grad(first)(x)
     }
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result() {
     let source = r#"
@@ -526,6 +554,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
     assert!(application.after_packing.len() > application.after_splice.len());
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn host_only_definitions_do_not_fabricate_graph_observations() {
     let source = r#"
@@ -540,6 +569,7 @@ def filled[n](x: tensor[n, f32]) -> tensor[n, f32] =
     same_dag(&trace.normalization.after_drops, library.dag());
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn application_preserves_formal_names_when_caller_names_differ() {
     let source = r#"
@@ -570,6 +600,7 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
     );
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn host_structured_results_are_not_reported_as_observed_applications() {
     let source = r#"
@@ -598,6 +629,7 @@ def derivative(x: tensor[2, f32]) -> tensor[2, f32] = {
     assert!(!library.lowered_names()["derivative"]);
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn specialization_records_both_named_and_actual_dimension_types() {
     let source = r#"
@@ -626,6 +658,7 @@ def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
     );
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn selected_wrt_does_not_drop_the_other_argument_binding() {
     let source = r#"
@@ -649,6 +682,7 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = grad(lo
     );
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn completed_application_snapshots_do_not_alias_later_mutations() {
     let (_, mut trace) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
@@ -687,6 +721,7 @@ fn completed_application_snapshots_do_not_alias_later_mutations() {
     );
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
     let source = "def values() -> tensor[2, i64] = [9007199254740993, -9007199254740993]\n";
@@ -727,6 +762,7 @@ fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
     }
 }
 
+#[cfg(feature = "lowering-trace")]
 #[test]
 fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
     let source = r#"

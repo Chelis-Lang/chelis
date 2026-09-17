@@ -95,7 +95,7 @@ fn independent_activation_source(
         (
             "g",
             format!(
-                "def g(x: tensor[{input}, f32], y: tensor[{output}, f32]) -> tensor[{input}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, shape(y, 0i32))\n"
+                "def g[{input}, {output}](x: tensor[{input}, f32], y: tensor[{output}, f32]) -> tensor[{input}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, shape(y, 0i32))\n"
             ),
         )
     } else {
