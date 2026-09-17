@@ -3582,7 +3582,7 @@ def validate_local_ascription_layer_mutations(
                 "--exact",
                 "--nocapture",
             ),
-            "c: initializer owns `extent `2`: claimed = 2, pad axis 0 = 3`",
+            "c: local ascription must trap",
         ),
         (
             "local-ascription artifact conversion",
