@@ -159,6 +159,70 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
     );
 }
 
+fn legacy_node(expr: &Expr) -> Expr {
+    let Expr::Node(node, span) = expr else {
+        panic!("test fixture must be a decoded node");
+    };
+    Expr::List(node.to_list(*span), *span)
+}
+
+#[test]
+fn raw_decoder_matches_successor_and_legacy_carriers() {
+    for source in [
+        "(t-prim {} i64)",
+        "(t-ref {} (t-prim {} f32))",
+        "(t-tensor {} (d-lit {} 4) (t-var {} p))",
+        "(t-adt {} Option (t-prim {} bool))",
+        "(t-tuple {} (t-prim {} i32) (t-unit {}))",
+        "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
+    ] {
+        let successor = parse_one(source);
+        let legacy = legacy_node(&successor);
+        assert_eq!(
+            decode_host_type(&legacy),
+            decode_host_type(&successor),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
+    let span = Span::new(0, 0);
+    let malformed = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
+                Expr::Atom(Atom::Name("not-metadata".into()), span),
+                Expr::Atom(Atom::Name("i64".into()), span),
+            ],
+        },
+        span,
+    );
+    let rejected = [
+        Expr::BareList(vec![], span),
+        Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-type".into(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        })),
+        Expr::Atom(Atom::Name("i64".into()), span),
+        Expr::Map(Metadata::default(), span),
+        malformed,
+    ];
+
+    for expr in rejected {
+        assert!(
+            matches!(
+                decode_host_type(&expr),
+                Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
+            ),
+            "{expr:?}"
+        );
+    }
+}
+
 #[test]
 fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
     // The parser now rejects a zero-child `t-prim` before it can reach the
@@ -255,6 +319,12 @@ fn raw_host_type_decoding_is_result_typed() {
         state.contains("Result<HostTypeTerm, HostTypeDecodeError>"),
         "raw Deep host-type decoding must return a typed Result; defining the error \
          vocabulary without using it at the boundary is insufficient"
+    );
+    let definition = ["fn stamped_", "parts"].concat();
+    let call = ["stamped_", "parts("].concat();
+    assert!(
+        !state.contains(&definition) && !state.contains(&call),
+        "E5b requires every host-type read to disposition ExprCarrier directly"
     );
 }
 
