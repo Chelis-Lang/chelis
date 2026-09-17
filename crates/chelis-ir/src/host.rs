@@ -7654,15 +7654,6 @@ fn sequential_host_let_chain<'expr>(
     })
 }
 
-fn is_empty_to_tensor_literal(expr: &Expr) -> bool {
-    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    kids.len() == 2
-        && direct_var_name(&kids[0]) == Some("to_tensor")
-        && direct_var_name(&kids[1]) == Some("Nil")
-}
-
 fn lower_checked_local_ascription_region(
     name: &str,
     initializer: &Expr,
@@ -7684,27 +7675,6 @@ fn lower_checked_local_ascription_region(
                 ),
             )
         })?;
-
-    // Empty tensor literals are intentionally materialized by the host lane:
-    // the tensor DAG literal extractor has no payload from which to infer a
-    // precision. Preserve that established route, but only after the checked
-    // initializer type proves the authored rank-1 extent is exactly zero.
-    // A different claim is rejected here instead of falling through to an
-    // untyped `Load(\"to_tensor\")` or silently dropping the obligation.
-    if is_empty_to_tensor_literal(initializer) {
-        if expected.dims.as_slice() != [DimInfo::Lit(0)] {
-            return Err(crate::lower::LowerDiagnostic::new(
-                format!(
-                    "local tensor ascription `{name}` conflicts with a statically empty \
-                     `to_tensor` initializer: expected {expected:?}, actual extent 0"
-                ),
-                Some(initializer.span()),
-                initializer.span_id().map(str::to_owned),
-            )
-            .fatal());
-        }
-        return lower_host_expr(initializer, program, scope, tensor_helpers);
-    }
 
     try_lower_tensor_helper_call_with_context(
         local_region.expression(),

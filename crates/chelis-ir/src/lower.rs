@@ -6150,10 +6150,14 @@ fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
 fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     let elements = collect_cons_chain(expr)?;
     if elements.is_empty() {
-        // Empty list: rank-1 zero-element tensor. Pad over a zero-
-        // size dim doesn't compose cleanly; reject and let host
-        // routing handle it.
-        return None;
+        // An empty list is still a fully known rank-1 tensor. The literal
+        // emitter's uniform Const path carries its checked dtype and shape
+        // without inventing an element, so transform/helper lowering must not
+        // replace it with an unresolved `Load("to_tensor")`.
+        return Some(LiteralToTensor {
+            shape: vec![0],
+            data: Vec::new(),
+        });
     }
     if let Some(scalars) = elements
         .iter()

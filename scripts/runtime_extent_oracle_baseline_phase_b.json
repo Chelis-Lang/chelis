@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "f1edd345eccd1b079cc83bccb357d7123ef3981f0ff2398ab3dd6c8358fb26f0",
+  "corpus_sha256": "15e5f43886716a452dfd69467e512f8916b33f6f5b76976d5fe81d41f736ea63",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -121,6 +121,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "api_issue_2110_local_ascription_cache.composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_selected.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_selected.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_untaken.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_untaken.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes"
     },
     {
       "id": "claim.local_ascription.control_if.runtime_selected.c",

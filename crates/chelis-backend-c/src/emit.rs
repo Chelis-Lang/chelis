@@ -1088,6 +1088,27 @@ impl CEmitter {
         ));
     }
 
+    /// Finish a generated tensor's exclusive write lease before a checked
+    /// scalar read, then refresh its data pointer through the public read
+    /// view for any later consumers.
+    ///
+    /// Straight-line kernels ordinarily retain write leases until cleanup.
+    /// A path-local extent guard is different: its activation is a computed
+    /// rank-zero Bool that must cross the exact tagged scalar carrier. The
+    /// runtime correctly refuses `chelis_tensor_to_scalar` while the write
+    /// lease is active, so discharge that producer lease at the first guard
+    /// read rather than bypassing ownership through its raw data pointer.
+    fn finish_tensor_write_for_checked_read(&mut self, id: usize) {
+        if !self.write_nodes.remove(&id) {
+            return;
+        }
+        self.line(&format!("chelis_tensor_end_write(t{id}_write_guard);"));
+        self.line(&format!(
+            "chelis_read_view t{id}_checked_read = chelis_tensor_read_view(t{id});"
+        ));
+        self.line(&format!("t{id}_data = (void*)t{id}_checked_read.data;"));
+    }
+
     fn emit_owned_tensor(&mut self, id: usize, ndim: &str, shape: &str, dtype: &str) {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
@@ -6920,12 +6941,15 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 other => other.to_string(),
             };
             let mismatch = format!("({extent_expr}) != {operand}");
-            let predicate = site.activation.map_or(mismatch.clone(), |activation| {
+            let predicate = if let Some(activation) = site.activation {
+                self.finish_tensor_write_for_checked_read(activation.0);
                 format!(
-                    "((const uint8_t*)t{}_data)[0] != 0 && ({mismatch})",
+                    "chelis_tensor_to_scalar(t{}).bits == UINT64_C(1) && ({mismatch})",
                     activation.0
                 )
-            });
+            } else {
+                mismatch.clone()
+            };
             let (name, op) = (site.claim, site.op);
             let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
             self.line(&format!("if ({predicate}) {{"));

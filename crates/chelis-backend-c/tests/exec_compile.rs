@@ -6503,6 +6503,10 @@ fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
     )
     .expect("runtime branch codegen");
     assert_eq!(generated.input_labels, ["flag", "x"]);
+    assert!(
+        generated.c_source.contains("chelis_tensor_to_scalar(t"),
+        "branch activation crosses the exact tagged scalar carrier"
+    );
     generated
 }
 

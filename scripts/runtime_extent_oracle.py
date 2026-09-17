@@ -1158,6 +1158,30 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "ir_issue_2110_local_ascription.selected_runtime_branch_executes_its_local_ascription_guard",
         ),
         _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
             "claim.local_ascription.control_if.runtime_untaken.c",
             "nonconforming_rejection",
             EXECUTES,
