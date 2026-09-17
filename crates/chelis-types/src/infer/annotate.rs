@@ -5,6 +5,267 @@
 
 use super::*;
 
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+pub(super) struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>,
+}
+
+impl<'a> AnnotationResolutionContext<'a> {
+    pub(super) fn root(declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+        }
+    }
+
+    pub(super) fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+}
+
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
+
+    match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        DeepTag::Module => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
+
+        // Declarations.
+        DeepTag::Def => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Defsig => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                Syntax
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Defdim => Binder,
+
+        // Expressions and their structural helper positions.
+        DeepTag::Fn => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::App
+        | DeepTag::If
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::Par
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Copy
+        | DeepTag::Borrow
+        | DeepTag::Unquote
+        | DeepTag::Splice => RuntimeExpr,
+        DeepTag::HandleEffect => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Let => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Match => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Arm => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Var | DeepTag::Lit => Syntax,
+        DeepTag::Record => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Access => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Pipe => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::TupleGet => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::RecordUpdate => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        DeepTag::PatVar => Binder,
+        DeepTag::PatLit => Syntax,
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::PatTuple => ExplicitInferenceBypass,
+        DeepTag::PatWild => Syntax,
+        DeepTag::PatAs => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank => Type,
+
+        // Transform-specific selector/type positions.
+        DeepTag::Grad | DeepTag::Vmap => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Cast => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        DeepTag::Params => Binder,
+        DeepTag::Bind => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Kv => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+    }
+}
+
 pub(super) fn annotate_ir_program(
     exprs: &[deep::Expr],
     product: &InferenceProduct,
