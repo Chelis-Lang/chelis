@@ -1089,7 +1089,7 @@ fn resugar_definition(
     let name = name_child(&definition, 0)?.to_string();
     let value_node = node_ref(&definition.children[1]).ok();
     let signature_type = signature
-        .map(|signature| defsig_parts(&signature))
+        .map(|signature| defsig_parts(signature))
         .transpose()?
         .map(|(_, type_expr)| type_expr);
     let definition_type = definition.meta.ty().map(|v| v.expression());
@@ -1122,7 +1122,7 @@ fn resugar_definition(
     let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
     let dtype_bounds = decode_resugar_dtype_bounds(bound_source)?;
     let declared_binders = signature
-        .map(|signature| defsig_parts(&signature))
+        .map(|signature| defsig_parts(signature))
         .transpose()?
         .map(|(binders, _)| binders)
         .unwrap_or_default();
