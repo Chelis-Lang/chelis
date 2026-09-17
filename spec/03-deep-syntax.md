@@ -803,10 +803,16 @@ explicit call. Explicit `borrow` and `copy` nodes remain explicit.
 
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
-same-named call-like forms. A matching `defsig` and `def` resugar as one inline
-typed Surf definition; a standalone `defsig` remains `sig`. A checked standalone
-`def` carrying semantic `type` metadata resugars as a typed Surf declaration;
-normalization materializes the equivalent `defsig` rather than erasing the type.
+same-named call-like forms. A matching `defsig` and function-valued `def`
+resugar as one inline typed Surf `def`, including the signature's binder list.
+A matching monomorphic `defsig` and non-function `def` resugar as one inline
+typed value binding. A matching binder-bearing `defsig` and non-function `def`
+instead resugar as a standalone binder-bearing Surf `sig` followed by an
+untyped value binding: Surf value bindings have no binder-list position, so
+inlining that type would free the quantified names. A standalone `defsig`
+remains `sig`. A checked standalone `def` carrying semantic `type` metadata
+resugars as a typed Surf declaration; normalization materializes the equivalent
+`defsig` rather than erasing the type.
 All ordered pairs in one `bind` become ordered Surf block bindings. Empty
 `tuple` and `t-tuple` nodes normalize to the language's unit value and type;
 empty `pat-tuple` is written `()` directly. Every zero-argument `app`, including

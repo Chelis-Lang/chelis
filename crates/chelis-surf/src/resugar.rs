@@ -183,11 +183,13 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 
 /// Resugar a public Deep program into the shared canonical Surf AST.
 ///
-/// Adjacent matching `defsig`/`def` pairs are deliberately folded into one
-/// typed Surf declaration. Derived Deep metadata is ignored; the narrow
-/// validated `surf_*` metadata namespace is consulted only where Deep has
-/// erased a canonical source distinction such as module-path casing or a
-/// grouped `dim` declaration.
+/// Adjacent matching `defsig`/`def` pairs are folded into one typed Surf
+/// declaration when that declaration can carry the complete signature.
+/// A binder-bearing non-function signature remains standalone because a Surf
+/// value binding has no binder-list position. Derived Deep metadata is ignored;
+/// the narrow validated `surf_*` metadata namespace is consulted only where
+/// Deep has erased a canonical source distinction such as module-path casing
+/// or a grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
     for expr in exprs {
@@ -267,9 +269,11 @@ fn reject_extensions(expr: &DeepExpr) -> Result<(), ResugarError> {
 /// `def`, its function value, and its parameters are also removed when the
 /// immediately preceding matching `defsig` already carries the same types.
 /// Whole-parameter inference holes also add no constraint beside that signature.
-/// Canonical Surf folds the pair into one declaration whose actual parameter
-/// types live only in its signature. A real disagreement remains visible. Property
-/// parameter types remain paired with the written `property_quantifiers`.
+/// Canonical Surf folds a representable pair into one declaration whose actual
+/// parameter types live only in its signature. A binder-bearing non-function
+/// pair remains a standalone `sig` plus an untyped value binding. A real
+/// disagreement remains visible. Property parameter types remain paired with
+/// the written `property_quantifiers`.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
@@ -970,19 +974,30 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                     && definition.tag == DeepTag::Def
                     && definition.children.first().and_then(atom_name) == Some(name.as_str())
                 {
-                    declarations.push(resugar_definition(Some(&node), definition)?);
+                    let declaration = resugar_definition(Some(&node), definition)?;
+                    let (declared_binders, _) = defsig_parts(&node)?;
+                    if !declared_binders.is_empty()
+                        && let Decl::LetDef {
+                            name: value_name,
+                            value,
+                            span,
+                            ..
+                        } = declaration
+                    {
+                        declarations.push(resugar_signature(&node, name)?);
+                        declarations.push(Decl::LetDef {
+                            name: value_name,
+                            ty: None,
+                            value,
+                            span,
+                        });
+                    } else {
+                        declarations.push(declaration);
+                    }
                     index += 2;
                     continue;
                 }
-                let (declared_binders, signature_type) = defsig_parts(&node)?;
-                let type_binders = resugar_dtype_bound_binders(node.meta, &declared_binders)?;
-                declarations.push(Decl::Sig {
-                    name,
-                    type_binders,
-                    ty: resugar_type(signature_type)?,
-                    effects: resugar_effect_metadata(signature_type)?,
-                    span: node.span,
-                });
+                declarations.push(resugar_signature(&node, name)?);
                 index += 1;
             }
             DeepTag::Def => {
@@ -1079,6 +1094,18 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
         }
     }
     Ok(declarations)
+}
+
+fn resugar_signature(node: &NodeRef<'_>, name: String) -> Result<Decl, ResugarError> {
+    let (declared_binders, signature_type) = defsig_parts(node)?;
+    let type_binders = resugar_dtype_bound_binders(node.meta, &declared_binders)?;
+    Ok(Decl::Sig {
+        name,
+        type_binders,
+        ty: resugar_type(signature_type)?,
+        effects: resugar_effect_metadata(signature_type)?,
+        span: node.span,
+    })
 }
 
 fn resugar_definition(

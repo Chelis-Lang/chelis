@@ -323,6 +323,11 @@ Every structurally valid public Deep tag SHALL have a canonical Surf AST represe
 Deep-to-Surf emitters SHALL construct that shared AST and use the canonical Surf printer;
 they SHALL NOT maintain a second handwritten source dialect. Desugaring the result SHALL
 recover Deep modulo only the derived metadata normalization named by the numbered source spec.
+Matching `defsig`/`def` pairs SHALL collapse into one inline typed declaration when Surf can
+represent the complete contract there. A binder-bearing `defsig` paired with a non-function
+`def` SHALL instead remain a standalone binder-bearing `sig` followed by an untyped value
+binding, because Surf value bindings have no binder-list position and SHALL NOT free the
+quantified names.
 That normalization SHALL materialize a checked standalone `def` type as a `defsig`, map empty
 `tuple`/`t-tuple` to unit without mapping any zero-argument `app` to a `var`; uppercase
 constructor `var`, zero-argument `app`, and zero-field `record` forms SHALL remain distinct
@@ -346,6 +351,12 @@ present and SHALL exactly match the property `fn` parameter list before resugari
 
 - **WHEN** Deep contains `block`, `record-update`, `quote`, `unquote`, or `splice`
 - **THEN** resugaring uses `do`, `with`, `quote`, `unquote`, or `splice` respectively
+
+#### Scenario: Polymorphic value signature remains bound
+
+- **WHEN** a non-function `def` is paired with a `defsig` whose explicit binder list is nonempty
+- **THEN** resugaring emits a standalone binder-bearing `sig` and an untyped value binding
+- **AND** desugaring the result recovers the original binder ownership
 
 #### Scenario: Unrepresentable input fails explicitly
 

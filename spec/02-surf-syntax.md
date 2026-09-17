@@ -389,7 +389,20 @@ sig arange[n, p: Int]: p -> p -> tensor[n, p]
 def arange(start, stop) = ...
 ```
 
-`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
+`sig` must precede its corresponding definition: either a function `def` or a
+bare top-level value binding. Only a function `def` has an inline binder list.
+A binder-bearing signature for a non-function value therefore stays standalone
+in canonical Surf and is followed by an untyped value binding:
+
+```text
+sig empty[p]: List[p]
+empty = Nil
+```
+
+Writing `empty: List[p] = Nil` instead would lose the quantifier because a typed
+value binding has no binder list or declaration-binder scope.
+
+Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Effect annotations are optional suffixes on either `sig` or `def`:
 
@@ -1518,6 +1531,11 @@ dim batch, seq                   ⟹  (defdim {} batch) (defdim {} seq)
 ```
 sig f: f32 -> f32 -> f32
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+
+sig empty[p]: List[p]
+empty = Nil
+⟹  (defsig {} empty (p) (t-adt {} List (t-var {} p)))
+    (def {} empty (var {} Nil))
 
 def f(x: f32, y: f32) -> f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))

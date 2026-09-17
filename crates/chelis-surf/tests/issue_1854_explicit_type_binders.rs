@@ -7,9 +7,11 @@ use chelis_deep::{
     parser::parse_str as parse_deep, printer::print_canonical_flat,
 };
 use chelis_surf::{
+    ast::Decl,
     desugar::desugar_program,
+    format::format_program,
     parser::parse_str,
-    resugar::{ResugarError, resugar_program},
+    resugar::{ResugarError, normalize_deep_for_surface_roundtrip, resugar_program},
 };
 
 const UNKNOWN_DTYPES: [&str; 7] = [
@@ -174,6 +176,74 @@ fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
              {source}\n{redeep}"
         );
     }
+}
+
+#[test]
+fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
+    let original = parse_deep(
+        "(defsig {} empty (p) (t-adt {} List (t-var {} p)))
+         (def {} empty (var {} Nil))",
+    )
+    .expect("polymorphic value fixture must parse");
+
+    let recovered =
+        resugar_program(&original).expect("polymorphic value signature must be representable");
+    assert!(
+        matches!(
+            recovered.as_slice(),
+            [
+                Decl::Sig {
+                    name,
+                    type_binders,
+                    ..
+                },
+                Decl::LetDef { name: value_name, ty: None, .. }
+            ] if name == "empty"
+                && value_name == "empty"
+                && type_binders.len() == 1
+                && type_binders[0].name == "p"
+        ),
+        "the binder-bearing signature must remain standalone: {recovered:#?}"
+    );
+    assert_eq!(
+        format_program(&recovered),
+        "sig empty[p]: List[p]\nempty = Nil\n"
+    );
+    let redesugared = desugar_program(&recovered);
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("derived Surf spans must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&original)
+                .expect("original fixture must normalize"),
+        ),
+        "the standalone signature and untyped value must recover the original Deep"
+    );
+}
+
+#[test]
+fn monomorphic_value_defsig_keeps_the_canonical_inline_binding() {
+    let original = parse_deep(
+        "(defsig {} empty_i64 (t-adt {} List (t-prim {} i64)))
+         (def {} empty_i64 (var {} Nil))",
+    )
+    .expect("monomorphic value fixture must parse");
+
+    let recovered =
+        resugar_program(&original).expect("monomorphic value signature must be representable");
+    assert!(
+        matches!(
+            recovered.as_slice(),
+            [Decl::LetDef {
+                name,
+                ty: Some(_),
+                ..
+            }] if name == "empty_i64"
+        ),
+        "a monomorphic value remains one inline typed binding: {recovered:#?}"
+    );
 }
 
 #[test]

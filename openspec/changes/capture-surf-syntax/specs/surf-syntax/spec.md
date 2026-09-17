@@ -226,14 +226,23 @@ spelling. A spread name SHALL NOT repeat within one tensor shape, and a `def` me
 ### Requirement: Type signatures and arrow associativity
 
 Surf SHALL support inline (`def`) and standalone (`sig`) signatures; a `sig` SHALL precede
-its `def`. The `->` arrow SHALL be right-associative and flat in Deep (`t-fn` with last child
-the return type), and a function-typed argument SHALL require parentheses, preserved by the
-formatter and decompiler.
+its function `def` or bare top-level value binding. Only a function `def` SHALL carry an
+inline binder list. A binder-bearing signature for a non-function value SHALL therefore
+remain a standalone `sig` followed by an untyped value binding; a typed value binding has no
+quantifier scope. The `->` arrow SHALL be right-associative and flat in Deep (`t-fn` with
+last child the return type), and a function-typed argument SHALL require parentheses,
+preserved by the formatter and decompiler.
 
 #### Scenario: Inline annotations synthesize a defsig
 
 - **WHEN** a function is `def add_vecs[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)`
 - **THEN** the desugarer emits a `defsig` in addition to the `def`
+
+#### Scenario: Polymorphic value signature remains standalone
+
+- **WHEN** Deep contains `(defsig {} empty (p) (t-adt {} List (t-var {} p)))` followed by `(def {} empty (var {} Nil))`
+- **THEN** canonical Surf emits `sig empty[p]: List[p]` followed by `empty = Nil`
+- **AND** desugaring that Surf recovers the binder-bearing `defsig` rather than freeing `p`
 
 #### Scenario: Parenthesized function argument is distinct from curried arrows
 
