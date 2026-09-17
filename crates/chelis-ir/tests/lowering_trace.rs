@@ -43,9 +43,7 @@ fn same_dag(left: &Dag, right: &Dag) {
 // empty integration binary.
 #[cfg(not(feature = "lowering-trace"))]
 #[test]
-fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {
-    assert!(!cfg!(feature = "lowering-trace"));
-}
+fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {}
 
 #[cfg(feature = "lowering-trace")]
 #[test]
