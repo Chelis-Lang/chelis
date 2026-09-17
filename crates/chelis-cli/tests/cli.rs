@@ -8805,6 +8805,17 @@ fn check_tracks_core_transform_values_across_forwarding_results() {
             true,
         ),
         (
+            "nested_match_result_all_untyped",
+            "def probe(flag: bool, t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               carrier = match flag with {\n\
+                 | true => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+                 | false => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+               }\n\
+               vmap((carrier.0).0)(t)\n\
+             }\n",
+            true,
+        ),
+        (
             "module_tuple_projection_alias",
             "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
              pair = (reduce, 0i32)\n\
@@ -8869,6 +8880,17 @@ fn check_tracks_core_transform_values_across_forwarding_results() {
                  | forwarded => forwarded\n\
                }\n\
                vmap(mapped)(t)\n\
+             }\n",
+            false,
+        ),
+        (
+            "nested_match_result_constrained_by_typed_arm",
+            "def probe(flag: bool, t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               carrier = match flag with {\n\
+                 | true => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+                 | false => ((fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32), 1i32)\n\
+               }\n\
+               vmap((carrier.0).0)(t)\n\
              }\n",
             false,
         ),

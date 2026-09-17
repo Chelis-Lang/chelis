@@ -144,6 +144,7 @@ enum CoreTransformValue {
     Ordinary,
     TopLevelFunctionAlias,
     UntypedVmapLambda,
+    ConstrainedVmapLambda,
     Tuple(Vec<CoreTransformValue>),
 }
 
@@ -157,16 +158,23 @@ impl CoreTransformValue {
     }
 
     /// Conservative union for alternate result paths. `Ordinary` carries no
-    /// hazard and is the bottom value; callable hazards dominate direct
-    /// targets, while equal tuple structures join element by element so
-    /// projection keeps sibling isolation.
+    /// transform provenance and is the bottom value. A constrained lambda
+    /// proves that ordinary branch unification supplies explicit mapped
+    /// structure to an otherwise untyped lambda in the same result slot.
+    /// Top-level aliases remain hazardous, while equal tuple structures join
+    /// element by element so projection keeps sibling isolation.
     fn join(&self, other: &Self) -> Self {
         match (self, other) {
-            (Self::Ordinary, value) | (value, Self::Ordinary) => value.clone(),
             (Self::TopLevelFunctionAlias, _) | (_, Self::TopLevelFunctionAlias) => {
                 Self::TopLevelFunctionAlias
             }
+            (Self::ConstrainedVmapLambda, Self::UntypedVmapLambda)
+            | (Self::UntypedVmapLambda, Self::ConstrainedVmapLambda) => Self::ConstrainedVmapLambda,
             (Self::UntypedVmapLambda, _) | (_, Self::UntypedVmapLambda) => Self::UntypedVmapLambda,
+            (Self::ConstrainedVmapLambda, _) | (_, Self::ConstrainedVmapLambda) => {
+                Self::ConstrainedVmapLambda
+            }
+            (Self::Ordinary, value) | (value, Self::Ordinary) => value.clone(),
             (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
                 left.iter()
                     .zip(right)
@@ -545,8 +553,12 @@ fn classify_core_transform_value(
         return CoreTransformValue::Ordinary;
     };
     match tag {
-        DeepTag::Fn if vmap_lambda_has_untyped_parameter(Some(value)) => {
-            CoreTransformValue::UntypedVmapLambda
+        DeepTag::Fn => {
+            if vmap_lambda_has_untyped_parameter(Some(value)) {
+                CoreTransformValue::UntypedVmapLambda
+            } else {
+                CoreTransformValue::ConstrainedVmapLambda
+            }
         }
         DeepTag::Var => {
             let Some(name) = children.first().and_then(symbol_name) else {
@@ -2283,7 +2295,7 @@ mod core_transform_fragment_tests {
                 &module_values,
                 &lexical_scope,
             ),
-            CoreTransformValue::Ordinary,
+            CoreTransformValue::ConstrainedVmapLambda,
             "a local ascription supplies the pre-transform function structure"
         );
 
@@ -2335,8 +2347,22 @@ mod core_transform_fragment_tests {
     #[test]
     fn alternate_result_join_preserves_hazards_and_tuple_siblings() {
         let untyped = CoreTransformValue::UntypedVmapLambda;
-        let typed = CoreTransformValue::Ordinary;
-        assert_eq!(typed.join(&untyped), untyped);
+        let typed = CoreTransformValue::ConstrainedVmapLambda;
+        assert_eq!(
+            typed.join(&untyped),
+            typed,
+            "an explicitly structured arm constrains the same callable result slot"
+        );
+        assert_eq!(
+            CoreTransformValue::Ordinary.join(&untyped),
+            untyped,
+            "an unrelated ordinary result must not erase an untyped lambda hazard"
+        );
+        assert_eq!(
+            CoreTransformValue::TopLevelFunctionAlias.join(&typed),
+            CoreTransformValue::TopLevelFunctionAlias,
+            "a typed sibling must not erase top-level function provenance"
+        );
 
         let left = CoreTransformValue::Tuple(vec![
             CoreTransformValue::UntypedVmapLambda,
