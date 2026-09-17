@@ -353,7 +353,7 @@ fn index_does_not_consume_list_argument() {
         r#"
 def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
-    first: tensor[k, f32] = index(params, 0)
+    first: tensor[k, f32] = index(params, 0i64)
     _ = drop(first)
     params
   }
@@ -374,7 +374,7 @@ fn list_len_then_index_then_reuse_compiles() {
 def step(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     n: i64 = len(params)
-    first: tensor[k, f32] = index(params, 0)
+    first: tensor[k, f32] = index(params, 0i64)
     _ = drop(first)
     params
   }
@@ -414,7 +414,7 @@ fn index_still_flags_use_after_genuine_consume() {
 def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
     _ = drop(params)
-    first: tensor[k, f32] = index(params, 0)
+    first: tensor[k, f32] = index(params, 0i64)
     first
   }
 "#,
@@ -469,7 +469,7 @@ fn index_explicit_container_borrow_is_a_type_error() {
         r#"
 def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
-    first: tensor[k, f32] = index(&params, 0)
+    first: tensor[k, f32] = index(&params, 0i64)
     first
   }
 "#,

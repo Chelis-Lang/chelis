@@ -83,12 +83,12 @@ out = JsonObject(dict_of([
   ("meta", JsonObject(dict_of([("positions", JsonFloat(cast(len(positions), f64)))])))
 ]))
 done_json = write_file("{results}", to_json(out))
-val0 = round_to(mul(float_cell(index(positions, 0), "quantity"), float_cell(index(positions, 0), "mid_price")), 2)
-val1 = round_to(mul(float_cell(index(positions, 1), "quantity"), float_cell(index(positions, 1), "mid_price")), 2)
-val2 = round_to(mul(float_cell(index(positions, 2), "quantity"), float_cell(index(positions, 2), "mid_price")), 2)
-crow0 = dict_of([("instrument", required_cell(index(positions, 0), "instrument")), ("value", to_string(val0))])
-crow1 = dict_of([("instrument", required_cell(index(positions, 1), "instrument")), ("value", to_string(val1))])
-crow2 = dict_of([("instrument", required_cell(index(positions, 2), "instrument")), ("value", to_string(val2))])
+val0 = round_to(mul(float_cell(index(positions, 0i64), "quantity"), float_cell(index(positions, 0i64), "mid_price")), 2)
+val1 = round_to(mul(float_cell(index(positions, 1i64), "quantity"), float_cell(index(positions, 1i64), "mid_price")), 2)
+val2 = round_to(mul(float_cell(index(positions, 2i64), "quantity"), float_cell(index(positions, 2i64), "mid_price")), 2)
+crow0 = dict_of([("instrument", required_cell(index(positions, 0i64), "instrument")), ("value", to_string(val0))])
+crow1 = dict_of([("instrument", required_cell(index(positions, 1i64), "instrument")), ("value", to_string(val1))])
+crow2 = dict_of([("instrument", required_cell(index(positions, 2i64), "instrument")), ("value", to_string(val2))])
 table = [crow0, crow1, crow2]
 done_csv = write_file("{valued}", to_csv(table))
 "#,
@@ -220,7 +220,7 @@ px = map(fn (row: Dict[string, string]) -> match dict_get(row, "px") with {{
   }}
   | None => fail("float_column: column `px` not found; available column: `mid_price`")
 }}, positions)
-done = write_file("{}", to_json(JsonFloat(index(px, 0))))
+done = write_file("{}", to_json(JsonFloat(index(px, 0i64))))
 "#,
         app_pkg.join("positions.csv").to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -286,15 +286,15 @@ trades = read_csv("{trades}")
 ids = integer_column(trades, "trade_id")
 qty = integer_column(trades, "qty")
 total_qty = fold(fn (acc, q) -> add(acc, q), 0i64, qty)
-first_widened = index(float_column(trades, "trade_id"), 0)
+first_widened = index(float_column(trades, "trade_id"), 0i64)
 out = JsonObject(dict_of([
-  ("first_id", JsonInt(integer_cell(index(trades, 0), "trade_id"))),
+  ("first_id", JsonInt(integer_cell(index(trades, 0i64), "trade_id"))),
   ("totals", JsonObject(dict_of([("qty", JsonInt(total_qty))]))),
   ("lossy", JsonObject(dict_of([("first_id_f64", JsonFloat(first_widened))])))
 ]))
 done_json = write_file("{results}", to_json(out))
-row0 = dict_of([("trade_id", to_string(index(ids, 0)))])
-row1 = dict_of([("trade_id", to_string(index(ids, 1)))])
+row0 = dict_of([("trade_id", to_string(index(ids, 0i64)))])
+row1 = dict_of([("trade_id", to_string(index(ids, 1i64)))])
 table = [row0, row1]
 done_csv = write_file("{ids_out}", to_csv(table))
 "#,
@@ -352,7 +352,7 @@ xs = map(fn (row: Dict[string, string]) -> match dict_get(row, "px") with {{
   }}
   | None => fail("integer_column: column `px` not found")
 }}, trades)
-done = write_file("{}", to_json(JsonInt(index(xs, 0))))
+done = write_file("{}", to_json(JsonInt(index(xs, 0i64))))
 "#,
         app_pkg.join("trades.csv").to_str().unwrap(),
         output_path.to_str().unwrap(),
