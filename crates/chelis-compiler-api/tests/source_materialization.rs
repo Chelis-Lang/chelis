@@ -5,6 +5,12 @@
 #[path = "../examples/support/wire_materialization.rs"]
 mod materialization;
 
+use chelis_compiler_api::{
+    compiler,
+    schema::{CheckRequest, EvalRequest, SourceKind},
+};
+use chelis_types::errors::CheckErrorKind;
+use chelis_vocab::DiagnosticKind;
 use serde_json::json;
 
 #[test]
@@ -179,6 +185,50 @@ fn registered_def_expression_metadata_has_check_and_eval_admission_parity() {
                 "{codec} must identify the rejected {key} expression: {error}"
             );
         }
+
+        let nested =
+            format!("(def {{{key}: (tuple {{}} (future_nested {{}} 1))}} value (lit {{}} 7))");
+        let stamped = chelis_deep::parse_and_stamp_file(&nested)
+            .expect("the lenient Deep parser must preserve the nested unknown form");
+        let checker_errors = chelis_types::check_typed_program(&stamped)
+            .expect_err("a nested unknown metadata expression must fail checking")
+            .errors;
+        assert!(
+            checker_errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::UnknownForm)
+                    && error.message.contains("future_nested")
+            }),
+            "the checker must classify nested {key} metadata as UnknownForm: {checker_errors:?}"
+        );
+
+        let checked = compiler::check(CheckRequest {
+            source_kind: SourceKind::Deep,
+            source: nested.clone(),
+        })
+        .expect("check must return its structured diagnostic report");
+        assert!(
+            checked.errors.iter().any(|error| {
+                error.kind() == DiagnosticKind::UnknownForm
+                    && error.message.contains("future_nested")
+            }),
+            "check must preserve the nested {key} UnknownForm diagnostic: {:?}",
+            checked.errors
+        );
+
+        let eval_error = compiler::eval(EvalRequest {
+            source_kind: SourceKind::Deep,
+            source: nested,
+            bindings: Default::default(),
+        })
+        .expect_err("eval must reject a nested unknown metadata expression");
+        assert!(
+            eval_error.errors.iter().any(|error| {
+                error.kind() == DiagnosticKind::UnknownForm
+                    && error.message.contains("future_nested")
+            }),
+            "eval must preserve the nested {key} UnknownForm diagnostic: {:?}",
+            eval_error.errors
+        );
     }
 }
 
