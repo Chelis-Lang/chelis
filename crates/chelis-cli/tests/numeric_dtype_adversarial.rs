@@ -765,6 +765,9 @@ def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_i32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
 def use_i64(x: tensor[3, i64]) -> tensor[3, i64] = poly_id(x)
+out_f32 = use_f32(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
+out_i32 = use_i32(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32)]))
+out_i64 = use_i64(to_tensor([cast(1, i64), cast(2, i64), cast(3, i64)]))
 "#,
     );
     let build = run_build_in(dir.path(), &src, Some(&dir.path().join("out")));
@@ -775,10 +778,35 @@ def use_i64(x: tensor[3, i64]) -> tensor[3, i64] = poly_id(x)
     );
     let c_file = dir.path().join("out").join("multi_specialize.c");
     let c_source = fs::read_to_string(&c_file).expect("read emitted C");
-    for callee in ["use_f32", "use_i32", "use_i64"] {
+    let mut main = c_source
+        .split_once("int main(void)")
+        .expect("emitted C must contain main")
+        .1;
+    for (callee, dtype) in [
+        ("use_f32", "CHELIS_DTYPE_F32"),
+        ("use_i32", "CHELIS_DTYPE_I32"),
+        ("use_i64", "CHELIS_DTYPE_I64"),
+    ] {
+        let mut symbol = "chelis_fn_".to_string();
+        for byte in callee.bytes() {
+            symbol.push_str(&format!("{byte:02x}"));
+        }
+        let definition = format!("chelis_tensor* {symbol}(chelis_tensor* x)");
         assert!(
-            c_source.contains(callee),
-            "RT-4 invariant: monomorphized symbol `{callee}` missing from emitted C"
+            c_source.contains(&definition),
+            "RT-4 invariant: concrete wrapper `{callee}` missing from emitted C"
         );
+        let dtype_pos = main.find(dtype).unwrap_or_else(|| {
+            panic!("RT-4 invariant: `{callee}` call site must construct {dtype}")
+        });
+        let call = format!("{symbol}__chelis_owned_body(");
+        let call_pos = main.find(&call).unwrap_or_else(|| {
+            panic!("RT-4 invariant: concrete `{callee}` call missing from main")
+        });
+        assert!(
+            dtype_pos < call_pos,
+            "RT-4 invariant: `{callee}` must receive its concrete {dtype} input"
+        );
+        main = &main[call_pos + call.len()..];
     }
 }

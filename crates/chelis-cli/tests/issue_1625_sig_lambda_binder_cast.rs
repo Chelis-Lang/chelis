@@ -98,6 +98,44 @@ fn error_messages(json: &Value) -> Vec<String> {
         .collect()
 }
 
+fn assert_dtype_binder_rejected(source: &Path, spelling: &str) {
+    let formatted = chelis(&["fmt", "--inplace", source.to_str().unwrap()]);
+    let formatted_stderr = String::from_utf8_lossy(&formatted.stderr);
+    assert!(
+        !formatted.status.success()
+            && formatted_stderr.contains(&format!(
+                "dtype spelling `{spelling}` cannot be a declaration binder"
+            )),
+        "`chelis fmt` must reject `{spelling}` at the binder declaration: \
+         {formatted_stderr}"
+    );
+
+    let checked = run_check(source);
+    assert_ne!(
+        checked["score"], 1.0,
+        "`chelis check` must reject `{spelling}` as a binder: {checked}"
+    );
+    let messages = error_messages(&checked);
+    assert!(
+        messages.iter().any(|message| {
+            message.contains(&format!(
+                "dtype spelling `{spelling}` cannot be a declaration binder"
+            ))
+        }),
+        "`chelis check` must retain the binder-boundary diagnostic; got {messages:?}"
+    );
+
+    let deep = chelis(&["deep", source.to_str().unwrap()]);
+    let deep_stderr = String::from_utf8_lossy(&deep.stderr);
+    assert!(
+        !deep.status.success()
+            && deep_stderr.contains(&format!(
+                "dtype spelling `{spelling}` cannot be a declaration binder"
+            )),
+        "`chelis deep` must reject `{spelling}` before emitting Deep: {deep_stderr}"
+    );
+}
+
 /// Write, canonicalize, then check the program at both ingresses (Surf and
 /// Deep, via `chelis deep`). Mirrors
 /// `issue_1558_binder_cast_variable_source.rs::check_both_ingresses`.
@@ -259,10 +297,9 @@ fn a_same_named_bounded_binder_in_another_function_does_not_leak_into_the_unboun
 }
 
 #[test]
-fn an_explicit_primitive_sig_binder_stays_concrete_and_round_trips() {
+fn an_explicit_primitive_sig_binder_is_rejected_before_dtype_use() {
     let dir = tempdir().expect("tempdir");
     let source = dir.path().join("primitive_binder.ch");
-    let lowered = dir.path().join("primitive_binder.dp");
     write_file(
         &source,
         "module Issue1625PrimitiveBinder\n\
@@ -270,73 +307,19 @@ fn an_explicit_primitive_sig_binder_stays_concrete_and_round_trips() {
          recast = fn (v) -> cast(v, f32)\n\
          out = recast(1.5f32)\n",
     );
-    fmt_inplace(&source);
-
-    let deep = chelis(&["deep", source.to_str().unwrap()]);
-    assert!(
-        deep.status.success(),
-        "primitive-binder source must lower: {}",
-        String::from_utf8_lossy(&deep.stderr)
-    );
-    let deep_text = String::from_utf8(deep.stdout.clone()).expect("Deep output is UTF-8");
-    assert!(
-        deep_text.contains("(cast {span:"),
-        "fixture must retain its cast body:\n{deep_text}"
-    );
-    assert!(
-        deep_text.contains("(t-prim {} f32)") && !deep_text.contains("(t-var {} f32)"),
-        "an explicit binder list must not rebind active primitive `f32`:\n{deep_text}"
-    );
-    fs::write(&lowered, &deep.stdout).expect("write Deep fixture");
-
-    for (label, json) in [("surf", run_check(&source)), ("deep", run_check(&lowered))] {
-        assert_eq!(
-            json["score"], 1.0,
-            "{label} ingress must accept the concrete primitive: {json}"
-        );
-        assert!(
-            error_messages(&json).is_empty(),
-            "{label} ingress must report no errors; got {:?}",
-            error_messages(&json)
-        );
-    }
-
-    let recovered = chelis(&["surf", lowered.to_str().unwrap()]);
-    assert!(
-        recovered.status.success(),
-        "Deep-to-Surf round-trip must succeed: {}",
-        String::from_utf8_lossy(&recovered.stderr)
-    );
+    assert_dtype_binder_rejected(&source, "f32");
 }
 
 #[test]
-fn an_explicit_reserved_sig_binder_stays_on_the_dtype_rejection_path() {
+fn an_explicit_reserved_sig_binder_is_rejected_before_dtype_use() {
     let dir = tempdir().expect("tempdir");
-    let (surf, deep) = check_both_ingresses(
-        dir.path(),
-        "Issue1625ReservedBinder",
-        "sig recast[u8]: u8 -> u8\n\
+    let source = dir.path().join("reserved_binder.ch");
+    write_file(
+        &source,
+        "module Issue1625ReservedBinder\n\
+         sig recast[u8]: u8 -> u8\n\
          recast = fn (v) -> cast(v, u8)\n\
          out = recast(1)\n",
     );
-    for (label, json) in [("surf", &surf), ("deep", &deep)] {
-        assert_ne!(
-            json["score"], 1.0,
-            "{label} ingress must reject reserved dtype `u8`: {json}"
-        );
-        let messages = error_messages(json);
-        assert!(
-            messages.iter().any(|message| {
-                message.contains("cannot use `u8` as a scalar dtype")
-                    && message.contains("unsigned integer types are deferred")
-            }),
-            "{label} ingress must use the reserved-dtype rejection; got {messages:?}"
-        );
-        assert!(
-            !messages
-                .iter()
-                .any(|message| message.contains("undeclared type variable `u8`")),
-            "{label} ingress must not misclassify `u8` as a binder; got {messages:?}"
-        );
-    }
+    assert_dtype_binder_rejected(&source, "u8");
 }

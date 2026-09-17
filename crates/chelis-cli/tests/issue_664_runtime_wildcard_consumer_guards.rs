@@ -201,24 +201,11 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
 /// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
 ///
-/// The DIAGNOSTIC moved with chelis#1837's `pad` admission, and the property
-/// this row owns did not. These programs carry two real defects: the declared
-/// result claims `n` while the movement produces something else, and the `add`
-/// then mixes two extents. `spec/04-type-system.md` section 4.7 decides which
-/// is reported, in terms: a local guard "takes the source position of the
-/// operation that introduces the guarded extent: an independent effect or trap
-/// that precedes that operation in source order is observed first, and one
-/// that follows it is observed only if the guard passes". The `pad` binding
-/// precedes the `add`, so the claim is reported and the operand mismatch is
-/// reached only if the claim holds.
-///
-/// chelis#664's property is loud rejection on both lanes, never exit 0 over
-/// mismatched shapes, and `assert_error_parity` still enforces exactly that.
-/// `issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim` and
-/// its shrink twin below are the controls that the operand check itself is intact, on this same pad
-/// path: give the claim a value the pad actually produces and the guard passes,
-/// so the `add` is reached and reports the operand mismatch with this row's
-/// former needles.
+/// Under the explicit declaration-binder contract, `n` remains the authored
+/// input/output binder rather than being narrowed by the body. The `add`
+/// therefore owns the first executable failure: it observes `[4]` versus
+/// `[3]`. chelis#664's property remains loud rejection on both lanes, never
+/// exit 0 over mismatched shapes.
 ///
 /// Measured on both lanes at this head: eval and the linked binary print the
 /// same two lines, the binary exiting 134.
@@ -231,8 +218,8 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elempad",
-        "extent `n`: claimed = 3, pad axis 0 = 4",
-        "extent `n`: claimed = 3, pad axis 0 = 4",
+        "tensor shapes must match for elementwise op, got [4] vs [3]",
+        "elementwise operand shape mismatch",
     );
 }
 
@@ -242,11 +229,8 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 /// literal bound would pin the sig's `n` at check time; the runtime
 /// bound `n - 3` keeps the wildcard route: `[3]` vs `[6]` at run time.)
 ///
-/// Its diagnostic moved for the reason the pad row above records, and to the
-/// same rule: the `shrink` binding precedes the `add`, so the declared result's
-/// claim over the shrink is reported first. Both lanes agree, and both still
-/// reject. The agreeing-claim control below covers the second clause of that
-/// rule for this family.
+/// As in the pad row, the explicit declaration binder stays rigid, so the
+/// elementwise consumer reports `[3]` versus `[6]` directly on both lanes.
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
@@ -256,8 +240,8 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elemshrink",
-        "extent `n`: claimed = 6, shrink axis 0 = 3",
-        "extent `n`: claimed = 6, shrink axis 0 = 3",
+        "tensor shapes must match for elementwise op, got [3] vs [6]",
+        "elementwise operand shape mismatch",
     );
 }
 
