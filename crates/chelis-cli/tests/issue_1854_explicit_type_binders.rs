@@ -203,6 +203,10 @@ fn cli_shares_unknown_primitive_ownership_across_signature_and_definition() {
          def ident(x: float32) -> float32 = x\n",
         "def ident(x: float32) -> float32 = x\n\
          sig ident: float32 -> float32\n",
+        "sig ident[a]: float32 -> float32\n\
+         def ident(x: float32) -> float32 = x\n",
+        "def ident(x: float32) -> float32 = x\n\
+         sig ident[a]: float32 -> float32\n",
     ]
     .into_iter()
     .enumerate()
@@ -230,6 +234,35 @@ fn cli_shares_unknown_primitive_ownership_across_signature_and_definition() {
         let path = format!("standalone-inline-{index}.dp");
         fs::write(dir.path().join(&path), source).expect("write Deep fixture");
         assert_cli_unknown_spelling_order(dir.path(), &path, &["float32"]);
+    }
+}
+
+#[test]
+fn cli_keeps_reserved_primitive_diagnostics_per_use_with_explicit_binders() {
+    let dir = tempdir().expect("tempdir");
+    for (index, name) in RESERVED_DTYPES.into_iter().enumerate() {
+        let path = format!("reserved-explicit-binder-{index}.ch");
+        fs::write(
+            dir.path().join(&path),
+            format!(
+                "sig ident[a]: {name} -> {name}\n\
+                 def ident(x: {name}) -> {name} = x\n"
+            ),
+        )
+        .expect("write Surf fixture");
+        let report = check_json(dir.path(), &path);
+        let messages = error_messages(&report);
+        assert_eq!(
+            messages.len(),
+            3,
+            "reserved `{name}` must retain one diagnostic per authored use: {report}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains(&format!("`{name}`"))),
+            "every reserved-use diagnostic must name `{name}`: {report}"
+        );
     }
 }
 

@@ -917,14 +917,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
-        // A declaration with an explicit nonempty binder list gives each
-        // unlisted use its own owner: the error is an undeclared binder use,
-        // even though it retains the shared unknown-primitive wording.
-        // Monomorphic typo spellings retain #1854's declaration/name owner.
-        let declaration_owner = match self.binder_mode {
-            BinderMode::ExplicitGeneric(names) if !names.is_empty() => None,
-            _ => self.declaration_diagnostic_owner.clone(),
-        };
+        let declaration_owner = self.declaration_diagnostic_owner.clone();
         if let Some(owner) = &declaration_owner
             && let Some(witness) = self
                 .errors

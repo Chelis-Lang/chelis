@@ -193,6 +193,10 @@ fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner()
          def ident(x: float32) -> float32 = x",
         "def ident(x: float32) -> float32 = x\n\
          sig ident: float32 -> float32",
+        "sig ident[a]: float32 -> float32\n\
+         def ident(x: float32) -> float32 = x",
+        "def ident(x: float32) -> float32 = x\n\
+         sig ident[a]: float32 -> float32",
     ] {
         assert_unknown_spelling_order(&surf(source), &["float32"]);
     }
@@ -211,6 +215,20 @@ fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner()
     ] {
         let program = parse_deep(source).expect("Deep fixture must parse");
         assert_unknown_spelling_order(&program, &["float32"]);
+    }
+}
+
+#[test]
+fn explicit_binders_do_not_collapse_reserved_primitive_diagnostics() {
+    for name in RESERVED_DTYPES {
+        assert_both_ingresses_reject_each_site(
+            &surf(&format!(
+                "sig ident[a]: {name} -> {name}\n\
+                 def ident(x: {name}) -> {name} = x"
+            )),
+            name,
+            3,
+        );
     }
 }
 
