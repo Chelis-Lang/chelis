@@ -738,8 +738,8 @@
         "mode": "exact"
       },
       "expected": [
-        "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation",
-        "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims"
+        "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+        "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation"
       ],
       "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v14, then validates both on decode."
     },
