@@ -7560,11 +7560,11 @@ fn lower_host_expr_with_expected(
     Ok(result)
 }
 
-#[derive(Clone)]
-struct SequentialHostLetBinding {
-    binding: Expr,
-    initializer: Expr,
-    bind_span: Option<String>,
+#[derive(Clone, Copy)]
+struct SequentialHostLetBinding<'expr> {
+    binding: &'expr Expr,
+    initializer: &'expr Expr,
+    bind_span: Option<&'expr str>,
     layer: usize,
 }
 
@@ -7573,22 +7573,22 @@ struct SequentialHostLetLayer {
     explicit_ty: HostTypeTerm,
 }
 
-struct SequentialHostLetChain {
-    bindings: Vec<SequentialHostLetBinding>,
+struct SequentialHostLetChain<'expr> {
+    bindings: Vec<SequentialHostLetBinding<'expr>>,
     layers: Vec<SequentialHostLetLayer>,
     bind_expr: Expr,
-    body: Expr,
+    body: &'expr Expr,
 }
 
 /// Flatten only the direct tail chain produced for sequential Surf bindings:
 /// `(let b0 (let b1 (... body)))`. Branches and other nested expressions are
 /// not traversed. This gives a checked local ascription visibility over the
 /// same lexical predecessors that source evaluation gives it.
-fn sequential_host_let_chain(
-    expr: &Expr,
+fn sequential_host_let_chain<'expr>(
+    expr: &'expr Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> Option<SequentialHostLetChain> {
+) -> Option<SequentialHostLetChain<'expr>> {
     let mut bindings = Vec::new();
     let mut layers = Vec::new();
     let mut current = expr;
@@ -7610,16 +7610,16 @@ fn sequential_host_let_chain(
         if tag(bind_list) != Some(DeepTag::Bind) {
             return None;
         }
-        let bind_span = bind_expr.span_id().map(str::to_owned);
+        let bind_span = bind_expr.span_id();
         let bind_kids = children(bind_list);
         if !bind_kids.len().is_multiple_of(2) {
             return None;
         }
         for pair in bind_kids.as_chunks::<2>().0 {
             bindings.push(SequentialHostLetBinding {
-                binding: pair[0].clone(),
-                initializer: pair[1].clone(),
-                bind_span: bind_span.clone(),
+                binding: &pair[0],
+                initializer: &pair[1],
+                bind_span,
                 layer,
             });
         }
@@ -7628,7 +7628,7 @@ fn sequential_host_let_chain(
             current = next;
             layer += 1;
         } else {
-            break next.clone();
+            break next;
         }
     };
 
@@ -7651,6 +7651,77 @@ fn sequential_host_let_chain(
             span,
         ),
         body,
+    })
+}
+
+fn is_empty_to_tensor_literal(expr: &Expr) -> bool {
+    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    kids.len() == 2
+        && direct_var_name(&kids[0]) == Some("to_tensor")
+        && direct_var_name(&kids[1]) == Some("Nil")
+}
+
+fn lower_checked_local_ascription_region(
+    name: &str,
+    initializer: &Expr,
+    local_region: &crate::lower::LocalAscriptionBindingRegion,
+    checked_lowering: &crate::lower::SubexprLoweringContext,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let region_context = checked_lowering.for_local_ascription_region(local_region);
+    let expected = expr_tensor_type(initializer, program, scope)
+        .or_else(|| tensor_type_from_host_input(&expr_host_type(initializer, program, scope)))
+        .ok_or_else(|| {
+            host_expr_lowering_error(
+                initializer,
+                format!(
+                    "checked local tensor-ascription region rooted at `{name}` has no concrete \
+                     tensor type at its initializer"
+                ),
+            )
+        })?;
+
+    // Empty tensor literals are intentionally materialized by the host lane:
+    // the tensor DAG literal extractor has no payload from which to infer a
+    // precision. Preserve that established route, but only after the checked
+    // initializer type proves the authored rank-1 extent is exactly zero.
+    // A different claim is rejected here instead of falling through to an
+    // untyped `Load(\"to_tensor\")` or silently dropping the obligation.
+    if is_empty_to_tensor_literal(initializer) {
+        if expected.dims.as_slice() != [DimInfo::Lit(0)] {
+            return Err(crate::lower::LowerDiagnostic::new(
+                format!(
+                    "local tensor ascription `{name}` conflicts with a statically empty \
+                     `to_tensor` initializer: expected {expected:?}, actual extent 0"
+                ),
+                Some(initializer.span()),
+                initializer.span_id().map(str::to_owned),
+            )
+            .fatal());
+        }
+        return lower_host_expr(initializer, program, scope, tensor_helpers);
+    }
+
+    try_lower_tensor_helper_call_with_context(
+        local_region.expression(),
+        program,
+        scope,
+        tensor_helpers,
+        expected,
+        &region_context,
+    )
+    .ok_or_else(|| {
+        host_expr_lowering_error(
+            initializer,
+            format!(
+                "checked local tensor-ascription region rooted at `{name}` cannot be represented \
+                 by the tensor execution lane"
+            ),
+        )
     })
 }
 
@@ -7956,7 +8027,7 @@ fn lower_host_expr_kind(
                 let chain = flattened.expect("cross-layer region requires a flattened let chain");
                 (
                     chain.bindings,
-                    chain.bind_expr,
+                    Cow::Owned(chain.bind_expr),
                     chain.body,
                     Some(chain.layers),
                 )
@@ -7973,30 +8044,30 @@ fn lower_host_expr_kind(
                         "a `let` node has malformed bindings",
                     ));
                 }
-                let bind_span = bind_first.span_id().map(str::to_owned);
+                let bind_span = bind_first.span_id();
                 let current = children(bind_list)
                     .as_chunks::<2>()
                     .0
                     .iter()
                     .map(|pair| SequentialHostLetBinding {
-                        binding: pair[0].clone(),
-                        initializer: pair[1].clone(),
-                        bind_span: bind_span.clone(),
+                        binding: &pair[0],
+                        initializer: &pair[1],
+                        bind_span,
                         layer: 0,
                     })
                     .collect();
                 (
                     current,
-                    bind_first.clone(),
-                    kids.get(1)
-                        .ok_or_else(|| host_expr_lowering_error(expr, "a `let` node has no body"))?
-                        .clone(),
+                    Cow::Borrowed(bind_first),
+                    kids.get(1).ok_or_else(|| {
+                        host_expr_lowering_error(expr, "a `let` node has no body")
+                    })?,
                     None,
                 )
             };
             let local_regions = checked_lowering
                 .local_ascription_binding_regions(
-                    &bind_expr,
+                    bind_expr.as_ref(),
                     tensor_helpers.declaration_name.as_deref(),
                 )
                 .into_iter()
@@ -8006,55 +8077,26 @@ fn lower_host_expr_kind(
                 .as_ref()
                 .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
             for (ordinal, binding) in let_bindings.iter().enumerate() {
-                if let Some(name) = symbol_name(&binding.binding) {
-                    let initializer = &binding.initializer;
+                if let Some(name) = symbol_name(binding.binding) {
+                    let initializer = binding.initializer;
                     let index = ordinal * 2;
                     let mut value = if let Some(local_region) = local_regions.get(&index) {
-                        let region_context =
-                            checked_lowering.for_local_ascription_region(local_region);
-                        let expected = expr_tensor_type(initializer, program, &scoped)
-                            .or_else(|| {
-                                tensor_type_from_host_input(&expr_host_type(
-                                    initializer,
-                                    program,
-                                    &scoped,
-                                ))
-                            })
-                            .ok_or_else(|| {
-                                host_expr_lowering_error(
-                                    initializer,
-                                    format!(
-                                        "checked local tensor-ascription region rooted at \
-                                             `{name}` has no concrete tensor type at its \
-                                             initializer"
-                                    ),
-                                )
-                            })?;
-                        try_lower_tensor_helper_call_with_context(
-                            local_region.expression(),
+                        lower_checked_local_ascription_region(
+                            name,
+                            initializer,
+                            local_region,
+                            &checked_lowering,
                             program,
                             &scoped,
                             tensor_helpers,
-                            expected,
-                            &region_context,
-                        )
-                        .ok_or_else(|| {
-                            host_expr_lowering_error(
-                                initializer,
-                                format!(
-                                    "checked local tensor-ascription region rooted at \
-                                             `{name}` cannot be represented by the tensor \
-                                             execution lane"
-                                ),
-                            )
-                        })?
+                        )?
                     } else {
                         lower_host_expr(initializer, program, &scoped, tensor_helpers)?
                     };
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region
                     // caused the sequential tail chain to be flattened.
-                    value.append_merged_span(binding.bind_span.as_deref());
+                    value.append_merged_span(binding.bind_span);
                     let bind_ty = host_expr_type(&value);
                     let host_binding = HostBinding {
                         name: name.to_string(),
@@ -8071,7 +8113,7 @@ fn lower_host_expr_kind(
                     scoped.insert(name.to_string(), bind_ty);
                 }
             }
-            let mut body = lower_host_expr(&body_expr, program, &scoped, tensor_helpers)?;
+            let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
             if let (Some(layers), Some(mut nested_bindings)) = (nested_layers, nested_bindings) {
                 for (layer, layer_bindings) in
                     layers.into_iter().zip(nested_bindings.drain(..)).rev()
