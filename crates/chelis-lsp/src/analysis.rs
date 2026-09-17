@@ -428,14 +428,23 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
             }
         }
         Decl::Property {
-            name, params, span, ..
+            name,
+            type_binders,
+            params,
+            span,
+            ..
         } => {
             index.defs.insert(
                 name.clone(),
                 TopLevelSymbol {
                     name: name.clone(),
                     range: range_for_span(text, *span),
-                    hover: format!("@property {} forall({})", name, format_params(params)),
+                    hover: format!(
+                        "@property {}{} forall({})",
+                        name,
+                        format_type_binders(type_binders),
+                        format_params(params)
+                    ),
                     kind: CompletionItemKind::FUNCTION,
                 },
             );
@@ -1547,6 +1556,21 @@ fn format_type_params(params: &[String]) -> String {
         String::new()
     } else {
         format!("[{}]", params.join(", "))
+    }
+}
+
+fn format_type_binders(binders: &[chelis_surf::ast::TypeBinder]) -> String {
+    if binders.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            binders
+                .iter()
+                .map(chelis_surf::ast::TypeBinder::render)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 

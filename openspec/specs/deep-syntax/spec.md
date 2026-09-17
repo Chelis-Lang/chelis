@@ -382,7 +382,9 @@ position SHALL fail resugaring explicitly rather than be rewritten.
 Surf property syntax SHALL represent user-authored properties only. A property carrying
 `property_source_kind: "bridge:c-earchin"` or any `property_source_id` SHALL fail resugaring
 explicitly rather than be rewritten with user provenance. `property_quantifiers` SHALL be
-present and SHALL exactly match the property `fn` parameter list before resugaring.
+present and SHALL exactly match the property `fn` parameter list before resugaring. An
+adjacent property `defsig`'s explicit binder list and `dtype_bounds` SHALL resugar after the
+property name and SHALL survive AST serialization and public wire conversion.
 
 #### Scenario: Direct Deep forms remain distinct
 
@@ -414,6 +416,12 @@ present and SHALL exactly match the property `fn` parameter list before resugari
 
 - **WHEN** `property_quantifiers` differs from the property `fn` parameter list
 - **THEN** resugaring fails rather than emitting renamed binders and free variables
+
+#### Scenario: Property declaration binders remain bound
+
+- **WHEN** a property `defsig` binds `p` and its quantifier type uses `(t-var {} p)`
+- **THEN** canonical Surf emits `@property name[p] forall(...)`
+- **AND** desugaring and public wire conversion preserve that binder list
 
 #### Scenario: Unsigned suffix rejected at lex time
 

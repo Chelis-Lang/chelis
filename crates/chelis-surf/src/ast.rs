@@ -100,6 +100,9 @@ pub enum Decl {
     },
     Property {
         name: String,
+        /// Complete `[..]` binder list for every type, dimension, or rank
+        /// variable used by this property declaration.
+        type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         preconditions: Vec<Expr>,
         body: Expr,

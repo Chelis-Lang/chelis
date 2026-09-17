@@ -247,6 +247,131 @@ fn monomorphic_value_defsig_keeps_the_canonical_inline_binding() {
 }
 
 #[test]
+fn polymorphic_property_binders_are_structural_and_round_trip() {
+    let source = "@property accepts[p] forall(x: p):\n  true\n";
+    let parsed = parse_str(source).expect("explicit property binders must parse");
+    assert_eq!(format_program(&parsed), source);
+    let serialized = serde_json::to_string(&parsed).expect("property AST serializes");
+    let decoded: Vec<Decl> = serde_json::from_str(&serialized).expect("property AST deserializes");
+    assert_eq!(
+        decoded, parsed,
+        "Surf AST serialization must retain the property binder list"
+    );
+
+    let lowered = desugar_program(&parsed);
+    let rendered = print_canonical_flat(&lowered);
+    assert!(
+        rendered.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))")
+            && rendered.matches("(x {type: (t-var {} p)})").count() == 2,
+        "the defsig and property quantifier metadata must share binder `p`: {rendered}"
+    );
+
+    let recovered =
+        resugar_program(&lowered).expect("the polymorphic property must resugar canonically");
+    assert_eq!(format_program(&recovered), source);
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&desugar_program(&recovered))
+                .expect("recovered property must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&lowered)
+                .expect("original property must normalize"),
+        ),
+        "Deep -> Surf -> Deep must preserve the property declaration binders"
+    );
+}
+
+#[test]
+fn bounded_property_binders_reuse_the_declaration_binder_model() {
+    let rendered = deep("@property accepts[p: Float] forall(x: p):\n  true");
+    assert!(
+        rendered.contains(
+            "(defsig {dtype_bounds: {p: float}} accepts (p) \
+             (t-fn {} (t-var {} p) (t-prim {} bool)))"
+        ),
+        "a property bound must ride on its defsig: {rendered}"
+    );
+}
+
+#[test]
+fn property_binder_lists_reject_duplicate_and_forbidden_names() {
+    for (source, needle) in [
+        (
+            "@property accepts[p, p] forall(x: p): true",
+            "duplicate binder `p`",
+        ),
+        (
+            "@property accepts[f32] forall(x: f32): true",
+            "dtype spelling `f32` cannot be a declaration binder",
+        ),
+    ] {
+        let error = parse_str(source).expect_err("invalid property binder list must reject");
+        assert!(
+            error.to_string().contains(needle),
+            "wrong property-binder diagnostic for `{source}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn property_body_type_positions_use_the_declaration_scope_without_widening_tensors() {
+    let rendered = deep(
+        "@property accepts[n, p] forall(x: p) where \
+         (fn(y: p) -> true)(x):\n  (fn(z: tensor[n, p]) -> true)(to_tensor([x]))",
+    );
+    assert!(
+        rendered.contains("(t-var {} p)"),
+        "ordinary quantifier and body types must see property binder `p`: {rendered}"
+    );
+    assert!(
+        rendered.contains("(d-var {} n)") && rendered.contains("(t-prim {} p)"),
+        "body-local tensor precision stays a closed primitive request: {rendered}"
+    );
+}
+
+#[test]
+fn nested_module_property_resugaring_preserves_binders() {
+    let original = parse_deep(concat!(
+        "(module {surf_path: \"Demo.Property\"} demo.property ",
+        "(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool))) ",
+        "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
+        "property_quantifiers: (params {} (x {type: (t-var {} p)})), ",
+        "property_preconditions: (tuple {})} accepts ",
+        "(fn {} (params {} (x {type: (t-var {} p)})) ",
+        "(lit {type: (t-prim {} bool)} true))))",
+    ))
+    .expect("nested polymorphic property fixture must parse");
+
+    let recovered = resugar_program(&original).expect("nested property must resugar");
+    assert_eq!(
+        format_program(&recovered),
+        "module Demo.Property\n@property accepts[p] forall(x: p):\n  true\n"
+    );
+    let redesugared = desugar_program(&recovered);
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("nested recovered property must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&original)
+                .expect("nested original property must normalize"),
+        ),
+    );
+}
+
+#[test]
+fn monomorphic_properties_keep_the_existing_canonical_spelling() {
+    let source = "@property accepts forall(x: i32):\n  true\n";
+    let parsed = parse_str(source).expect("monomorphic property parses");
+    assert_eq!(format_program(&parsed), source);
+    let recovered =
+        resugar_program(&desugar_program(&parsed)).expect("monomorphic property resugars");
+    assert_eq!(format_program(&recovered), source);
+}
+
+#[test]
 fn body_annotations_without_a_declaration_binder_remain_unbound() {
     for (source, variable, forbidden) in [
         (

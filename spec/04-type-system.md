@@ -1608,8 +1608,16 @@ type is `bool`. Every binder must have an explicit type. The `where`
 preconditions must type-check as `bool` expressions in the binder scope; the
 predicate body must type-check as `bool`.
 
-Desugaring emits a `defsig` with the binder types and `bool` result, plus an
-ordinary `def` carrying the property metadata specified in
+An optional `[..]` list after the property name is the declaration's complete
+explicit type, dimension, and rank binder list under [04-INF-6] and §5.8.1.
+Those binders are rigid and scope the property quantifier types, preconditions,
+predicate body, and expression-valued options. Duplicate, forbidden, unlisted,
+and dtype-family-bounded names follow the same rules as a function
+declaration. Body-local tensor precision slots remain governed by §5.8.1's
+closed primitive rule.
+
+Desugaring emits a `defsig` with that explicit binder list, the quantifier
+types, and `bool` result, plus an ordinary `def` carrying the property metadata specified in
 `spec/design/chelis_property_spec.md`. Type checking trusts neither the metadata
 nor the property annotation; it checks the resulting Deep function against the
 signature like any other definition.

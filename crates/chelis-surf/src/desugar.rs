@@ -479,14 +479,6 @@ fn lower_module_path(path: &str) -> String {
     path.to_ascii_lowercase()
 }
 
-fn desugar_param(param: &Param) -> deep::Expr {
-    desugar_param_with_dims(param, &UnordSet::new())
-}
-
-fn desugar_param_with_dims(param: &Param, dim_vars: &UnordSet<String>) -> deep::Expr {
-    desugar_param_with_scope(param, dim_vars, &UnordSet::new())
-}
-
 /// Desugar a parameter with both a declared dim-variable scope and a
 /// declared type-variable scope. For `def f[..](...)` parameters, a name in
 /// the precision slot of a `tensor[..., <name>]` annotation becomes
@@ -866,6 +858,9 @@ fn collect_declared_type_binders(
         Decl::Sig {
             name, type_binders, ..
         } => (name, type_binders),
+        Decl::Property {
+            name, type_binders, ..
+        } => (name, type_binders),
         _ => return,
     };
     let entry = out.entry(name.clone()).or_default();
@@ -1014,12 +1009,13 @@ impl DesugarCtx {
 
             Decl::Property {
                 name,
+                type_binders,
                 params,
                 preconditions,
                 body,
                 options,
                 ..
-            } => self.desugar_property(name, params, preconditions, body, options),
+            } => self.desugar_property(name, type_binders, params, preconditions, body, options),
 
             Decl::LetDef {
                 name,
@@ -1328,17 +1324,32 @@ impl DesugarCtx {
     fn desugar_property(
         &self,
         name: &str,
+        type_binders: &[TypeBinder],
         params: &[Param],
         preconditions: &[Expr],
         body: &Expr,
         options: &[PropertyOption],
     ) -> Vec<deep::Expr> {
+        let declared_binders = self
+            .declared_type_binders
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let binder_names: UnordSet<String> = declared_binders
+            .to_sorted()
+            .into_iter()
+            .map(|(binder, _)| binder.clone())
+            .collect();
         let param_scope = params
             .iter()
             .map(|param| param.name.clone())
             .collect::<Vec<_>>();
-        let param_nodes = params.iter().map(desugar_param).collect::<Vec<_>>();
+        let param_nodes = params
+            .iter()
+            .map(|param| desugar_param_with_scope(param, &binder_names, &binder_names))
+            .collect::<Vec<_>>();
         let params_node = node(DeepTag::Params, param_nodes.clone());
+        let restore_binders = self.current_type_binders.replace(declared_binders);
         let preconditions = PropertyPreconditions::new(
             deep::Metadata::default(),
             preconditions
@@ -1399,6 +1410,7 @@ impl DesugarCtx {
                 self.desugar_expr_with_scope(body, &param_scope),
             ],
         );
+        self.current_type_binders.replace(restore_binders);
         let def_node = node_meta(
             DeepTag::Def,
             meta_with_entries(meta_entries),
@@ -1406,12 +1418,18 @@ impl DesugarCtx {
         );
         let mut type_parts = params
             .iter()
-            .map(|param| desugar_type(param.ty.as_ref().expect("property params are typed")))
+            .map(|param| {
+                desugar_type_with_scope(
+                    param.ty.as_ref().expect("property params are typed"),
+                    &binder_names,
+                    &binder_names,
+                )
+            })
             .collect::<Vec<_>>();
         type_parts.push(node(DeepTag::TPrim, vec![sym("bool")]));
-        let sig_node = node(
-            DeepTag::Defsig,
-            vec![sym(name), node(DeepTag::TFn, type_parts)],
+        let sig_node = with_dtype_bounds(
+            defsig_node(name, type_binders, node(DeepTag::TFn, type_parts)),
+            type_binders,
         );
         vec![sig_node, def_node]
     }

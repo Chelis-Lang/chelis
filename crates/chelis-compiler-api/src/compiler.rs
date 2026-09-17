@@ -6245,6 +6245,7 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
         },
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -6252,6 +6253,13 @@ fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
             span: s,
         } => WireSurfDecl::Property {
             name: name.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
             preconditions: preconditions
                 .iter()

@@ -266,10 +266,12 @@ names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`,
 - **WHEN** an effect suffix names an effect outside the built-in set, e.g. `! { Bogus }`
 - **THEN** the parser/checker rejects it
 
-### Requirement: Explicit signature binders
+### Requirement: Explicit declaration binders
 
-Every type, dimension, and rank variable in a `sig` SHALL appear exactly once in that
-signature's complete `[..]` binder list. A non-primitive name in a tensor precision slot
+Every type, dimension, and rank variable in a `sig`, annotated `def`, or `@property`
+declaration SHALL appear exactly once in that declaration's complete `[..]` binder list.
+For a property the list SHALL follow the property name and scope its quantifier types,
+preconditions, predicate body, and expression-valued options. A non-primitive name in a tensor precision slot
 SHALL become `t-var` only when listed; an unlisted spelling remains a primitive request and
 SHALL be rejected by the closed primitive resolver. The `[..]` clause SHALL override the
 case-split so a listed PascalCase name is a type variable. A matching `def` SHALL NOT carry
@@ -277,6 +279,17 @@ a second binder list. A declaration binder SHALL remain in scope for ordinary ty
 positions in body-local lambda parameters, expression ascriptions, block bindings, and
 nested ADT arguments. A tensor precision slot in those body-local annotations SHALL remain
 a closed primitive request.
+
+#### Scenario: Property binders remain structural
+
+- **WHEN** a property is `@property accepts[p] forall(x: p): true`
+- **THEN** `p` is the property's explicit rigid declaration binder
+- **AND** canonical Deep carries `(p)` on the matching `defsig`
+
+#### Scenario: Monomorphic property spelling is unchanged
+
+- **WHEN** a property has no declaration binders
+- **THEN** canonical Surf omits `[]`
 
 #### Scenario: Sig precision name is an explicit type variable
 

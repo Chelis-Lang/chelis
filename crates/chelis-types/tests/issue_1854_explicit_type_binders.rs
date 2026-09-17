@@ -1115,3 +1115,37 @@ fn declared_but_unused_bounded_deep_binder_rejects_at_both_ingresses() {
         "wrong bounded-unused diagnostic: {ir:?}"
     );
 }
+
+#[test]
+fn explicit_property_binders_check_at_both_ingresses() {
+    for source in [
+        "@property accepts[p] forall(x: p): true",
+        "@property accepts[p: Float] forall(x: p): true",
+    ] {
+        let program = surf(source);
+        check_ir_program(&program).expect("IR ingress must accept the property binder");
+        check_typed_program(&program).expect("typed ingress must accept the property binder");
+    }
+}
+
+#[test]
+fn incomplete_property_binder_lists_reject_at_both_ingresses() {
+    let program = surf("@property accepts[p] forall(x: tensor[n, p]): true");
+    let ir = diagnostics(check_ir_program(&program));
+    let typed = diagnostics(check_typed_program(&program));
+    assert_eq!(typed, ir, "incomplete property binders need ingress parity");
+    assert_eq!(ir.len(), 1, "undeclared `n` must have one owner: {ir:?}");
+    assert!(
+        ir[0].message.contains("undeclared dimension variable") && ir[0].message.contains("`n`"),
+        "wrong incomplete-property-binder diagnostic: {ir:?}"
+    );
+}
+
+#[test]
+fn an_unlisted_property_scalar_name_remains_an_unknown_primitive() {
+    assert_both_ingresses_reject_once(
+        &surf("@property accepts forall(x: float32): true"),
+        "float32",
+        Some("f32"),
+    );
+}

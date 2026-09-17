@@ -653,12 +653,13 @@ fn format_decl(decl: &Decl) -> String {
         }
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
             options,
             ..
-        } => format_property(name, params, preconditions, body, options),
+        } => format_property(name, type_binders, params, preconditions, body, options),
         Decl::LetDef {
             name, ty, value, ..
         } => {
@@ -683,17 +684,19 @@ fn format_decl(decl: &Decl) -> String {
 
 fn format_property(
     name: &str,
+    type_binders: &[TypeBinder],
     params: &[Param],
     preconditions: &[Expr],
     body: &Expr,
     options: &[PropertyOption],
 ) -> String {
+    let type_binders = format_type_binders(type_binders);
     let params = params
         .iter()
         .map(format_param)
         .collect::<Vec<_>>()
         .join(", ");
-    let mut out = format!("@property {name} forall({params})");
+    let mut out = format!("@property {name}{type_binders} forall({params})");
     if !preconditions.is_empty() {
         out.push_str(" where ");
         out.push_str(

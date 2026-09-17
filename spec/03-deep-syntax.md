@@ -836,7 +836,11 @@ provenance therefore fails explicitly; it must never emit an ordinary
 `@property` that would redesugar with `property_source_kind: "user"`.
 `property_quantifiers` must also be present and exactly match the property
 `fn` parameter list before resugaring; a mismatch fails rather than changing
-the bound names.
+the bound names. When the adjacent property `defsig` carries an explicit binder
+list, canonical Surf writes the same list after the property name
+(`@property name[binders] forall(...)`). Resugaring, AST serialization, and
+public wire conversion preserve the ordered binder names and `dtype_bounds`;
+omitting them would free variables in the quantifier or body types.
 
 ### 6.3.2 Round-trip normalization
 

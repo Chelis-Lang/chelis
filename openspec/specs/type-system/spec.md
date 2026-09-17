@@ -169,7 +169,9 @@ receive a flat multi-argument function type.
 
 Every authored type, dimension, or rank variable listed in a declaration's explicit binder
 list SHALL be universally quantified and rigid throughout that declaration's body, whether
-the `defsig` declares a function or a non-function value. The body SHALL type-check for every
+the `defsig` declares a function, property, or non-function value. A property's binder list
+SHALL scope its quantifier types, preconditions, predicate body, and expression-valued
+options. The body SHALL type-check for every
 admissible instantiation. A body constraint that identifies an authored binder with a
 concrete type or shape, with another authored binder of the same signature, or with a type
 or shape containing either SHALL be a type error reported at the declaration. The installed
@@ -202,6 +204,11 @@ no return-only dimension position and therefore receives no such exception.
 
 - **WHEN** `empty[p]` is declared as `List[p]` and its body is an empty list
 - **THEN** the declaration is accepted with its unconstrained polymorphic `List[p]` scheme
+
+#### Scenario: Polymorphic property is checked under its declaration binders
+
+- **WHEN** `@property accepts[p] forall(x: p): true` is checked
+- **THEN** `p` remains rigid and universally quantified through the property `defsig`
 
 #### Scenario: Wildcard filled by an authored binder preserves that binder
 

@@ -422,19 +422,27 @@ Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a not
 
 #### P4b: Explicit Declaration Binders
 
-Every type, dimension, and rank variable in a `sig` or annotated `def`
-is declared in that declaration's `[..]` binder list. Names appearing
+Every type, dimension, and rank variable in a `sig`, annotated `def`, or
+`@property` declaration is declared in that declaration's `[..]` binder list.
+For a property the list follows the property name:
+
+```text
+@property accepts[p] forall(x: p): true
+```
+
+Names appearing
 in the precision slot of a `tensor[...]` type that match the binder
 list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
 Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
 `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
 or def quantifier scope (e.g., in a let-typed binding), no
 quantifier exists, so the existing rule applies.
-Within a quantified def body, the declaration's type binders remain in scope
-for ordinary annotation type positions, including lambda parameters,
-expression ascriptions, block bindings, and nested ADT arguments. A tensor
-precision slot in one of those body-local annotations does not inherit that
-scope; it remains a closed primitive request under the value-position rule.
+Within a quantified def or property body, the declaration's type binders
+remain in scope for ordinary annotation type positions, including property
+quantifier types, lambda parameters, expression ascriptions, block bindings,
+and nested ADT arguments. A tensor precision slot in one of those body-local
+annotations does not inherit that scope; it remains a closed primitive request
+under the value-position rule.
 The retired v0.18 integer spellings `int8`, `int16`, `int32`, and `int64`
 never become type variables. They are rejected with the
 versioned-migration diagnostic even when listed.
@@ -1208,7 +1216,7 @@ SigDecl       <- 'sig' S Ident TypeBinders? S ':' S TypeExpr EffectClause?
 #  PROPERTY DECLARATIONS
 # ═══════════════════════════════════════════════════
 
-PropertyDecl  <- '@property' S Ident S 'forall' S Params
+PropertyDecl  <- '@property' S Ident TypeBinders? S 'forall' S Params
                  (S 'where' S Expr (S ',' S Expr)* (S ',')?)?
                  S ':' S Expr PropertyOption*
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
@@ -1218,6 +1226,14 @@ The canonical property-option order is `tolerance`, `seed`, `samples`, then
 every `contract`. Repeatable contracts retain their authored relative order.
 The normal parser accepts another option order as a syntax-safe alias, and the
 formatter rewrites it to this one order.
+
+A property's optional `TypeBinders` is the declaration's complete explicit
+binder list under §P4b/§P4c. It scopes every quantifier type, `where`
+precondition, predicate body, and expression-valued property option. Duplicate
+or forbidden binder names and undeclared type, dimension, or rank variables
+reject exactly as they do for `def`; dtype-family bounds use the same
+representation and validity rules. Omitting the list preserves the existing
+monomorphic property spelling.
 
 The comma and colon delimiters bound each property precondition. A binary
 precondition therefore omits the redundant outer grouping pair used by the

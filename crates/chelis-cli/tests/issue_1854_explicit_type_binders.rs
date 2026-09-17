@@ -864,3 +864,45 @@ fn check_rejects_a_declared_but_unused_bounded_binder() {
         "a bounded binder cannot be inert metadata: {checked}"
     );
 }
+
+#[test]
+fn cli_round_trips_and_checks_polymorphic_properties() {
+    let dir = tempdir().expect("tempdir");
+    let source = "@property accepts[p] forall(x: p):\n  true\n";
+    fs::write(dir.path().join("property.ch"), source).expect("write Surf property");
+
+    let checked = check_json(dir.path(), "property.ch");
+    assert_eq!(
+        checked["score"].as_f64(),
+        Some(1.0),
+        "the Surf property must check: {checked}"
+    );
+
+    let deep = run(dir.path(), &["deep", "property.ch"]);
+    assert!(
+        deep.status.success(),
+        "`chelis deep` failed: {}",
+        text(&deep)
+    );
+    let deep_text = String::from_utf8_lossy(&deep.stdout);
+    assert!(
+        deep_text.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))"),
+        "Deep must carry the property binder on its defsig: {deep_text}"
+    );
+    fs::write(dir.path().join("property.dp"), &deep.stdout).expect("write Deep property");
+
+    let surf = run(dir.path(), &["surf", "property.dp"]);
+    assert!(
+        surf.status.success(),
+        "`chelis surf` failed: {}",
+        text(&surf)
+    );
+    assert_eq!(String::from_utf8_lossy(&surf.stdout), source);
+    fs::write(dir.path().join("recovered.ch"), &surf.stdout).expect("write recovered Surf");
+    let recovered = check_json(dir.path(), "recovered.ch");
+    assert_eq!(
+        recovered["score"].as_f64(),
+        Some(1.0),
+        "the recovered property must check: {recovered}"
+    );
+}

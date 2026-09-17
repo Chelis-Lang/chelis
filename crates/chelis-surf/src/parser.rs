@@ -121,6 +121,9 @@ pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError>
         }
         | Decl::Sig {
             type_binders, span, ..
+        }
+        | Decl::Property {
+            type_binders, span, ..
         } = decl
         {
             let mut declared = UnordSet::new();
@@ -1087,6 +1090,11 @@ impl Parser {
 
     fn parse_property_decl_after_at(&mut self, start: Span) -> Result<Decl, ParseError> {
         let (name, _) = self.expect_ident()?;
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         let (forall, _) = self.expect_ident()?;
         if forall != "forall" {
             return Err(ParseError::Expected {
@@ -1129,6 +1137,7 @@ impl Parser {
             .unwrap_or_else(|| expr_span(&body));
         Ok(Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,

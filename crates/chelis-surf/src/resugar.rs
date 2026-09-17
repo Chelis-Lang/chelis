@@ -1156,7 +1156,8 @@ fn resugar_definition(
     validate_binder_literal_adoption(&definition.children[1], &declared_binders, &dtype_bounds)?;
 
     if definition.meta.chelis_role().map(|v| v.value().as_str()) == Some("property") {
-        return resugar_property(declared_type, definition, name);
+        let type_binders = resugar_dtype_bound_binders(bound_source, &declared_binders)?;
+        return resugar_property(declared_type, definition, name, type_binders);
     }
 
     if value_node.is_some_and(|node| node.tag == DeepTag::Fn) {
@@ -1233,6 +1234,7 @@ fn resugar_property(
     declared_type: Option<&DeepExpr>,
     definition: NodeRef<'_>,
     name: String,
+    type_binders: Vec<TypeBinder>,
 ) -> Result<Decl, ResugarError> {
     let function = node_ref(&definition.children[1])?;
     if function.tag != DeepTag::Fn {
@@ -1366,6 +1368,7 @@ fn resugar_property(
 
     Ok(Decl::Property {
         name,
+        type_binders,
         params,
         preconditions,
         body: resugar_expression_inner(&function.children[1])?,
@@ -1709,6 +1712,7 @@ fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarErr
             }
             Decl::Property {
                 name,
+                type_binders,
                 params,
                 preconditions,
                 body,
@@ -1716,6 +1720,9 @@ fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarErr
                 ..
             } => {
                 require_name(name, "property", is_lower_identifier)?;
+                for binder in type_binders {
+                    require_name(&binder.name, "property-quantifier", is_value_identifier)?;
+                }
                 validate_surface_params(params)?;
                 for expression in preconditions {
                     validate_surface_expression(expression)?;

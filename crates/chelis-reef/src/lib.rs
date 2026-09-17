@@ -9175,6 +9175,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         },
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -9187,6 +9188,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
                 .collect::<UnordSet<_>>();
             Decl::Property {
                 name: internal_name(package, module, name),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
@@ -9314,6 +9316,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         },
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -9326,6 +9329,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
                 .collect::<UnordSet<_>>();
             Decl::Property {
                 name: name.clone(),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
