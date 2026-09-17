@@ -40,7 +40,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tomllib
-from typing import Collection, Iterable, Mapping, Sequence
+from typing import Iterable, Sequence
 
 from capacity_census_cache_publication import COMPILE_CASES as CACHE_COMPILE_CASES
 from capacity_census_wire_calls import DRIVER as WIRE_CALL_DRIVER
@@ -227,30 +227,26 @@ class NightlyOnlySource:
     """A source whose only Clippy coverage is a nightly matrix row."""
 
     path: str
-    feature: str
     row: str
 
 
 # The exact residual. These sources sit behind solver features whose external
 # toolchains the repository does not provision per pull request, so the only
-# row that compiles them is nightly. The list is self-pruning: a file that a
-# per-pull-request row does compile is reported as stale, and `--require-complete`
-# (run by the nightly job) drops the allowance entirely, so a new uncovered file
-# cannot hide behind it.
+# row that compiles them is nightly. Source-to-feature attribution is reviewed
+# manually: accumulated dep-info cannot prove which registered row compiled a
+# source. `--require-complete` (run by the nightly job) drops the allowance
+# entirely, so a new uncovered file cannot hide behind it.
 NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
     NightlyOnlySource(
         path="crates/chelis-prove/src/z3_engine.rs",
-        feature="chelis-prove/z3",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_erf_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
 )
@@ -417,7 +413,7 @@ def resolved_features(
 def check_matrix_covers_declared_features(
     repo_root: Path = REPO_ROOT,
     matrix: Sequence[ClippyRun] = CLIPPY_MATRIX,
-) -> dict[str, frozenset[tuple[str, str]]]:
+) -> None:
     """Leg 2: every declared feature is compiled both enabled and disabled.
 
     Both states matter. `#[cfg(feature = "f")]` is linted only by a row that
@@ -469,20 +465,6 @@ def check_matrix_covers_declared_features(
 
     for run in matrix:
         check_owner_invokes(run, repo_root)
-    return by_row
-
-
-def features_enabled_per_pull_request(
-    by_row: Mapping[str, Collection[tuple[str, str]]],
-    matrix: Sequence[ClippyRun] = CLIPPY_MATRIX,
-) -> frozenset[tuple[str, str]]:
-    """Cargo-resolved features enabled by at least one per-PR matrix row."""
-    return frozenset(
-        feature
-        for run in matrix
-        if run.cadence == PER_PULL_REQUEST and run.label in by_row
-        for feature in by_row[run.label]
-    )
 
 
 def gate_command_lines(repo_root: Path = REPO_ROOT) -> frozenset[str]:
@@ -609,21 +591,15 @@ def check_every_source_is_compiled(
     exceptions: Sequence[UncompiledException] = UNCOMPILED_EXCEPTIONS,
     nightly_only: Sequence[NightlyOnlySource] = NIGHTLY_ONLY_SOURCES,
     require_complete: bool = False,
-    resolved_features_by_row: Mapping[
-        str, Collection[tuple[str, str]]
-    ] | None = None,
 ) -> None:
     """Leg 3: reconcile repository sources against rustc's own dep-info.
 
     ``target_directories`` may contain accumulated artifacts from any Cargo
     invocation, so those sources establish completeness but not row
-    provenance. Cargo's resolved feature union for registered per-pull-request
-    rows decides whether a nightly-only whole-file feature gate has become
-    stale without inferring its producer from those artifacts.
+    provenance. Nightly-only source attribution is therefore not inferred
+    automatically from this union.
     """
     labels = {run.label: run for run in CLIPPY_MATRIX}
-    by_row = resolved_features_by_row or {}
-    nightly_features: dict[str, tuple[str, str]] = {}
     for source in nightly_only:
         if not (repo_root / source.path).is_file():
             raise ConfigurationClosureFailure(
@@ -635,19 +611,6 @@ def check_every_source_is_compiled(
                 f"nightly-only source {source.path} names {source.row!r}, which is "
                 "not a nightly row of CLIPPY_MATRIX"
             )
-        package, separator, feature = source.feature.partition("/")
-        if separator != "/" or not package or not feature or "/" in feature:
-            raise ConfigurationClosureFailure(
-                f"nightly-only source {source.path} has invalid feature identity "
-                f"{source.feature!r}; expected package/feature"
-            )
-        feature_identity = (package, feature)
-        if feature_identity not in by_row.get(source.row, ()):
-            raise ConfigurationClosureFailure(
-                f"nightly-only feature {source.feature} is not enabled by its "
-                f"named row {source.row!r}"
-            )
-        nightly_features[source.path] = feature_identity
     for exception in exceptions:
         if not (repo_root / exception.directory).is_dir():
             raise ConfigurationClosureFailure(
@@ -689,21 +652,6 @@ def check_every_source_is_compiled(
     allowed_nightly = (
         set() if require_complete else {source.path for source in nightly_only}
     )
-    if not require_complete:
-        enabled_per_pull_request = features_enabled_per_pull_request(by_row)
-        stale = sorted(
-            path
-            for path in allowed_nightly
-            if nightly_features[path] in enabled_per_pull_request
-        )
-        if stale:
-            raise ConfigurationClosureFailure(
-                "these sources are recorded as nightly-only but a registered run "
-                "compiled them here: "
-                + ", ".join(stale)
-                + ". Delete their NIGHTLY_ONLY_SOURCES entries; the residual has shrunk."
-            )
-
     excepted = tuple(
         f"{exception.directory}/" for exception in exceptions if exception.sources is None
     )
@@ -742,14 +690,13 @@ def validate(
     require_complete: bool = False,
 ) -> None:
     check_declared_configuration_space(repo_root)
-    by_row = check_matrix_covers_declared_features(repo_root)
+    check_matrix_covers_declared_features(repo_root)
     check_every_source_is_compiled(
         target_directories
         if target_directories is not None
         else default_target_directories(repo_root),
         repo_root,
         require_complete=require_complete,
-        resolved_features_by_row=by_row,
     )
     print("CONFIGURATION CLOSURE: PASS", flush=True)
 

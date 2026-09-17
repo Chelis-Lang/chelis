@@ -235,11 +235,7 @@ class MatrixCoverageTests(unittest.TestCase):
     """
 
     def test_live_matrix_covers_every_declared_feature_both_ways(self) -> None:
-        by_row = CLOSURE.check_matrix_covers_declared_features(REPO_ROOT)
-        per_pull_request = CLOSURE.features_enabled_per_pull_request(by_row)
-        self.assertIn(("chelis-prove", "clarabel"), per_pull_request)
-        self.assertNotIn(("chelis-prove", "arb"), per_pull_request)
-        self.assertNotIn(("chelis-prove", "z3"), per_pull_request)
+        CLOSURE.check_matrix_covers_declared_features(REPO_ROOT)
 
     def test_declared_features_include_implicit_optional_dependencies(self) -> None:
         declared = CLOSURE.declared_features(REPO_ROOT)
@@ -549,6 +545,14 @@ class SourceReconciliationTests(unittest.TestCase):
             self.assertIn(source.row, labels, source.path)
             self.assertEqual(labels[source.row].cadence, CLOSURE.NIGHTLY, source.path)
 
+    def test_nightly_inventory_cannot_assert_unverified_feature_attribution(self) -> None:
+        with self.assertRaises(TypeError):
+            CLOSURE.NightlyOnlySource(
+                path="crates/chelis-prove/src/z3_engine.rs",
+                row="all-features",
+                feature="chelis-prove/arb",
+            )
+
     def test_accumulated_dep_info_does_not_prune_a_nightly_only_entry(self) -> None:
         # A warm target includes dep-info from cargo invocations outside the
         # registered Clippy rows. That evidence can establish completeness,
@@ -566,7 +570,6 @@ class SourceReconciliationTests(unittest.TestCase):
             nightly = (
                 CLOSURE.NightlyOnlySource(
                     path="src/nightly.rs",
-                    feature="pkg/feature",
                     row="all-features",
                 ),
             )
@@ -575,109 +578,7 @@ class SourceReconciliationTests(unittest.TestCase):
                 root,
                 exceptions=(),
                 nightly_only=nightly,
-                resolved_features_by_row={
-                    "all-features": frozenset({("pkg", "feature")})
-                },
             )
-
-    def test_reports_a_nightly_only_entry_a_registered_run_compiled(self) -> None:
-        # Cargo's resolved registered-row features prune the inventory: an
-        # entry that matrix covers is dead weight hiding a later regression.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
-            (root / "src").mkdir()
-            (root / "src" / "compiled.rs").write_text("", encoding="utf-8")
-            deps = root / "target" / "debug" / "deps"
-            deps.mkdir(parents=True)
-            (deps / "unit.d").write_text(
-                "target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8"
-            )
-            nightly = (
-                CLOSURE.NightlyOnlySource(
-                    path="src/compiled.rs",
-                    feature="pkg/feature",
-                    row="all-features",
-                ),
-            )
-            with self.assertRaisesRegex(
-                CLOSURE.ConfigurationClosureFailure, "recorded as nightly-only"
-            ):
-                CLOSURE.check_every_source_is_compiled(
-                    (root / "target" / "debug",),
-                    root,
-                    exceptions=(),
-                    nightly_only=nightly,
-                    resolved_features_by_row={
-                        "all-features": frozenset({("pkg", "feature")}),
-                        "default-features": frozenset({("pkg", "feature")}),
-                    },
-                )
-
-    def test_rejects_a_nonexistent_nightly_feature_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
-            (root / "src").mkdir()
-            (root / "src/nightly.rs").write_text("", encoding="utf-8")
-            deps = root / "target/debug/deps"
-            deps.mkdir(parents=True)
-            (deps / "unit.d").write_text(
-                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
-            )
-            nightly = (
-                CLOSURE.NightlyOnlySource(
-                    path="src/nightly.rs",
-                    feature="pkg/missing",
-                    row="all-features",
-                ),
-            )
-            with self.assertRaisesRegex(
-                CLOSURE.ConfigurationClosureFailure,
-                "pkg/missing.*not enabled.*all-features",
-            ):
-                CLOSURE.check_every_source_is_compiled(
-                    (root / "target/debug",),
-                    root,
-                    exceptions=(),
-                    nightly_only=nightly,
-                    resolved_features_by_row={
-                        "all-features": frozenset({("pkg", "feature")})
-                    },
-                )
-
-    def test_rejects_a_feature_named_under_the_wrong_nightly_row(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
-            (root / "src").mkdir()
-            (root / "src/nightly.rs").write_text("", encoding="utf-8")
-            deps = root / "target/debug/deps"
-            deps.mkdir(parents=True)
-            (deps / "unit.d").write_text(
-                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
-            )
-            nightly = (
-                CLOSURE.NightlyOnlySource(
-                    path="src/nightly.rs",
-                    feature="pkg/feature",
-                    row="default-features-macos",
-                ),
-            )
-            with self.assertRaisesRegex(
-                CLOSURE.ConfigurationClosureFailure,
-                "pkg/feature.*not enabled.*default-features-macos",
-            ):
-                CLOSURE.check_every_source_is_compiled(
-                    (root / "target/debug",),
-                    root,
-                    exceptions=(),
-                    nightly_only=nightly,
-                    resolved_features_by_row={
-                        "all-features": frozenset({("pkg", "feature")}),
-                        "default-features-macos": frozenset(),
-                    },
-                )
 
     def test_require_complete_drops_the_nightly_allowance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -694,7 +595,6 @@ class SourceReconciliationTests(unittest.TestCase):
             nightly = (
                 CLOSURE.NightlyOnlySource(
                     path="src/nightly.rs",
-                    feature="pkg/feature",
                     row="all-features",
                 ),
             )
@@ -704,9 +604,6 @@ class SourceReconciliationTests(unittest.TestCase):
                 root,
                 exceptions=(),
                 nightly_only=nightly,
-                resolved_features_by_row={
-                    "all-features": frozenset({("pkg", "feature")})
-                },
             )
             # ... and not permitted on the run that compiles everything.
             with self.assertRaisesRegex(
@@ -718,16 +615,12 @@ class SourceReconciliationTests(unittest.TestCase):
                     exceptions=(),
                     nightly_only=nightly,
                     require_complete=True,
-                    resolved_features_by_row={
-                        "all-features": frozenset({("pkg", "feature")})
-                    },
                 )
 
     def test_rejects_a_nightly_entry_naming_a_per_pull_request_row(self) -> None:
         nightly = (
             CLOSURE.NightlyOnlySource(
                 path="crates/chelis-prove/src/z3_engine.rs",
-                feature="chelis-prove/z3",
                 row="default-features",
             ),
         )
@@ -742,7 +635,6 @@ class SourceReconciliationTests(unittest.TestCase):
         nightly = (
             CLOSURE.NightlyOnlySource(
                 path="crates/chelis-prove/src/gone.rs",
-                feature="chelis-prove/z3",
                 row="all-features",
             ),
         )
