@@ -10,15 +10,22 @@
 //! pending gate then surfaced as the misleading
 //! "cast requires tensor or prim type, got `p`".
 //!
-//! [04-DTYPE-2] restricts a family-bounded binder to active primitives. The
-//! source is therefore always a scalar, the result is always the named
-//! primitive, and `cast_trunc`'s float-source requirement follows from the
-//! bound alone. Nothing is left to wait for.
+//! [04-DTYPE-2] restricts a family-bounded binder to active primitives, so the
+//! source is always a scalar and the result is always the named primitive.
 //!
-//! Negative parity: each rejection must name its real [05-OP-6] reason, not
-//! the generic one. Every rejection below failed before the fix too, but with
-//! that generic message, which is why the diagnostic is asserted. An
-//! unbounded binder admits non-dtypes ([04-DTYPE-2]), so it stays rejected.
+//! The same bound can sit on a non-rigid INFERENCE variable, which inherits it
+//! when a bounded function is instantiated. That variable is bound later, so
+//! only decisions that cannot change when it is bound are taken early: an
+//! acceptance, or a rejection that reads only the target. `cast_trunc` from an
+//! `Int` or `Numeric` bound would reject on the source, so it keeps
+//! suspending (#1489). A valid program where such a variable later binds to a
+//! float must therefore pass, whichever operand inference visits first.
+//!
+//! Negative parity: invalid casts are still rejected in every lane. A
+//! target-only rejection names its real reason. A rigid `Int`/`Numeric`
+//! `cast_trunc` source is still rejected, but through the suspended gate, with
+//! the same generic message as before this change. An unbounded binder admits
+//! non-dtypes ([04-DTYPE-2]), so it stays rejected.
 use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
@@ -129,28 +136,13 @@ fn a_bounded_scalar_computed_in_the_body_casts_too() {
     );
 }
 
-#[test]
-fn invalid_bounded_scalar_casts_name_their_real_reason_in_every_lane() {
-    for (body, expected) in [
-        (
-            "def t[p: Int](u: p) -> i64 = cast_trunc(u, i64)\n\
-             def main() -> tensor[1, i64] = to_tensor([t(7i32)])",
-            "`cast_trunc` source",
-        ),
-        (
-            "def t[p: Numeric](u: p) -> i64 = cast_trunc(u, i64)\n\
-             def main() -> tensor[1, i64] = to_tensor([t(7.5f32)])",
-            "`cast_trunc` source",
-        ),
-        (
-            "def t[p: Float](u: p) -> f64 = cast_trunc(u, f64)\n\
-             def main() -> tensor[1, f64] = to_tensor([t(7.5f32)])",
-            "is not an integer dtype",
-        ),
-    ] {
-        let source = program(body);
-        for command in ["check", "eval", "build"] {
-            let output = run(command, &source);
+/// Run `check`, `eval` and `build` on `source`. Each must reject it, and the
+/// combined output is returned for the caller's diagnostic assertions.
+fn rejected_in_every_lane(source: &str, what: &str) -> Vec<(&'static str, String)> {
+    ["check", "eval", "build"]
+        .into_iter()
+        .map(|command| {
+            let output = run(command, source);
             let diagnostic = format!(
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
@@ -162,21 +154,117 @@ fn invalid_bounded_scalar_casts_name_their_real_reason_in_every_lane() {
                         .expect("check JSON");
                 assert!(
                     report["errors"].as_array().is_some_and(|e| !e.is_empty()),
-                    "check accepted {body}"
+                    "check accepted {what}"
                 );
             } else {
-                assert!(!output.status.success(), "{command} accepted {body}");
+                assert!(!output.status.success(), "{command} accepted {what}");
             }
+            (command, diagnostic)
+        })
+        .collect()
+}
+
+#[test]
+fn target_only_invalid_bounded_scalar_casts_name_their_real_reason_in_every_lane() {
+    // These read only the target, so they are decided at the cast and must
+    // not fall back to the generic pending-gate message.
+    for (body, expected) in [
+        (
+            "def t[p: Float](u: p) -> f64 = cast_trunc(u, f64)\n\
+             def main() -> tensor[1, f64] = to_tensor([t(7.5f32)])",
+            "is not an integer dtype",
+        ),
+        (
+            "def t[p: Float](u: p) -> string = cast(u, string)\n\
+             def main() -> string = t(1.5f32)",
+            "cannot cast scalar to unsupported precision `string`",
+        ),
+    ] {
+        for (command, diagnostic) in rejected_in_every_lane(&program(body), body) {
             assert!(
                 diagnostic.contains(expected),
                 "{command} on {body}: expected {expected:?} in {diagnostic}"
             );
             assert!(
                 !diagnostic.contains("cast requires tensor or prim type"),
-                "{command} on {body} still reports the generic pending-gate message: {diagnostic}"
+                "{command} on {body} reports the generic pending-gate message: {diagnostic}"
             );
         }
     }
+}
+
+#[test]
+fn a_rigid_int_or_numeric_cast_trunc_source_is_still_rejected_in_every_lane() {
+    // [05-OP-6]: `cast_trunc` needs a float source, and an `Int` or `Numeric`
+    // bound admits an integer. The rejection stays with the suspended gate, so
+    // only the rejection itself is asserted, not a new message.
+    for body in [
+        "def t[p: Int](u: p) -> i64 = cast_trunc(u, i64)\n\
+         def main() -> tensor[1, i64] = to_tensor([t(7i32)])",
+        "def t[p: Numeric](u: p) -> i64 = cast_trunc(u, i64)\n\
+         def main() -> tensor[1, i64] = to_tensor([t(7.5f32)])",
+    ] {
+        rejected_in_every_lane(&program(body), body);
+    }
+}
+
+const HIGHER_ORDER: &str = "def num_id[p: Numeric](u: p) -> p = u\n\
+     def fid[p: Float](u: p) -> p = u\n\
+     def apply_it[a, b](f: (a) -> b, x: a) -> b = f(x)\n";
+
+#[test]
+fn a_numeric_inference_variable_later_bound_to_a_float_truncates() {
+    // The lambda parameter `x` is an inference variable. `num_id(x)` gives it a
+    // `Numeric` bound before `apply_it` binds it to f32. Rejecting the
+    // truncation at that point would refuse a valid f32 -> i64 truncation.
+    assert_lanes_agree(
+        &format!(
+            "{HIGHER_ORDER}def main() -> tensor[1, i64] = \
+             to_tensor([apply_it(fn (x) -> cast_trunc(num_id(x), i64), 2.5f32)])"
+        ),
+        "numeric_inference_later_float",
+        &[2.0],
+    );
+}
+
+#[test]
+fn the_verdict_does_not_depend_on_which_operand_inference_visits_first() {
+    // The same program with the two `add` operands swapped. One order bounds
+    // `x` by `Numeric` first, the other by `Float`. Both must be accepted and
+    // agree, or the verdict is following the inference schedule (#1489).
+    for (name, operands) in [
+        (
+            "numeric_first",
+            "cast_trunc(num_id(x), i64), cast_trunc(fid(x), i64)",
+        ),
+        (
+            "float_first",
+            "cast_trunc(fid(x), i64), cast_trunc(num_id(x), i64)",
+        ),
+    ] {
+        assert_lanes_agree(
+            &format!(
+                "{HIGHER_ORDER}def main() -> tensor[1, i64] = \
+                 to_tensor([apply_it(fn (x) -> add({operands}), 2.5f32)])"
+            ),
+            name,
+            &[4.0],
+        );
+    }
+}
+
+#[test]
+fn a_value_restricted_source_still_suspends_and_may_be_a_tensor() {
+    // `sqrt(x)` gives `x` a float VALUE restriction, which admits a tensor.
+    // Deciding it early as a scalar would reject this valid tensor cast.
+    assert_lanes_agree(
+        &format!(
+            "{HIGHER_ORDER}def main() -> tensor[1, f64] = \
+             apply_it(fn (x) -> cast(sqrt(x), f64), to_tensor([2.25f32]))"
+        ),
+        "value_restriction_tensor",
+        &[1.5],
+    );
 }
 
 #[test]

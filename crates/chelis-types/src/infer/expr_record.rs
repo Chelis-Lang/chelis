@@ -1103,13 +1103,19 @@ pub(super) fn cast_result_from_source(
     vg: &mut VarGen,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    // chelis#2151: a scalar source typed by a dtype-family-bounded binder is
-    // already decided. [04-DTYPE-2] instantiates such a variable only at an
-    // active primitive, so it is never a tensor, the result is always the
-    // named primitive, and whether `cast_trunc` is legal follows from the
-    // bound. Suspending it (below) is only right for a variable that will be
-    // bound later; an authored binder is rigid, so the suspended gate never
-    // discharged and surfaced as "cast requires tensor or prim type, got `p`".
+    // chelis#2151: a scalar source typed by a variable with a declared
+    // dtype-family bound can often be decided now. [04-DTYPE-2] instantiates
+    // such a variable only at an active primitive, so it is never a tensor and
+    // the result is always the named primitive. Suspending it (below) waits for
+    // a binding; an authored binder is rigid and never gets one, so the gate
+    // never discharged and surfaced as "cast requires tensor or prim type, got
+    // `p`".
+    //
+    // The variable may also be a non-rigid inference variable that inherited
+    // the bound. So this decides only what cannot change when that variable is
+    // bound later: an acceptance, or a rejection that depends on the target
+    // alone. Anything that would reject on the SOURCE still suspends, so the
+    // verdict never depends on inference order (chelis#1489).
     //
     // Only the three declared families qualify. The `*Value` restrictions
     // admit a tensor as well as a scalar, so those sources still suspend.
@@ -1119,8 +1125,9 @@ pub(super) fn cast_result_from_source(
             | TypeVarRestriction::ActiveInt
             | TypeVarRestriction::ActiveNumeric),
         ) = subst.tvar_restriction(*source_var)
+        && let Some(decision) = bounded_scalar_cast_result(bound, new_prec, mode)
     {
-        return match bounded_scalar_cast_result(bound, new_prec, mode) {
+        return match decision {
             Ok(result) => result,
             Err(error) => report(errors, *error),
         };
@@ -1161,44 +1168,41 @@ pub(super) fn cast_result_from_source(
 }
 
 /// The [05-OP-6] / [05-OP-63] decision for a scalar source whose type is a
-/// variable carrying a declared dtype-family bound (chelis#2151).
+/// variable carrying a declared dtype-family bound (chelis#2151), when that
+/// decision is final.
 ///
 /// It mirrors the `Type::Prim` arm of [`cast_result_from_settled_source`], with
-/// the bound standing in for the concrete source: the same scalar-target
-/// validity check and the same `cast_trunc` pair rule. A `Float` bound admits
-/// only float sources. An `Int` or `Numeric` bound admits an integer source at
-/// some instantiation, so `cast_trunc` from it is rejected here, at the
-/// declaration, rather than accepted for some call sites and not others.
+/// the bound standing in for the concrete source. It returns `None` when the
+/// answer could still depend on how the variable is later bound, and the
+/// caller then suspends as before:
+///
+/// - The scalar-target check and the `cast_trunc` integer-target check read
+///   only the target, so rejecting on them now is order-independent.
+/// - Every accepting answer is final: the result is the named primitive
+///   whatever the source becomes, and a `Float` bound admits only float
+///   sources.
+/// - `cast_trunc` from an `Int` or `Numeric` bound would reject on the SOURCE.
+///   For an inference variable that later binds to a float, rejecting now would
+///   refuse a valid program, so it is not decided here.
 fn bounded_scalar_cast_result(
     bound: TypeVarRestriction,
     new_prec: Prim,
     mode: CastMode,
-) -> Result<Type, Box<CheckError>> {
+) -> Option<Result<Type, Box<CheckError>>> {
     if !new_prec.is_valid_scalar_cast_target() {
-        return Err(Box::new(unsupported_precision_error(
+        return Some(Err(Box::new(unsupported_precision_error(
             new_prec, /* tensor = */ false,
-        )));
+        ))));
     }
     if mode == CastMode::Trunc {
         if let Some(error) = trunc_pair_error(None, new_prec) {
-            return Err(Box::new(error));
+            return Some(Err(Box::new(error)));
         }
         if bound != TypeVarRestriction::ActiveFloat {
-            return Err(Box::new(CheckError::new(
-                CheckErrorKind::CastNonTensor,
-                format!(
-                    "`cast_trunc` source is bounded by `{}`, which admits non-float dtypes",
-                    bound.family_name()
-                ),
-                vec![
-                    "`cast_trunc` truncates a float toward zero into an integer \
-                     width ([05-OP-6]); bound the source by `Float`, or use `cast`"
-                        .to_string(),
-                ],
-            )));
+            return None;
         }
     }
-    Ok(Type::Prim(new_prec))
+    Some(Ok(Type::Prim(new_prec)))
 }
 
 /// The [05-OP-6] source/target contract: `cast_trunc` is float-to-integer
