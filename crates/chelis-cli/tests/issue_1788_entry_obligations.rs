@@ -109,7 +109,7 @@ fn mixed_helpers_accept_independent_binders() {
 
 #[test]
 fn direct_vmap_two_spread_entry_enforces_shared_witnesses() {
-    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+    let source = "def combine[pre, post](x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
          def apply(x: &tensor[batch, *, seq, *, f32], y: &tensor[batch, *, seq, *, f32]) -> tensor[batch, *, seq, *, f32] = vmap(combine)(x, y)\n\
          out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]), to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]], [[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]], [[[13.0f32], [14.0f32], [15.0f32]], [[16.0f32], [17.0f32], [18.0f32]], [[19.0f32], [20.0f32], [21.0f32]], [[22.0f32], [23.0f32], [24.0f32]]]]))\n";
     check_both(source, "extent `pre[0]`: x axis 1 = 2, y axis 1 = 4", false);
@@ -117,7 +117,7 @@ fn direct_vmap_two_spread_entry_enforces_shared_witnesses() {
 
 #[test]
 fn nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses() {
-    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+    let source = "def combine[pre, post](x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
          def apply(x: &tensor[*, batch, *, seq, *, f32], y: &tensor[*, batch, *, seq, *, f32]) -> tensor[*, batch, *, seq, *, f32] = vmap(combine, axis=1)(x, y)\n\
          x: tensor[2, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32]), [2i64, 2i64, 1i64, 3i64, 1i64])\n\
          y: tensor[4, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32, 21.0f32, 22.0f32, 23.0f32, 24.0f32]), [4i64, 2i64, 1i64, 3i64, 1i64])\n\

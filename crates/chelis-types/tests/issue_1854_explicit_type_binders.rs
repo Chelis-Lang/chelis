@@ -2,7 +2,7 @@
 
 use chelis_deep::{Expr, parser::parse_str as parse_deep};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
-use chelis_types::{check_ir_program, check_typed_program, errors::CheckError};
+use chelis_types::{check_ir_program, check_typed_program};
 
 const REJECTED_DTYPES: [(&str, Option<&str>); 7] = [
     ("float32", Some("f32")),
@@ -18,10 +18,37 @@ fn surf(source: &str) -> Vec<Expr> {
     desugar_program(&parse_surf(source).expect("Surf fixture must parse"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Diagnostic {
+    kind: String,
+    message: String,
+    suggestions: Vec<String>,
+    severity_bits: u64,
+    expected: Option<String>,
+    got: Option<String>,
+    span_offset: Option<usize>,
+    span_id: Option<String>,
+}
+
 fn diagnostics(
     result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>,
-) -> Vec<CheckError> {
-    result.err().map_or_else(Vec::new, |report| report.errors)
+) -> Vec<Diagnostic> {
+    result.err().map_or_else(Vec::new, |report| {
+        report
+            .errors
+            .into_iter()
+            .map(|error| Diagnostic {
+                kind: error.kind.diagnostic_name().to_string(),
+                message: error.message,
+                suggestions: error.suggestions,
+                severity_bits: error.severity.to_bits(),
+                expected: error.expected,
+                got: error.got,
+                span_offset: error.span_offset,
+                span_id: error.span_id,
+            })
+            .collect()
+    })
 }
 
 fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Option<&str>) {
@@ -107,7 +134,7 @@ fn explicit_surf_binders_and_active_primitives_check_clean() {
         "def ident[a](x: a) -> a = x",
         "sig ident[a]: a -> a\ndef ident(x) = x",
         "def constant[a]() -> i32 = 1i32",
-        "sig constant[a]: () -> i32\ndef constant() = 1i32",
+        "sig constant[a]: i32 -> i32\ndef constant(x) = x",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = x",
         "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\ndef ident(x) = x",
         "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\n\
@@ -143,7 +170,7 @@ fn active_primitive_names_cannot_be_rebound_by_deep_t_var_nodes() {
     for name in ["f32", "i64", "bool"] {
         let program = parse_deep(&format!(
             "(defsig {{}} ident ({name})
-               (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))
+               (t-fn {{}} (t-var {{}} {name}) (t-prim {{}} f32)))
              (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x)))"
         ))
         .expect("Deep fixture must parse");
@@ -178,7 +205,7 @@ fn undeclared_deep_type_dimension_and_rank_variables_reject() {
     for (name, ty, needle) in [
         (
             "a",
-            "(t-fn {} (t-var {} a) (t-var {} a))",
+            "(t-fn {} (t-var {} a) (t-prim {} f32))",
             "undeclared type variable",
         ),
         (
@@ -256,16 +283,18 @@ fn declared_deep_type_dimension_and_rank_variables_check_clean() {
         ("(a)", "(t-fn {} (t-var {} a) (t-var {} a))"),
         (
             "(n)",
-            "(t-fn {} (t-tensor {} (d-var {} n) (t-prim {} f32)) (t-prim {} f32))",
+            "(t-fn {} (t-tensor {} (d-var {} n) (t-prim {} f32)) \
+                      (t-tensor {} (d-var {} n) (t-prim {} f32)))",
         ),
         (
             "(r)",
-            "(t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-prim {} f32))",
+            "(t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) \
+                      (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
         ),
     ] {
         let program = parse_deep(&format!(
             "(defsig {{}} f {binders} {ty})
-             (def {{}} f (fn {{}} (params {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.0)))"
+             (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         ))
         .expect("Deep fixture must parse");
         check_ir_program(&program).expect("declared Deep binder must check");

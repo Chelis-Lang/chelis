@@ -729,8 +729,8 @@ fn named_expand_under_grad_and_vmap_evals_and_matches_backend() {
 /// The batch axis is not part of either spread.
 #[test]
 fn direct_vmap_actualizes_two_spread_signature_and_matches_backend() {
-    let source = "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = insert(x, c, 2i64, seq)\n\
-         def apply(x: &tensor[batch, left, seq, right, f32]) -> tensor[batch, left, c, seq, right, f32] = vmap(widen)(x)\n\
+    let source = "def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = insert(x, c, 2i64, seq)\n\
+         def apply[c](x: &tensor[batch, left, seq, right, f32]) -> tensor[batch, left, c, seq, right, f32] = vmap(widen)(x)\n\
          out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]))\n";
     assert_clean(
         &check_json(source),
@@ -762,7 +762,7 @@ fn direct_vmap_actualizes_two_spread_signature_and_matches_backend() {
 /// run, so checking must remove it before actualizing the callee row.
 #[test]
 fn nonzero_axis_vmap_actualizes_two_spread_signature_and_matches_backend() {
-    let source = "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+    let source = "def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(identity, axis=1)(x)\n\
          x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
          out = apply(x)\n";
@@ -790,7 +790,7 @@ fn nonzero_axis_vmap_actualizes_two_spread_signature_and_matches_backend() {
 /// complete two-spread input shape to survive axis-1 `vmap`.
 #[test]
 fn nonzero_axis_vmap_grad_actualizes_two_spread_signature_and_matches_backend() {
-    let source = "def constant_loss(x: &tensor[..pre, seq, ..post, f32]) -> f32 = 0.0f32\n\
+    let source = "def constant_loss[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> f32 = 0.0f32\n\
          def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(grad(constant_loss), axis=1)(x)\n\
          x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
          out = apply(x)\n";
@@ -818,7 +818,7 @@ fn nonzero_axis_vmap_grad_actualizes_two_spread_signature_and_matches_backend() 
 /// branch at both canonical and nonzero mapped axes.
 #[test]
 fn vmap_dynamic_branch_uses_actualized_two_spread_result_type() {
-    let source = "def choose_pair(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32], choose: bool) -> tensor[..pre, seq, ..post, f32] = if choose then add(x, y) else mul(x, y)\n\
+    let source = "def choose_pair[pre, post](x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32], choose: bool) -> tensor[..pre, seq, ..post, f32] = if choose then add(x, y) else mul(x, y)\n\
          def apply0(x: &tensor[batch, left, seq, right, f32], y: &tensor[batch, left, seq, right, f32], choose: bool) -> tensor[batch, left, seq, right, f32] = vmap(choose_pair)(x, y, choose)\n\
          def apply2(x: &tensor[left, seq, batch, right, f32], y: &tensor[left, seq, batch, right, f32], choose: bool) -> tensor[left, seq, batch, right, f32] = vmap(choose_pair, axis=2)(x, y, choose)\n\
          x: tensor[1, 2, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [1i64, 2i64, 3i64, 1i64])\n\
@@ -870,7 +870,7 @@ fn every_legal_vmap_axis_matches_eval_and_generated_c() {
         .collect::<Vec<_>>()
         .join(", ");
     let mut source =
-        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n"
+        "def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n"
             .to_owned();
     for axis in 0..=4 {
         let mut dims = vec!["left", "inner", "seq", "right"];
@@ -924,7 +924,7 @@ fn every_legal_vmap_axis_matches_eval_and_generated_c() {
 /// canonicalizing permutations observable.
 #[test]
 fn stored_vmap_preserves_nonzero_two_spread_axis_across_all_lanes() {
-    let source = "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+    let source = "def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          mapped = vmap(identity, axis=1)\n\
          def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = mapped(x)\n\
          x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
@@ -954,7 +954,7 @@ fn stored_vmap_preserves_nonzero_two_spread_axis_across_all_lanes() {
 #[test]
 fn nested_vmap_shifts_stored_nonzero_two_spread_axis_at_check() {
     let json = check_json(
-        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+        "def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          mapped = vmap(identity, axis=1)\n\
          def nested_apply(x: &tensor[outer, left, batch, inner, seq, right, f32]) -> tensor[outer, left, batch, inner, seq, right, f32] = vmap(mapped)(x)\n",
     );
@@ -970,7 +970,7 @@ fn nested_vmap_shifts_stored_nonzero_two_spread_axis_at_check() {
 #[test]
 fn rank_spread_vmap_axis_out_of_bounds_uses_unbatched_rank() {
     let json = check_json(
-        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+        "def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(identity, axis=5)(x)\n",
     );
     assert_rejected_with(

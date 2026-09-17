@@ -2,7 +2,10 @@
 //! explicit `[..]` binder list. Unknown lowercase scalar and tensor-precision
 //! names must remain `t-prim` so the shared Deep type resolver can reject them.
 
-use chelis_deep::{parser::parse_str as parse_deep, printer::print_canonical_flat};
+use chelis_deep::{
+    Atom as DeepAtom, DeepTag, Expr as DeepExpr, List as DeepList, Metadata, Span,
+    parser::parse_str as parse_deep, printer::print_canonical_flat,
+};
 use chelis_surf::{
     desugar::desugar_program,
     parser::parse_str,
@@ -16,6 +19,16 @@ const UNKNOWN_DTYPES: [&str; 7] = [
 fn deep(source: &str) -> String {
     let declarations = parse_str(source).expect("Surf fixture must parse");
     print_canonical_flat(&desugar_program(&declarations))
+}
+
+fn malformed_defsig(children: Vec<DeepExpr>) -> DeepExpr {
+    let span = Span::new(0, 0);
+    let mut elements = vec![
+        DeepExpr::Atom(DeepAtom::Tag(DeepTag::Defsig), span),
+        DeepExpr::Map(Metadata::default(), span),
+    ];
+    elements.extend(children);
+    DeepExpr::List(DeepList { elements }, span)
 }
 
 #[test]
@@ -103,7 +116,7 @@ fn matching_def_cannot_declare_a_second_binder_list() {
     assert!(
         error
             .to_string()
-            .contains("a declaration's `defsig` owns its binders"),
+            .contains("a declaration's `defsig` owns its binder list"),
         "wrong duplicate-owner diagnostic: {error}"
     );
 }
@@ -166,14 +179,32 @@ fn active_primitive_t_vars_have_no_resugar_fallback() {
 
 #[test]
 fn defsig_resugar_arity_reports_the_two_or_three_child_contract() {
-    for (source, actual) in [
-        ("(defsig {} ident)", 1),
+    let span = Span::new(0, 0);
+    let name = || DeepExpr::Atom(DeepAtom::Name("ident".to_string()), span);
+    let binders = || {
+        DeepExpr::BareList(
+            vec![DeepExpr::Atom(DeepAtom::Name("a".to_string()), span)],
+            span,
+        )
+    };
+    let ty = parse_deep("(t-fn {} (t-var {} a) (t-var {} a))")
+        .expect("valid type fixture")
+        .remove(0);
+    let extra = parse_deep("(t-prim {} f32)")
+        .expect("valid extra fixture")
+        .remove(0);
+    for (program, actual) in [
+        (vec![malformed_defsig(vec![name()])], 1),
         (
-            "(defsig {} ident (a) (t-fn {} (t-var {} a) (t-var {} a)) extra)",
+            vec![malformed_defsig(vec![
+                name(),
+                binders(),
+                ty.clone(),
+                extra.clone(),
+            ])],
             4,
         ),
     ] {
-        let program = parse_deep(source).expect("malformed-arity fixture must parse structurally");
         let error = resugar_program(&program).expect_err("invalid defsig arity must not resugar");
         assert_eq!(
             error,
@@ -195,7 +226,7 @@ fn defsig_resugar_arity_reports_the_two_or_three_child_contract() {
 fn declared_but_unused_unbounded_binders_are_preserved() {
     for source in [
         "def constant[a]() -> i32 = 1i32",
-        "sig constant[a]: () -> i32\ndef constant() = 1i32",
+        "sig constant[a]: i32 -> i32\ndef constant(x) = x",
     ] {
         let rendered = deep(source);
         assert!(

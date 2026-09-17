@@ -621,7 +621,7 @@ fn stored_nonzero_vmap_spreads_survive_decoded_context() {
     fs::write(
         root.join("mylib/src/axes.ch"),
         "module Mylib.Axes\nexport (mapped)\n\n\
-         def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         def identity[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
          mapped = vmap(identity, axis=1)\n",
     )
     .expect("write axes.ch");

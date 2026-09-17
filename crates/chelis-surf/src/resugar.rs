@@ -11,7 +11,7 @@ use chelis_deep::annotations::{
 };
 use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
 use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
-use chelis_unord::UnordMap;
+use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::EffectKind;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -3612,7 +3612,7 @@ fn resugar_dtype_bound_binders(
     quantifiers: &[String],
 ) -> Result<Vec<TypeBinder>, ResugarError> {
     let bounds = decode_resugar_dtype_bounds(meta)?;
-    let mut binders: Vec<TypeBinder> = quantifiers
+    let binders: Vec<TypeBinder> = quantifiers
         .iter()
         .map(|name| TypeBinder {
             name: name.clone(),

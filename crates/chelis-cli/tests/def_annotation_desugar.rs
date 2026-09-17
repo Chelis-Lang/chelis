@@ -126,7 +126,7 @@ fn def_precision_name_not_in_quantifier_list_errors() {
 
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    let has_unknown_primitive = errors.iter().any(|e| {
+    let all_are_unknown_primitive = errors.iter().all(|e| {
         let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
         kind == "TypeMismatch"
@@ -135,14 +135,19 @@ fn def_precision_name_not_in_quantifier_list_errors() {
                 .and_then(|suggestions| suggestions.as_array())
                 .is_some_and(|suggestions| {
                     suggestions.iter().any(|suggestion| {
-                        suggestion
-                            .as_str()
-                            .is_some_and(|text| text.contains("`f32`"))
+                        suggestion.as_str().is_some_and(|text| {
+                            text.contains("declare `p` in the signature binder list")
+                        })
                     })
                 })
     });
+    assert_eq!(
+        errors.len(),
+        2,
+        "each undeclared primitive use must have one owning diagnostic: {errors:?}"
+    );
     assert!(
-        has_unknown_primitive,
+        all_are_unknown_primitive,
         "precision name `p` not in def binder list `[a, b]` must be rejected \
          by the shared primitive resolver per spec/02-surf-syntax.md §P4b. \
          Got {errors:?}"

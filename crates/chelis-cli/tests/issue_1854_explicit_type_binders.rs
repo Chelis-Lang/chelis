@@ -105,7 +105,7 @@ fn declared_surf_type_binders_and_active_primitives_score_one() {
         "def ident[a](x: a) -> a = x\n",
         "sig ident[a]: a -> a\ndef ident(x) = x\n",
         "def constant[a]() -> i32 = 1i32\n",
-        "sig constant[a]: () -> i32\ndef constant() = 1i32\n",
+        "sig constant[a]: i32 -> i32\ndef constant(x) = x\n",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = x\n",
         "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\n\
          def ident(x: tensor[n, p]) -> tensor[n, p] = x\n",
@@ -128,7 +128,7 @@ fn declared_surf_type_binders_and_active_primitives_score_one() {
 #[test]
 fn check_rejects_a_declared_but_unused_bounded_binder() {
     let dir = tempdir().expect("tempdir");
-    let source = "sig constant[a: Numeric]: () -> i32\ndef constant() = 1i32\n";
+    let source = "sig constant[a: Numeric]: i32 -> i32\ndef constant(x) = x\n";
     fs::write(dir.path().join("bounded-unused.ch"), source).expect("write control");
     let checked = text(&run(dir.path(), &["check", "bounded-unused.ch"]));
     assert!(

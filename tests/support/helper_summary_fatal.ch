@@ -1,5 +1,5 @@
 module Sink_Panic_Localization
-sig causal_sdpa_with_sink: &tensor[s, d, f32] -> &tensor[s, d, f32] -> &tensor[s, d, f32] -> &tensor[s, s, f32] -> &tensor[s, s, f32] -> f32 -> tensor[s, d, f32]
+sig causal_sdpa_with_sink[s, d]: &tensor[s, d, f32] -> &tensor[s, d, f32] -> &tensor[s, d, f32] -> &tensor[s, s, f32] -> &tensor[s, s, f32] -> f32 -> tensor[s, d, f32]
 def causal_sdpa_with_sink(q, k, v, scale, mask, sink) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
