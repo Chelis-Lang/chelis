@@ -40,6 +40,9 @@ def plan() -> dict:
         [],
         baseline,
     )
+    expansion_shards, expansion_planning = (
+        owned.package_expansion_shard_plan([], baseline)
+    )
     result = {
         "version": owned.PLAN_VERSION,
         "mode": "pull_request",
@@ -49,7 +52,12 @@ def plan() -> dict:
         "config_digest": "d" * 64,
         "changed_records": [],
         "path_dispositions": [],
-        "target_dispositions": [],
+        "target_dispositions": [
+            owned.package_expansion_execution_disposition(
+                expansion_shards,
+                expansion_planning,
+            )
+        ],
         "selected_packages": [],
         "eligible_targets": [],
         "change_owned": [],
@@ -62,7 +70,7 @@ def plan() -> dict:
         "shard_planning": {
             "change_owned": change_owned_planning,
             "package_expansion": {
-                "algorithm": owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+                "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
             },
         },
         "shards": {
