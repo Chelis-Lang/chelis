@@ -7171,7 +7171,7 @@ mod tests {
         let parameters = ["q", "k", "v", "scale", "mask", "sink"]
             .map(str::to_owned)
             .into();
-        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:934..940`";
+        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
         assert_eq!(
             selected_host_input_demand(&compiled, "bad", &parameters)
                 .unwrap_err()

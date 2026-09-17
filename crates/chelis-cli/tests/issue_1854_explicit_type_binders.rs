@@ -121,6 +121,148 @@ fn check_keeps_distinct_unknown_dtype_names_separately_owned() {
     }
 }
 
+fn assert_cli_unknown_spelling_order(root: &Path, path: &str, expected: &[&str]) {
+    let report = check_json(root, path);
+    let messages = error_messages(&report);
+    let actual = messages
+        .iter()
+        .filter_map(|message| {
+            expected
+                .iter()
+                .copied()
+                .find(|name| message.contains(&format!("`{name}`")))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "wrong CLI owner order: {report}");
+    assert_eq!(
+        messages.len(),
+        expected.len(),
+        "CLI emitted an extra diagnostic: {report}"
+    );
+}
+
+fn assert_cli_unknown_spelling_order_amid_other_errors(root: &Path, path: &str, expected: &[&str]) {
+    let report = check_json(root, path);
+    let messages = error_messages(&report);
+    let actual = messages
+        .iter()
+        .filter(|message| message.contains("unknown primitive type"))
+        .filter_map(|message| {
+            expected
+                .iter()
+                .copied()
+                .find(|name| message.contains(&format!("`{name}`")))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "CLI unknown-name owners must remain isolated across modules: {report}"
+    );
+}
+
+#[test]
+fn cli_shares_unknown_primitive_ownership_across_signature_and_definition() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source) in [
+        "sig ident: float32 -> float32\n\
+         def ident(x: float32) -> float32 = x\n",
+        "def ident(x: float32) -> float32 = x\n\
+         sig ident: float32 -> float32\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("standalone-inline-{index}.ch");
+        fs::write(dir.path().join(&path), source).expect("write Surf fixture");
+        assert_cli_unknown_spelling_order(dir.path(), &path, &["float32"]);
+    }
+
+    for (index, source) in [
+        "(defsig {} ident
+           (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+         (def {} ident
+           (fn {} (params {} (x {type: (t-prim {} float32)}))
+             (var {} x)))\n",
+        "(def {} ident
+           (fn {} (params {} (x {type: (t-prim {} float32)}))
+             (var {} x)))
+         (defsig {} ident
+           (t-fn {} (t-prim {} float32) (t-prim {} float32)))\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("standalone-inline-{index}.dp");
+        fs::write(dir.path().join(&path), source).expect("write Deep fixture");
+        assert_cli_unknown_spelling_order(dir.path(), &path, &["float32"]);
+    }
+}
+
+#[test]
+fn cli_preserves_unknown_spelling_declaration_order_and_module_scope() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source, expected) in [
+        (
+            0,
+            "sig convert: float32 -> float32\n\
+             def convert(x: fp32) -> fp32 = x\n",
+            ["float32", "fp32"],
+        ),
+        (
+            1,
+            "sig first: fp32 -> fp32\n\
+             def first(x: fp32) -> fp32 = x\n\
+             sig second: float32 -> float32\n\
+             def second(x: float32) -> float32 = x\n",
+            ["fp32", "float32"],
+        ),
+        (
+            2,
+            "sig second: float32 -> float32\n\
+             def second(x: float32) -> float32 = x\n\
+             sig first: fp32 -> fp32\n\
+             def first(x: fp32) -> fp32 = x\n",
+            ["float32", "fp32"],
+        ),
+    ] {
+        let path = format!("ownership-order-{index}.ch");
+        fs::write(dir.path().join(&path), source).expect("write Surf fixture");
+        assert_cli_unknown_spelling_order(dir.path(), &path, &expected);
+    }
+    fs::write(
+        dir.path().join("ownership-multiplicity.ch"),
+        "sig first: float32 -> float32\n\
+         def first(x: float32) -> float32 = x\n\
+         sig second: float32 -> float32\n\
+         def second(x: float32) -> float32 = x\n",
+    )
+    .expect("write same-spelling declaration fixture");
+    assert_cli_unknown_spelling_order(
+        dir.path(),
+        "ownership-multiplicity.ch",
+        &["float32", "float32"],
+    );
+
+    let modules = "(module {} Left
+      (defsig {} ident
+        (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+      (def {} ident
+        (fn {} (params {} (x {type: (t-prim {} float32)}))
+          (var {} x))))
+    (module {} Right
+      (defsig {} ident
+        (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+      (def {} ident
+        (fn {} (params {} (x {type: (t-prim {} float32)}))
+          (var {} x))))\n";
+    fs::write(dir.path().join("ownership-modules.dp"), modules).expect("write Deep fixture");
+    assert_cli_unknown_spelling_order_amid_other_errors(
+        dir.path(),
+        "ownership-modules.dp",
+        &["float32", "float32"],
+    );
+}
+
 #[test]
 fn cli_rejects_forbidden_dtype_names_at_surf_and_deep_binder_lists() {
     let dir = tempdir().expect("tempdir");

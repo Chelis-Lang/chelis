@@ -213,7 +213,7 @@ impl DesugarCtx {
 
 #[cfg(test)]
 fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
-    DesugarCtx::default().desugar_decl(decl)
+    DesugarCtx::new(std::slice::from_ref(decl)).desugar_decl(decl)
 }
 
 #[cfg(test)]
@@ -3551,8 +3551,9 @@ mod tests {
 
     #[test]
     fn test_type_var() {
-        // Lowercase non-primitive → t-var
-        assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-var {} a)");
+        // Outside an explicit declaration binder list, a lowercase unknown
+        // spelling remains a primitive candidate for checker-owned rejection.
+        assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-prim {} a)");
     }
 
     #[test]

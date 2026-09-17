@@ -77,7 +77,7 @@ fn kinds(report: &serde_json::Value) -> Vec<String> {
 /// A dim-polymorphic higher-order helper: `v` is an unresolved variable while
 /// the lambda body is inferred, and `n` is not fixed until the argument is.
 const HELPER: &str =
-    "def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n";
+    "def apply_n[b, n](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n";
 
 /// The `let`-bound form, for a given call and declared result.
 fn let_bound(module: &str, call: &str, declared: &str) -> String {

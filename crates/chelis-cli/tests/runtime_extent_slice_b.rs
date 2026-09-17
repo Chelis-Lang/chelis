@@ -2478,8 +2478,9 @@ fn two_expands_over_one_operand_axis_share_one_guard() {
 fn node_target_source(claim: &str, factor: u32) -> String {
     let second = if factor == 2 { "2i64" } else { "1i64" };
     let second_ty = if factor == 2 { "2" } else { "1" };
+    let binders = if claim == "m" { "n, m" } else { "n" };
     format!(
-        "def f[n](x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
+        "def f[{binders}](x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
          reshape(x, [floor_div(shape(x, 0), {factor}i64), {second}])\n\
          out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
     )
@@ -4606,8 +4607,9 @@ fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
 /// with it, and `k` is a free dim that claims nothing. Before the repair those
 /// three took three different exits, which is why one of them is not enough.
 fn overshooting_shrink_source(claim: &str) -> String {
+    let binders = if claim == "k" { "[k]" } else { "" };
     format!(
-        "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = \
+        "def f{binders}(x: tensor[rows, f32]) -> tensor[{claim}, f32] = \
          shrink(x, [[1i64, add(shape(x, 0i32), 3i64)]])\n\
          out = f({})\n",
         vector_literal(4)
@@ -7611,7 +7613,7 @@ fn a_caller_transported_result_label_survives_the_op_computed_stamp() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = |gain: usize| {
         format!(
-            "def narrow[d](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = \
+            "def narrow[d, r](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = \
              shrink(x, [[1i64, shape(x, 0i32)]])\n\
              def caller[r](g: tensor[fixed, f32], y: tensor[r, f32]) -> tensor[fixed, f32] = \
              narrow(y, g)\n\
@@ -9242,10 +9244,10 @@ fn issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes() 
         gcc_available(),
         "mapped-gradient artifact receipts require compiling and executing C"
     );
-    assert_eq!(ISSUE_1932_EXACT_SOURCE.len(), 290);
+    assert_eq!(ISSUE_1932_EXACT_SOURCE.len(), 296);
     assert_eq!(
         format!("{:x}", Sha256::digest(ISSUE_1932_EXACT_SOURCE.as_bytes())),
-        "30ca8685500d97796027d2b592eac2d8f59862c9ceebd6cb9845bbc24f966fd4"
+        "cd89c59c71388e642fb5e458865e9fb49961a0e6e23fd8f17077d9380160a874"
     );
 
     let agreeing_zero =
@@ -9427,7 +9429,7 @@ fn independent_grad_claim_source(
     };
     let declaration = if distinct {
         format!(
-            "def g(x: tensor[{n}, f32], y: tensor[{m}, f32]) -> tensor[{n}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, {size})\n"
+            "def g[{n}, {m}](x: tensor[{n}, f32], y: tensor[{m}, f32]) -> tensor[{n}, f32] = insert(scalar_to_tensor(11.0f32), 0i32, {size})\n"
         )
     } else {
         String::new()

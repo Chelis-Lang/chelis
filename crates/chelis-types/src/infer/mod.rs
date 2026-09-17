@@ -31,7 +31,7 @@ use crate::deep_type::{
 use crate::env::{Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
-use crate::session::DiagnosticSink;
+use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};
 use crate::types::*;
 use crate::unify::*;
 
@@ -73,6 +73,7 @@ mod checked;
 mod common;
 mod declarations;
 mod declared_surface;
+mod declared_type;
 pub(crate) use declared_surface::resolve_declared_surface_in_session;
 pub use declared_surface::{DeclaredSignature, DeclaredTypeSurface, resolve_declared_surface};
 mod deferred_operands;
@@ -110,6 +111,7 @@ use binder_literal::*;
 use checked::*;
 use common::*;
 pub(crate) use common::{decide_shape_route, shape_route_result};
+use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
 pub(crate) use app_collection::{TensorConcatCallEvidence, decide_collection_constraint};

@@ -114,6 +114,136 @@ fn distinct_unknown_surf_scalar_names_keep_distinct_diagnostics() {
     }
 }
 
+fn assert_unknown_spelling_order(program: &[Expr], expected: &[&str]) {
+    let ir = diagnostics(check_ir_program(program));
+    let typed = diagnostics(check_typed_program(program));
+    assert_eq!(
+        typed, ir,
+        "checker ingresses must preserve declaration/name ownership and order"
+    );
+    let actual = ir
+        .iter()
+        .filter_map(|diagnostic| {
+            expected
+                .iter()
+                .copied()
+                .find(|name| diagnostic.message.contains(&format!("`{name}`")))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "wrong unknown-name owners: {ir:?}");
+    assert_eq!(
+        ir.len(),
+        expected.len(),
+        "no extra diagnostic may preempt the ownership contract: {ir:?}"
+    );
+}
+
+fn assert_unknown_spelling_order_amid_other_errors(program: &[Expr], expected: &[&str]) {
+    let ir = diagnostics(check_ir_program(program));
+    let typed = diagnostics(check_typed_program(program));
+    assert_eq!(
+        typed, ir,
+        "checker ingresses must preserve module-scoped ownership and order"
+    );
+    let actual = ir
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("unknown primitive type"))
+        .filter_map(|diagnostic| {
+            expected
+                .iter()
+                .copied()
+                .find(|name| diagnostic.message.contains(&format!("`{name}`")))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "unknown-name owners must remain isolated across modules: {ir:?}"
+    );
+}
+
+#[test]
+fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner() {
+    for source in [
+        "sig ident: float32 -> float32\n\
+         def ident(x: float32) -> float32 = x",
+        "def ident(x: float32) -> float32 = x\n\
+         sig ident: float32 -> float32",
+    ] {
+        assert_unknown_spelling_order(&surf(source), &["float32"]);
+    }
+
+    for source in [
+        "(defsig {} ident
+           (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+         (def {} ident
+           (fn {} (params {} (x {type: (t-prim {} float32)}))
+             (var {} x)))",
+        "(def {} ident
+           (fn {} (params {} (x {type: (t-prim {} float32)}))
+             (var {} x)))
+         (defsig {} ident
+           (t-fn {} (t-prim {} float32) (t-prim {} float32)))",
+    ] {
+        let program = parse_deep(source).expect("Deep fixture must parse");
+        assert_unknown_spelling_order(&program, &["float32"]);
+    }
+}
+
+#[test]
+fn unknown_primitive_owners_preserve_spelling_declaration_order_and_module_scope() {
+    assert_unknown_spelling_order(
+        &surf(
+            "sig convert: float32 -> float32\n\
+             def convert(x: fp32) -> fp32 = x",
+        ),
+        &["float32", "fp32"],
+    );
+    for (source, expected) in [
+        (
+            "sig first: fp32 -> fp32\n\
+             def first(x: fp32) -> fp32 = x\n\
+             sig second: float32 -> float32\n\
+             def second(x: float32) -> float32 = x",
+            ["fp32", "float32"],
+        ),
+        (
+            "sig second: float32 -> float32\n\
+             def second(x: float32) -> float32 = x\n\
+             sig first: fp32 -> fp32\n\
+             def first(x: fp32) -> fp32 = x",
+            ["float32", "fp32"],
+        ),
+    ] {
+        assert_unknown_spelling_order(&surf(source), &expected);
+    }
+    assert_unknown_spelling_order(
+        &surf(
+            "sig first: float32 -> float32\n\
+             def first(x: float32) -> float32 = x\n\
+             sig second: float32 -> float32\n\
+             def second(x: float32) -> float32 = x",
+        ),
+        &["float32", "float32"],
+    );
+
+    let modules = parse_deep(
+        "(module {} Left
+           (defsig {} ident
+             (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+           (def {} ident
+             (fn {} (params {} (x {type: (t-prim {} float32)}))
+               (var {} x))))
+         (module {} Right
+           (defsig {} ident
+             (t-fn {} (t-prim {} float32) (t-prim {} float32)))
+           (def {} ident
+             (fn {} (params {} (x {type: (t-prim {} float32)}))
+               (var {} x))))",
+    )
+    .expect("module fixture must parse");
+    assert_unknown_spelling_order_amid_other_errors(&modules, &["float32", "float32"]);
+}
+
 #[test]
 fn unknown_surf_tensor_precision_names_reject_once_at_both_checker_ingresses() {
     for (name, nearest) in REJECTED_DTYPES {

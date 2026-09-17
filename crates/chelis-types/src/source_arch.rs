@@ -38,6 +38,7 @@ pub(crate) const REQUIRED_INFER_ROLES: &[(&str, &str)] = &[
     ("checked-program construction", "infer/checked.rs"),
     ("annotation ownership", "infer/annotate.rs"),
     ("program orchestration", "infer/program.rs"),
+    ("declared type resolution", "infer/declared_type.rs"),
     ("validation", "infer/validate.rs"),
     ("expression forms", "infer/expr.rs"),
     ("application dispatch", "infer/app.rs"),

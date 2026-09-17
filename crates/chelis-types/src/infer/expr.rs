@@ -119,7 +119,32 @@ pub(super) fn infer_expr(
     product: &mut InferenceProduct,
 ) -> Type {
     infer_expr_with_type_metadata_ownership(
-        expr, env, vg, subst, adt_reg, errors, product, None, None,
+        expr, env, vg, subst, adt_reg, errors, product, None, None, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_expr_with_declaration_diagnostic_owner(
+    expr: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+) -> Type {
+    infer_expr_with_type_metadata_ownership(
+        expr,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        None,
+        None,
+        declaration_diagnostic_owner,
     )
 }
 
@@ -144,6 +169,7 @@ pub(super) fn infer_expr_with_expected(
         product,
         Some(expected),
         None,
+        None,
     )
 }
 
@@ -158,6 +184,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
@@ -198,7 +225,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     expected_result,
                 ),
-                Some(DeepTag::Fn) => infer_fn(list, env, vg, subst, adt_reg, errors, product),
+                Some(DeepTag::Fn) => infer_fn(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                ),
                 Some(DeepTag::Let) => infer_let(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::If) => infer_if(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Match) => infer_match(list, env, vg, subst, adt_reg, errors, product),
@@ -470,7 +506,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     product,
                     expected_result,
                 ),
-                DeepTag::Fn => infer_fn(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Fn => infer_fn(
+                    &list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                ),
                 DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Match => infer_match(&list, env, vg, subst, adt_reg, errors, product),

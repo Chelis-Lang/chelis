@@ -269,6 +269,8 @@ fn sweep_recursive_collection_contracts(
                 crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
                 Some(name.clone()),
             );
+            let declaration_diagnostic_owner =
+                DeclarationDiagnosticOwner::new(module.as_deref(), name);
             env.set_current_declaration_ordinal(Some(*declaration_index));
             let expected = prior_schemes
                 .get(name)
@@ -286,6 +288,7 @@ fn sweep_recursive_collection_contracts(
                 true,
                 user_def_names,
                 declared_signatures,
+                Some(&declaration_diagnostic_owner),
             ) {
                 deferred_bindings.push(binding);
             }
@@ -564,6 +567,8 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner =
+                decl_name.map(|name| DeclarationDiagnosticOwner::new(module.as_deref(), name));
             env.set_current_declaration_ordinal(Some(declaration_index));
             let external_input_failure = prebind_literal_external_input_for_declaration(
                 declaration_index,
@@ -594,6 +599,7 @@ pub(super) fn infer_program_with_product_in_session(
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner.as_ref(),
             ) {
                 deferred_bindings.push(binding);
             }
@@ -1612,6 +1618,8 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner =
+                decl_name.map(|name| DeclarationDiagnosticOwner::new(module.as_deref(), name));
             state
                 .env
                 .set_current_declaration_ordinal(Some(declaration_index));
@@ -1644,6 +1652,7 @@ pub(super) fn infer_ir_program_with_state(
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner.as_ref(),
             ) {
                 deferred_bindings.push(binding);
             }

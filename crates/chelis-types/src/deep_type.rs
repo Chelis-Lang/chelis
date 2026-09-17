@@ -17,7 +17,7 @@ use chelis_deep::ast as deep;
 
 use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
-use crate::session::DiagnosticSink;
+use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};
 use crate::types::{
     Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar,
     TypeVarRestriction, VarGen,
@@ -216,6 +216,10 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     /// declaration/name scope. Repeated occurrences propagate that witness
     /// instead of emitting one diagnostic per type-tree occurrence.
     rejected_primitive_names: UnordMap<String, ErrorWitness>,
+    /// Session-wide declaration identity used to share one unknown-primitive
+    /// owner between a standalone signature and its matching definition's
+    /// inline annotations.
+    declaration_diagnostic_owner: Option<DeclarationDiagnosticOwner>,
     /// Declared dtype-family bounds, keyed by binder name
     /// (`spec/04-type-system.md` §5.9 [04-DTYPE-2]). Empty for every
     /// declaration that declares no bound.
@@ -252,6 +256,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             dim_vars: UnordMap::new(),
             rank_vars: UnordMap::new(),
             rejected_primitive_names: UnordMap::new(),
+            declaration_diagnostic_owner: None,
             dtype_bounds: UnordMap::new(),
             installed_bounds: Vec::new(),
             owner_location: None,
@@ -279,6 +284,14 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             }
         }
         resolver
+    }
+
+    pub(crate) fn with_declaration_diagnostic_owner(
+        mut self,
+        owner: Option<&DeclarationDiagnosticOwner>,
+    ) -> Self {
+        self.declaration_diagnostic_owner = owner.cloned();
+        self
     }
 
     /// Declare dtype-family bounds for this scope's binders
@@ -905,10 +918,24 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if let Some(witness) = self.rejected_primitive_names.get(name).copied() {
             return witness;
         }
+        if let Some(owner) = &self.declaration_diagnostic_owner
+            && let Some(witness) = self.errors.declaration_primitive_witness(owner, name)
+        {
+            self.rejected_primitive_names
+                .insert(name.to_string(), witness);
+            return witness;
+        }
         let diagnostic = self
             .diagnostic_location()
             .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
         let witness = report_witness(self.errors, diagnostic);
+        if let Some(owner) = &self.declaration_diagnostic_owner {
+            self.errors.record_declaration_primitive_witness(
+                owner.clone(),
+                name.to_string(),
+                witness,
+            );
+        }
         self.rejected_primitive_names
             .insert(name.to_string(), witness);
         witness

@@ -42,6 +42,7 @@ pub(super) fn infer_fn(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -50,7 +51,15 @@ pub(super) fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
+    let params = extract_params_with_ownership(
+        &kids[0],
+        &DefParameterAnnotationOwnership::independent(),
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+        declaration_diagnostic_owner,
+    );
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -181,6 +190,7 @@ pub(super) fn infer_declared_def_body(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     let property_has_quantifier_carriers = declaration_meta
         .chelis_role()
@@ -203,6 +213,7 @@ pub(super) fn infer_declared_def_body(
         adt_reg,
         errors,
         product,
+        declaration_diagnostic_owner,
     );
     product.record_bypass(
         body,
@@ -233,15 +244,34 @@ pub(super) fn infer_def_body_with_sig(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
     let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
-        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
+        return infer_expr_with_declaration_diagnostic_owner(
+            body,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            product,
+            declaration_diagnostic_owner,
+        );
     };
     let (decl_args, decl_ret) = match decl_ty {
         Type::Fn(args, ret) => (args, ret.as_ref()),
         _ => {
-            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
+            return infer_expr_with_declaration_diagnostic_owner(
+                body,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                product,
+                declaration_diagnostic_owner,
+            );
         }
     };
 
@@ -263,6 +293,7 @@ pub(super) fn infer_def_body_with_sig(
         adt_reg,
         errors,
         annotation_binder_mode(env),
+        declaration_diagnostic_owner,
     );
     let mut param_types = Vec::with_capacity(params.len());
     let mut fn_env = env.clone();
@@ -354,23 +385,6 @@ fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
 /// Each param can be a bare symbol, a metadata-annotated symbol, or a legacy
 /// `(name {type: T})` helper pair.
-pub(super) fn extract_params(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-    binder_mode: BinderMode<'_>,
-) -> Vec<(String, Option<Type>)> {
-    extract_params_with_ownership(
-        expr,
-        &DefParameterAnnotationOwnership::independent(),
-        vg,
-        adt_reg,
-        errors,
-        binder_mode,
-    )
-}
-
 fn extract_params_with_ownership(
     expr: &deep::Expr,
     ownership: &DefParameterAnnotationOwnership,
@@ -378,6 +392,7 @@ fn extract_params_with_ownership(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     binder_mode: BinderMode<'_>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Vec<(String, Option<Type>)> {
     let Some(elems) = parameter_elements(expr) else {
         return Vec::new();
@@ -388,7 +403,8 @@ fn extract_params_with_ownership(
         adt_reg.resolution_env(),
         vg,
         errors,
-    );
+    )
+    .with_declaration_diagnostic_owner(declaration_diagnostic_owner);
     let mut resolve_annotation =
         |annotation: &deep::Expr| match resolver.resolve_parameter(annotation) {
             Ok(ty) => ty.map(|ty| ty.into_type()),
@@ -496,6 +512,7 @@ pub(super) fn infer_let(
                     product,
                     None,
                     Some(&mut rhs_type_metadata_resolution),
+                    None,
                 );
                 let rhs_type_before_ascription = subst.apply(&expr_ty);
                 let local_ascription_origin = match stamped_parts(rhs_expr)
