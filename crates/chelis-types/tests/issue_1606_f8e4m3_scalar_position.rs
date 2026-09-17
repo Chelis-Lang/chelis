@@ -262,22 +262,25 @@ fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
     );
 }
 
-/// A source site owns one diagnostic, even when inference revisits its declaration.
+/// The expected sequence names one declaration-owned diagnostic per spelling.
 fn assert_one_report_per_site(source: &str, names: &[&str]) {
     let program = surf_to_deep(source);
-    let mut expected: Vec<_> = names
+    let mut search_start = 0;
+    let expected = names
         .iter()
-        .flat_map(|name| {
-            source.match_indices(name).map(move |(offset, _)| {
-                (
-                    *name,
-                    offset,
-                    format!("source:{offset}..{}", offset + name.len()),
-                )
-            })
+        .map(|name| {
+            let relative = source[search_start..]
+                .find(name)
+                .unwrap_or_else(|| panic!("expected `{name}` after byte {search_start}: {source}"));
+            let offset = search_start + relative;
+            search_start = offset + name.len();
+            (
+                *name,
+                offset,
+                format!("source:{offset}..{}", offset + name.len()),
+            )
         })
-        .collect();
-    expected.sort_by_key(|(_, offset, _)| *offset);
+        .collect::<Vec<_>>();
     for (entry, result) in [
         ("ir", check_ir_program(&program)),
         ("typed", check_typed_program(&program)),
@@ -470,7 +473,7 @@ fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
 }
 
 #[test]
-fn property_copy_ownership_preserves_semantic_metadata_differences() {
+fn property_copy_ownership_ignores_nonsemantic_metadata_differences() {
     use chelis_types::errors::CheckErrorKind;
 
     for name in ["f8e4m3", "f8e5m2"] {
@@ -495,7 +498,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                 ("ir", check_ir_program(&program)),
                 ("typed", check_typed_program(&program)),
             ] {
-                let report = result.expect_err("both independent reserved sites must reject");
+                let report = result.expect_err("the declaration-owned reserved spelling rejects");
                 assert_eq!(
                     report
                         .errors
@@ -504,7 +507,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                             matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision)
                         })
                         .count(),
-                    2,
+                    1,
                     "{entry}/{name}: {report:?}"
                 );
             }
@@ -560,7 +563,7 @@ fn property_copy_ownership_keeps_mixed_slot_dispositions_independent() {
             "(t-prim {} bool)".to_string(),
         ];
         let program = hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
-        assert_api_diagnostic_counts(&program, 2, 1, name);
+        assert_api_diagnostic_counts(&program, 1, 1, name);
     }
 }
 
@@ -693,8 +696,8 @@ fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
                        (t-ref {{}} (t-prim {{}} {name})) \
                        (t-prim {{}} f32))"
                 ),
-                3,
-                "nested composites preserve every authored rejection",
+                2,
+                "nested composites preserve one rejection per spelling",
             ),
             (
                 "(t-adt {} Pair (t-prim {} f32))".to_string(),
@@ -814,10 +817,10 @@ fn separate_reserved_sites_keep_separate_diagnostics() {
 }
 
 #[test]
-fn repeated_reserved_spelling_at_distinct_sites_is_not_deduplicated() {
+fn repeated_reserved_spelling_in_distinct_declarations_is_not_deduplicated() {
     assert_one_report_per_site(
         "def left(x: f8e4m3) -> i32 = 0i32\ndef right(x: f8e4m3) -> i32 = 0i32",
-        &["f8e4m3"],
+        &["f8e4m3", "f8e4m3"],
     );
 }
 
@@ -830,7 +833,7 @@ fn calls_propagate_the_failed_signature_without_a_second_report() {
 }
 
 #[test]
-fn distinct_parameter_sites_in_one_signature_each_report_once() {
+fn one_signature_keys_reserved_diagnostics_by_spelling() {
     assert_one_report_per_site(
         "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
         &["f8e4m3", "f8e5m2"],
@@ -877,6 +880,29 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
             );
             assert!(error.message.contains(name), "{error:?}");
         }
+        assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
+        let start = source.find("cast(").expect("cast site");
+        let expected = format!("surf:{start}..{}", source.len());
+        assert_eq!(report.errors[1].span_offset, Some(start));
+        assert_eq!(report.errors[1].span_id.as_deref(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
+    let source = "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e4m3)";
+    let program = surf_to_deep(source);
+    for result in [check_ir_program(&program), check_typed_program(&program)] {
+        let report = result.expect_err("the declaration and cast sites must both reject");
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|error| error.message.contains("f8e4m3")),
+            "{:?}",
+            report.errors
+        );
         assert_eq!(report.errors[0].span_id.as_deref(), Some("source:16..22"));
         let start = source.find("cast(").expect("cast site");
         let expected = format!("surf:{start}..{}", source.len());
@@ -1047,7 +1073,7 @@ fn a_failed_signature_preserves_its_other_binder_bounds() {
 }
 
 #[test]
-fn independent_deep_annotations_do_not_share_a_display_span_identity() {
+fn matching_deep_signature_and_annotation_share_a_declaration_owner() {
     for display_span in ["same", "source:16..22"] {
         let source = format!(
             "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} i32)))\n\
@@ -1055,8 +1081,8 @@ fn independent_deep_annotations_do_not_share_a_display_span_identity() {
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
-            let report = result.expect_err("both independently authored annotations must reject");
-            assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+            let report = result.expect_err("the declaration-owned annotation must reject");
+            assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
             assert!(
                 report
                     .errors
@@ -1226,7 +1252,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
         ),
         (
             "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
-            &["f8e4m3", "f8e4m3"][..],
+            &["f8e4m3"][..],
         ),
         (
             "def classify(x: f8e4m3) -> f8e5m2 = x",

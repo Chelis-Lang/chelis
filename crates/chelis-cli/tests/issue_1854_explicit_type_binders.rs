@@ -98,11 +98,8 @@ fn check_rejects_unknown_surf_type_names_and_the_desugared_deep_agrees() {
         let checked = check_json(dir.path(), "case.ch");
         let messages = error_messages(&checked);
         assert!(
-            messages.len() == 2
-                && messages
-                    .iter()
-                    .all(|message| message.contains(&format!("`{name}`"))),
-            "Surf check must give every authored `{name}` site an owner: {checked}"
+            messages.len() == 1 && messages[0].contains(&format!("`{name}`")),
+            "Surf check must give repeated `{name}` one declaration owner: {checked}"
         );
 
         let deep = run(dir.path(), &["deep", "case.ch"]);
@@ -120,11 +117,8 @@ fn check_rejects_unknown_surf_type_names_and_the_desugared_deep_agrees() {
         let deep_checked = check_json(dir.path(), "case.dp");
         let deep_messages = error_messages(&deep_checked);
         assert!(
-            deep_messages.len() == 2
-                && deep_messages
-                    .iter()
-                    .all(|message| message.contains(&format!("`{name}`"))),
-            "Deep check must retain every authored `{name}` owner: {deep_checked}"
+            deep_messages.len() == 1 && deep_messages[0].contains(&format!("`{name}`")),
+            "Deep check must retain the same single `{name}` owner: {deep_checked}"
         );
     }
 }
@@ -238,7 +232,7 @@ fn cli_shares_unknown_primitive_ownership_across_signature_and_definition() {
 }
 
 #[test]
-fn cli_keeps_reserved_primitive_diagnostics_per_use_with_explicit_binders() {
+fn cli_shares_reserved_primitive_diagnostics_with_explicit_binders() {
     let dir = tempdir().expect("tempdir");
     for (index, name) in RESERVED_DTYPES.into_iter().enumerate() {
         let path = format!("reserved-explicit-binder-{index}.ch");
@@ -254,8 +248,8 @@ fn cli_keeps_reserved_primitive_diagnostics_per_use_with_explicit_binders() {
         let messages = error_messages(&report);
         assert_eq!(
             messages.len(),
-            3,
-            "reserved `{name}` must retain one diagnostic per authored use: {report}"
+            1,
+            "reserved `{name}` must have one declaration-owned diagnostic: {report}"
         );
         assert!(
             messages
@@ -404,24 +398,27 @@ fn check_rejects_undeclared_surf_dimension_and_rank_variables() {
     for (index, source, name, needle) in [
         (
             0,
-            "sig shaped: tensor[n, f32] -> f32\ndef shaped(x) = 0.0f32\n",
+            "sig shaped: tensor[n, f32] -> tensor[n, f32]\n\
+             def shaped(x: tensor[n, f32]) -> tensor[n, f32] = x\n",
             "n",
             "undeclared dimension variable",
         ),
         (
             1,
-            "sig shaped: tensor[..r, f32] -> f32\ndef shaped(x) = 0.0f32\n",
+            "sig shaped: tensor[..r, f32] -> tensor[..r, f32]\n\
+             def shaped(x: tensor[..r, f32]) -> tensor[..r, f32] = x\n",
             "r",
             "undeclared rank variable",
         ),
     ] {
         let path = format!("undeclared-{index}.ch");
         fs::write(dir.path().join(&path), source).expect("write Surf fixture");
-        let checked = text(&run(dir.path(), &["check", &path]));
+        let checked = check_json(dir.path(), &path);
+        let messages = error_messages(&checked);
         assert!(
-            !checked.contains("\"score\": 1,")
-                && checked.contains(needle)
-                && checked.contains(&format!("`{name}`")),
+            messages.len() == 1
+                && messages[0].contains(needle)
+                && messages[0].contains(&format!("`{name}`")),
             "Surf check must reject undeclared `{name}`: {checked}"
         );
     }

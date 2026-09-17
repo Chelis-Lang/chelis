@@ -18,7 +18,7 @@ use chelis_deep::ast as deep;
 use crate::adt::AdtRegistry;
 use crate::env::DeclarationBinderIdentities;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
-use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};
+use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
 use crate::types::{
     Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar,
     TypeVarRestriction, VarGen,
@@ -218,9 +218,8 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     type_vars: UnordMap<String, TypeVar>,
     dim_vars: UnordMap<String, DimVar>,
     rank_vars: UnordMap<String, RankVar>,
-    /// Declaration identity for the unknown-primitive compatibility owner.
-    /// Reserved and deferred primitive diagnostics deliberately bypass it and
-    /// retain one witness per authored type site.
+    /// Declaration identity shared by name-resolution diagnostics across one
+    /// standalone signature and its matching inline/body annotations.
     declaration_diagnostic_owner: Option<DeclarationDiagnosticOwner>,
     /// Declared dtype-family bounds, keyed by binder name
     /// (`spec/04-type-system.md` §5.9 [04-DTYPE-2]). Empty for every
@@ -544,7 +543,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     // through the same [04-DTYPE-1] rejection.
                     let tensor = self.resolving_tensor_precision;
                     let diagnostic = f8e4m3_diagnostic(tensor);
-                    return Err(self.report_primitive_diagnostic(diagnostic));
+                    return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -569,7 +568,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     .or_else(|| unsigned_family_diagnostic(name, tensor))
                     .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
-                    return Err(self.report_primitive_diagnostic(diagnostic));
+                    return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
                 }
                 let nearest = nearest_active_dtype(name);
                 let diagnostic = CheckError::new(
@@ -656,10 +655,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .or_else(|| unsigned_family_diagnostic(name, tensor))
             .or_else(|| deferred_family_diagnostic(name, tensor))
         {
-            let diagnostic = self
-                .diagnostic_location()
-                .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
-            return Err(report_witness(self.errors, diagnostic));
+            return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
         }
         if Prim::parse_name(name).is_some_and(|prim| prim.is_admissible_active()) {
             return Err(self.type_error_with_suggestions(
@@ -879,10 +875,30 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     fn unbound(&mut self, kind: &str, name: &str) -> ErrorWitness {
-        self.type_error(format!(
-            "undeclared {kind} variable `{name}` in {}",
-            self.use_site.label()
-        ))
+        let class = match kind {
+            "type" => DeclarationTypeDiagnosticClass::UndeclaredTypeVariable,
+            "dimension" => DeclarationTypeDiagnosticClass::UndeclaredDimensionVariable,
+            "rank" => DeclarationTypeDiagnosticClass::UndeclaredRankVariable,
+            _ => {
+                return self.type_error(format!(
+                    "undeclared {kind} variable `{name}` in {}",
+                    self.use_site.label()
+                ));
+            }
+        };
+        self.report_declaration_type_diagnostic_once(
+            name,
+            class,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "undeclared {kind} variable `{name}` in {}",
+                    self.use_site.label()
+                ),
+                vec![],
+            ),
+            false,
+        )
     }
 
     fn malformed(&mut self, message: String) -> ErrorWitness {
@@ -916,29 +932,56 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         report_witness(self.errors, diagnostic)
     }
 
+    fn report_rejected_primitive_diagnostic_once(
+        &mut self,
+        name: &str,
+        diagnostic: CheckError,
+    ) -> ErrorWitness {
+        self.report_declaration_type_diagnostic_once(
+            name,
+            DeclarationTypeDiagnosticClass::RejectedPrimitive,
+            diagnostic,
+            false,
+        )
+    }
+
     fn report_unknown_primitive_diagnostic_once(
         &mut self,
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
+        self.report_declaration_type_diagnostic_once(
+            name,
+            DeclarationTypeDiagnosticClass::UnknownPrimitive,
+            diagnostic,
+            true,
+        )
+    }
+
+    fn report_declaration_type_diagnostic_once(
+        &mut self,
+        name: &str,
+        class: DeclarationTypeDiagnosticClass,
+        diagnostic: CheckError,
+        record_unknown_site: bool,
+    ) -> ErrorWitness {
         let location = self.diagnostic_location();
         let declaration_owner = self.declaration_diagnostic_owner.clone();
         if let Some(owner) = &declaration_owner
-            && let Some(witness) = self
-                .errors
-                .declaration_unknown_primitive_witness(owner, name)
+            && let Some(witness) = self.errors.declaration_type_witness(owner, name, class)
         {
-            self.record_unknown_primitive_site(location.as_ref(), name, witness);
+            if record_unknown_site {
+                self.record_unknown_primitive_site(location.as_ref(), name, witness);
+            }
             return witness;
         }
         let witness = self.report_primitive_diagnostic(diagnostic);
-        self.record_unknown_primitive_site(location.as_ref(), name, witness);
+        if record_unknown_site {
+            self.record_unknown_primitive_site(location.as_ref(), name, witness);
+        }
         if let Some(owner) = declaration_owner {
-            self.errors.record_declaration_unknown_primitive_witness(
-                owner,
-                name.to_string(),
-                witness,
-            );
+            self.errors
+                .record_declaration_type_witness(owner, name.to_string(), class, witness);
         }
         witness
     }

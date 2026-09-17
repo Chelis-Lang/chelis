@@ -143,8 +143,13 @@ fn def_precision_name_not_in_quantifier_list_errors() {
     });
     assert_eq!(
         errors.len(),
-        2,
-        "each undeclared primitive use must have one owning diagnostic: {errors:?}"
+        1,
+        "the repeated undeclared primitive spelling must have one declaration-owned diagnostic: {errors:?}"
+    );
+    assert_eq!(
+        errors[0].get("span_id").and_then(|span| span.as_str()),
+        Some("source:26..27"),
+        "the declaration owner must retain the first useful source location: {errors:?}"
     );
     assert!(
         all_are_unknown_primitive,

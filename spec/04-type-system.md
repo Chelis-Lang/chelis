@@ -870,6 +870,18 @@ differently.
 > §5.8.1's closed primitive and undeclared-name rules; no occurrence introduces
 > a binder.
 >
+> A name-resolution rejection in those declaration-owned type positions has
+> one diagnostic owner per lexical module, declaration, offending spelling,
+> and diagnostic class. A standalone `sig` and its matching definition's
+> inline annotations and body type positions share that owner. Repeating the
+> same rejected primitive or undeclared type, dimension, or rank spelling
+> within that owner SHALL reuse the first diagnostic witness rather than emit
+> one diagnostic per occurrence. Different declarations, lexical modules,
+> spellings, or diagnostic classes retain different diagnostics in
+> deterministic declaration order. This ownership does not extend to an
+> independent expression or runtime/type-use failure merely because it names
+> the same spelling.
+>
 > Except for the sole role-sensitive exception below, each such binder is
 > universally quantified and rigid: the body SHALL type-check for every
 > admissible instantiation. A body constraint that identifies an authored

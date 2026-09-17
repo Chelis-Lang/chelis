@@ -160,6 +160,15 @@ type, precondition, predicate body, or expression-valued option. A name not decl
 enclosing explicit binder remains subject to §5.8.1's closed primitive and undeclared-name
 rules; no occurrence introduces a binder.
 
+A name-resolution rejection in those declaration-owned type positions SHALL have one
+diagnostic owner per lexical module, declaration, offending spelling, and diagnostic class.
+A standalone signature and its matching definition's inline annotations and body type
+positions SHALL share that owner. Repeating the same rejected primitive or undeclared type,
+dimension, or rank spelling within that owner SHALL reuse the first diagnostic witness.
+Different declarations, lexical modules, spellings, or diagnostic classes SHALL retain
+different diagnostics in deterministic declaration order. An independent expression or
+runtime/type-use failure SHALL NOT be absorbed merely because it names the same spelling.
+
 Except for the sole role-sensitive exception below, each such binder is universally
 quantified and rigid: the body SHALL type-check for every admissible instantiation. A body
 constraint that identifies an authored binder with a concrete type or shape, with another
@@ -209,6 +218,16 @@ and receives no such exception.
 
 - **WHEN** a body tensor precision slot names `q` and no enclosing explicit binder declares `q`
 - **THEN** `q` does not become a binder and is rejected under the closed primitive rule
+
+#### Scenario: Declaration-owned name failures report once
+
+- **WHEN** one declaration repeats the same rejected primitive or undeclared type, dimension, or rank spelling across its standalone signature, inline annotations, or body type positions
+- **THEN** the checker emits one diagnostic for that lexical-module, declaration, spelling, and diagnostic-class owner at both checker ingresses
+
+#### Scenario: Distinct diagnostic owners remain distinct
+
+- **WHEN** rejected names differ by declaration, lexical module, spelling, or diagnostic class, or an independent use-site failure names the same spelling
+- **THEN** the checker retains the distinct diagnostics in deterministic declaration order
 
 #### Scenario: Wildcard filled by an authored binder preserves that binder
 

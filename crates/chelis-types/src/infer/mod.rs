@@ -31,7 +31,7 @@ use crate::deep_type::{
 use crate::env::{DeclarationBinderIdentities, Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
-use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};
+use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
 use crate::types::*;
 use crate::unify::*;
 
@@ -72,8 +72,12 @@ impl DiagnosticOutput for DiagnosticSink<'_> {
         owner: &DeclarationDiagnosticOwner,
         primitive_name: &str,
     ) -> bool {
-        self.declaration_unknown_primitive_witness(owner, primitive_name)
-            .is_some()
+        self.declaration_type_witness(
+            owner,
+            primitive_name,
+            DeclarationTypeDiagnosticClass::UnknownPrimitive,
+        )
+        .is_some()
     }
 
     fn resolved_unknown_primitive_at(

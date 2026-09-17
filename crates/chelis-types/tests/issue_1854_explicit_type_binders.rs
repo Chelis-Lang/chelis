@@ -77,25 +77,6 @@ fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Opti
     }
 }
 
-fn assert_both_ingresses_reject_each_site(program: &[Expr], name: &str, expected: usize) {
-    let ir = diagnostics(check_ir_program(program));
-    let typed = diagnostics(check_typed_program(program));
-    assert_eq!(
-        typed, ir,
-        "checker ingresses must report the same ordered diagnostics for `{name}`"
-    );
-    assert_eq!(
-        ir.len(),
-        expected,
-        "`{name}` must report at every authored site: {ir:?}"
-    );
-    assert!(
-        ir.iter()
-            .all(|diagnostic| diagnostic.message.contains(&format!("`{name}`"))),
-        "every diagnostic must name the reserved spelling: {ir:?}"
-    );
-}
-
 #[test]
 fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
     for (name, nearest) in UNKNOWN_DTYPES {
@@ -106,10 +87,10 @@ fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
         );
     }
     for name in RESERVED_DTYPES {
-        assert_both_ingresses_reject_each_site(
+        assert_both_ingresses_reject_once(
             &surf(&format!("def ident(x: {name}) -> {name} = x")),
             name,
-            2,
+            None,
         );
     }
 }
@@ -219,15 +200,15 @@ fn standalone_signature_and_matching_inline_annotation_share_one_unknown_owner()
 }
 
 #[test]
-fn explicit_binders_do_not_collapse_reserved_primitive_diagnostics() {
+fn explicit_binders_share_reserved_primitive_diagnostics() {
     for name in RESERVED_DTYPES {
-        assert_both_ingresses_reject_each_site(
+        assert_both_ingresses_reject_once(
             &surf(&format!(
                 "sig ident[a]: {name} -> {name}\n\
                  def ident(x: {name}) -> {name} = x"
             )),
             name,
-            3,
+            None,
         );
     }
 }
@@ -325,6 +306,134 @@ fn undeclared_surf_dimension_and_rank_variables_reject_at_both_ingresses() {
         assert!(
             ir[0].message.contains(needle) && ir[0].message.contains(&format!("`{name}`")),
             "wrong Surf undeclared-binder diagnostic: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn repeated_undeclared_type_dimension_and_rank_names_share_declaration_owners() {
+    for (name, slot, needle) in [
+        ("a", "(t-var {} a)", "undeclared type variable"),
+        (
+            "n",
+            "(t-tensor {} (d-var {} n) (t-prim {} f32))",
+            "undeclared dimension variable",
+        ),
+        (
+            "r",
+            "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+            "undeclared rank variable",
+        ),
+    ] {
+        let program = parse_deep(&format!(
+            "(defsig {{}} ident (t-fn {{}} {slot} {slot}))
+             (def {{}} ident
+               (fn {{}} (params {{}} (x {{type: {slot}}})) (var {{}} x)))"
+        ))
+        .expect("repeated undeclared-name fixture must parse");
+        let ir = diagnostics(check_ir_program(&program));
+        let typed = diagnostics(check_typed_program(&program));
+        assert_eq!(typed, ir, "ingress parity for repeated undeclared `{name}`");
+        assert_eq!(
+            ir.len(),
+            1,
+            "`{name}` must have one declaration owner: {ir:?}"
+        );
+        assert!(
+            ir[0].message.contains(needle) && ir[0].message.contains(&format!("`{name}`")),
+            "wrong repeated undeclared-name diagnostic: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn one_spelling_in_distinct_name_resolution_classes_keeps_distinct_diagnostics() {
+    let program = parse_deep(
+        "(defsig {} classify
+           (t-fn {}
+             (t-tuple {}
+               (t-var {} q)
+               (t-tensor {} (d-var {} q) (t-prim {} f32))
+               (t-tensor {} (d-rank {} q) (t-prim {} f32)))
+             (t-prim {} f32)))
+         (def {} classify
+           (fn {} (params {} x) (lit {type: (t-prim {} f32)} 0.0)))",
+    )
+    .expect("diagnostic-class fixture must parse");
+    let ir = diagnostics(check_ir_program(&program));
+    let typed = diagnostics(check_typed_program(&program));
+    assert_eq!(typed, ir, "diagnostic-class ingress parity");
+    assert_eq!(
+        ir.len(),
+        3,
+        "distinct name-resolution classes must remain: {ir:?}"
+    );
+    for needle in [
+        "undeclared type variable",
+        "undeclared dimension variable",
+        "undeclared rank variable",
+    ] {
+        assert_eq!(
+            ir.iter()
+                .filter(|diagnostic| {
+                    diagnostic.message.contains(needle) && diagnostic.message.contains("`q`")
+                })
+                .count(),
+            1,
+            "missing distinct `{needle}` owner: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn undeclared_dimension_owners_are_isolated_by_declaration_and_module() {
+    let slot = "(t-tensor {} (d-var {} n) (t-prim {} f32))";
+    let declaration_program = parse_deep(&format!(
+        "(defsig {{}} first (t-fn {{}} {slot} {slot}))
+         (def {{}} first (fn {{}} (params {{}} x) (var {{}} x)))
+         (defsig {{}} second (t-fn {{}} {slot} {slot}))
+         (def {{}} second (fn {{}} (params {{}} x) (var {{}} x)))"
+    ))
+    .expect("distinct declaration fixture must parse");
+    let module_program = parse_deep(&format!(
+        "(module {{}} Left
+           (defsig {{}} ident (t-fn {{}} {slot} {slot}))
+           (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x))))
+         (module {{}} Right
+           (defsig {{}} ident (t-fn {{}} {slot} {slot}))
+           (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x))))"
+    ))
+    .expect("module-isolation fixture must parse");
+
+    for (label, program) in [
+        ("declarations", declaration_program.as_slice()),
+        ("modules", module_program.as_slice()),
+    ] {
+        let ir = diagnostics(check_ir_program(program));
+        let typed = diagnostics(check_typed_program(program));
+        assert_eq!(typed, ir, "{label} ingress parity");
+        let owners = ir
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message.contains("undeclared dimension variable")
+                    && diagnostic.message.contains("`n`")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners.len(),
+            2,
+            "{label} must retain two dimension owners: {ir:?}"
+        );
+        assert!(
+            label != "modules"
+                || ir
+                    .iter()
+                    .any(|diagnostic| diagnostic.kind == "DuplicateDefinition"),
+            "module isolation must not hide the independent duplicate-definition class: {ir:?}"
+        );
+        assert!(
+            owners[0].span_offset < owners[1].span_offset,
+            "{label} owners must remain in declaration order: {ir:?}"
         );
     }
 }
@@ -939,7 +1048,7 @@ fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
                (fn {{}} (params {{}} x) (var {{}} x)))"
         ))
         .expect("Deep fixture must parse");
-        assert_both_ingresses_reject_each_site(&program, name, 2);
+        assert_both_ingresses_reject_once(&program, name, None);
     }
 }
 
