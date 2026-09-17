@@ -591,20 +591,20 @@ fn infer_let_effects(
                 i += 2;
             }
         }
-        ExprCarrier::MalformedLegacyList(list) => {
-            effects.extend(&infer_children_effects(
-                &list.elements,
-                top_level_effects,
-                top_level_callables,
-                &local_scope,
-            ));
-        }
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => {}
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => {
+            effects.extend(&infer_expr_effects(
+                &kids[0],
+                top_level_effects,
+                top_level_callables,
+                &local_scope,
+            ));
+        }
     }
 
     effects.extend(&infer_expr_effects(
@@ -1714,6 +1714,117 @@ mod tests {
             span,
         );
         assert_eq!(declared_effects_from_defsig(&defsig), None);
+    }
+
+    #[test]
+    fn let_effect_reader_traverses_every_non_bind_slot_carrier() {
+        let span = Span::new(0, 0);
+        let name = |value: &str| Expr::Atom(Atom::Name(value.into()), span);
+        let io_expr = || {
+            Expr::node(
+                DeepTag::App,
+                Metadata::default(),
+                vec![
+                    Expr::node(DeepTag::Var, Metadata::default(), vec![name("debug")], span),
+                    Expr::node(
+                        DeepTag::Lit,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Int(1), span)],
+                        span,
+                    ),
+                ],
+                span,
+            )
+        };
+        let pure_expr = || {
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Int(0), span)],
+                span,
+            )
+        };
+
+        let carrier_cases = |child: Expr| {
+            [
+                ("structural-list", Expr::BareList(vec![child.clone()], span)),
+                (
+                    "undecodable-head",
+                    Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                        head: "future-bind".into(),
+                        meta: Metadata::default(),
+                        children: vec![child.clone()],
+                        span,
+                    })),
+                ),
+                (
+                    "metadata-expression",
+                    Expr::MetaExpr(
+                        chelis_deep::MetaExpr {
+                            metadata: Metadata::default(),
+                            expr: Box::new(child.clone()),
+                        },
+                        span,
+                    ),
+                ),
+                (
+                    "decoded-non-bind",
+                    Expr::node(DeepTag::Tuple, Metadata::default(), vec![child], span),
+                ),
+            ]
+        };
+        let effectful_cases = carrier_cases(io_expr());
+        assert!(matches!(
+            effectful_cases[0].1.carrier(),
+            ExprCarrier::StructuralList(_)
+        ));
+        assert!(matches!(
+            effectful_cases[1].1.carrier(),
+            ExprCarrier::UndecodableHead(..)
+        ));
+        assert!(matches!(
+            effectful_cases[2].1.carrier(),
+            ExprCarrier::MetadataExpression(_)
+        ));
+        assert!(matches!(
+            effectful_cases[3].1.carrier(),
+            ExprCarrier::DecodedNode(DeepTag::Tuple, ..)
+        ));
+
+        let hidden = effectful_cases
+            .iter()
+            .filter_map(|(label, bind_slot)| {
+                let effects = infer_let_effects(
+                    &[bind_slot.clone(), pure_expr()],
+                    &BTreeMap::new(),
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                );
+                (!effects.contains(&Effect::Io)).then_some(*label)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            hidden.is_empty(),
+            "bind-slot carriers hide effectful content: {hidden:?}"
+        );
+
+        let pure_cases = carrier_cases(pure_expr());
+        let invented = pure_cases
+            .iter()
+            .filter_map(|(label, bind_slot)| {
+                let effects = infer_let_effects(
+                    &[bind_slot.clone(), pure_expr()],
+                    &BTreeMap::new(),
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                );
+                effects.contains(&Effect::Io).then_some(*label)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            invented.is_empty(),
+            "bind-slot carrier traversal invents effects: {invented:?}"
+        );
     }
 
     #[test]
