@@ -168,22 +168,91 @@ def shard_fields(
     change_owned: list[owned.Identity],
     package_expansion: list[owned.Identity],
 ) -> dict:
-    change_owned_shards, planning = owned.change_owned_shard_plan(
+    baseline = duration_baseline()
+    change_owned_shards, change_owned_planning = owned.change_owned_shard_plan(
         change_owned,
-        duration_baseline(),
+        baseline,
+    )
+    expansion_shards, expansion_planning = owned.package_expansion_shard_plan(
+        package_expansion,
+        baseline,
     )
     return {
         "shard_planning": {
-            "change_owned": planning,
-            "package_expansion": {
-                "algorithm": owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
-            },
+            "change_owned": change_owned_planning,
+            "package_expansion": expansion_planning,
         },
         "shards": {
             "change_owned": change_owned_shards,
-            "package_expansion": owned.shard_map(package_expansion),
+            "package_expansion": expansion_shards,
         },
     }
+
+
+def set_package_expansion(
+    plan: dict,
+    identities: list[owned.Identity],
+    *,
+    weights: dict[owned.Identity, int] | None = None,
+) -> owned.DurationBaseline:
+    baseline = duration_baseline(weights)
+    standing_reuse = set(plan["standing_coverage_reuse"])
+    change_owned_shards, change_owned_planning = owned.change_owned_shard_plan(
+        [
+            owned.Identity.parse(value)
+            for value in plan["change_owned"]
+            if value not in standing_reuse
+        ],
+        baseline,
+    )
+    shards, planning = owned.package_expansion_shard_plan(
+        identities,
+        baseline,
+    )
+    plan["eligible_targets"] = sorted(
+        set(plan["eligible_targets"])
+        | {identity.canonical for identity in identities}
+    )
+    plan["package_expansion"] = sorted(
+        identity.canonical for identity in identities
+    )
+    plan["shard_planning"]["change_owned"] = change_owned_planning
+    plan["shard_planning"]["package_expansion"] = planning
+    plan["shards"]["change_owned"] = change_owned_shards
+    plan["shards"]["package_expansion"] = shards
+    return baseline
+
+
+def set_colocated_package_expansion(
+    plan: dict,
+    identities: list[owned.Identity],
+) -> tuple[int, owned.DurationBaseline]:
+    anchors = [
+        owned.Identity(f"anchor-{index}", "heavy")
+        for index in range(len(owned.SHARDS) - 1)
+    ]
+    weights = {
+        **{anchor: 1_000_000 for anchor in anchors},
+        **{identity: 1_000 for identity in identities},
+    }
+    baseline = set_package_expansion(
+        plan,
+        [*anchors, *identities],
+        weights=weights,
+    )
+    shard = next(
+        shard
+        for shard in owned.SHARDS
+        if identities[0].canonical
+        in plan["shards"]["package_expansion"][str(shard)]
+    )
+    if not all(
+        identity.canonical
+        in plan["shards"]["package_expansion"][str(shard)]
+        for identity in identities
+    ):
+        raise AssertionError("fixture targets were not assigned together")
+    return shard, baseline
 
 
 class SchemaTests(unittest.TestCase):
@@ -1570,11 +1639,7 @@ packages = ["chelis-cli", "chelis-e2e"]
 class ShardingAndExecutionTests(unittest.TestCase):
     def test_expansion_deadline_preserves_receipts_at_every_command_boundary(self) -> None:
         identity = owned.Identity("p", "smoke")
-        shard = owned.shard_for(identity)
-        later = next(
-            owned.Identity("q", f"z{n}") for n in range(100)
-            if owned.shard_for(owned.Identity("q", f"z{n}")) == shard
-        )
+        later = owned.Identity("q", "later")
         for expired_call, truncated_junit in (
             (0, False), (1, False), (2, False), (3, False),
             (4, False), (4, True), (None, False),
@@ -1583,9 +1648,10 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 root = Path(tmp)
                 target = root / "target"
                 plan = self._plan(lane="package-expansion")
-                plan["eligible_targets"].append(later.canonical)
-                plan["package_expansion"].append(later.canonical)
-                plan["shards"]["package_expansion"] = owned.shard_map([identity, later])
+                shard, fixture_baseline = set_colocated_package_expansion(
+                    plan,
+                    [identity, later],
+                )
                 owned.attach_plan_digest(plan)
                 calls = []
 
@@ -1626,6 +1692,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     receipt = owned.execute_shard(
                         plan, lane="package-expansion", shard=shard,
                         output=root / "receipt", repo=root, runner=run,
+                        duration_baseline=fixture_baseline,
                     )
                 self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
                 self.assertEqual(receipt["selected_targets"], [identity.canonical, later.canonical])
@@ -1639,7 +1706,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     commands = json.loads((root / "receipt/commands.json").read_text())
                     self.assertEqual(commands[-1]["stdout"], "partial stdout")
                     self.assertEqual(commands[-1]["stderr"], "partial stderr")
-                    summary = owned.summarize_package_expansion(plan, [receipt])
+                    summary = owned.summarize_package_expansion(
+                        plan,
+                        [receipt],
+                        duration_baseline=fixture_baseline,
+                    )
                     self.assertFalse(summary["observed_success"])
                 if expired_call in (3, 4):
                     self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
@@ -1668,7 +1739,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
         ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
             receipt = owned.execute_shard(
                 plan, lane="package-expansion",
-                shard=owned.shard_for(owned.Identity("p", "smoke")),
+                shard=next(
+                    shard
+                    for shard in owned.SHARDS
+                    if "p::smoke"
+                    in plan["shards"]["package_expansion"][str(shard)]
+                ),
                 output=Path(tmp), repo=Path(tmp), runner=run,
             )
         self.assertEqual(len(calls), 1)
@@ -1698,7 +1774,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
         ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
             receipt = owned.execute_shard(
                 plan, lane="package-expansion",
-                shard=owned.shard_for(owned.Identity("p", "smoke")),
+                shard=next(
+                    shard
+                    for shard in owned.SHARDS
+                    if "p::smoke"
+                    in plan["shards"]["package_expansion"][str(shard)]
+                ),
                 output=Path(tmp), repo=Path(tmp), runner=run,
             )
         self.assertEqual(len(calls), 2)
@@ -1776,6 +1857,39 @@ class ShardingAndExecutionTests(unittest.TestCase):
         counts = [len(shards[str(shard)]) for shard in owned.SHARDS]
         self.assertLessEqual(max(counts) - min(counts), 1)
 
+    def test_package_expansion_uses_duration_balancing(self) -> None:
+        slow: list[owned.Identity] = []
+        index = 0
+        while len(slow) < len(owned.SHARDS):
+            identity = owned.Identity("p", f"slow_{index}")
+            if owned.shard_for(identity) == 0:
+                slow.append(identity)
+            index += 1
+        ordinary = [owned.Identity("p", f"ordinary_{n}") for n in range(40)]
+        weights = {
+            identity: 100_000 if identity in slow else 5_000
+            for identity in slow + ordinary
+        }
+        shards, planning = owned.package_expansion_shard_plan(
+            weights,
+            duration_baseline(weights),
+        )
+        hash_loads = {str(shard): 0 for shard in owned.SHARDS}
+        for identity, milliseconds in weights.items():
+            hash_loads[str(owned.shard_for(identity))] += milliseconds
+        self.assertEqual(
+            planning["algorithm"],
+            owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+        )
+        self.assertLess(
+            max(planning["estimated_milliseconds"].values()),
+            max(hash_loads.values()),
+        )
+        self.assertEqual(
+            sorted(row for rows in shards.values() for row in rows),
+            sorted(identity.canonical for identity in weights),
+        )
+
     def test_plan_rejects_duration_assignment_tampering(self) -> None:
         plan = self._plan()
         source = next(
@@ -1788,6 +1902,25 @@ class ShardingAndExecutionTests(unittest.TestCase):
         plan["shards"]["change_owned"][str(target)].append(canonical)
         owned.attach_plan_digest(plan)
         with self.assertRaisesRegex(ValueError, "duration planning"):
+            owned.verify_plan_digest(plan)
+
+    def test_plan_rejects_package_expansion_duration_assignment_tampering(
+        self,
+    ) -> None:
+        plan = self._plan(lane="package-expansion")
+        source = next(
+            shard
+            for shard in owned.SHARDS
+            if plan["shards"]["package_expansion"][str(shard)]
+        )
+        target = (source + 1) % len(owned.SHARDS)
+        canonical = plan["shards"]["package_expansion"][str(source)].pop()
+        plan["shards"]["package_expansion"][str(target)].append(canonical)
+        owned.attach_plan_digest(plan)
+        with self.assertRaisesRegex(
+            ValueError,
+            "package-expansion duration planning",
+        ):
             owned.verify_plan_digest(plan)
 
     def test_commands_are_package_scoped_and_apply_only_exact_test_exclusions(self) -> None:
@@ -1818,7 +1951,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "all",
         )
 
-    def test_expansion_groups_ordinary_targets_by_package_only(self) -> None:
+    def test_expansion_groups_are_package_scoped_and_bounded(self) -> None:
         ordinary = (
             owned.Identity("p", "alpha"),
             owned.Identity("p", "beta"),
@@ -1869,24 +2002,155 @@ class ShardingAndExecutionTests(unittest.TestCase):
             ["alpha", "beta"],
         )
 
+        many = [owned.Identity("p", f"target_{index:02}") for index in range(80)]
+        baseline = duration_baseline(
+            {identity: 30_000 for identity in many}
+        )
+        shards, planning = owned.package_expansion_shard_plan(many, baseline)
+        selected = max(shards.values(), key=len)
+        plan["shard_planning"]["package_expansion"] = planning
+        chunked = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=selected,
+        )
+        self.assertGreater(len(chunked), 1)
+        self.assertTrue(
+            all(
+                len(group) <= owned.PACKAGE_EXPANSION_GROUP_TARGET_LIMIT
+                for group in chunked
+            )
+        )
+        self.assertTrue(
+            all(
+                sum(
+                    planning["weights_milliseconds"][identity.canonical]
+                    for identity in group
+                )
+                <= owned.PACKAGE_EXPANSION_GROUP_ESTIMATED_MILLISECONDS
+                for group in chunked
+            )
+        )
+        self.assertEqual(
+            sorted(identity.canonical for group in chunked for identity in group),
+            sorted(selected),
+        )
+
+    def test_same_package_deadline_preserves_completed_chunks(self) -> None:
+        first = owned.Identity("p", "a_first")
+        second = owned.Identity("p", "z_second")
+        fillers = [
+            owned.Identity("p", "b_filler"),
+            owned.Identity("p", "c_filler"),
+            owned.Identity("p", "d_filler"),
+        ]
+        identities = [first, *fillers, second]
+        plan = self._plan(lane="package-expansion")
+        fixture_baseline = set_package_expansion(
+            plan,
+            identities,
+            weights={identity: 1_000 for identity in identities},
+        )
+        shard = next(
+            shard
+            for shard in owned.SHARDS
+            if first.canonical
+            in plan["shards"]["package_expansion"][str(shard)]
+        )
+        self.assertIn(
+            second.canonical,
+            plan["shards"]["package_expansion"][str(shard)],
+        )
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "build":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            target = command[command.index("--test") + 1]
+            if command[2] == "list":
+                payload = {
+                    "rust-suites": {
+                        f"p::{target}": {
+                            "testcases": {
+                                "case": {
+                                    "ignored": False,
+                                    "filter-match": {"status": "matches"},
+                                }
+                            }
+                        }
+                    }
+                }
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(payload),
+                    "",
+                )
+            if target == "z_second":
+                raise subprocess.TimeoutExpired(
+                    command,
+                    kwargs.get("timeout", 0),
+                    output="",
+                    stderr="",
+                )
+            junit = Path(os.environ["CARGO_TARGET_DIR"]) / "nextest/ci-full/junit.xml"
+            junit.parent.mkdir(parents=True, exist_ok=True)
+            junit.write_text(
+                '<testsuite><testcase name="case" '
+                'classname="p::a_first"/></testsuite>'
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(
+                os.environ,
+                {"CARGO_TARGET_DIR": str(Path(tmp) / "target")},
+            ),
+            mock.patch.object(owned, "_commit", return_value="b" * 40),
+            mock.patch.object(
+                owned,
+                "PACKAGE_EXPANSION_GROUP_TARGET_LIMIT",
+                1,
+            ),
+        ):
+            receipt = owned.execute_shard(
+                plan,
+                lane="package-expansion",
+                shard=shard,
+                output=Path(tmp) / "receipt",
+                repo=Path(tmp),
+                runner=run,
+                duration_baseline=fixture_baseline,
+            )
+        self.assertFalse(receipt["success"])
+        self.assertEqual(receipt["executed_targets"], [first.canonical])
+        self.assertEqual(receipt["executed_tests"], ["p::a_first::case"])
+        self.assertIn("execution deadline", " ".join(receipt["failures"]))
+        self.assertEqual(
+            [
+                command[command.index("--test") + 1]
+                for command in calls
+                if "--test" in command and command[2] == "run"
+            ],
+            ["a_first", "z_second"],
+        )
+
     def test_package_batch_preserves_exact_targets_tests_and_missing_results(self) -> None:
         identity = owned.Identity("p", "smoke")
-        sibling = next(
-            owned.Identity("p", f"z{index}")
-            for index in range(100)
-            if owned.shard_for(owned.Identity("p", f"z{index}"))
-            == owned.shard_for(identity)
-        )
+        sibling = owned.Identity("p", "sibling")
         for outcome in ("complete", "missing", "skipped"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target = root / "target"
                 plan = self._plan(lane="package-expansion")
-                plan["eligible_targets"].append(sibling.canonical)
-                plan["package_expansion"].append(sibling.canonical)
                 plan["test_exclusions"] = []
-                plan["shards"]["package_expansion"] = owned.shard_map(
-                    [identity, sibling]
+                shard, fixture_baseline = set_colocated_package_expansion(
+                    plan,
+                    [identity, sibling],
                 )
                 owned.attach_plan_digest(plan)
                 calls = []
@@ -1951,10 +2215,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     receipt = owned.execute_shard(
                         plan,
                         lane="package-expansion",
-                        shard=owned.shard_for(identity),
+                        shard=shard,
                         output=root / "receipt",
                         repo=root,
                         runner=run,
+                        duration_baseline=fixture_baseline,
                     )
                 self.assertEqual(len(calls), 3)
                 self.assertEqual(calls[1].count("--test"), 2)
@@ -2244,6 +2509,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
         plan = self._plan(lane="package-expansion")
         plan["test_exclusions"] = []
         owned.attach_plan_digest(plan)
+        shard = next(
+            shard
+            for shard in owned.SHARDS
+            if identity.canonical
+            in plan["shards"]["package_expansion"][str(shard)]
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             calls: list[list[str]] = []
@@ -2283,7 +2554,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 receipt = owned.execute_shard(
                     plan,
                     lane="package-expansion",
-                    shard=owned.shard_for(identity),
+                    shard=shard,
                     output=root / "receipt",
                     repo=root,
                     runner=run,
@@ -2306,18 +2577,12 @@ class ShardingAndExecutionTests(unittest.TestCase):
         self,
     ) -> None:
         ignored = owned.Identity("p", "smoke")
-        active = next(
-            owned.Identity("p", f"z{index}")
-            for index in range(100)
-            if owned.shard_for(owned.Identity("p", f"z{index}"))
-            == owned.shard_for(ignored)
-        )
+        active = owned.Identity("p", "active")
         plan = self._plan(lane="package-expansion")
-        plan["eligible_targets"].append(active.canonical)
-        plan["package_expansion"].append(active.canonical)
         plan["test_exclusions"] = []
-        plan["shards"]["package_expansion"] = owned.shard_map(
-            [ignored, active]
+        shard, fixture_baseline = set_colocated_package_expansion(
+            plan,
+            [ignored, active],
         )
         owned.attach_plan_digest(plan)
         with tempfile.TemporaryDirectory() as tmp:
@@ -2381,10 +2646,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 receipt = owned.execute_shard(
                     plan,
                     lane="package-expansion",
-                    shard=owned.shard_for(ignored),
+                    shard=shard,
                     output=root / "receipt",
                     repo=root,
                     runner=run,
+                    duration_baseline=fixture_baseline,
                 )
 
             self.assertTrue(receipt["success"], receipt["failures"])
@@ -2657,7 +2923,12 @@ class BoundedCommandTests(unittest.TestCase):
                 ):
                     receipt = owned.execute_shard(
                         plan, lane="package-expansion",
-                        shard=owned.shard_for(owned.Identity("p", "smoke")),
+                        shard=next(
+                            shard
+                            for shard in owned.SHARDS
+                            if "p::smoke"
+                            in plan["shards"]["package_expansion"][str(shard)]
+                        ),
                         output=root / "receipt", repo=root,
                     )
                 self.assertFalse(receipt["success"])
@@ -2874,34 +3145,40 @@ class ReportTests(unittest.TestCase):
             )
 
     def test_informational_summary_records_failures_but_does_not_raise(self) -> None:
-        self.plan["package_expansion"] = ["p::default_gated"]
-        self.plan["eligible_targets"].append("p::default_gated")
-        self.plan["shards"]["package_expansion"] = owned.shard_map(
-            [owned.Identity("p", "default_gated")]
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
         )
         owned.attach_plan_digest(self.plan)
         receipts = self.receipts(surface="package_expansion")
         receipts[0]["success"] = False
         receipts[0]["failures"] = ["timeout"]
         owned.attach_receipt_digest(receipts[0])
-        summary = owned.summarize_package_expansion(self.plan, receipts[:-1])
+        summary = owned.summarize_package_expansion(
+            self.plan,
+            receipts[:-1],
+            duration_baseline=fixture_baseline,
+        )
         self.assertFalse(summary["observed_success"])
         self.assertFalse(summary["success"])
         self.assertFalse(summary["required"])
         self.assertTrue(summary["failures"])
 
     def test_informational_summary_records_soft_budget_overrun(self) -> None:
-        self.plan["package_expansion"] = ["p::default_gated"]
-        self.plan["eligible_targets"].append("p::default_gated")
-        self.plan["shards"]["package_expansion"] = owned.shard_map(
-            [owned.Identity("p", "default_gated")]
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
         )
         owned.attach_plan_digest(self.plan)
         receipts = self.receipts(surface="package_expansion")
         receipts[0]["elapsed_seconds"] = 901.0
         receipts[0]["soft_budget_exceeded"] = True
         owned.attach_receipt_digest(receipts[0])
-        summary = owned.summarize_package_expansion(self.plan, receipts)
+        summary = owned.summarize_package_expansion(
+            self.plan,
+            receipts,
+            duration_baseline=fixture_baseline,
+        )
         self.assertFalse(summary["observed_success"])
         self.assertTrue(
             any("soft budget" in finding for finding in summary["failures"])
@@ -2927,10 +3204,9 @@ class ReportTests(unittest.TestCase):
                 owned.load_receipts(root)
 
     def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
-        self.plan["package_expansion"] = ["p::default_gated"]
-        self.plan["eligible_targets"].append("p::default_gated")
-        self.plan["shards"]["package_expansion"] = owned.shard_map(
-            [owned.Identity("p", "default_gated")]
+        set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
         )
         owned.attach_plan_digest(self.plan)
         with tempfile.TemporaryDirectory() as tmp:

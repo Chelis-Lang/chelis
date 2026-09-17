@@ -40,6 +40,9 @@ def plan() -> dict:
         [],
         baseline,
     )
+    expansion_shards, expansion_planning = (
+        owned.package_expansion_shard_plan([], baseline)
+    )
     result = {
         "version": owned.PLAN_VERSION,
         "mode": "pull_request",
@@ -61,13 +64,11 @@ def plan() -> dict:
         "test_exclusions": [],
         "shard_planning": {
             "change_owned": change_owned_planning,
-            "package_expansion": {
-                "algorithm": owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
-            },
+            "package_expansion": expansion_planning,
         },
         "shards": {
             "change_owned": change_owned_shards,
-            "package_expansion": owned.shard_map([]),
+            "package_expansion": expansion_shards,
         },
     }
     owned.attach_plan_digest(result)
