@@ -178,7 +178,7 @@ fn stub_sig_argmax_argmin_shape_returns_int64_indices_at_all_arithmetic_input_dt
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("argreduce.ch");
             let src = format!(
-                "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
+                "sig {op}[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, i64]\n\
                  def {op}(xs, axis) = fail(\"stub\")\n\
                  def call_{op}(xs: &tensor[2, 3, {dtype}]) -> tensor[3, i64] =\n  \
                  {op}(xs, cast(0, i32))\n"
@@ -265,7 +265,7 @@ fn neg_reduce_rejects_mismatched_input_output_precision() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("neg_reduce.ch");
         let src = format!(
-            "sig {op}: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
+            "sig {op}[a, b, p]: &tensor[a, b, p] -> i32 -> tensor[b, p]\n\
              def {op}(xs, axis) = fail(\"stub\")\n\
              def bad(xs: &tensor[2, 3, {input_dtype}]) -> tensor[3, f32] =\n  \
              {op}(xs, cast(0, i32))\n"

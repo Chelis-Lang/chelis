@@ -9901,7 +9901,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     write_file(
         &path,
         "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
-         g: tensor[n, f32] = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
+         g = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -9934,6 +9934,10 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
+    assert!(
+        !used.is_empty(),
+        "the fixture must retain a symbolic generated-C extent; generated source:\n{source}"
+    );
     let mut declared: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(idx) = line.find("int64_t ")

@@ -167,7 +167,11 @@ fn cases() -> Vec<Case> {
         .map(|case| {
             let mut case = case.clone();
             case.id = format!("polymorphic.{}", case.id);
-            case.source = case.source.replace("rows", "n").replace("cols", "m");
+            case.source = case
+                .source
+                .replace("rows", "n")
+                .replace("cols", "m")
+                .replacen("def f(", "def f[n, m](", 1);
             case.signature = Some(if case.issue == 1374 {
                 "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]"
             } else {
@@ -248,11 +252,12 @@ fn cases() -> Vec<Case> {
         ("broadcast.symbolic", "shape(xs, 0i32)"),
     ] {
         let dim = if id == "broadcast.literal" { "3" } else { "n" };
+        let binders = if dim == "n" { "[n]" } else { "" };
         add(
             id,
             1619,
             &format!(
-                "sig f: tensor[{dim}, f32] -> tensor[{dim}, bool]\ndef f(xs) = gt(xs, expand(to_tensor([1.5f32]), 0i32, {size}))\nout = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+                "sig f{binders}: tensor[{dim}, f32] -> tensor[{dim}, bool]\ndef f(xs) = gt(xs, expand(to_tensor([1.5f32]), 0i32, {size}))\nout = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
             ),
             None,
             Expected::Tensor(vec![3], vec![0.0, 1.0, 1.0]),
@@ -2433,7 +2438,7 @@ fn omitted_extent_claim_contract() {
             }
             let g = "def g[n](b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
             for (form, def, discarded) in [
-                ("shape", g.replace("def g(", "def f("), false),
+                ("shape", g.replace("def g[n](", "def f[n]("), false),
                 (
                     "nested",
                     format!(
