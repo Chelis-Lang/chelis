@@ -609,18 +609,11 @@ impl<'a> EvalContext<'a> {
                 format!("host runtime `{kind_label}` evaluation failed: {error}")
             }
         })?;
-        // chelis#377: a served capture's value must match the rank its `Load`
-        // node was typed with. The vmap lane prepends the batch axis to a
-        // captured binding's `Load` (typing top-level `w` as `[batch, ..]`)
-        // while the served value keeps its declared rank (`[..]`). Chelis has
-        // no implicit broadcasting, so that rank mismatch is unsatisfiable:
-        // before this guard it reached an elementwise op and PANICKED the
-        // evaluator's shape assertion (`binary_map` left:[batch,..] right:[..]).
-        // Reject it here with a clean diagnostic instead. Correct
-        // vmap-with-captures must BROADCAST the capture across the batch axis,
-        // not batch it — the remaining tracked residual (chelis#377). The grad
-        // lane is unaffected: a captured binding's `Load` keeps its declared
-        // rank there, so the ranks match and this never fires.
+        // A served capture must match its authored-rank `Load`. Capture-aware
+        // vmap preserves that raw load and gives its mapped identity an
+        // explicit rank-inserting movement, so the batch axis never widens the
+        // load contract itself. Keep this guard as a defensive invariant check
+        // before an inconsistent DAG can reach elementwise evaluation.
         for node in dag.nodes() {
             let chelis_ir::dag::RiscOp::Load { name } = &node.op else {
                 continue;
@@ -633,11 +626,9 @@ impl<'a> EvalContext<'a> {
                     TransformKind::Vmap => "vmap",
                 };
                 return Err(format!(
-                    "host runtime: `{kind_label}(...)` over a def capturing top-level \
-                     binding `{name}` is unsupported: the transform types the capture as \
-                     rank {} (batched) but the binding is rank {}. vmap-with-captures must \
-                     broadcast the capture across the batch axis, not batch it (tracked \
-                     residual, chelis#377).",
+                    "host runtime: `{kind_label}(...)` capture rank invariant failed for \
+                     top-level binding `{name}`: the authored `Load` expects rank {} but the \
+                     binding has rank {}.",
                     node.output_type.dims.len(),
                     value.shape.len(),
                 ));

@@ -751,19 +751,15 @@ impl<'a> EvalContext<'a> {
                     let captured = self.resolve_top_level(&input.name)?;
                     let staged_value =
                         stage_kernel_argument(name, &input.name, &captured, input.ty.precision)?;
-                    // chelis#377: a `vmap` inside the body types a captured
-                    // binding's `Load` at the batched rank while the binding
-                    // keeps its declared rank; the transforms reject that
-                    // before evaluation (`apply_transform`), and so does the
-                    // kernel path, with the same diagnostic, rather than
-                    // reaching an elementwise op with disagreeing operands.
+                    // A captured kernel input keeps its authored rank. Any
+                    // mapped batch lift is an explicit consumer inside the
+                    // DAG, never a widened `Load` contract. Keep this guard as
+                    // a defensive invariant check before evaluation.
                     if staged_value.shape.len() != input.ty.dims.len() {
                         return Err(format!(
-                            "host runtime: kernel `{name}` over a def capturing top-level \
-                             binding `{}` is unsupported: the kernel types the capture as \
-                             rank {} but the binding is rank {}. vmap-with-captures must \
-                             broadcast the capture across the batch axis, not batch it \
-                             (tracked residual, chelis#377).",
+                            "host runtime: kernel `{name}` capture rank invariant failed for \
+                             top-level binding `{}`: the authored-rank input expects rank {} \
+                             but the binding has rank {}.",
                             input.name,
                             input.ty.dims.len(),
                             staged_value.shape.len(),
