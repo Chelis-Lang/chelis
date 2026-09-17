@@ -3644,8 +3644,14 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
         describe_value(&RuntimeValue::MappedFile(vec![1, 2, 3])),
         "<mapped-file:3>"
     );
+    let checked_function = chelis_deep::parser::parse_str(
+        "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
+    )
+    .expect("parse checked function fixture")
+    .remove(0);
     assert_eq!(
         describe_value(&RuntimeValue::Closure {
+            checked_function: Box::new(checked_function),
             params: vec!["x".to_string()],
             param_types: vec![None],
             return_type: None,

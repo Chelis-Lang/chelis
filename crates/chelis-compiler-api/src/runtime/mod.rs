@@ -172,6 +172,11 @@ pub enum RuntimeValue {
     },
     MappedFile(Vec<u8>),
     Closure {
+        /// Exact checked `(fn ...)` expression that produced this closure.
+        /// Transform lowering reuses this carrier directly: rebuilding a
+        /// function from `params` and `body` drops checker-owned parameter
+        /// and callable metadata (chelis#676).
+        checked_function: Box<Expr>,
         params: Vec<String>,
         /// Declared Deep type expression per param, when the `(fn ...)`
         /// carried checker-annotated `{type: ...}` param metadata.
@@ -788,6 +793,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
     let body_is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
     match value {
         RuntimeValue::Closure {
+            checked_function,
             params,
             param_types,
             return_type,
@@ -798,6 +804,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             precision_env,
             def_name: None,
         } if body_is_fn => RuntimeValue::Closure {
+            checked_function,
             params,
             param_types,
             return_type,

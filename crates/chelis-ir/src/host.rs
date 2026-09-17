@@ -11613,7 +11613,16 @@ fn lower_app_host_expr(
     let has_callable_params = fn_sig
         .as_ref()
         .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
-    let helper_summary_rejects = top_level_fn_helper_summary_rejects(program, &name)?;
+    // A function-valued formal has no tensor-helper representation. Probing
+    // its standalone summary before the call-site inline path also erases the
+    // concrete callable captured by a nested transform target (chelis#676).
+    // Both helper branches below already exclude this case; keep summary
+    // preparation behind the same boundary.
+    let helper_summary_rejects = if has_callable_params {
+        false
+    } else {
+        top_level_fn_helper_summary_rejects(program, &name)?
+    };
     // A call into a staged function must retain that function's shared plan.
     // Re-extracting a tensor-only summary here loses its host scalar producers
     // and the claims attached before the original graph was partitioned.

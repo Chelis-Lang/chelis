@@ -348,16 +348,21 @@ impl<'a> EvalContext<'a> {
             .zip(placeholder_types.iter().cloned())
             .collect();
 
-        // Build a fresh `program_defs` that includes both top-level
-        // defs from the host runtime AND any captured local closures
-        // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
-        // resolves `target` when the inner DAG lowering reaches it).
+        // Build a fresh `program_defs` that includes both top-level defs from
+        // the host runtime AND any captured local closures. The closure owns
+        // the exact checked function expression: reconstructing one from only
+        // parameter names and the body erases parameter types and the checked
+        // function signature. A nested function-valued capture then reaches
+        // lowering as rank zero and corrupts the backward DAG (chelis#676).
         let mut program_defs = self.top_level_defs.clone();
         for (name, value) in captured_env.to_sorted() {
-            if let RuntimeValue::Closure { params, body, .. } = value {
+            if let RuntimeValue::Closure {
+                checked_function, ..
+            } = value
+            {
                 program_defs
                     .entry(name.clone())
-                    .or_insert_with(|| synth_fn_expr(params, body));
+                    .or_insert_with(|| checked_function.as_ref().clone());
             }
         }
 
@@ -1565,39 +1570,6 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
             span,
         ),
     }
-}
-
-/// Synthesize a `(fn {} (params {} <p>...) <body>)` Deep expression
-/// from a host-runtime closure's params + body. Used when injecting
-/// captured local closures into the IR `program_defs` table.
-fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
-    let span = body.span();
-    let param_exprs = params
-        .iter()
-        .map(|name| Expr::Atom(Atom::Name(name.clone()), span))
-        .collect::<Vec<_>>();
-    let mut params_elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::Params), span),
-        Expr::Map(Metadata::default(), span),
-    ];
-    params_elements.extend(param_exprs);
-    let params_list = Expr::List(
-        List {
-            elements: params_elements,
-        },
-        span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Fn), span),
-                Expr::Map(Metadata::default(), span),
-                params_list,
-                body.clone(),
-            ],
-        },
-        span,
-    )
 }
 
 pub(super) fn var_name(expr: &Expr) -> Option<&str> {
