@@ -84,6 +84,11 @@ pub enum SizeProvenance {
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
     binders: Option<UnordSet<String>>,
+    /// Declaration-owned type identities visible to ordinary body
+    /// annotations. A name that occurs as `t-var` in the outer signature is
+    /// the fresh instantiation of that occurrence; an unbounded listed name
+    /// absent there receives an independent fresh identity before body
+    /// inference. Dimension and rank identities remain position-specific.
     type_vars: UnordMap<String, TypeVar>,
 }
 
@@ -628,6 +633,37 @@ impl Env {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Complete one declaration's body-local type-binder identities from its
+    /// structural `defsig` binder list.
+    ///
+    /// [04-INF-6] scopes every listed unbounded binder through the body even
+    /// when the outer signature never mentions it. Occurrence-derived scheme
+    /// mappings therefore supply only part of the answer: preserve those
+    /// identities, then mint one fresh type identity for every remaining
+    /// listed name. The binder list is unkinded, so this does not prevent the
+    /// same spelling from independently denoting a dimension or rank in those
+    /// positions.
+    pub(crate) fn declared_type_names_for_body(
+        &self,
+        name: &str,
+        binder_names: &UnordSet<String>,
+        tvar_mapping: &[(TypeVar, Type)],
+        var_gen: &mut VarGen,
+    ) -> UnordMap<TypeVar, String> {
+        let mut type_names = self.declared_type_names_for(name, tvar_mapping);
+        let present = type_names
+            .to_sorted()
+            .into_iter()
+            .map(|(_, source_name)| source_name.clone())
+            .collect::<UnordSet<_>>();
+        for source_name in binder_names.to_sorted() {
+            if !present.contains(source_name) {
+                type_names.insert(var_gen.fresh_tvar(), source_name.clone());
+            }
+        }
+        type_names
     }
 
     /// Park the composed map for the definition now being inferred, so the

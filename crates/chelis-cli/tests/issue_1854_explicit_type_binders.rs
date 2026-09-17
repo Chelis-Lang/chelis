@@ -390,6 +390,125 @@ fn declared_surf_type_binders_and_active_primitives_score_one() {
 }
 
 #[test]
+fn cli_preserves_and_checks_body_only_surf_binders() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source, binder, annotation) in [
+        (0, "def maker[p]() = fn (x: p) -> x\n", "p", "(t-var {} p)"),
+        (
+            1,
+            "def maker[n]() = fn (x: tensor[n, f32]) -> x\n",
+            "n",
+            "(d-var {} n)",
+        ),
+        (
+            2,
+            "def maker[r]() = fn (x: tensor[..r, f32]) -> x\n",
+            "r",
+            "(d-rank {} r)",
+        ),
+    ] {
+        let path = format!("body-only-{index}.ch");
+        fs::write(dir.path().join(&path), source).expect("write Surf fixture");
+
+        let deep = run(dir.path(), &["deep", &path]);
+        assert!(
+            deep.status.success(),
+            "`chelis deep` failed: {}",
+            text(&deep)
+        );
+        let rendered = String::from_utf8_lossy(&deep.stdout);
+        assert!(
+            rendered.contains(&format!("(defsig {{}} maker ({binder}) "))
+                && rendered.contains(annotation),
+            "`chelis deep` dropped a body-only declaration binder: {rendered}"
+        );
+
+        let checked = check_json(dir.path(), &path);
+        assert_eq!(
+            checked["score"].as_f64(),
+            Some(1.0),
+            "`chelis check` rejected a body-only binder: {checked}"
+        );
+    }
+}
+
+#[test]
+fn cli_checks_canonical_deep_body_only_binders_and_rejects_undeclared_neighbors() {
+    let dir = tempdir().expect("tempdir");
+    for (index, binder, annotation) in [
+        (0, "p", "(t-var {} p)"),
+        (1, "n", "(t-tensor {} (d-var {} n) (t-prim {} f32))"),
+        (2, "r", "(t-tensor {} (d-rank {} r) (t-prim {} f32))"),
+    ] {
+        let declared_path = format!("deep-body-only-{index}.dp");
+        fs::write(
+            dir.path().join(&declared_path),
+            format!(
+                "(defsig {{}} maker ({binder}) (t-fn {{}} (t-var {{}} _)))
+                 (def {{}}
+                   maker
+                   (fn {{}}
+                     (params {{}})
+                     (fn {{}}
+                       (params {{}} (x {{type: {annotation}}}))
+                       (var {{}} x))))\n"
+            ),
+        )
+        .expect("write declared Deep fixture");
+        let declared = check_json(dir.path(), &declared_path);
+        assert_eq!(
+            declared["score"].as_f64(),
+            Some(1.0),
+            "canonical Deep body-only `{binder}` must check: {declared}"
+        );
+
+        let undeclared_path = format!("deep-body-undeclared-{index}.dp");
+        fs::write(
+            dir.path().join(&undeclared_path),
+            format!(
+                "(defsig {{}} maker (t-fn {{}} (t-var {{}} _)))
+                 (def {{}}
+                   maker
+                   (fn {{}}
+                     (params {{}})
+                     (fn {{}}
+                       (params {{}} (x {{type: {annotation}}}))
+                       (var {{}} x))))\n"
+            ),
+        )
+        .expect("write undeclared Deep fixture");
+        let undeclared = check_json(dir.path(), &undeclared_path);
+        let messages = error_messages(&undeclared);
+        assert!(
+            messages.len() == 1
+                && messages[0].contains(&format!("`{binder}`"))
+                && messages[0].contains("undeclared"),
+            "an ordinary body annotation must not declare `{binder}`: {undeclared}"
+        );
+
+        let surf_path = format!("surf-body-undeclared-{index}.ch");
+        let surf_annotation = match binder {
+            "p" => "p",
+            "n" => "tensor[n, f32]",
+            "r" => "tensor[..r, f32]",
+            _ => unreachable!("closed test table"),
+        };
+        fs::write(
+            dir.path().join(&surf_path),
+            format!("def maker() = fn (x: {surf_annotation}) -> x\n"),
+        )
+        .expect("write undeclared Surf fixture");
+        let surf_undeclared = check_json(dir.path(), &surf_path);
+        assert!(
+            error_messages(&surf_undeclared)
+                .iter()
+                .any(|message| message.contains(&format!("`{binder}`"))),
+            "Surf body annotation must not declare `{binder}`: {surf_undeclared}"
+        );
+    }
+}
+
+#[test]
 fn deep_defsig_wrong_arity_reaches_the_cli_contract_owner() {
     let dir = tempdir().expect("tempdir");
     for (index, source, actual) in [

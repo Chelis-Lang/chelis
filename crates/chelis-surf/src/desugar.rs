@@ -1237,7 +1237,8 @@ impl DesugarCtx {
         // scope may come from this def or its standalone sig.
         let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
-        let synthesize_signature = (params.iter().any(|param| param.ty.is_some())
+        let synthesize_signature = (!type_binders.is_empty()
+            || params.iter().any(|param| param.ty.is_some())
             || ret_ty.is_some()
             || effects.is_some()
             || declares_bound)
@@ -1289,10 +1290,12 @@ impl DesugarCtx {
         // defsig binding) would overwrite the concrete explicit sig, dropping
         // the body-vs-signature contract on those positions. Suppress it and
         // let the explicit sig drive body validation.
-        // A declared bound forces the synthesized signature even when nothing
-        // else would: the bound has no other carrier, and a `defsig` whose
-        // positions are all wildcards still reports a bound naming a binder
-        // the declaration never uses.
+        // An explicit binder list forces the synthesized signature even when
+        // every outer type slot is omitted: `defsig` is the declaration's
+        // structural binder carrier, and P4b keeps those names in scope for
+        // ordinary body annotations. A declared bound additionally requires
+        // an occurrence in the declared type, so its existing validation
+        // remains stricter than the unbounded body-only case.
         if synthesize_signature {
             // The explicit clause is the only binder source. Variable-shaped
             // uses not present in it remain undeclared at Deep resolution.

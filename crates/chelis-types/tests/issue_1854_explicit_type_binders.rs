@@ -353,6 +353,158 @@ fn declaration_body_annotations_preserve_the_existing_role_sensitive_scope() {
 }
 
 #[test]
+fn body_only_surf_binders_check_at_both_ingresses() {
+    for source in [
+        "def maker[p]() = fn (x: p) -> x",
+        "def maker[n]() = fn (x: tensor[n, f32]) -> x",
+        "def maker[r]() = fn (x: tensor[..r, f32]) -> x",
+    ] {
+        let program = surf(source);
+        check_ir_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "normalized IR ingress must accept body-only binder in `{source}`: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must accept body-only binder in `{source}`: {:?}",
+                report.errors
+            )
+        });
+    }
+}
+
+#[test]
+fn body_only_type_binder_is_generalized_and_remains_rigid() {
+    let polymorphic = surf(
+        "def maker[p]() = fn (x: p) -> x\n\
+         int_result = (maker())(1i32)\n\
+         float_result = (maker())(1.0f32)",
+    );
+    check_ir_program(&polymorphic)
+        .expect("normalized IR ingress must generalize the body-only type binder");
+    check_typed_program(&polymorphic)
+        .expect("typed ingress must generalize the body-only type binder");
+
+    let narrowed = surf("def maker[p]() = fn (x: p) -> add(x, 1i32)");
+    let ir = diagnostics(check_ir_program(&narrowed));
+    let typed = diagnostics(check_typed_program(&narrowed));
+    assert_eq!(typed, ir, "body-only binder rigidity ingress parity");
+    assert!(
+        ir.iter().any(|diagnostic| {
+            diagnostic.message.contains("declared type parameter `p`")
+                && diagnostic.message.contains("[04-INF-6]")
+        }),
+        "a body-only authored binder must remain rigid: {ir:?}"
+    );
+}
+
+#[test]
+fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
+    for (source, name, needle) in [
+        (
+            "def maker() = fn (x: p) -> x",
+            "p",
+            "unknown primitive type",
+        ),
+        (
+            "def maker() = fn (x: tensor[n, f32]) -> x",
+            "n",
+            "undeclared dimension variable",
+        ),
+        (
+            "def maker() = fn (x: tensor[..r, f32]) -> x",
+            "r",
+            "undeclared rank variable",
+        ),
+    ] {
+        let program = surf(source);
+        let ir = diagnostics(check_ir_program(&program));
+        let typed = diagnostics(check_typed_program(&program));
+        assert_eq!(typed, ir, "undeclared Surf body-binder parity for `{name}`");
+        assert_eq!(ir.len(), 1, "`{name}` must have one owner: {ir:?}");
+        assert!(
+            ir[0].message.contains(needle) && ir[0].message.contains(&format!("`{name}`")),
+            "wrong undeclared Surf body-binder diagnostic: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_deep_body_only_binders_fill_a_wildcard_result_at_both_ingresses() {
+    for (binder, annotation) in [
+        ("p", "(t-var {} p)"),
+        ("n", "(t-tensor {} (d-var {} n) (t-prim {} f32))"),
+        ("r", "(t-tensor {} (d-rank {} r) (t-prim {} f32))"),
+    ] {
+        let program = parse_deep(&format!(
+            "(defsig {{}} maker ({binder}) (t-fn {{}} (t-var {{}} _)))
+             (def {{}}
+               maker
+               (fn {{}}
+                 (params {{}})
+                 (fn {{}}
+                   (params {{}} (x {{type: {annotation}}}))
+                   (var {{}} x))))"
+        ))
+        .expect("canonical Deep fixture must parse");
+        check_ir_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "normalized IR ingress must let body-only `{binder}` fill the wildcard: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must let body-only `{binder}` fill the wildcard: {:?}",
+                report.errors
+            )
+        });
+    }
+}
+
+#[test]
+fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
+    for (name, annotation, needle) in [
+        ("p", "(t-var {} p)", "undeclared type variable"),
+        (
+            "n",
+            "(t-tensor {} (d-var {} n) (t-prim {} f32))",
+            "undeclared dimension variable",
+        ),
+        (
+            "r",
+            "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+            "undeclared rank variable",
+        ),
+    ] {
+        let program = parse_deep(&format!(
+            "(defsig {{}} maker (t-fn {{}} (t-var {{}} _)))
+             (def {{}}
+               maker
+               (fn {{}}
+                 (params {{}})
+                 (fn {{}}
+                   (params {{}} (x {{type: {annotation}}}))
+                   (var {{}} x))))"
+        ))
+        .expect("canonical Deep fixture must parse");
+        let ir = diagnostics(check_ir_program(&program));
+        let typed = diagnostics(check_typed_program(&program));
+        assert_eq!(
+            typed, ir,
+            "undeclared body-binder ingress parity for `{name}`"
+        );
+        assert_eq!(ir.len(), 1, "`{name}` must have one owner: {ir:?}");
+        assert!(
+            ir[0].message.contains(needle) && ir[0].message.contains(&format!("`{name}`")),
+            "wrong undeclared body-binder diagnostic: {ir:?}"
+        );
+    }
+}
+
+#[test]
 fn explicit_deep_t_var_nodes_remain_valid_binders() {
     let program = parse_deep(
         "(defsig {} ident (float32)

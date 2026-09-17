@@ -141,6 +141,70 @@ fn declaration_body_annotations_reuse_bare_type_binders_without_broadening_tenso
 }
 
 #[test]
+fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
+    for (source, binder, annotation) in [
+        ("def maker[p]() = fn (x: p) -> x", "p", "(t-var {} p)"),
+        (
+            "def maker[n]() = fn (x: tensor[n, f32]) -> x",
+            "n",
+            "(d-var {} n)",
+        ),
+        (
+            "def maker[r]() = fn (x: tensor[..r, f32]) -> x",
+            "r",
+            "(d-rank {} r)",
+        ),
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains(&format!("(defsig {{}} maker ({binder}) "))
+                && rendered.contains("(t-fn {} (t-var {} _))")
+                && rendered.contains(annotation),
+            "P4b requires a body-only binder to retain a structural defsig carrier: \
+             {source}\n{rendered}"
+        );
+
+        let program = parse_deep(&rendered).expect("desugared Deep must parse");
+        let recovered = resugar_program(&program).expect("body-only binder carrier must resugar");
+        let redeep = print_canonical_flat(&desugar_program(&recovered));
+        assert!(
+            redeep.contains(&format!("(defsig {{}} maker ({binder}) "))
+                && redeep.contains(annotation),
+            "canonical Surf/Deep round-trip must preserve the body-only binder: \
+             {source}\n{redeep}"
+        );
+    }
+}
+
+#[test]
+fn body_annotations_without_a_declaration_binder_remain_unbound() {
+    for (source, variable, forbidden) in [
+        (
+            "def maker() = fn (x: p) -> x",
+            "(t-prim {} p)",
+            "(t-var {} p)",
+        ),
+        (
+            "def maker() = fn (x: tensor[n, f32]) -> x",
+            "(d-var {} n)",
+            "(defsig {} maker (n) ",
+        ),
+        (
+            "def maker() = fn (x: tensor[..r, f32]) -> x",
+            "(d-rank {} r)",
+            "(defsig {} maker (r) ",
+        ),
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains(variable) && !rendered.contains(forbidden),
+            "an ordinary body annotation must not manufacture a declaration binder: \
+             {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
 fn matching_def_cannot_declare_a_second_binder_list() {
     let error = parse_str(
         "sig ident[a]: a -> a\n\

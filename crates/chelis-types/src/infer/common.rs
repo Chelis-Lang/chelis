@@ -2409,12 +2409,14 @@ pub(super) fn infer_top_level(
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
         // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
-        // signature's AUTHORED type binders, keyed by the fresh variables the
-        // instantiation below mints. Empty when the signature authored none,
-        // in which case nothing in the declaration is rigid; an inference hole
-        // is never a member. The deferred-borrow drain reports on these fresh
-        // variables long after this instantiation, so the composed map is
-        // parked on `Env` below.
+        // signature's AUTHORED type binders, keyed by declaration-owned fresh
+        // variables. Outer-signature occurrences come from instantiation;
+        // unbounded names absent there are minted directly from the structural
+        // binder list so ordinary body annotations retain [04-INF-6] scope.
+        // Empty means the signature authored no binders; an inference hole is
+        // never a member. The deferred-borrow drain reports on these fresh
+        // variables long after this setup, so the composed map is parked on
+        // `Env` below.
         let binder_names = declared_signatures
             .get(&name)
             .map(|metadata| &metadata.binders);

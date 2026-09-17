@@ -151,7 +151,9 @@ impl<'a> PreparedRecursiveExpected<'a> {
         DeclaredMemberSetup {
             ty: Some(ty),
             dim_names: env.declared_dim_names_for(request.name, &dvar_mapping),
-            type_names: env.declared_type_names_for(request.name, &mapping),
+            type_names: request.binder_names.map_or_else(UnordMap::new, |binders| {
+                env.declared_type_names_for_body(request.name, binders, &mapping, var_gen)
+            }),
             caller_guard,
         }
     }
