@@ -403,11 +403,19 @@ impl<'a> EvalContext<'a> {
         // while invocation witnesses retain the authored parameter binders.
         // Give both routes the declared signature alongside checked types,
         // so the result claim still refers to its activation's witness.
-        let lowering = SubexprLoweringContext::new(
-            self.type_env.clone(),
-            program_defs,
-            self.declared_signatures.clone(),
-        );
+        let lowering = if let Some(session) = &self.session {
+            SubexprLoweringContext::from_checked_program(
+                session.program(),
+                program_defs,
+                self.declared_signatures.clone(),
+            )
+        } else {
+            SubexprLoweringContext::new(
+                self.type_env.clone(),
+                program_defs,
+                self.declared_signatures.clone(),
+            )
+        };
         let mut execution_plan = None;
         let lower_result = if profile == EvaluationProfile::FixedControl {
             let context = RandomExecutionContext::new(RandomLoweringState {

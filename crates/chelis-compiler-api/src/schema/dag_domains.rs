@@ -329,6 +329,25 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 }
                 continue;
             }
+            if let WireRiscOp::ExtentWitness {
+                site:
+                    WireExtentWitnessSite::LocalAscriptionClaim {
+                        axis: WireRtAxis::Lit { value },
+                        ..
+                    },
+                ..
+            } = &required.op
+            {
+                if usize::try_from(*value)
+                    .ok()
+                    .is_none_or(|axis| !literal_result_axis_is_supported(dag, node, axis))
+                {
+                    return Err(reject(
+                        "local ascription dependency requires a supported producing axis",
+                    ));
+                }
+                continue;
+            }
             let WireRiscOp::ExtentWitness {
                 site:
                     WireExtentWitnessSite::ResultClaim {
@@ -357,6 +376,35 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             if !supported || result_axis >= node.output_type.dims.len() {
                 return Err(reject(
                     "result claim dependency requires a supported producing axis",
+                ));
+            }
+        }
+        let owns_local_ascription = node.shape_deps.iter().any(|dependency| {
+            dag.nodes
+                .get(*dependency as usize)
+                .is_some_and(|dependency| {
+                    matches!(
+                        dependency.op,
+                        WireRiscOp::ExtentWitness {
+                            site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
+                            ..
+                        }
+                    )
+                })
+        });
+        if owns_local_ascription {
+            let activation_count = node
+                .shape_deps
+                .iter()
+                .filter_map(|dependency| dag.nodes.get(*dependency as usize))
+                .filter(|dependency| {
+                    dependency.output_type.dims.is_empty()
+                        && dependency.output_type.precision == "bool"
+                })
+                .count();
+            if activation_count > 1 {
+                return Err(reject(
+                    "local ascription owner has multiple runtime branch activations",
                 ));
             }
         }
@@ -415,6 +463,74 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 {
                     return Err(reject(
                         "literal result claim requires exactly one producing owner",
+                    ));
+                }
+            }
+            WireRiscOp::ExtentWitness {
+                site:
+                    WireExtentWitnessSite::LocalAscriptionClaim {
+                        binding,
+                        claim,
+                        axis:
+                            WireRtAxis::Lit {
+                                value: claimed_axis,
+                            },
+                        ..
+                    },
+                parameter,
+                axis: WireRtAxis::Lit { value },
+                requirements,
+                claims,
+            } => {
+                if binding.is_empty()
+                    || claim.is_empty()
+                    || *claimed_axis < 0
+                    || *claimed_axis != *value
+                    || !claims.is_empty()
+                    || !node.output_type.dims.is_empty()
+                    || node.output_type.precision != "int64"
+                {
+                    return Err(reject(
+                        "local ascription claim requires nonempty provenance, one normalized axis, scalar int64 output, and no entry claims",
+                    ));
+                }
+                let literal = node.inputs.is_empty()
+                    && node.shape_deps.is_empty()
+                    && parameter.is_empty()
+                    && requirements.len() == 1;
+                if literal {
+                    extent(requirements[0].get())?;
+                } else {
+                    if parameter.is_empty() || !requirements.is_empty() || node.inputs.len() != 1 {
+                        return Err(reject(
+                            "local ascription claim must carry exactly one literal or one declaring witness",
+                        ));
+                    }
+                    axis(dag, node, *value)?;
+                    let declared = node
+                        .shape_deps
+                        .first()
+                        .and_then(|required| dag.nodes.get(*required as usize));
+                    let same_observation = node.shape_deps.len() == 1 && declared.is_some_and(|declared| {
+                        matches!(declared.op, WireRiscOp::ExtentWitness { site: WireExtentWitnessSite::Caller, axis: WireRtAxis::Lit { value: observed }, .. } if observed == *value)
+                            && declared.inputs.first() == node.inputs.first()
+                            && declared.id < node.id
+                    });
+                    if !same_observation {
+                        return Err(reject(
+                            "named local ascription claim requires its exact earlier declaring observation",
+                        ));
+                    }
+                }
+                if dag
+                    .nodes
+                    .iter()
+                    .filter(|owner| owner.shape_deps.contains(&node.id))
+                    .count()
+                    != 1
+                {
+                    return Err(reject(
+                        "local ascription claim requires exactly one initializer owner",
                     ));
                 }
             }

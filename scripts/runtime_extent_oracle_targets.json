@@ -568,6 +568,187 @@
     },
     {
       "phase": "b",
+      "id": "surf_issue_2110_local_ascription_provenance",
+      "package": "chelis-surf",
+      "kind": "test",
+      "file": "crates/chelis-surf/tests/issue_2110_local_ascription_provenance.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata"
+      ],
+      "note": "Surf preserves an authored local tensor annotation as explicit provenance while marking compiler-inferred type metadata separately."
+    },
+    {
+      "phase": "b",
+      "id": "types_issue_2110_local_ascription",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_2110_local_ascription_obligations.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "authored_ascriptions_inside_match_arms_reach_the_checked_program",
+        "authored_wildcard_is_preserved_without_manufacturing_a_claim",
+        "checked_library_composition_preserves_both_identity_domains",
+        "checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
+        "claimed_axes_remain_in_authored_axis_order",
+        "hand_authored_deep_static_mismatch_is_dimension_mismatch",
+        "hand_authored_deep_type_metadata_is_an_explicit_local_ascription",
+        "inferred_metadata_does_not_become_authored_ascription_provenance",
+        "runtime_dependent_local_ascription_retains_exact_authored_claim",
+        "static_agreement_discharges_and_static_disagreement_stays_dimension_mismatch"
+      ],
+      "note": "The checker retains exact authored provenance, identity, source spans and ordered outstanding claims through checked-program and library composition; inferred metadata creates no obligation and graph-fixed disagreement remains DimensionMismatch."
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_2110_local_ascription",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        "each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+        "grad_pruning_preserves_a_dead_except_for_trap_local_site",
+        "host_evaluation_kernel_carries_the_same_local_ascription_site",
+        "inferred_metadata_does_not_create_a_local_ascription_site",
+        "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+        "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        "ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
+        "rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        "selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard",
+        "selected_runtime_branch_executes_its_local_ascription_guard",
+        "staged_host_partition_retains_the_local_ascription_site",
+        "untaken_runtime_branch_does_not_execute_an_inlined_helpers_local_ascription_guard",
+        "untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
+        "vmap_shifts_the_local_claim_and_initializer_axis_together"
+      ],
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; selected runtime branches enforce their site, untaken runtime branches do not, inferred metadata creates no site, and malformed roles fail closed."
+    },
+    {
+      "phase": "b",
+      "id": "cli_issue_2110_local_ascription",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        "a_cross_let_alias_traps_at_the_producer_before_intervening_effects",
+        "a_disagreeing_nested_same_name_ascription_traps_at_its_initializer",
+        "a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        "a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        "a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        "a_named_local_claim_uses_its_declaring_runtime_extent",
+        "a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        "a_selected_static_branch_enforces_its_local_ascription_obligation",
+        "a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        "a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        "a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
+        "a_value_dead_except_for_the_obligation_still_traps",
+        "a_wildcard_host_alias_creates_no_guard_or_internal_error",
+        "a_wildcard_local_ascription_creates_no_extent_obligation",
+        "agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        "agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        "agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        "an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        "an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        "an_agreeing_literal_result_and_local_claim_execute_exactly",
+        "an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        "an_agreeing_nested_same_name_ascription_attaches_to_only_its_initializer",
+        "an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        "an_inferred_result_claim_does_not_replace_the_local_claim",
+        "an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        "an_inlined_callee_retains_its_local_ascription_obligation",
+        "an_invoked_local_closure_prepares_its_own_local_ascription",
+        "an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        "an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        "an_untaken_static_branch_creates_no_local_ascription_obligation",
+        "an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        "direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        "direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        "hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        "hand_authored_deep_cross_let_alias_traps_before_the_intervening_effect",
+        "hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        "hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
+        "inferred_metadata_does_not_create_a_local_runtime_claim",
+        "multiple_local_axis_claims_fail_in_authored_axis_order"
+      ],
+      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/local-closure/dead/consumer paths, cross-let host alias attribution, single execution, nested shadowing and same-name positive/negative ownership, selected and untaken control-flow arms, host-effect placement, activation-scoped uninvoked closures, direct top-level grad/vmap transport, result-claim coexistence, wildcard and inferred controls, and authored axis order."
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_2110_staged_partition",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host/staged.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts"
+      ],
+      "note": "A local-ascription claim crossing a staged host cut remains a non-data token, is rematerialized beside its sole initializer owner, and is never exported or owned by a completion root."
+    },
+    {
+      "phase": "b",
+      "id": "api_issue_2110_local_ascription_cache",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_2110_local_ascription_cache.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
+        "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+        "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
+      ],
+      "note": "Stdlib and dependency cache payloads retain the checked obligation, cached-library plus entry composition lowers it to an explicit site, and independently checked same-offset bindings select their activation-local identities."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_extent_witness.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "local_ascription_owner_rejects_multiple_runtime_branch_activations",
+        "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
+      ],
+      "note": "WireDag v14 requires the exact local-ascription identity and preserves one exact scalar Bool runtime-branch activation; missing, hybrid, empty, unknown or multiply activated representations reject."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription_projection",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+        "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation"
+      ],
+      "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v14, then validates both on decode."
+    },
+    {
+      "phase": "b",
       "id": "exec_c",
       "package": "chelis-backend-c",
       "kind": "test",
@@ -579,8 +760,10 @@
         "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
         "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+        "a_selected_runtime_branch_emits_its_local_ascription_guard_on_c",
         "an_all_interface_class_runs_when_its_witnesses_agree",
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+        "an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
         "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
@@ -588,7 +771,7 @@
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
       ],
-      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement, runtime-branch activation and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
     },
     {
       "phase": "b",

@@ -395,6 +395,27 @@ class SchemaTests(unittest.TestCase):
             ),
             ("ci.yml", "script-unit", "chelis#1277"),
         )
+        wire_structural_tests = by_path[
+            "scripts/test_capacity_census_wire_structural.py"
+        ]
+        self.assertEqual(wire_structural_tests.disposition, "owner")
+        self.assertEqual(
+            (
+                wire_structural_tests.owner.workflow,
+                wire_structural_tests.owner.job,
+                wire_structural_tests.owner.cadence,
+                wire_structural_tests.owner.tracking_issue,
+            ),
+            (
+                "heavy-e2e.yml",
+                "runtime-extent-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#729",
+            ),
+        )
+        wire_census = by_path["spec/design/capacity_census_wire.json"]
+        self.assertEqual(wire_census.disposition, "packages")
+        self.assertEqual(wire_census.packages, ("chelis-compiler-api",))
         self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
                          "full-workspace")
         deep_spec = by_path["spec/03-deep-syntax.md"]

@@ -151,8 +151,8 @@ struct Chain {
 fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     let mut chains = Vec::new();
     let mut in_chain: Vec<bool> = vec![false; dag.len()];
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
-    let is_result_claim_barrier = |node: &DagNode| claimed_result_producers[node.id.0];
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
+    let is_claim_barrier = |node: &DagNode| claimed_producers[node.id.0];
 
     // Walk in topological order.
     for node in dag.nodes() {
@@ -160,7 +160,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node) || is_result_claim_barrier(node) {
+        if !is_fusible_elementwise(node) || is_claim_barrier(node) {
             continue;
         }
 
@@ -181,7 +181,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c) if is_fusible_elementwise(c) && !is_result_claim_barrier(c) => {
+                Some(c) if is_fusible_elementwise(c) && !is_claim_barrier(c) => {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)
@@ -217,7 +217,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
 
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let old_id = node.id.0;
@@ -233,8 +233,8 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             // This is the chain output node — emit a FusedElem.
             let chain = &chains[ci];
             assert!(
-                chain.nodes.iter().all(|id| !claimed_result_producers[id.0]),
-                "fusion chain contains a producer-owned result claim"
+                chain.nodes.iter().all(|id| !claimed_producers[id.0]),
+                "fusion chain contains a producer-owned extent claim"
             );
             let (fused_op, external_inputs) = build_fused_elem(dag, chain, &id_map);
             let reusable_input = reusable_external_input(dag, chain, &external_inputs);

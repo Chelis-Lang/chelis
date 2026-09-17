@@ -825,6 +825,7 @@ pub(crate) fn revalidate_adt_value(
         adt_fields: adt_fields.clone(),
         tensor_bindings: &empty_tensors,
         session: None,
+        active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,

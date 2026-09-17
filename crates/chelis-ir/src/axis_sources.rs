@@ -2255,7 +2255,8 @@ pub fn witness_entry_obligations(
         crate::dag::ExtentWitnessSite::Caller => "load",
         crate::dag::ExtentWitnessSite::LocalExpand => "expand",
         crate::dag::ExtentWitnessSite::ResultClaim { .. }
-        | crate::dag::ExtentWitnessSite::LiteralResultClaim => return None,
+        | crate::dag::ExtentWitnessSite::LiteralResultClaim
+        | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => return None,
     };
     let read_for = |id: NodeId| -> Option<ExtentRecord> {
         let observed = dag.get(id)?;
@@ -2844,6 +2845,11 @@ pub struct LocalGuardClaim {
     pub op: &'static str,
     /// How to read the extent this guard observes.
     pub observed: LocalGuardObservation,
+    /// Runtime branch activation for a path-local authored ascription.
+    ///
+    /// The lowering owner carries this scalar Bool beside its claim token as
+    /// a non-value dependency. `None` is the ordinary unconditional guard.
+    pub activation: Option<NodeId>,
 }
 
 /// A returned axis and the operation where its inherited claim becomes ready.
@@ -2949,33 +2955,29 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
         .collect()
 }
 
-/// Nodes any producer-owned result claim requires semantic rewrites to preserve.
+/// Nodes any producer-owned extent claim requires semantic rewrites to preserve.
 ///
-/// Both named `ResultClaim` and authored `LiteralResultClaim` tokens make
-/// their owner potentially trapping. Literal claims can be attached to an
-/// administrative Copy/Cast carrier while §4.7 attribution remains at the
-/// primitive behind that carrier, so the protected set includes that complete
-/// administrative chain. Named producer claims are attached directly to their
-/// producing primitive and enter through the same query.
+/// Named `ResultClaim`, authored `LiteralResultClaim`, and local
+/// `LocalAscriptionClaim` tokens make their owner potentially trapping.
+/// Claims can be attached to an administrative Copy/Cast carrier while §4.7
+/// attribution remains at the primitive behind that carrier, so the protected
+/// set includes that complete administrative chain.
 ///
 /// Every rewrite that can replace, merge, fold, fuse, specialize, or eliminate
 /// a producer consumes this one classification. Keeping the token forms behind
 /// this API prevents a new rewrite from accidentally protecting only one.
-pub(crate) fn claimed_result_producers(dag: &Dag) -> Vec<bool> {
-    result_claim_producers_matching(dag, directly_owns_result_claim)
+pub(crate) fn claimed_producers(dag: &Dag) -> Vec<bool> {
+    claim_producers_matching(dag, directly_owns_producer_claim)
 }
 
 /// Literal-only ownership carriers are a lowering representation detail, not
 /// the semantic rewrite barrier. Sparse helper recognition uses this narrower
 /// query only to peel those exact administrative carriers.
 pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
-    result_claim_producers_matching(dag, directly_owns_literal_result_claim)
+    claim_producers_matching(dag, directly_owns_literal_result_claim)
 }
 
-fn result_claim_producers_matching(
-    dag: &Dag,
-    directly_owns: impl Fn(&Dag, NodeId) -> bool,
-) -> Vec<bool> {
+fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> bool) -> Vec<bool> {
     let mut protected = vec![false; dag.len()];
     let mut pending = dag
         .nodes()
@@ -3007,7 +3009,7 @@ fn result_claim_producers_matching(
     protected
 }
 
-pub(crate) fn directly_owns_result_claim(dag: &Dag, owner: NodeId) -> bool {
+pub(crate) fn directly_owns_producer_claim(dag: &Dag, owner: NodeId) -> bool {
     dag.get(owner).is_some_and(|node| {
         node.shape_deps
             .iter()
@@ -3017,7 +3019,8 @@ pub(crate) fn directly_owns_result_claim(dag: &Dag, owner: NodeId) -> bool {
                     dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     })
                 )
@@ -3327,6 +3330,49 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                                claim,
+                                axis: RtAxis::Lit(axis),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                let axis = usize::try_from(*axis).expect("verified local ascription axis");
+                let site = result_extent_sites(dag, node.id)
+                    .into_iter()
+                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
+                    .expect("verified local ascription producer");
+                let (producer, observed) = if required.0 < site.producer.0 {
+                    (site.producer, site.observation)
+                } else {
+                    (
+                        node.id,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
+                };
+                sites.push((
+                    (producer.0, axis),
+                    LocalGuardClaim {
+                        claim: claim.clone(),
+                        canonical: CanonicalExtent::Witness(*required),
+                        op: site.operation,
+                        observed,
+                        activation: local_ascription_guard_activation(dag, node.id, *required)
+                            .expect("verified local ascription activation"),
+                    },
+                ));
+                continue;
+            }
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                         axis: RtAxis::Lit(axis),
                         requirements,
@@ -3368,6 +3414,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
+                        activation: None,
                     },
                 ));
                 continue;
@@ -3402,6 +3449,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                     canonical: CanonicalExtent::Witness(*required),
                     op: site.operation,
                     observed: site.observation,
+                    activation: None,
                 },
             ));
         }
@@ -3463,6 +3511,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         },
                         op: crate::grad::risc_op_name(&node.op),
                         observed: LocalGuardObservation::ComputedExtent(observed),
+                        activation: None,
                     },
                 ));
                 continue;
@@ -3534,6 +3583,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                     },
                     op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
+                    activation: None,
                 },
             ));
         }
@@ -3574,10 +3624,46 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // shape, which is why the read instruction is data rather than
                 // something a consumer infers from the site's `op`.
                 observed: LocalGuardObservation::RealizedExtent,
+                activation: None,
             },
         ));
     }
     sites
+}
+
+/// The one scalar Bool dependency that activates a path-local ascription.
+///
+/// Claim tokens and ordinary shape sources share `shape_deps`; the activation
+/// is structurally distinct because it is rank-0 Bool. More than one such
+/// dependency is ambiguous and therefore malformed rather than ordered or
+/// guessed.
+pub(crate) fn local_ascription_guard_activation(
+    dag: &Dag,
+    owner: NodeId,
+    claim: NodeId,
+) -> Result<Option<NodeId>, String> {
+    let owner = dag
+        .get(owner)
+        .ok_or_else(|| "local ascription owner is missing".to_string())?;
+    let activations = owner
+        .shape_deps
+        .iter()
+        .copied()
+        .filter(|dependency| *dependency != claim)
+        .filter(|dependency| {
+            dag.get(*dependency).is_some_and(|node| {
+                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
+            })
+        })
+        .collect::<Vec<_>>();
+    match activations.as_slice() {
+        [] => Ok(None),
+        [activation] => Ok(Some(*activation)),
+        _ => Err(format!(
+            "local ascription owner {} has multiple runtime branch activations",
+            owner.id.0
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -3590,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn claimed_result_producers_cover_named_literal_and_the_owned_admin_chain() {
+    fn claimed_producers_cover_named_literal_local_and_the_owned_admin_chain() {
         let mut dag = Dag::new();
         let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
         let input = dag.add_node(
@@ -3639,16 +3725,37 @@ mod tests {
         );
         let named_owner = dag.add_node(RiscOp::Add, vec![input, input], tensor.clone(), None);
         dag.add_result_claim_dep(named_owner, named_claim);
+        let local_claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: 0,
+                    binding: "local".into(),
+                    claim: "4".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let local_owner = dag.add_node(RiscOp::Exp, vec![input], tensor.clone(), None);
+        dag.add_shape_dep(local_owner, local_claim);
         let unrelated = dag.add_node(RiscOp::Copy, vec![input], tensor, None);
 
-        let protected = claimed_result_producers(&dag);
+        let protected = claimed_producers(&dag);
         assert!(protected[owner.0]);
         assert!(protected[cast.0]);
         assert!(protected[producer.0]);
         assert!(protected[named_owner.0]);
+        assert!(protected[local_owner.0]);
         assert!(!protected[input.0]);
         assert!(!protected[claim.0]);
         assert!(!protected[named_claim.0]);
+        assert!(!protected[local_claim.0]);
         assert!(!protected[unrelated.0]);
     }
 

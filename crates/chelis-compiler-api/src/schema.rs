@@ -2070,7 +2070,12 @@ pub struct WireRecordPatternField {
 /// - `12`: result-claim witnesses carry a mandatory diagnostic label and
 ///   output axis. A producer's shape dependency names its exact declaring
 ///   extent; these obligations cannot be reconstructed from dimension names.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 13;
+/// - `13`: literal-result claims have a distinct site role with one exact
+///   requirement and one producer owner.
+/// - `14`: local tensor-ascription claims carry mandatory authored identity,
+///   binding, claim and axis fields, with exact literal or declaring-witness
+///   forms and one initializer owner.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 14;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2946,7 +2951,16 @@ pub enum WireExtentWitnessSite {
     LiteralResultClaim,
     Caller,
     LocalExpand,
-    ResultClaim { claim: String, axis: WireRtAxis },
+    ResultClaim {
+        claim: String,
+        axis: WireRtAxis,
+    },
+    LocalAscriptionClaim {
+        ascription_id: u64,
+        binding: String,
+        claim: String,
+        axis: WireRtAxis,
+    },
 }
 
 /// One named equality a witness owes against another witness (wire v11).

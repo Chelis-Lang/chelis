@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 13, "nodes": [], "roots": []}
+    empty = {"schema_version": 14, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 14):
+    for version in (None, 10, 11, 12, 13, 15):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 13,
+        "schema_version": 14,
         "nodes": [
             {
                 "shape_deps": [],
@@ -229,7 +229,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 13,
+            "schema_version": 14,
             "nodes": [
                 copy.deepcopy(load),
                 {
@@ -298,7 +298,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 13,
+        "schema_version": 14,
         "nodes": [
             value_node,
             witness_node,
@@ -401,7 +401,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 13,
+        "schema_version": 14,
         "nodes": [
             copy.deepcopy(load),
             {
@@ -543,6 +543,106 @@ def dag_cases():
         bad = copy.deepcopy(result_claim)
         bad["nodes"][4]["op"] = op
         add("result-claim-invalid-producer-" + op["kind"], bad, False, "supported producing axis")
+
+    # Wire v14: the checker-assigned local-ascription id is an opaque
+    # artifact-local identity. It admits the complete u64 domain but never a
+    # signed or fractional numeric representation.
+    local_ascription = copy.deepcopy(witness)
+    local_ascription["nodes"] = local_ascription["nodes"][:3]
+    local_ascription["nodes"][1]["op"] = {
+        "kind": "extent_witness",
+        "site": {
+            "local_ascription_claim": {
+                "ascription_id": 18446744073709551615,
+                "binding": "y",
+                "claim": "2",
+                "axis": {"axis": "lit", "value": 0},
+            }
+        },
+        "parameter": "",
+        "axis": {"axis": "lit", "value": 0},
+        "requirements": [2],
+        "claims": [],
+    }
+    local_ascription["nodes"][1]["inputs"] = []
+    local_ascription["nodes"][1]["shape_deps"] = []
+    local_ascription["nodes"][2]["op"] = {
+        "kind": "pad",
+        "padding": [
+            [
+                {"bound": "lit", "value": 0},
+                {"bound": "lit", "value": 0},
+            ]
+        ],
+        "fill": {"dtype": "f32", "bits": "00000000"},
+    }
+    local_ascription["nodes"][2]["inputs"] = [0]
+    local_ascription["nodes"][2]["shape_deps"] = [1]
+    local_ascription["nodes"][2]["output_type"] = copy.deepcopy(
+        local_ascription["nodes"][0]["output_type"]
+    )
+    local_ascription["roots"] = [2]
+    add("local-ascription-owned", local_ascription, True)
+    for name, value in (
+        ("local-ascription-id-negative", -1),
+        ("local-ascription-id-float", 7.0),
+    ):
+        bad = copy.deepcopy(local_ascription)
+        bad["nodes"][1]["op"]["site"]["local_ascription_claim"][
+            "ascription_id"
+        ] = value
+        add(name, bad, False)
+
+    # The named form observes the same tensor axis as an earlier Caller
+    # witness and retains that declaring witness as its sole shape dependency.
+    # It is a distinct representation from the literal form above: neither
+    # requirements nor a guessed parameter-less fallback are admitted.
+    named_local_ascription = copy.deepcopy(witness)
+    named_local_ascription["nodes"] = named_local_ascription["nodes"][:2]
+    named_local_ascription["nodes"][1]["op"]["requirements"] = []
+    named_local_ascription["nodes"][1]["op"]["claims"] = []
+    named_token = copy.deepcopy(named_local_ascription["nodes"][1])
+    named_token["id"] = 2
+    named_token["op"]["site"] = {
+        "local_ascription_claim": {
+            "ascription_id": 17,
+            "binding": "y",
+            "claim": "rows",
+            "axis": {"axis": "lit", "value": 0},
+        }
+    }
+    named_token["shape_deps"] = [1]
+    named_owner = copy.deepcopy(local_ascription["nodes"][2])
+    named_owner["id"] = 3
+    named_owner["shape_deps"] = [2]
+    named_local_ascription["nodes"].extend([named_token, named_owner])
+    named_local_ascription["roots"] = [3]
+    add("named-local-ascription-owned", named_local_ascription, True)
+    for name, mutate in (
+        (
+            "named-local-ascription-missing-declaration",
+            lambda value: value["nodes"][2].update(shape_deps=[]),
+        ),
+        (
+            "named-local-ascription-wrong-declaration",
+            lambda value: value["nodes"][2].update(shape_deps=[0]),
+        ),
+        (
+            "named-local-ascription-empty-parameter",
+            lambda value: value["nodes"][2]["op"].update(parameter=""),
+        ),
+        (
+            "named-local-ascription-literal-hybrid",
+            lambda value: value["nodes"][2]["op"].update(requirements=[2]),
+        ),
+        (
+            "named-local-ascription-missing-owner",
+            lambda value: value["nodes"][3].update(shape_deps=[]),
+        ),
+    ):
+        bad = copy.deepcopy(named_local_ascription)
+        mutate(bad)
+        add(name, bad, False)
     return cases
 
 
@@ -551,7 +651,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 13,
+        "schema_version": 14,
         "nodes": [
             {
                 "shape_deps": [],
@@ -605,7 +705,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 14):
+        for version in (10, 11, 12, 13, 15):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

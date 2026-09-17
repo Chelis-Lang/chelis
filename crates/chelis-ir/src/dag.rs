@@ -467,6 +467,16 @@ pub enum ExtentWitnessSite {
         claim: String,
         axis: RtAxis,
     },
+    /// One checker-retained authored local tensor-ascription obligation.
+    /// The stable checker identity and binding name are provenance; `claim`
+    /// is the authored axis spelling used by diagnostics. The enclosing
+    /// producer's `shape_deps` edge owns execution at the initializer op.
+    LocalAscriptionClaim {
+        ascription_id: u64,
+        binding: String,
+        claim: String,
+        axis: RtAxis,
+    },
 }
 
 /// One dimension-binder equality a witness owes against ANOTHER witness.

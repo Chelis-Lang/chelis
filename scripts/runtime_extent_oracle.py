@@ -925,6 +925,598 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             TERMINAL_CONTROL,
             "ir_issue_1948_same_shape.malformed_same_shape_relations_are_verifier_errors",
         ),
+        # chelis#2110: a local tensor ascription is its own producer-owned
+        # obligation. It remains separate from inferred metadata and from a
+        # function-result claim, survives every activation/rebuild/artifact
+        # boundary, and traps at the initializer operation on both host lanes.
+        _row(
+            "claim.local_ascription.provenance",
+            "silent_unguarded",
+            EXECUTES,
+            "surf_issue_2110_local_ascription_provenance.explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata",
+        ),
+        _row(
+            "claim.local_ascription.checker_transport",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.runtime_dependent_local_ascription_retains_exact_authored_claim",
+        ),
+        _row(
+            "claim.local_ascription.control_match.checker",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.authored_ascriptions_inside_match_arms_reach_the_checked_program",
+        ),
+        _row(
+            "claim.local_ascription.checked_rewrites",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
+        ),
+        _row(
+            "claim.local_ascription.deep.origin",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.hand_authored_deep_type_metadata_is_an_explicit_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.deep.runtime.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.runtime.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_2110_local_ascription.hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
+        ),
+        _row(
+            "claim.local_ascription.direct.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.initializer_alias.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        ),
+        _row(
+            "claim.local_ascription.initializer_alias.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        ),
+        _row(
+            "claim.local_ascription.return_alias.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        ),
+        _row(
+            "claim.local_ascription.return_alias.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        ),
+        _row(
+            "claim.local_ascription.inlined.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.inlined.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.uninvoked.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.uninvoked.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.untaken.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.untaken.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.selected.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.selected.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_selected.c",
+            EXECUTES,
+            EXECUTES,
+            "exec_c.a_selected_runtime_branch_emits_its_local_ascription_guard_on_c",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_selected.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_2110_local_ascription.selected_runtime_branch_executes_its_local_ascription_guard",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_untaken.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_untaken.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
+        ),
+        _row(
+            "claim.local_ascription.control_match.untaken.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.untaken.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.selected.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.selected.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_match.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.trap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.shadowing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.shadowing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.trap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        ),
+        _row(
+            "claim.local_ascription.inferred_result.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.inferred_result.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.named.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent",
+        ),
+        _row(
+            "claim.local_ascription.named.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent",
+        ),
+        _row(
+            "claim.local_ascription.same_shape_consumer.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        ),
+        _row(
+            "claim.local_ascription.same_shape_consumer.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        ),
+        _row(
+            "claim.local_ascription.dead.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps",
+        ),
+        _row(
+            "claim.local_ascription.dead.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps",
+        ),
+        _row(
+            "claim.local_ascription.axis_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order",
+        ),
+        _row(
+            "claim.local_ascription.axis_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order",
+        ),
+        _row(
+            "claim.local_ascription.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.wildcard.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation",
+        ),
+        _row(
+            "claim.local_ascription.wildcard.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim",
+        ),
+        _row(
+            "claim.local_ascription.agreeing_literal_result.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly",
+        ),
+        _row(
+            "claim.local_ascription.agreeing_literal_result.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly",
+        ),
+        _row(
+            "claim.local_ascription.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_2110_local_ascription.a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
+        ),
+        _row(
+            "claim.local_ascription.lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+        ),
+        _row(
+            "claim.local_ascription.activation_identity",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.alias_liveness",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.rebuilds",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        ),
+        _row(
+            "claim.local_ascription.fusion",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+        ),
+        _row(
+            "claim.local_ascription.grad_pruning",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.grad_pruning_preserves_a_dead_except_for_trap_local_site",
+        ),
+        _row(
+            "claim.local_ascription.ownership_lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
+        ),
+        _row(
+            "claim.local_ascription.host_kernel",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.host_evaluation_kernel_carries_the_same_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.host_partition",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.staged_host_partition_retains_the_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.nondata",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_staged_partition.host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts",
+        ),
+        _row(
+            "claim.local_ascription.vmap",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.vmap_shifts_the_local_claim_and_initializer_axis_together",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.structure",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.native_malformed",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "ir_issue_2110_local_ascription.malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        ),
+        _row(
+            "claim.local_ascription.cache_composition",
+            "silent_unguarded",
+            EXECUTES,
+            "api_issue_2110_local_ascription_cache.stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations",
+        ),
+        _row(
+            "claim.local_ascription.composed_identity_collision",
+            "silent_unguarded",
+            EXECUTES,
+            "api_issue_2110_local_ascription_cache.composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
+        ),
+        _row(
+            "claim.local_ascription.wire_roundtrip",
+            "silent_unguarded",
+            EXECUTES,
+            "wire_issue_2110_local_ascription.local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields",
+        ),
+        _row(
+            "claim.local_ascription.wire_live_lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "wire_issue_2110_local_ascription_projection.compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+        ),
         # Round 1's P1. A RUNTIME padding bound is a different witness from
         # a literal one, and the rows are separate because the claim's
         # precondition is the bound rather than the operand: lowering stamped
@@ -2506,18 +3098,24 @@ def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestT
 
 
 _CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/axis_sources.rs"
+_CLAIM_BARRIER_ALL_PRODUCER_CLAIMS = """\
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+"""
+_CLAIM_BARRIER_LITERAL_AND_LOCAL = """\
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+"""
 _CLAIM_BARRIER_NAMED_AND_LITERAL = """\
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
                             | crate::dag::ExtentWitnessSite::LiteralResultClaim,
-"""
-_CLAIM_BARRIER_LITERAL_ONLY = """\
-                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
 """
 _SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/specialize.rs"
 _BLAS_REGION_BARRIER = """\
         if let Some(info) = detect_matmul_pattern(dag, node.id)
             && matched_region_is_claim_free(
-                &claimed_result_producers,
+                &claimed_producers,
                 info.replaced_region(node.id),
             )
 """
@@ -2526,28 +3124,201 @@ _BLAS_REGION_BARRIER_REMOVED = """\
 """
 _DENSE_GATHER_REGION_BARRIER = """\
         if let Some(info) = detect_dense_gather_pattern(dag, node.id)
-            && matched_region_is_claim_free(
-                &claimed_result_producers,
-                info.replaced_region(node.id),
-            )
+            && matched_region_is_claim_free(&claimed_producers, info.replaced_region(node.id))
         {
 """
 _DENSE_GATHER_REGION_BARRIER_REMOVED = """\
         if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
 """
+_LOCAL_ASCRIPTION_PROVENANCE_SOURCE = REPO_ROOT / "crates/chelis-surf/src/desugar.rs"
+_LOCAL_ASCRIPTION_PROVENANCE = """\
+                        let value = with_metadata_value(
+                            inject_type_metadata(value, desugar_type(ty)),
+                            M::SurfBindingType(Spanned::new(
+                                BindingTypeOrigin::Explicit,
+                                type_expr_span(ty),
+                            )),
+                        );
+"""
+_LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
+                        let value = with_metadata_value(
+                            inject_type_metadata(value, desugar_type(ty)),
+                            M::SurfBindingType(Spanned::new(
+                                BindingTypeOrigin::Inferred,
+                                type_expr_span(ty),
+                            )),
+                        );
+"""
+_LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-types/src/infer/checked.rs"
+_LOCAL_ASCRIPTION_CHECKER_TRANSPORT = """\
+        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
+"""
+_LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
+        local_tensor_ascriptions: Vec::new(),
+"""
+_LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/lower.rs"
+_LOCAL_ASCRIPTION_LIBRARY_CARRIER = """\
+        local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
+"""
+_LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED = """\
+        local_tensor_ascriptions: Vec::new(),
+"""
+_LOCAL_ASCRIPTION_CONTEXT_COMPOSITION = """\
+    ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
+"""
+_LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED = """\
+    ctx.local_tensor_ascriptions =
+        Arc::new(new_program.local_tensor_ascriptions().to_vec());
+"""
+_LOCAL_ASCRIPTION_ATTACHMENT = """\
+                                self.dag.add_shape_dep(owner, *token);
+"""
+_LOCAL_ASCRIPTION_ATTACHMENT_REMOVED = """\
+                                // Controlled mutation: omit initializer ownership.
+"""
+_LOCAL_ASCRIPTION_EVAL_SOURCE = REPO_ROOT / "crates/chelis-ir/src/eval.rs"
+_LOCAL_ASCRIPTION_EVAL_OBSERVATION = """\
+    if observed != claimed {
+        return Err(format!(
+            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\\n\\
+             numeric trap: domain in {} at i64",
+            claim.claim, claim.op, claim.op,
+        ));
+    }
+"""
+_LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED = """\
+    let _ = (axis, claim, observed, claimed);
+"""
+_LOCAL_ASCRIPTION_C_SOURCE = REPO_ROOT / "crates/chelis-backend-c/src/emit.rs"
+_LOCAL_ASCRIPTION_C_OBSERVATION = """\
+        self.emit_local_dim_guards_matching(id, extents, false);
+"""
+_LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED = """\
+        // Controlled mutation: omit producer-owned local guards.
+"""
+_LOCAL_ASCRIPTION_ARTIFACT_SOURCE = REPO_ROOT / "crates/chelis-compiler-api/src/compiler.rs"
+_LOCAL_ASCRIPTION_ARTIFACT_CONVERSION = """\
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id,
+                    binding,
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: *ascription_id,
+                    binding: binding.clone(),
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
+"""
+_LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED = """\
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                    WireExtentWitnessSite::LiteralResultClaim
+                }
+"""
+
+
+def _replace_unique_mutation(
+    source: str,
+    anchor: str,
+    replacement: str,
+    label: str,
+) -> str:
+    if source.count(anchor) != 1:
+        raise OracleFailure(f"{label} mutation anchor is missing or ambiguous")
+    return source.replace(anchor, replacement, 1)
 
 
 def remove_named_claim_from_producer_barrier(source: str) -> str:
-    """Controlled mutation: regress the central barrier to literal-only."""
+    """Controlled mutation: omit named result claims from the central barrier."""
 
-    if source.count(_CLAIM_BARRIER_NAMED_AND_LITERAL) != 1:
-        raise OracleFailure(
-            "claimed-producer barrier mutation anchor is missing or ambiguous"
-        )
-    return source.replace(
+    return _replace_unique_mutation(
+        source,
+        _CLAIM_BARRIER_ALL_PRODUCER_CLAIMS,
+        _CLAIM_BARRIER_LITERAL_AND_LOCAL,
+        "claimed-producer barrier",
+    )
+
+
+def remove_local_claim_from_producer_barrier(source: str) -> str:
+    """Controlled mutation: omit local ascriptions from every rewrite barrier."""
+
+    return _replace_unique_mutation(
+        source,
+        _CLAIM_BARRIER_ALL_PRODUCER_CLAIMS,
         _CLAIM_BARRIER_NAMED_AND_LITERAL,
-        _CLAIM_BARRIER_LITERAL_ONLY,
-        1,
+        "local-ascription producer barrier",
+    )
+
+
+def remove_local_ascription_provenance(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_PROVENANCE,
+        _LOCAL_ASCRIPTION_PROVENANCE_REMOVED,
+        "local-ascription provenance",
+    )
+
+
+def remove_local_ascription_checker_transport(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_CHECKER_TRANSPORT,
+        _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED,
+        "local-ascription checker transport",
+    )
+
+
+def remove_local_ascription_library_carrier(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_LIBRARY_CARRIER,
+        _LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED,
+        "local-ascription lowered-library carrier",
+    )
+
+
+def remove_local_ascription_context_composition(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION,
+        _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED,
+        "local-ascription contextual composition",
+    )
+
+
+def remove_local_ascription_attachment(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_ATTACHMENT,
+        _LOCAL_ASCRIPTION_ATTACHMENT_REMOVED,
+        "local-ascription lower-let attachment",
+    )
+
+
+def remove_local_ascription_eval_observation(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_EVAL_OBSERVATION,
+        _LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED,
+        "local-ascription Eval observation",
+    )
+
+
+def remove_local_ascription_c_observation(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_C_OBSERVATION,
+        _LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED,
+        "local-ascription C observation",
+    )
+
+
+def remove_local_ascription_artifact_conversion(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION,
+        _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED,
+        "local-ascription artifact conversion",
     )
 
 
@@ -2660,6 +3431,210 @@ def validate_specializer_region_barrier_mutations(
             raise OracleFailure(
                 f"{recognizer} specialization barrier mutation did not restore its source"
             )
+
+
+def _validate_controlled_mutation(
+    *,
+    label: str,
+    source_path: Path,
+    mutate: Callable[[str], str],
+    command: tuple[str, ...],
+    expected_failure: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    original = source_path.read_text()
+    mutated = mutate(original)
+    try:
+        source_path.write_text(mutated)
+        completed = _run_text(runner, command)
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            raise OracleFailure(f"{label} mutation escaped its executable receipt")
+        if expected_failure not in output:
+            raise OracleFailure(f"{label} mutation failed for an unrelated reason")
+    finally:
+        source_path.write_text(original)
+    if source_path.read_text() != original:
+        raise OracleFailure(f"{label} mutation did not restore its source")
+
+
+def validate_local_ascription_layer_mutations(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove #2110 fails closed when any required transport layer is removed."""
+
+    cases = (
+        (
+            "local-ascription provenance",
+            _LOCAL_ASCRIPTION_PROVENANCE_SOURCE,
+            remove_local_ascription_provenance,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-surf",
+                "--test",
+                "issue_2110_local_ascription_provenance",
+                "explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "left: Inferred",
+        ),
+        (
+            "local-ascription checker transport",
+            _LOCAL_ASCRIPTION_CHECKER_SOURCE,
+            remove_local_ascription_checker_transport,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-types",
+                "--test",
+                "issue_2110_local_ascription_obligations",
+                "runtime_dependent_local_ascription_retains_exact_authored_claim",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "expected one local tensor ascription, got []",
+        ),
+        (
+            "local-ascription lower-let attachment",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_attachment,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "test lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer ... FAILED",
+        ),
+        (
+            "local-ascription lowered-library carrier",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_library_carrier,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--test",
+                "issue_2110_local_ascription_cache",
+                "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "the production lowered-library carrier must retain the checked obligations",
+        ),
+        (
+            "local-ascription contextual composition",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_context_composition,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--test",
+                "issue_2110_local_ascription_cache",
+                "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "contextual helper inlining must use the checked dependency obligation",
+        ),
+        (
+            "local-ascription rebuild and liveness barrier",
+            _CLAIM_BARRIER_SOURCE,
+            remove_local_claim_from_producer_barrier,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "fusion must retain one exact site",
+        ),
+        (
+            "local-ascription Eval observation",
+            _LOCAL_ASCRIPTION_EVAL_SOURCE,
+            remove_local_ascription_eval_observation,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "eval: local ascription must trap",
+        ),
+        (
+            "local-ascription C observation",
+            _LOCAL_ASCRIPTION_C_SOURCE,
+            remove_local_ascription_c_observation,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "c: local ascription must trap",
+        ),
+        (
+            "local-ascription artifact conversion",
+            _LOCAL_ASCRIPTION_ARTIFACT_SOURCE,
+            remove_local_ascription_artifact_conversion,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--lib",
+                "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "native lowering projects the local claim into WireDag",
+        ),
+    )
+    for label, source_path, mutate, command, expected_failure in cases:
+        _validate_controlled_mutation(
+            label=label,
+            source_path=source_path,
+            mutate=mutate,
+            command=command,
+            expected_failure=expected_failure,
+            runner=runner,
+        )
 
 
 def _run_text(
@@ -2792,6 +3767,7 @@ def validate(
     if registry is None and targets is None and phase in ("b", "final"):
         validate_claimed_producer_barrier_mutation(runner)
         validate_specializer_region_barrier_mutations(runner)
+        validate_local_ascription_layer_mutations(runner)
 
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)

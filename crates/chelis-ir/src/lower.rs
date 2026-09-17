@@ -590,6 +590,14 @@ pub struct LoweredLibrary {
     /// `(var libname)` Load types when the new-code expression's metadata
     /// is `default_type`.
     program_types: BTreeMap<String, TensorType>,
+    /// Checker-owned authored local tensor ascriptions for the retained
+    /// library definitions. Contextual lowering can inline those definitions,
+    /// so their runtime obligations must travel with the executable bodies.
+    ///
+    /// This field intentionally has no serde default: a cache written before
+    /// the obligation carrier existed cannot prove that an absent list means
+    /// there were no authored claims.
+    local_tensor_ascriptions: Vec<chelis_types::CheckedLocalTensorAscription>,
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
     linearity: LinearityInfo,
@@ -777,6 +785,12 @@ impl LoweredLibrary {
     /// Return the immutable program types.
     pub fn program_types(&self) -> &BTreeMap<String, TensorType> {
         &self.program_types
+    }
+
+    /// Return the checked local tensor-ascription obligations owned by the
+    /// retained library definitions.
+    pub fn local_tensor_ascriptions(&self) -> &[chelis_types::CheckedLocalTensorAscription] {
+        &self.local_tensor_ascriptions
     }
 
     /// Return the immutable linearity metadata.
@@ -1001,6 +1015,7 @@ fn lower_program_to_library_inner(
         program_signatures.clone(),
         program.linearity().clone(),
     );
+    ctx.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
     if execution_out.is_some() {
         ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(None));
     }
@@ -1139,6 +1154,7 @@ fn lower_program_to_library_inner(
         program_defs,
         program_signatures,
         program_types,
+        local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
         linearity: program.linearity().clone(),
         lowered_names,
         rootless_defs: ctx.rootless_defs,
@@ -1414,15 +1430,17 @@ fn lower_program_with_context_inner(
 
     // Combined defs: library defs + new-code defs. Same shadow rule —
     // new-code wins, mirroring monolithic lowering of `library + new`.
+    let new_definitions = collect_top_level_defs(new_program.exprs());
+    let replaced_definitions = new_definitions.keys().cloned().collect::<BTreeSet<_>>();
     let mut program_defs = library.program_defs.clone();
-    for (name, body) in collect_top_level_defs(new_program.exprs()) {
+    for (name, body) in new_definitions {
         program_defs.insert(name, body);
     }
 
     let mut program_signatures = library.program_signatures.clone();
     // A replacement definition without a declaration must not inherit the
     // previous definition's binder scope.
-    for name in collect_top_level_defs(new_program.exprs()).keys() {
+    for name in &replaced_definitions {
         program_signatures.remove(name);
     }
     program_signatures.extend(collect_top_level_sigs(new_program.exprs()));
@@ -1432,6 +1450,19 @@ fn lower_program_with_context_inner(
         program_signatures,
         new_program.linearity().clone(),
     );
+    let local_tensor_ascriptions = chelis_types::compose_local_tensor_ascriptions(
+        &library.local_tensor_ascriptions,
+        new_program.local_tensor_ascriptions(),
+        &replaced_definitions,
+    )
+    .unwrap_or_else(|| {
+        raise_fatal_lowering_error(
+            "local tensor-ascription identity space overflowed during contextual lowering",
+            None,
+            None,
+        )
+    });
+    ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
 
     // Seed the lowering ctx with the cloned library DAG and the library's
     // name -> NodeId bindings. Library drops are terminal markers for the
@@ -1903,10 +1934,41 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
 /// authored callable contracts remain separate: inference may rename a
 /// dimension, but that renamed result cannot replace its declared binder.
 #[derive(Clone)]
+pub struct LocalAscriptionBindingRegion {
+    /// Child offset in the enclosing `(bind ...)` list. The region executes
+    /// when this binding is reached, before any later alias is interpreted.
+    producer_binding_index: usize,
+    /// Authored ascription bindings represented by this region. More than one
+    /// local annotation may name aliases of the same producer.
+    ascription_binding_indices: Vec<usize>,
+    /// Exact checker identities selected for this declaration. Synthetic
+    /// subexpression lowering filters to these records so independently
+    /// checked units with colliding names and source offsets cannot lend an
+    /// obligation to one another.
+    ascription_ids: Vec<u64>,
+    expression: Expr,
+}
+
+impl LocalAscriptionBindingRegion {
+    pub fn producer_binding_index(&self) -> usize {
+        self.producer_binding_index
+    }
+
+    pub fn ascription_binding_indices(&self) -> &[usize] {
+        &self.ascription_binding_indices
+    }
+
+    pub fn expression(&self) -> &Expr {
+        &self.expression
+    }
+}
+
+#[derive(Clone)]
 pub struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
+    local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
 }
 
 impl SubexprLoweringContext {
@@ -1917,6 +1979,23 @@ impl SubexprLoweringContext {
     ) -> Self {
         prepare_subexpr_lowering_context(
             &checked_types.into_sorted().into_iter().collect(),
+            Arc::new(definitions.into_sorted().into_iter().collect()),
+            Arc::new(declared_signatures.into_sorted().into_iter().collect()),
+        )
+    }
+
+    /// Build a subexpression context from the checked artifact that owns
+    /// authored local-ascription obligations. Runtime transform lowering
+    /// must use this entry rather than reconstructing a context from type
+    /// and signature maps, because those maps cannot represent the local
+    /// introducing-site claims.
+    pub fn from_checked_program(
+        program: &CheckedProgram,
+        definitions: UnordMap<String, Expr>,
+        declared_signatures: UnordMap<String, Expr>,
+    ) -> Self {
+        prepare_checked_subexpr_lowering_context(
+            program,
             Arc::new(definitions.into_sorted().into_iter().collect()),
             Arc::new(declared_signatures.into_sorted().into_iter().collect()),
         )
@@ -1954,6 +2033,166 @@ impl SubexprLoweringContext {
             false,
             execution,
         )
+    }
+
+    /// Build the executable regions that retain checked local tensor
+    /// ascriptions in one sequential `(bind ...)` list.
+    ///
+    /// A local annotation may read an earlier alias rather than spell its
+    /// producing operation directly. Lowering just the annotated binding
+    /// turns that producer into a `Load` and assigns the guard to the load.
+    /// Instead, follow sequential aliases to their nearest visible local
+    /// producer and retain the complete alias path in one checked region.
+    /// The surrounding host lane executes the region at that producer's
+    /// binding index, so the producer runs once and remains the guard owner.
+    ///
+    /// Interpreted host control selects an `if`/`match` arm before this method
+    /// is reached. Planning only the selected arm's bind list preserves the
+    /// rule that an untaken arm creates no obligation.
+    pub fn local_ascription_binding_regions(
+        &self,
+        bindings: &Expr,
+        declaration_name: Option<&str>,
+    ) -> Vec<LocalAscriptionBindingRegion> {
+        let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(bindings) else {
+            return Vec::new();
+        };
+
+        #[derive(Default)]
+        struct RegionParts {
+            binding_indices: BTreeSet<usize>,
+            ascription_binding_indices: BTreeSet<usize>,
+            ascription_ids: BTreeSet<u64>,
+        }
+
+        let mut regions = BTreeMap::<usize, RegionParts>::new();
+        let mut binding_index = 0;
+        while binding_index + 1 < bind_kids.len() {
+            let Some(name) = symbol_name(&bind_kids[binding_index]) else {
+                binding_index += 2;
+                continue;
+            };
+            let matching_ids = self
+                .local_tensor_ascriptions
+                .iter()
+                .filter(|ascription| !ascription.outstanding_claims().is_empty())
+                .filter(|ascription| {
+                    declaration_name.is_none_or(|declaration_name| {
+                        ascription.declaration_name() == Some(declaration_name)
+                    })
+                })
+                .filter(|ascription| {
+                    LowerCtx::local_ascription_matches_binding(
+                        ascription,
+                        name,
+                        &bind_kids[binding_index],
+                        &bind_kids[binding_index + 1],
+                    )
+                })
+                .map(|ascription| ascription.id().get())
+                .collect::<BTreeSet<_>>();
+            if matching_ids.is_empty() {
+                binding_index += 2;
+                continue;
+            }
+
+            let mut path = BTreeSet::from([binding_index]);
+            let mut producer_binding_index = binding_index;
+            while let Some(alias) = bare_var_name(&bind_kids[producer_binding_index + 1]) {
+                let Some(predecessor) = (0..producer_binding_index)
+                    .step_by(2)
+                    .rev()
+                    .find(|candidate| symbol_name(&bind_kids[*candidate]) == Some(alias.as_str()))
+                else {
+                    break;
+                };
+                path.insert(predecessor);
+                producer_binding_index = predecessor;
+            }
+
+            let region = regions.entry(producer_binding_index).or_default();
+            region.binding_indices.extend(path);
+            region.ascription_binding_indices.insert(binding_index);
+            region.ascription_ids.extend(matching_ids);
+            binding_index += 2;
+        }
+
+        regions
+            .into_iter()
+            .filter_map(|(producer_binding_index, parts)| {
+                let result_binding_index = parts
+                    .ascription_binding_indices
+                    .iter()
+                    .next_back()
+                    .copied()?;
+                let result_name = symbol_name(&bind_kids[result_binding_index])?;
+                let span = bind_kids[producer_binding_index + 1].span();
+                let mut bind_elements = vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Bind), span),
+                    Expr::Map(Metadata::default(), span),
+                ];
+                for index in parts.binding_indices {
+                    bind_elements.push(bind_kids[index].clone());
+                    bind_elements.push(bind_kids[index + 1].clone());
+                }
+                let bind = Expr::List(
+                    List {
+                        elements: bind_elements,
+                    },
+                    span,
+                );
+                let body = Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                            Expr::Map(Metadata::default(), span),
+                            Expr::Atom(Atom::Name(result_name.to_string()), span),
+                        ],
+                    },
+                    span,
+                );
+                let expression = Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Tag(DeepTag::Let), span),
+                            Expr::Map(Metadata::default(), span),
+                            bind,
+                            body,
+                        ],
+                    },
+                    span,
+                );
+                Some(LocalAscriptionBindingRegion {
+                    producer_binding_index,
+                    ascription_binding_indices: parts
+                        .ascription_binding_indices
+                        .into_iter()
+                        .collect(),
+                    ascription_ids: parts.ascription_ids.into_iter().collect(),
+                    expression,
+                })
+            })
+            .collect()
+    }
+
+    /// Restrict one synthetic region to the exact checker identities selected
+    /// while planning it. Source offsets are local to an independently
+    /// checked artifact and can collide after library composition.
+    pub fn for_local_ascription_region(&self, region: &LocalAscriptionBindingRegion) -> Self {
+        let selected = region
+            .ascription_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut context = self.clone();
+        context.local_tensor_ascriptions = Arc::new(
+            self.local_tensor_ascriptions
+                .iter()
+                .filter(|ascription| selected.contains(&ascription.id().get()))
+                .cloned()
+                .collect(),
+        );
+        context
     }
 
     pub(crate) fn evaluation_profile(
@@ -2022,7 +2261,19 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_types: Arc::new(program_types),
         program_defs,
         program_signatures,
+        local_tensor_ascriptions: Arc::new(Vec::new()),
     }
+}
+
+pub(crate) fn prepare_checked_subexpr_lowering_context(
+    program: &CheckedProgram,
+    program_defs: Arc<BTreeMap<String, Expr>>,
+    program_signatures: Arc<BTreeMap<String, Expr>>,
+) -> SubexprLoweringContext {
+    let mut context =
+        prepare_subexpr_lowering_context(program.type_env(), program_defs, program_signatures);
+    context.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
+    context
 }
 
 pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
@@ -2280,6 +2531,7 @@ pub(crate) fn try_lower_staged_host_region(
             context.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
@@ -2335,6 +2587,7 @@ pub(crate) fn try_lower_staged_host_region(
         // A staged host region's inputs are the partition's, not an author's.
         ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
         ctx.binding_witnesses.clear();
+        ctx.prepare_local_ascription_tokens(expr, None);
         // Do not infer equality between repeated spellings in the machine-built
         // parameter list above. The returned result type is nevertheless the
         // authored declaration's claim, so resolve it against the first exact
@@ -2342,6 +2595,7 @@ pub(crate) fn try_lower_staged_host_region(
         // producer the same ownership it has outside staging.
         ctx.signature_is_authored = true;
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim), true);
+        ctx.validate_local_ascription_token_ownership();
         ctx.preserve_declared_result(&result, result_claim, None);
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {
@@ -2428,6 +2682,7 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
+    ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -2465,7 +2720,9 @@ fn lower_subexpr_program_inner_impl(
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
+    ctx.prepare_local_ascription_tokens(expr, None);
     let value = ctx.lower_expr_with_claim(expr, result_claim, authored_signature);
+    ctx.validate_local_ascription_token_ownership();
     // chelis#1374/#1376: an exported kernel carries its own declared result
     // claim. Without this the obligation existed only on the inlining paths,
     // so `out = f(...)` and a compiled `def f` ran unguarded.
@@ -5893,10 +6150,14 @@ fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
 fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     let elements = collect_cons_chain(expr)?;
     if elements.is_empty() {
-        // Empty list: rank-1 zero-element tensor. Pad over a zero-
-        // size dim doesn't compose cleanly; reject and let host
-        // routing handle it.
-        return None;
+        // An empty list is still a fully known rank-1 tensor. The literal
+        // emitter's uniform Const path carries its checked dtype and shape
+        // without inventing an element, so transform/helper lowering must not
+        // replace it with an unresolved `Load("to_tensor")`.
+        return Some(LiteralToTensor {
+            shape: vec![0],
+            data: Vec::new(),
+        });
     }
     if let Some(scalars) = elements
         .iter()
@@ -6160,6 +6421,10 @@ fn compute_reduce_window_out_dims(
 struct ResolvedFunction {
     // Immutable bodies are shared across lexical scope snapshots.
     expression: std::sync::Arc<Expr>,
+    /// Exact top-level declaration that owns this body, when one exists.
+    /// Composed checked units may reuse source byte offsets, so local
+    /// ascription provenance cannot be selected from spans alone.
+    declaration_name: Option<String>,
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
     signature: Option<std::sync::Arc<Expr>>,
@@ -6683,6 +6948,17 @@ struct LowerCtx<'program> {
     /// result obligations into `LiteralResultClaim` tokens. Every other
     /// lowering entry retains the pre-transfer literal carriers.
     literal_result_claim_ownership: LiteralResultClaimOwnership,
+    /// Checker-owned authored local tensor ascriptions. This is intentionally
+    /// separate from ordinary inferred expression `type` metadata.
+    local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    /// Activation-local lowering tokens allocated before its body executes.
+    local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
+    /// Scalar Bool selecting the runtime control-flow path currently being
+    /// lowered. A local-ascription owner retains this as a non-value
+    /// dependency so its guard executes only when that source branch is
+    /// selected. Unlike [`Self::random_path_condition`], this is present in
+    /// ordinary tensor DAGs as well as transform/helper subcontexts.
+    local_ascription_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -6837,6 +7113,9 @@ impl<'program> LowerCtx<'program> {
             activation_witnesses: Vec::new(),
             signature_is_authored: false,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
+            local_tensor_ascriptions: Arc::new(Vec::new()),
+            local_ascription_tokens: Vec::new(),
+            local_ascription_path_condition: None,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -7063,6 +7342,7 @@ impl<'program> LowerCtx<'program> {
         shadowed: &[String],
     ) -> UnordMap<String, NodeId> {
         subctx.resource_policy = self.resource_policy;
+        subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
         let shadowed = shadowed.iter().cloned().collect::<UnordSet<_>>();
         let mut captures = UnordMap::new();
         for (name, value) in self
@@ -8681,7 +8961,6 @@ impl<'program> LowerCtx<'program> {
         let saved_static_size_bindings = self.static_size_bindings.clone();
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
-
         // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
         if let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(&elems[2]) {
             let mut i = 0;
@@ -8752,7 +9031,67 @@ impl<'program> LowerCtx<'program> {
                         self.local_callables.insert(name.clone(), callable);
                     } else {
                         let witnesses = self.binding_witnesses_for_expr(&bind_kids[i + 1]).cloned();
-                        let val_id = self.lower_expr(&bind_kids[i + 1]);
+                        let mut val_id = self.lower_expr(&bind_kids[i + 1]);
+                        let local_claims =
+                            self.local_ascription_tokens
+                                .iter()
+                                .find_map(|(id, claims)| {
+                                    self.local_tensor_ascriptions
+                                        .iter()
+                                        .find(|ascription| ascription.id().get() == *id)
+                                        .filter(|ascription| {
+                                            Self::local_ascription_matches_binding(
+                                                ascription,
+                                                name,
+                                                &bind_kids[i],
+                                                &bind_kids[i + 1],
+                                            )
+                                        })
+                                        .map(|_| claims.clone())
+                                });
+                        if let Some(claims) = local_claims {
+                            let Some(mut owner) = val_id.as_single_node() else {
+                                raise_fatal_lowering_error(
+                                    format!(
+                                        "local tensor ascription `{name}` did not lower to one tensor initializer"
+                                    ),
+                                    Some(bind_kids[i + 1].span()),
+                                    bind_kids[i + 1].span_id().map(str::to_owned),
+                                )
+                            };
+                            for (axis, _) in &claims {
+                                self.restore_local_ascription_owner_axis(owner, *axis);
+                            }
+                            for (_axis, token) in &claims {
+                                let latest_dependency = self
+                                    .local_ascription_path_condition
+                                    .map_or(token.0, |activation| token.0.max(activation.0));
+                                if owner.0 <= latest_dependency {
+                                    let ty = self
+                                        .dag
+                                        .get(owner)
+                                        .expect("initializer")
+                                        .output_type
+                                        .clone();
+                                    owner = self.dag.add_node(
+                                        RiscOp::Copy,
+                                        vec![owner],
+                                        ty,
+                                        bind_kids[i + 1].span_id().map(str::to_owned),
+                                    );
+                                    val_id = LoweredValue::Node(owner);
+                                }
+                                self.dag.add_shape_dep(owner, *token);
+                            }
+                            if let Some(activation) = self.local_ascription_path_condition
+                                && !claims.is_empty()
+                            {
+                                self.dag.add_shape_dep(owner, activation);
+                            }
+                            if !claims.is_empty() {
+                                self.invocation_witnesses.push(owner);
+                            }
+                        }
                         if let Some((input, witnesses)) = witnesses
                             && val_id.as_single_node() == Some(input)
                         {
@@ -8787,6 +9126,336 @@ impl<'program> LowerCtx<'program> {
         self.local_callables = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
+    }
+
+    fn prepare_local_ascription_tokens(&mut self, body: &Expr, declaration_name: Option<&str>) {
+        let declaration_name = declaration_name
+            .map(str::to_string)
+            .or_else(|| self.declaration_name_for_body(body));
+        let ascriptions = self
+            .local_tensor_ascriptions
+            .iter()
+            .filter(|ascription| {
+                declaration_name.as_deref().is_none_or(|current| {
+                    ascription
+                        .declaration_name()
+                        .is_none_or(|owner| owner == current)
+                }) && Self::body_contains_local_ascription(body, ascription)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for ascription in ascriptions {
+            if self
+                .local_ascription_tokens
+                .iter()
+                .any(|(id, _)| *id == ascription.id().get())
+            {
+                continue;
+            }
+            let tokens = ascription
+                .outstanding_claims()
+                .iter()
+                .map(|claim| {
+                    (
+                        claim.axis(),
+                        self.local_ascription_claim_token(&ascription, claim),
+                    )
+                })
+                .collect();
+            self.local_ascription_tokens
+                .push((ascription.id().get(), tokens));
+        }
+    }
+
+    fn declaration_name_for_body(&self, body: &Expr) -> Option<String> {
+        let mut owner = None;
+        for (name, function) in self.program_defs.iter() {
+            let Some((_, candidate)) = self.extract_fn_parts(function) else {
+                continue;
+            };
+            if candidate != body {
+                continue;
+            }
+            if owner.is_some() {
+                return None;
+            }
+            owner = Some(name.clone());
+        }
+        owner
+    }
+
+    fn body_contains_local_ascription(
+        body: &Expr,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+    ) -> bool {
+        fn contains(expr: &Expr, ascription: &chelis_types::CheckedLocalTensorAscription) -> bool {
+            if let Some((tag, _, children)) = stamped_parts(expr) {
+                if tag == DeepTag::Fn {
+                    return false;
+                }
+                if tag == DeepTag::Bind {
+                    for pair in children.as_chunks::<2>().0 {
+                        let Some(name) = symbol_name(&pair[0]) else {
+                            continue;
+                        };
+                        if LowerCtx::local_ascription_matches_binding(
+                            ascription, name, &pair[0], &pair[1],
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+                return children.iter().any(|child| contains(child, ascription));
+            }
+            match expr {
+                Expr::BareList(children, _) => {
+                    children.iter().any(|child| contains(child, ascription))
+                }
+                Expr::UnknownForm(data) => data
+                    .children
+                    .iter()
+                    .any(|child| contains(child, ascription)),
+                _ => false,
+            }
+        }
+        contains(body, ascription)
+    }
+
+    fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
+        let discarded = self
+            .local_tensor_ascriptions
+            .iter()
+            .filter(|ascription| Self::body_contains_local_ascription(body, ascription))
+            .map(|ascription| ascription.id().get())
+            .collect::<UnordSet<_>>();
+        self.local_ascription_tokens
+            .retain(|(id, _)| !discarded.contains(id));
+    }
+
+    fn local_ascription_matches_binding(
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        binding_name: &str,
+        binding: &Expr,
+        initializer: &Expr,
+    ) -> bool {
+        ascription.binding_name() == binding_name
+            && (Self::expr_has_source_span(binding, ascription.binding_span())
+                || Self::expr_has_source_span(initializer, ascription.initializer_span())
+                || stamped_parts(initializer)
+                    .and_then(|(_, meta, _)| meta.surf_binding_type())
+                    .is_some_and(|origin| origin.span() == ascription.ascription_span()))
+    }
+
+    /// Remove an authored local claim from the initializer's physical shape.
+    ///
+    /// The checker stamp on the initializer is the obligation this PR
+    /// transports; it is not evidence that the producer actually has that
+    /// extent. Keeping the claimed literal/name in `output_type` makes the C
+    /// movement plan validate against the claim a second time, even on an
+    /// untaken runtime branch. Recover the producer's structural source
+    /// instead and leave the exact claim on its dedicated witness token.
+    fn restore_local_ascription_owner_axis(&mut self, owner: NodeId, axis: usize) {
+        use crate::axis_sources::AxisSource;
+        let replacement = match crate::axis_sources::output_axis_sources(&self.dag, owner)
+            .get(axis)
+            .cloned()
+        {
+            Some(AxisSource::Literal { value }) => usize::try_from(value).ok().map(DimInfo::Lit),
+            Some(AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(source_axis),
+            }) => self
+                .dag
+                .get(owner)
+                .and_then(|node| node.inputs.get(input))
+                .and_then(|input| self.dag.get(*input))
+                .and_then(|input| {
+                    input
+                        .output_type
+                        .dims
+                        .get(usize::try_from(source_axis).ok()?)
+                })
+                .cloned(),
+            Some(
+                AxisSource::ScalarInput { .. }
+                | AxisSource::OpComputed { .. }
+                | AxisSource::ClassSupplied { .. }
+                | AxisSource::ExternalAxis { .. },
+            )
+            | None => Some(DimInfo::Named(String::new(), None)),
+        };
+        if let Some(replacement) = replacement
+            && let Some(dim) = self
+                .dag
+                .node_mut(owner)
+                .and_then(|node| node.output_type.dims.get_mut(axis))
+        {
+            *dim = replacement;
+        }
+    }
+
+    fn expr_has_source_span(expr: &Expr, target: Span) -> bool {
+        fn source_range(source: &str) -> Option<(usize, usize)> {
+            let range = source.strip_prefix("surf:")?;
+            let (start, end) = range.split_once("..")?;
+            Some((start.parse().ok()?, end.parse().ok()?))
+        }
+
+        expr.span() == target
+            || expr.span_id().is_some_and(|source| {
+                source_range(source)
+                    .is_some_and(|(start, end)| (start, end) == (target.offset, target.end()))
+            })
+    }
+
+    fn local_ascription_claim_label(
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        axis: usize,
+        claim: &chelis_types::LocalAscriptionAxisClaim,
+    ) -> String {
+        let authored = ascription.authored_type();
+        if let Some((DeepTag::TTensor, _, children)) = stamped_parts(authored)
+            && let Some(dim) = children.get(axis)
+            && let Some((tag, _, dim_children)) = stamped_parts(dim)
+        {
+            match tag {
+                DeepTag::DName | DeepTag::DVar => {
+                    if let Some(name) = dim_children.first().and_then(symbol_name) {
+                        return name.to_string();
+                    }
+                }
+                DeepTag::DLit => {
+                    if let Some(Expr::Atom(Atom::Int(value), _)) = dim_children.first() {
+                        return value.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        claim.required_extent().to_string()
+    }
+
+    fn local_ascription_claim_token(
+        &mut self,
+        ascription: &chelis_types::CheckedLocalTensorAscription,
+        claim: &chelis_types::LocalAscriptionAxisClaim,
+    ) -> NodeId {
+        let label = Self::local_ascription_claim_label(ascription, claim.axis(), claim);
+        let site = crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+            ascription_id: ascription.id().get(),
+            binding: ascription.binding_name().to_string(),
+            claim: label.clone(),
+            axis: RtAxis::Lit(i32::try_from(claim.axis()).expect("checked tensor rank fits int32")),
+        };
+        let scalar = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        match claim.required_extent() {
+            chelis_types::types::Dim::Lit(required) => {
+                let value = chelis_types::scalar_from_i64("shape", Prim::Int64, *required)
+                    .unwrap_or_else(|trap| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "local tensor ascription `{}` has an invalid extent: {trap}",
+                                ascription.binding_name()
+                            ),
+                            Some(ascription.ascription_span()),
+                            None,
+                        )
+                    });
+                self.dag.add_node(
+                    RiscOp::ExtentWitness {
+                        site,
+                        parameter: String::new(),
+                        axis: RtAxis::Lit(
+                            i32::try_from(claim.axis()).expect("checked tensor rank fits int32"),
+                        ),
+                        requirements: vec![value],
+                        claims: Vec::new(),
+                    },
+                    Vec::new(),
+                    scalar,
+                    self.current_span_id.clone(),
+                )
+            }
+            chelis_types::types::Dim::Name(_) | chelis_types::types::Dim::Var(_) => {
+                let required = self.signature_witness(&label).unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "local tensor ascription `{}` cannot resolve authored extent `{label}` in this activation",
+                            ascription.binding_name()
+                        ),
+                        Some(ascription.ascription_span()),
+                        None,
+                    )
+                });
+                let original = self.dag.get(required).expect("declaring extent witness");
+                let RiscOp::ExtentWitness {
+                    parameter,
+                    axis: observed,
+                    ..
+                } = &original.op
+                else {
+                    unreachable!("signature extent is represented by a witness")
+                };
+                let input = original.inputs[0];
+                let output_type = original.output_type.clone();
+                let token = self.dag.add_node(
+                    RiscOp::ExtentWitness {
+                        site,
+                        parameter: parameter.clone(),
+                        axis: *observed,
+                        requirements: Vec::new(),
+                        claims: Vec::new(),
+                    },
+                    vec![input],
+                    output_type,
+                    self.current_span_id.clone(),
+                );
+                self.dag.add_shape_dep(token, required);
+                token
+            }
+            chelis_types::types::Dim::Wildcard | chelis_types::types::Dim::Rank(_) => {
+                unreachable!("checker records no wildcard/rank local claim")
+            }
+        }
+    }
+
+    fn validate_local_ascription_token_ownership(&self) {
+        for (ascription_id, claims) in &self.local_ascription_tokens {
+            let Some(ascription) = self
+                .local_tensor_ascriptions
+                .iter()
+                .find(|ascription| ascription.id().get() == *ascription_id)
+            else {
+                raise_fatal_lowering_error(
+                    format!(
+                        "local tensor ascription identity {ascription_id} has no checked record"
+                    ),
+                    None,
+                    None,
+                )
+            };
+            for (_, token) in claims {
+                let owner_count = self
+                    .dag
+                    .nodes()
+                    .iter()
+                    .filter(|owner| owner.shape_deps.contains(token))
+                    .count();
+                if owner_count != 1 {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "local tensor ascription `{}` has {owner_count} initializer owners; expected exactly one",
+                            ascription.binding_name()
+                        ),
+                        Some(ascription.initializer_span()),
+                        None,
+                    )
+                }
+            }
+        }
     }
 
     /// `(lit {type: T} value)`
@@ -9217,6 +9886,7 @@ impl<'program> LowerCtx<'program> {
         match tag {
             DeepTag::Fn => Some(CallableExpr::Plain(ResolvedFunction {
                 expression: std::sync::Arc::new(expr.clone()),
+                declaration_name: None,
                 signature: None,
             })),
             DeepTag::Var => {
@@ -9253,10 +9923,15 @@ impl<'program> LowerCtx<'program> {
                 }
                 if let Some(body) = self.program_defs.get(&name) {
                     let mut callable = self.resolve_callable_expr_inner(body, visited)?;
-                    if let CallableExpr::Plain(function) = &mut callable
-                        && let Some(signature) = self.program_signatures.get(&name)
-                    {
-                        function.signature = Some(std::sync::Arc::new(signature.clone()));
+                    if let CallableExpr::Plain(function) = &mut callable {
+                        function.declaration_name = Some(name.clone());
+                        if let Some(signature) = self
+                            .program_signatures
+                            .get(&name)
+                            .or_else(|| unique_terminal_match(&self.program_signatures, &name))
+                        {
+                            function.signature = Some(std::sync::Arc::new(signature.clone()));
+                        }
                     }
                     return Some(callable);
                 }
@@ -10196,6 +10871,8 @@ impl<'program> LowerCtx<'program> {
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_signature_is_authored = self.signature_is_authored;
+        let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
+        self.local_ascription_tokens.clear();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -10484,6 +11161,12 @@ impl<'program> LowerCtx<'program> {
             call_span,
             true,
         );
+        self.prepare_local_ascription_tokens(
+            body,
+            inlining_name
+                .as_deref()
+                .or(fn_expr.declaration_name.as_deref()),
+        );
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
@@ -10525,12 +11208,14 @@ impl<'program> LowerCtx<'program> {
                 }
             }
         }
+        self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
         self.signature_is_authored = saved_signature_is_authored;
+        self.local_ascription_tokens = saved_local_ascription_tokens;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -10569,6 +11254,8 @@ impl<'program> LowerCtx<'program> {
         let saved_authored = self.signature_is_authored;
         let saved_rank_substitutions = self.rank_substitutions.clone();
         let saved_dim_axis_positions = self.dim_axis_positions.clone();
+        let saved_local_ascription_tokens = self.local_ascription_tokens.clone();
+        self.local_ascription_tokens.clear();
         let start = self.invocation_witnesses.len();
         let authored_formal_type_exprs = params
             .iter()
@@ -10650,6 +11337,7 @@ impl<'program> LowerCtx<'program> {
             true,
         );
         let authored_result_claim = function.signature.is_some();
+        self.prepare_local_ascription_tokens(body, function.declaration_name.as_deref());
         let claim = function.result_type().map(|ty| {
             let actualized = Self::type_from_type_expr_with_subst(
                 ty,
@@ -10676,6 +11364,7 @@ impl<'program> LowerCtx<'program> {
         if let Some(claim) = &claim {
             self.preserve_declared_result(&result, claim, None);
         }
+        self.validate_local_ascription_token_ownership();
         let result = self.retain_invocation_witnesses(result, start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
@@ -10684,6 +11373,7 @@ impl<'program> LowerCtx<'program> {
         self.signature_is_authored = saved_authored;
         self.rank_substitutions = saved_rank_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
+        self.local_ascription_tokens = saved_local_ascription_tokens;
         result
     }
 
@@ -15400,10 +16090,7 @@ impl<'program> LowerCtx<'program> {
                 ),
             ),
             DimInfo::Named(_, _) if !self.signature_is_authored => None,
-            DimInfo::Named(name, _) => self
-                .signature_witnesses
-                .iter()
-                .find_map(|(binder, witness)| (binder == name).then_some(*witness)),
+            DimInfo::Named(name, _) => self.signature_witness(name),
         }
     }
 
@@ -16190,7 +16877,7 @@ impl<'program> LowerCtx<'program> {
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, claims, .. }
                     if !requirements.is_empty() || !claims.is_empty())
-                    || crate::axis_sources::directly_owns_literal_result_claim(&self.dag, *witness)
+                    || crate::axis_sources::directly_owns_producer_claim(&self.dag, *witness)
             })
             .collect::<Vec<_>>();
         if required.is_empty() {
@@ -17493,7 +18180,13 @@ impl<'program> LowerCtx<'program> {
         // under input perturbation, so the pruned gradient is exact). The
         // now-dead condition subgraph is swept by the entry points' DCE.
         if let Some(taken) = self.fold_static_cond(cond) {
-            return self.lower_expr(if taken { then_expr } else { else_expr });
+            let (selected, untaken) = if taken {
+                (then_expr, else_expr)
+            } else {
+                (else_expr, then_expr)
+            };
+            self.discard_local_ascription_tokens_in(untaken);
+            return self.lower_expr(selected);
         }
         if self.host_program.is_some() {
             self.host_stage_status
@@ -17504,6 +18197,22 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
+        let saved_local_path = self.local_ascription_path_condition;
+        // Carry the selected path through arm lowering rather than guessing
+        // from the arm's syntax: inlining can introduce a local claim only
+        // after `lower_if` has entered the arm.
+        self.local_ascription_path_condition = Some(match saved_local_path {
+            Some(parent_path) => self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, cond],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                self.current_span_id.clone(),
+            ),
+            None => cond,
+        });
         let saved_random_path = self.random_path_condition;
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -17545,9 +18254,35 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(else_path);
         }
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        let one = self.dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            path_ty.clone(),
+            self.current_span_id.clone(),
+        );
+        let not_cond = self.dag.add_node(
+            RiscOp::CmpLt,
+            vec![cond, one],
+            path_ty.clone(),
+            self.current_span_id.clone(),
+        );
+        self.local_ascription_path_condition = Some(match saved_local_path {
+            Some(parent_path) => self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, not_cond],
+                path_ty,
+                self.current_span_id.clone(),
+            ),
+            None => not_cond,
+        });
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
+        self.local_ascription_path_condition = saved_local_path;
         let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
@@ -17901,7 +18636,7 @@ impl<'program> LowerCtx<'program> {
                     .to_string(),
             );
         };
-        for arm in &elems[3..] {
+        for (selected_index, arm) in elems[3..].iter().enumerate() {
             let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
                 continue;
             };
@@ -17952,6 +18687,11 @@ impl<'program> LowerCtx<'program> {
                         self.local_callables.remove(&name);
                         self.fn_typed_params.remove(&name);
                         self.bindings.insert(name, value);
+                    }
+                    for (other_index, other_arm) in elems[3..].iter().enumerate() {
+                        if other_index != selected_index {
+                            self.discard_local_ascription_tokens_in(other_arm);
+                        }
                     }
                     let value = self.lower_expr(body);
                     self.bindings = saved;
@@ -18068,7 +18808,26 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
-        then_ty.clone()
+        let dims = then_ty
+            .dims
+            .iter()
+            .zip(&else_ty.dims)
+            .map(|(then_dim, else_dim)| match (then_dim, else_dim) {
+                // A dynamic branch cannot publish one arm's concrete extent
+                // when the other arm remains runtime-sized. In particular, a
+                // local ascription's literal is an obligation, not physical
+                // shape evidence for the branch blend. Keep the unresolved
+                // arm so the mask takes its extent from the selected runtime
+                // value instead of allocating to the untaken claim.
+                (DimInfo::Named(_, None), _) => then_dim.clone(),
+                (_, DimInfo::Named(_, None)) => else_dim.clone(),
+                _ => then_dim.clone(),
+            })
+            .collect();
+        TensorType {
+            dims,
+            precision: then_ty.precision,
+        }
     }
 
     fn is_runtime_if_bottom_placeholder(node: &crate::dag::DagNode) -> bool {
@@ -18921,6 +19680,7 @@ mod tests {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
+            local_tensor_ascriptions: Arc::new(Vec::new()),
         };
         let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,

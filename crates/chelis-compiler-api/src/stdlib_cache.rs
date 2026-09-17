@@ -98,6 +98,7 @@ use crate::schema::{Diagnostic, GeneralKind};
 // V17: authored program signatures and checked extent carriers are mandatory.
 // V16: scalar/storage payloads use the exact dtype-tagged bit codecs;
 // the changed key rejects previous positional payloads before decode.
+// V23 retains checker-owned local tensor-ascription obligations.
 const STDLIB_CACHE_FORMAT_VERSION: u32 =
     <StdLibContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
@@ -549,12 +550,12 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 22);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 23);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 22);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 23);
     }
 
     #[test]

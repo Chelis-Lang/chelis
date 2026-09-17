@@ -79,7 +79,8 @@ impl CachePayload for crate::LibraryContext {
     // obligation and would silently serve an unguarded program.
     // V15 (#1875): versioned TypeEnv with mandatory dimension-label transport.
     // V16: definition-checked operation contracts and operand-value restrictions.
-    const FORMAT_VERSION: u32 = 16;
+    // V17 retains checker-owned local tensor-ascription obligations.
+    const FORMAT_VERSION: u32 = 17;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -89,7 +90,8 @@ impl CachePayload for crate::StdLibContext {
     // V20: the V16 operation-contract transport above, for the standard library.
     // V21 carries exact result-claim witness roles in the lowered library.
     // V22 retains distinct literal-result declaration tokens and producer ownership.
-    const FORMAT_VERSION: u32 = 22;
+    // V23 retains checker-owned local tensor-ascription obligations.
+    const FORMAT_VERSION: u32 = 23;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
@@ -212,6 +214,10 @@ pub(crate) fn lowered_library_payload_matches(
                 == sorted_btree_map_bytes(expected.program_signatures())?
             && sorted_btree_map_bytes(cached.program_types())?
                 == sorted_btree_map_bytes(expected.program_types())?
+            && bincode::serialize(cached.local_tensor_ascriptions())
+                .map_err(|error| error.to_string())?
+                == bincode::serialize(expected.local_tensor_ascriptions())
+                    .map_err(|error| error.to_string())?
             && sorted_btree_map_bytes(cached.lowered_names())?
                 == sorted_btree_map_bytes(expected.lowered_names())?,
     )

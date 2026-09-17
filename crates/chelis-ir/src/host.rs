@@ -315,6 +315,16 @@ impl<'program> HostLoweringSession<'program> {
     pub fn program(&self) -> &'program CheckedProgram {
         self.program
     }
+
+    /// The checked subexpression-lowering context for this program.
+    ///
+    /// Host-side execution routes use this accessor rather than rebuilding a
+    /// context from the ordinary type environment, because the checker-owned
+    /// local tensor-ascription obligations are an independent artifact
+    /// channel and do not exist in inferred type metadata.
+    pub fn checked_subexpr_lowering_context(&self) -> crate::lower::SubexprLoweringContext {
+        cached_subexpr_lowering_context(self)
+    }
 }
 
 impl Deref for HostLoweringSession<'_> {
@@ -754,6 +764,10 @@ struct TensorHelperSink {
     transferred_result_claim_axes: Vec<crate::dag::RtAxis>,
     helpers: Vec<HostTensorHelper>,
     products: Vec<HelperExecutionProduct>,
+    /// Checked declaration whose body is currently being lowered. Local
+    /// ascription identities are artifact-local, so synthetic helper regions
+    /// must select records by declaration as well as by source span.
+    declaration_name: Option<String>,
     collect_execution: bool,
     collect_trace: bool,
 }
@@ -770,9 +784,20 @@ impl TensorHelperSink {
             transferred_result_claim_axes: Vec::new(),
             helpers: Vec::new(),
             products: Vec::new(),
+            declaration_name: None,
             collect_execution,
             collect_trace,
         }
+    }
+
+    fn for_declaration(
+        collect_execution: bool,
+        collect_trace: bool,
+        declaration_name: impl Into<String>,
+    ) -> Self {
+        let mut sink = Self::new(collect_execution, collect_trace);
+        sink.declaration_name = Some(declaration_name.into());
+        sink
     }
 
     fn push_helper(
@@ -2315,8 +2340,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         defs.clone(),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
@@ -2396,8 +2421,8 @@ fn lower_named_tensor_entry_execution_with<T>(
     else {
         return Ok(None);
     };
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
@@ -2849,6 +2874,7 @@ fn lower_host_program_with_execution(
             // body so `let g = grad(f); g(x)` rewrites to `(grad(f))(x)`
             // before host lowering — same rationale as in
             // `lower_host_function`.
+            global_tensor_helpers.declaration_name = Some(name.to_string());
             let inlined_body = inline_local_callable_lets(body);
             let mut value = lower_host_expr(
                 &inlined_body,
@@ -5492,7 +5518,8 @@ fn lower_host_function(
     let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
         return Ok(None);
     };
-    let mut tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
+    let mut tensor_helpers =
+        TensorHelperSink::for_declaration(collect_execution, collect_trace, name);
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
     // body has been lowered.
@@ -5616,6 +5643,35 @@ fn try_lower_tensor_helper_call(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> Option<HostExpr> {
+    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None)
+}
+
+fn try_lower_tensor_helper_call_with_context(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected: TensorType,
+    lowering_context: &crate::lower::SubexprLoweringContext,
+) -> Option<HostExpr> {
+    try_lower_tensor_helper_call_inner(
+        expr,
+        program,
+        scope,
+        tensor_helpers,
+        expected,
+        Some(lowering_context),
+    )
+}
+
+fn try_lower_tensor_helper_call_inner(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+    expected: TensorType,
+    lowering_context: Option<&crate::lower::SubexprLoweringContext>,
+) -> Option<HostExpr> {
     if let Expr::List(list, _) = expr
         && tag(list) == Some(DeepTag::Var)
         && let Some(name) = children(list).first().and_then(symbol_name)
@@ -5644,6 +5700,7 @@ fn try_lower_tensor_helper_call(
         &expected,
         tensor_helpers.collect_execution,
         tensor_helpers.collect_trace,
+        lowering_context,
     ) else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
@@ -6168,13 +6225,13 @@ fn lower_tensor_helper_dag(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
+    context: &crate::lower::SubexprLoweringContext,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
-        let context = cached_subexpr_lowering_context(program);
         let (dag, _) = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
             collect_tensor_scope(scope).into_sorted(),
-            &context,
+            context,
             None,
             None,
             0,
@@ -6198,6 +6255,7 @@ fn lower_tensor_helper_product(
     expected: &TensorType,
     collect_execution: bool,
     collect_trace: bool,
+    lowering_context: Option<&crate::lower::SubexprLoweringContext>,
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
@@ -6209,8 +6267,10 @@ fn lower_tensor_helper_product(
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
         return None;
     }
+    let context = lowering_context
+        .cloned()
+        .unwrap_or_else(|| cached_subexpr_lowering_context(program));
     if collect_execution {
-        let context = cached_subexpr_lowering_context(program);
         let scoped = collect_tensor_scope(scope).into_sorted();
         if context.c_execution_profile(expr, &scoped)
             == crate::evaluation::EvaluationProfile::FixedControl
@@ -6283,7 +6343,6 @@ fn lower_tensor_helper_product(
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
-            let context = cached_subexpr_lowering_context(program);
             let scoped = collect_tensor_scope(scope).into_sorted();
             let (dag, _, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
@@ -6299,11 +6358,13 @@ fn lower_tensor_helper_product(
             })
         });
     }
-    lower_tensor_helper_dag(expr, program, scope, expected).map(|dag| LoweredTensorHelper {
-        dag,
-        execution: None,
-        #[cfg(feature = "lowering-trace")]
-        trace: None,
+    lower_tensor_helper_dag(expr, program, scope, expected, &context).map(|dag| {
+        LoweredTensorHelper {
+            dag,
+            execution: None,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        }
     })
 }
 
@@ -7499,6 +7560,141 @@ fn lower_host_expr_with_expected(
     Ok(result)
 }
 
+#[derive(Clone, Copy)]
+struct SequentialHostLetBinding<'expr> {
+    binding: &'expr Expr,
+    initializer: &'expr Expr,
+    bind_span: Option<&'expr str>,
+    layer: usize,
+}
+
+struct SequentialHostLetLayer {
+    span_id: Option<String>,
+    explicit_ty: HostTypeTerm,
+}
+
+struct SequentialHostLetChain<'expr> {
+    bindings: Vec<SequentialHostLetBinding<'expr>>,
+    layers: Vec<SequentialHostLetLayer>,
+    bind_expr: Expr,
+    body: &'expr Expr,
+}
+
+/// Flatten only the direct tail chain produced for sequential Surf bindings:
+/// `(let b0 (let b1 (... body)))`. Branches and other nested expressions are
+/// not traversed. This gives a checked local ascription visibility over the
+/// same lexical predecessors that source evaluation gives it.
+fn sequential_host_let_chain<'expr>(
+    expr: &'expr Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Option<SequentialHostLetChain<'expr>> {
+    let mut bindings = Vec::new();
+    let mut layers = Vec::new();
+    let mut current = expr;
+    let mut layer = 0;
+    let body = loop {
+        let Expr::List(list, _) = current else {
+            return None;
+        };
+        if tag(list) != Some(DeepTag::Let) {
+            return None;
+        }
+        layers.push(SequentialHostLetLayer {
+            span_id: current.span_id().map(str::to_owned),
+            explicit_ty: expr_host_type(current, program, scope),
+        });
+        let kids = children(list);
+        let bind_expr = kids.first()?;
+        let bind_list = as_list(bind_expr)?;
+        if tag(bind_list) != Some(DeepTag::Bind) {
+            return None;
+        }
+        let bind_span = bind_expr.span_id();
+        let bind_kids = children(bind_list);
+        if !bind_kids.len().is_multiple_of(2) {
+            return None;
+        }
+        for pair in bind_kids.as_chunks::<2>().0 {
+            bindings.push(SequentialHostLetBinding {
+                binding: &pair[0],
+                initializer: &pair[1],
+                bind_span,
+                layer,
+            });
+        }
+        let next = kids.get(1)?;
+        if matches!(next, Expr::List(next_list, _) if tag(next_list) == Some(DeepTag::Let)) {
+            current = next;
+            layer += 1;
+        } else {
+            break next;
+        }
+    };
+
+    let span = expr.span();
+    let mut bind_elements = vec![
+        Expr::Atom(Atom::Tag(DeepTag::Bind), span),
+        Expr::Map(Metadata::default(), span),
+    ];
+    for binding in &bindings {
+        bind_elements.push(binding.binding.clone());
+        bind_elements.push(binding.initializer.clone());
+    }
+    Some(SequentialHostLetChain {
+        bindings,
+        layers,
+        bind_expr: Expr::List(
+            List {
+                elements: bind_elements,
+            },
+            span,
+        ),
+        body,
+    })
+}
+
+fn lower_checked_local_ascription_region(
+    name: &str,
+    initializer: &Expr,
+    local_region: &crate::lower::LocalAscriptionBindingRegion,
+    checked_lowering: &crate::lower::SubexprLoweringContext,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let region_context = checked_lowering.for_local_ascription_region(local_region);
+    let expected = expr_tensor_type(initializer, program, scope)
+        .or_else(|| tensor_type_from_host_input(&expr_host_type(initializer, program, scope)))
+        .ok_or_else(|| {
+            host_expr_lowering_error(
+                initializer,
+                format!(
+                    "checked local tensor-ascription region rooted at `{name}` has no concrete \
+                     tensor type at its initializer"
+                ),
+            )
+        })?;
+
+    try_lower_tensor_helper_call_with_context(
+        local_region.expression(),
+        program,
+        scope,
+        tensor_helpers,
+        expected,
+        &region_context,
+    )
+    .ok_or_else(|| {
+        host_expr_lowering_error(
+            initializer,
+            format!(
+                "checked local tensor-ascription region rooted at `{name}` cannot be represented \
+                 by the tensor execution lane"
+            ),
+        )
+    })
+}
+
 fn host_expr_lowering_error(
     expr: &Expr,
     detail: impl Into<String>,
@@ -7777,57 +7973,149 @@ fn lower_host_expr_kind(
             let kids = children(list);
             let mut scoped = scope.clone();
             let mut bindings = Vec::new();
-            if let Some(bind_first) = kids.first()
-                && let Some(bind_list) = as_list(bind_first)
-                && tag(bind_list) == Some(DeepTag::Bind)
-            {
-                // The `(bind {span: a} ...)` node carries its own span;
-                // when its child value is lowered to an existing HostExpr
-                // (the value HostExpr), the bind's span appends to the
-                // value's `merged_spans` per §2.3 host-side rule (b)
-                // (N→1 lowering collapse — bind wraps value).
-                let bind_span = bind_first.span_id().map(|s| s.to_owned());
-                let bind_children = children(bind_list);
-                let mut index = 0;
-                while index + 1 < bind_children.len() {
-                    if let Some(name) = symbol_name(&bind_children[index]) {
-                        let mut value = lower_host_expr(
-                            &bind_children[index + 1],
+            let checked_lowering = cached_subexpr_lowering_context(program);
+            let flattened = sequential_host_let_chain(expr, program, scope);
+            let flattened_regions = if let Some(chain) = flattened.as_ref() {
+                checked_lowering.local_ascription_binding_regions(
+                    &chain.bind_expr,
+                    tensor_helpers.declaration_name.as_deref(),
+                )
+            } else {
+                Vec::new()
+            };
+            let crosses_nested_let = flattened.as_ref().is_some_and(|chain| {
+                flattened_regions.iter().any(|region| {
+                    let producer_layer = chain.bindings[region.producer_binding_index() / 2].layer;
+                    region
+                        .ascription_binding_indices()
+                        .iter()
+                        .any(|index| chain.bindings[*index / 2].layer != producer_layer)
+                })
+            });
+
+            let (let_bindings, bind_expr, body_expr, nested_layers) = if crosses_nested_let {
+                let chain = flattened.expect("cross-layer region requires a flattened let chain");
+                (
+                    chain.bindings,
+                    Cow::Owned(chain.bind_expr),
+                    chain.body,
+                    Some(chain.layers),
+                )
+            } else {
+                let bind_first = kids.first().ok_or_else(|| {
+                    host_expr_lowering_error(expr, "a `let` node has no bindings")
+                })?;
+                let bind_list = as_list(bind_first).ok_or_else(|| {
+                    host_expr_lowering_error(expr, "a `let` node has malformed bindings")
+                })?;
+                if tag(bind_list) != Some(DeepTag::Bind) {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        "a `let` node has malformed bindings",
+                    ));
+                }
+                let bind_span = bind_first.span_id();
+                let current = children(bind_list)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| SequentialHostLetBinding {
+                        binding: &pair[0],
+                        initializer: &pair[1],
+                        bind_span,
+                        layer: 0,
+                    })
+                    .collect();
+                (
+                    current,
+                    Cow::Borrowed(bind_first),
+                    kids.get(1).ok_or_else(|| {
+                        host_expr_lowering_error(expr, "a `let` node has no body")
+                    })?,
+                    None,
+                )
+            };
+            let local_regions = checked_lowering
+                .local_ascription_binding_regions(
+                    bind_expr.as_ref(),
+                    tensor_helpers.declaration_name.as_deref(),
+                )
+                .into_iter()
+                .map(|region| (region.producer_binding_index(), region))
+                .collect::<BTreeMap<_, _>>();
+            let mut nested_bindings = nested_layers
+                .as_ref()
+                .map(|layers| (0..layers.len()).map(|_| Vec::new()).collect::<Vec<_>>());
+            for (ordinal, binding) in let_bindings.iter().enumerate() {
+                if let Some(name) = symbol_name(binding.binding) {
+                    let initializer = binding.initializer;
+                    let index = ordinal * 2;
+                    let mut value = if let Some(local_region) = local_regions.get(&index) {
+                        lower_checked_local_ascription_region(
+                            name,
+                            initializer,
+                            local_region,
+                            &checked_lowering,
                             program,
                             &scoped,
                             tensor_helpers,
-                        )?;
-                        value.append_merged_span(bind_span.as_deref());
-                        let bind_ty = host_expr_type(&value);
-                        bindings.push(HostBinding {
-                            name: name.to_string(),
-                            display_name: None,
-                            display_roots: Vec::new(),
-                            ty: bind_ty.clone(),
-                            value,
-                        });
-                        scoped.insert(name.to_string(), bind_ty);
+                        )?
+                    } else {
+                        lower_host_expr(initializer, program, &scoped, tensor_helpers)?
+                    };
+                    // The original `(bind {span: a} ...)` node wraps this
+                    // value even when a cross-let local-ascription region
+                    // caused the sequential tail chain to be flattened.
+                    value.append_merged_span(binding.bind_span);
+                    let bind_ty = host_expr_type(&value);
+                    let host_binding = HostBinding {
+                        name: name.to_string(),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: bind_ty.clone(),
+                        value,
+                    };
+                    if let Some(nested_bindings) = nested_bindings.as_mut() {
+                        nested_bindings[binding.layer].push(host_binding);
+                    } else {
+                        bindings.push(host_binding);
                     }
-                    index += 2;
+                    scoped.insert(name.to_string(), bind_ty);
                 }
             }
-            let body = lower_host_expr(
-                kids.get(1)
-                    .ok_or_else(|| host_expr_lowering_error(expr, "a `let` node has no body"))?,
-                program,
-                &scoped,
-                tensor_helpers,
-            )?;
-            let explicit_ty = expr_host_type(expr, program, scope);
-            HostExpr::new(HostExprKind::Let {
-                bindings,
-                body: Box::new(body.clone()),
-                ty: if explicit_ty.is_unresolved() {
-                    host_expr_type(&body)
-                } else {
-                    explicit_ty
-                },
-            })
+            let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
+            if let (Some(layers), Some(mut nested_bindings)) = (nested_layers, nested_bindings) {
+                for (layer, layer_bindings) in
+                    layers.into_iter().zip(nested_bindings.drain(..)).rev()
+                {
+                    let ty = if layer.explicit_ty.is_unresolved() {
+                        host_expr_type(&body)
+                    } else {
+                        layer.explicit_ty
+                    };
+                    let mut nested = HostExpr::new(HostExprKind::Let {
+                        bindings: layer_bindings,
+                        body: Box::new(body),
+                        ty,
+                    });
+                    if let Some(span) = layer.span_id {
+                        nested.span_id = Some(span);
+                    }
+                    body = nested;
+                }
+                body
+            } else {
+                let explicit_ty = expr_host_type(expr, program, scope);
+                HostExpr::new(HostExprKind::Let {
+                    bindings,
+                    body: Box::new(body.clone()),
+                    ty: if explicit_ty.is_unresolved() {
+                        host_expr_type(&body)
+                    } else {
+                        explicit_ty
+                    },
+                })
+            }
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::TupleGet) => {
             lower_tuple_get_host_expr(list, program, scope, tensor_helpers)?
@@ -12762,6 +13050,7 @@ fn ensure_mono_specialization(
     });
     let lowered = lower_mono_specialized_function(MonoSpecializedFunctionInput {
         symbol: &symbol,
+        declaration_name: name,
         params: spec_params,
         ret_ty,
         body_expr: &body_expr,
@@ -12781,6 +13070,7 @@ fn ensure_mono_specialization(
 
 struct MonoSpecializedFunctionInput<'a> {
     symbol: &'a str,
+    declaration_name: &'a str,
     params: Vec<HostParam>,
     ret_ty: &'a HostTypeTerm,
     body_expr: &'a Expr,
@@ -12796,6 +13086,7 @@ fn lower_mono_specialized_function(
 ) -> Result<LoweredHostFunction, crate::lower::LowerDiagnostic> {
     let MonoSpecializedFunctionInput {
         symbol,
+        declaration_name,
         mut params,
         ret_ty,
         body_expr,
@@ -12806,7 +13097,8 @@ fn lower_mono_specialized_function(
         collect_trace,
     } = input;
     let body_expr = inline_local_callable_lets(body_expr);
-    let mut fn_tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
+    let mut fn_tensor_helpers =
+        TensorHelperSink::for_declaration(collect_execution, collect_trace, declaration_name);
     // chelis#1201: pin this specialization's type variables for the body.
     // The body's checked types are the generic ones the checker recorded, so
     // without this a generic ADT constructed inside the body (coral#26's
@@ -14895,8 +15187,8 @@ fn cached_subexpr_lowering_context(
             .map(deep_expr_nodes)
             .sum::<usize>();
     });
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
+    let context = crate::lower::prepare_checked_subexpr_lowering_context(
+        program,
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
@@ -20898,9 +21190,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let dag =
-            lower_tensor_helper_dag(body, &HostLoweringSession::new(&checked), &scope, &expected)
-                .expect("helper dag");
+        let session = HostLoweringSession::new(&checked);
+        let context = cached_subexpr_lowering_context(&session);
+        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
+            .expect("helper dag");
         let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
         assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
     }

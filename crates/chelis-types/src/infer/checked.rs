@@ -14,267 +14,6 @@ pub(super) struct DeclaredSigMetadata {
     pub(super) dtype_bounds: UnordMap<String, chelis_deep::DtypeFamily>,
 }
 
-/// Explicit annotation-time declaration context. The declared signature map
-/// belongs to one annotation unit; `current_type_binders` is narrowed to the
-/// `def` whose children are being annotated and is passed through every
-/// recursive annotation call.
-#[derive(Clone, Copy)]
-pub(super) struct AnnotationResolutionContext<'a> {
-    declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>,
-}
-
-impl<'a> AnnotationResolutionContext<'a> {
-    pub(super) fn root(declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>) -> Self {
-        Self {
-            declared_signatures,
-        }
-    }
-
-    pub(super) fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
-        self.declared_signatures.get(name)
-    }
-}
-
-/// Semantic role of one tagged Deep node's child in checker-owned type
-/// stamping. This is deliberately distinct from the child's syntactic tag:
-/// a `lit` is a runtime expression under `app`, but the same shape is selector
-/// syntax in `tuple-get`, `grad`, or `vmap`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ChildStampRole {
-    /// Traversed by ordinary expression inference.
-    RuntimeExpr,
-    /// Compiler/source syntax which is preserved verbatim.
-    Syntax,
-    /// A field, axis, projection, or transform selector.
-    Selector,
-    /// Handler payload syntax whose literal-form contract is owned by
-    /// `chelis-effects`, not expression inference.
-    EffectHandler,
-    /// A declaration, parameter, or binding name.
-    Binder,
-    /// Type/dimension syntax resolved by its owning type consumer.
-    Type,
-    /// Traversed by a dedicated inference owner rather than `infer_expr` on
-    /// the structural parent (module declarations, patterns, helper nodes,
-    /// and synthesized pipe stages).
-    ExplicitInferenceBypass,
-}
-
-/// Exhaustive child-role table for the canonical closed Deep vocabulary.
-///
-/// Returning `None` is a loud version-skew signal, never permission to treat
-/// an unknown child as a runtime expression. The completeness test below
-/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
-/// of truth, so adding a tag requires an explicit ownership decision here.
-pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
-    use ChildStampRole::{
-        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
-    };
-
-    match tag {
-        // Module wrappers are not inferred as one expression. Their
-        // declarations each own a separate inference epoch.
-        DeepTag::Module => {
-            if index == 0 {
-                Binder
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
-
-        // Declarations.
-        DeepTag::Def => {
-            if index == 0 {
-                Binder
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::Defsig => {
-            if index == 0 {
-                Binder
-            } else {
-                Type
-            }
-        }
-        DeepTag::Deftype | DeepTag::Typealias => {
-            if index == 0 {
-                Binder
-            } else if index == 1 {
-                Syntax
-            } else {
-                Type
-            }
-        }
-        DeepTag::Variant | DeepTag::Field => {
-            if index == 0 {
-                Binder
-            } else {
-                Type
-            }
-        }
-        DeepTag::Defdim => Binder,
-
-        // Expressions and their structural helper positions.
-        DeepTag::Fn => {
-            if index == 0 {
-                Binder
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::App
-        | DeepTag::If
-        | DeepTag::Block
-        | DeepTag::Tuple
-        | DeepTag::Par
-        | DeepTag::Jit
-        | DeepTag::Realize
-        | DeepTag::Copy
-        | DeepTag::Borrow
-        | DeepTag::Unquote
-        | DeepTag::Splice => RuntimeExpr,
-        DeepTag::HandleEffect => {
-            if index == 0 {
-                EffectHandler
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::Let => {
-            if index == 0 {
-                ExplicitInferenceBypass
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::Match => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-        DeepTag::Arm => {
-            if index == 0 {
-                ExplicitInferenceBypass
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::Var | DeepTag::Lit => Syntax,
-        DeepTag::Record => {
-            if index == 0 {
-                Type
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-        DeepTag::Access => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                Selector
-            }
-        }
-        DeepTag::Pipe => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-        DeepTag::TupleGet => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                Selector
-            }
-        }
-        DeepTag::RecordUpdate => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-
-        // Pattern nodes are consumed by the primary pattern traversal.
-        DeepTag::PatVar => Binder,
-        DeepTag::PatLit => Syntax,
-        DeepTag::PatCtor | DeepTag::PatRecord => {
-            if index == 0 {
-                Selector
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-        DeepTag::PatTuple => ExplicitInferenceBypass,
-        DeepTag::PatWild => Syntax,
-        DeepTag::PatAs => {
-            if index == 0 {
-                Binder
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-
-        // Type and dimension nodes are owned recursively by DeepTypeResolver,
-        // never by expression annotation.
-        DeepTag::TPrim
-        | DeepTag::TFn
-        | DeepTag::TTensor
-        | DeepTag::TAdt
-        | DeepTag::TVar
-        | DeepTag::TRef
-        | DeepTag::TUnit
-        | DeepTag::TTuple
-        | DeepTag::DName
-        | DeepTag::DVar
-        | DeepTag::DLit
-        | DeepTag::DRank => Type,
-
-        // Transform-specific selector/type positions.
-        DeepTag::Grad | DeepTag::Vmap => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                Selector
-            }
-        }
-        DeepTag::Cast => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                Type
-            }
-        }
-
-        // Quoted children and effect/resource payloads are syntax data.
-        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
-
-        // Structural helper nodes. `kv` is also used by pattern records, so
-        // its value/pattern slot is an explicit owning traversal in both
-        // contexts; canonical runtime values still record their normal stamp.
-        DeepTag::Params => Binder,
-        DeepTag::Bind => {
-            if index.is_multiple_of(2) {
-                Binder
-            } else {
-                RuntimeExpr
-            }
-        }
-        DeepTag::Kv => {
-            if index == 0 {
-                Selector
-            } else {
-                ExplicitInferenceBypass
-            }
-        }
-    }
-}
-
 /// One checker operation's typed inference result. The product is private,
 /// session-local, and never serialized: annotation consumes it immediately
 /// after the owning inference traversal completes.
@@ -341,6 +80,16 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+    /// Explicit local tensor ascriptions, recorded independently from the
+    /// ordinary inferred `type` metadata that annotation writes on every
+    /// checked expression. Lowering consumes this checker-owned carrier at
+    /// the matching `let` before aliases can erase the authored boundary.
+    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
+    /// Exact top-level declaration currently being inferred. This is source
+    /// provenance for local ascriptions, not an inferred type fact: composed
+    /// checked units may reuse the same byte offsets, so spans alone cannot
+    /// identify the declaration that authored a binding.
+    active_declaration_name: Option<String>,
 }
 
 struct InferredAdmissionContract {
@@ -502,6 +251,47 @@ pub(super) struct FinalOwnerType {
 }
 
 impl InferenceProduct {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_local_tensor_ascription(
+        &mut self,
+        origin: LocalTensorAscriptionOrigin,
+        binding_name: &str,
+        binding_span: Span,
+        ascription_span: Span,
+        initializer_span: Span,
+        authored_type: deep::Expr,
+        declared_type: Type,
+        rhs_type_before_ascription: &Type,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let Some(outstanding_claims) =
+            outstanding_local_ascription_claims(&declared_type, rhs_type_before_ascription)
+        else {
+            return;
+        };
+        let Ok(raw_id) = u64::try_from(self.local_tensor_ascriptions.len()) else {
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                "local tensor-ascription identity space exhausted".to_string(),
+                vec!["Rejecting rather than aliasing two authored local bindings".to_string()],
+            ));
+            return;
+        };
+        self.local_tensor_ascriptions
+            .push(CheckedLocalTensorAscription {
+                id: LocalAscriptionId(raw_id),
+                origin,
+                declaration_name: self.active_declaration_name.clone(),
+                binding_name: binding_name.to_string(),
+                binding_span,
+                ascription_span,
+                initializer_span,
+                authored_type,
+                declared_type,
+                outstanding_claims,
+            });
+    }
+
     /// chelis#1801: record the fresh dimension variables one scheme
     /// instantiation just minted, in quantifier order.
     pub(super) fn record_instantiation_dvars(&mut self, fresh: impl IntoIterator<Item = DimVar>) {
@@ -545,6 +335,13 @@ impl InferenceProduct {
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
+        self.active_declaration_name = stamped_parts(root)
+            .and_then(|(tag, _, children)| {
+                (tag == DeepTag::Def)
+                    .then(|| children.first().and_then(symbol_name))
+                    .flatten()
+            })
+            .map(str::to_string);
     }
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
@@ -1542,6 +1339,7 @@ impl InferenceProduct {
             ));
             return;
         };
+        self.active_declaration_name = None;
 
         for (key, requirement) in epoch.owners.into_sorted() {
             let Some(writes) = epoch.writes.get(&key) else {
@@ -2177,6 +1975,189 @@ pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> UnordSet<String>
     names
 }
 
+/// Artifact-local identity of one explicit local tensor ascription.
+///
+/// Independently checked programs allocate separate domains.
+/// [`CheckedProgram::compose`] explicitly remaps the new-code domain before
+/// combining it with a checked library.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct LocalAscriptionId(u64);
+
+impl LocalAscriptionId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Authored source channel that owns a local tensor ascription.
+///
+/// Surf stamps inferred metadata explicitly, so unmarked public Deep `type`
+/// metadata remains an authored contract rather than being confused with
+/// compiler-inferred Surf metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LocalTensorAscriptionOrigin {
+    SurfExplicit,
+    DeepTypeMetadata,
+}
+
+/// One declared tensor axis that checking could not independently discharge.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LocalAscriptionAxisClaim {
+    axis: usize,
+    required_extent: Dim,
+}
+
+impl LocalAscriptionAxisClaim {
+    pub fn axis(&self) -> usize {
+        self.axis
+    }
+
+    pub fn required_extent(&self) -> &Dim {
+        &self.required_extent
+    }
+}
+
+/// Exact checker-owned record of an authored local tensor ascription.
+///
+/// The authored Deep type remains distinct from the checked type so wildcard
+/// spelling and source structure cannot be reconstructed from ordinary
+/// inferred metadata. `outstanding_claims` contains only declared axes whose
+/// agreement was not statically proved from the RHS before ascription
+/// unification.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CheckedLocalTensorAscription {
+    id: LocalAscriptionId,
+    origin: LocalTensorAscriptionOrigin,
+    declaration_name: Option<String>,
+    binding_name: String,
+    binding_span: Span,
+    ascription_span: Span,
+    initializer_span: Span,
+    authored_type: deep::Expr,
+    declared_type: Type,
+    outstanding_claims: Vec<LocalAscriptionAxisClaim>,
+}
+
+impl CheckedLocalTensorAscription {
+    pub fn id(&self) -> LocalAscriptionId {
+        self.id
+    }
+
+    pub fn origin(&self) -> LocalTensorAscriptionOrigin {
+        self.origin
+    }
+
+    pub fn declaration_name(&self) -> Option<&str> {
+        self.declaration_name.as_deref()
+    }
+
+    pub fn binding_name(&self) -> &str {
+        &self.binding_name
+    }
+
+    pub fn binding_span(&self) -> Span {
+        self.binding_span
+    }
+
+    pub fn ascription_span(&self) -> Span {
+        self.ascription_span
+    }
+
+    pub fn initializer_span(&self) -> Span {
+        self.initializer_span
+    }
+
+    pub fn authored_type(&self) -> &deep::Expr {
+        &self.authored_type
+    }
+
+    pub fn declared_type(&self) -> &Type {
+        &self.declared_type
+    }
+
+    pub fn outstanding_claims(&self) -> &[LocalAscriptionAxisClaim] {
+        &self.outstanding_claims
+    }
+
+    /// Clone this checked obligation into an identity domain above an earlier
+    /// independently checked artifact. The source spans and declaration
+    /// identity stay unchanged; only the opaque artifact-local ID moves.
+    pub fn with_id_offset(&self, offset: u64) -> Option<Self> {
+        let mut remapped = self.clone();
+        remapped.id = LocalAscriptionId(remapped.id.0.checked_add(offset)?);
+        Some(remapped)
+    }
+}
+
+/// Compose checker-owned local obligations across independently checked units.
+///
+/// A replacement definition owns the active body for its declaration name, so
+/// obligations attached to the shadowed library body are unreachable and must
+/// not participate in source-span selection. Retained records keep their
+/// identities; new-code records move above that retained identity domain.
+pub fn compose_local_tensor_ascriptions(
+    library: &[CheckedLocalTensorAscription],
+    new_code: &[CheckedLocalTensorAscription],
+    replaced_definitions: &BTreeSet<String>,
+) -> Option<Vec<CheckedLocalTensorAscription>> {
+    let mut composed = library
+        .iter()
+        .filter(|ascription| {
+            ascription
+                .declaration_name()
+                .is_none_or(|name| !replaced_definitions.contains(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let new_code_id_offset = match composed.iter().map(|ascription| ascription.id.0).max() {
+        Some(last) => last.checked_add(1)?,
+        None => 0,
+    };
+    for ascription in new_code {
+        composed.push(ascription.with_id_offset(new_code_id_offset)?);
+    }
+    Some(composed)
+}
+
+fn tensor_dims(ty: &Type) -> Option<&[Dim]> {
+    match ty {
+        Type::Tensor(dims, _) => Some(dims),
+        Type::Ref(inner) => tensor_dims(inner),
+        _ => None,
+    }
+}
+
+fn outstanding_local_ascription_claims(
+    declared_type: &Type,
+    rhs_type_before_ascription: &Type,
+) -> Option<Vec<LocalAscriptionAxisClaim>> {
+    let declared_dims = tensor_dims(declared_type)?;
+    let rhs_dims = tensor_dims(rhs_type_before_ascription);
+    let mut claims = Vec::new();
+    for (axis, required_extent) in declared_dims.iter().enumerate() {
+        if matches!(required_extent, Dim::Wildcard | Dim::Rank(_)) {
+            continue;
+        }
+        let independently_proved =
+            rhs_dims
+                .and_then(|dims| dims.get(axis))
+                .is_some_and(|observed| match (required_extent, observed) {
+                    (Dim::Lit(required), Dim::Lit(actual)) => required == actual,
+                    (Dim::Var(required), Dim::Var(actual)) => required == actual,
+                    _ => false,
+                });
+        if !independently_proved {
+            claims.push(LocalAscriptionAxisClaim {
+                axis,
+                required_extent: required_extent.clone(),
+            });
+        }
+    }
+    Some(claims)
+}
+
 /// Result of running type inference on a program.
 #[derive(Debug)]
 pub struct InferResult {
@@ -2195,6 +2176,7 @@ pub struct InferStats {
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: BTreeMap<String, deep::Expr>,
+    local_tensor_ascriptions: Vec<CheckedLocalTensorAscription>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
     type_headers: TypeResolutionEnv,
@@ -2220,6 +2202,7 @@ impl CheckedProgram {
         Self {
             annotated_exprs,
             type_env,
+            local_tensor_ascriptions: Vec::new(),
             linearity: LinearityInfo::default(),
             signature_inference: SignatureInferenceMetadata::default(),
             type_headers: TypeResolutionEnv::default(),
@@ -2253,6 +2236,10 @@ impl CheckedProgram {
 
     pub fn type_env(&self) -> &BTreeMap<String, deep::Expr> {
         &self.type_env
+    }
+
+    pub fn local_tensor_ascriptions(&self) -> &[CheckedLocalTensorAscription] {
+        &self.local_tensor_ascriptions
     }
 
     pub fn linearity(&self) -> &LinearityInfo {
@@ -2319,6 +2306,9 @@ impl CheckedProgram {
     ///   `_with_context` builder, so this just back-fills any
     ///   library-only entries.
     /// - `linearity`: the two `reusable_inputs_by_offset` maps merged.
+    /// - `local_tensor_ascriptions`: library records followed by new-code
+    ///   records whose artifact-local identities are remapped above the
+    ///   library's identity domain.
     /// - `signature_inference`: the two `functions` maps merged,
     ///   `new_code` winning on a name clash.
     ///
@@ -2344,6 +2334,22 @@ impl CheckedProgram {
         }
 
         let linearity = library.linearity.merged_with(&new_code.linearity);
+
+        let replaced_definitions = top_level_decl_items(&new_code.annotated_exprs)
+            .into_iter()
+            .filter_map(|expr| {
+                let (tag, _, children) = stamped_parts(expr)?;
+                (tag == DeepTag::Def)
+                    .then(|| children.first().and_then(symbol_name))
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+        let local_tensor_ascriptions = compose_local_tensor_ascriptions(
+            &library.local_tensor_ascriptions,
+            &new_code.local_tensor_ascriptions,
+            &replaced_definitions,
+        )?;
 
         let mut signature_inference = library.signature_inference.clone();
         for (name, sig) in &new_code.signature_inference.functions {
@@ -2375,6 +2381,7 @@ impl CheckedProgram {
         Some(Self {
             annotated_exprs,
             type_env,
+            local_tensor_ascriptions,
             linearity,
             signature_inference,
             type_headers,
@@ -2411,6 +2418,7 @@ pub(super) fn finalize_checked_program(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env,
+        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
         linearity: LinearityInfo::default(),
         signature_inference,
         type_headers: product.type_headers.clone(),
@@ -2436,10 +2444,79 @@ pub(super) fn validate_checked_program_totality(
     traces.extend(annotated_totality_invariant_traces(
         checked.annotated_exprs(),
     ));
+    traces.extend(local_ascription_invariant_traces(
+        checked.local_tensor_ascriptions(),
+    ));
     traces.extend(totality_invariant_traces(checked.signature_inference()));
     if !traces.is_empty() {
         errors.push(totality_violation_error(&traces));
     }
+}
+
+fn local_ascription_invariant_traces(ascriptions: &[CheckedLocalTensorAscription]) -> Vec<String> {
+    let mut traces = Vec::new();
+    let mut ids = BTreeSet::new();
+    for ascription in ascriptions {
+        if !ids.insert(ascription.id) {
+            traces.push(format!(
+                "duplicate local tensor-ascription identity {}",
+                ascription.id.get()
+            ));
+        }
+        if ascription.binding_name.is_empty() {
+            traces.push(format!(
+                "local tensor-ascription {} has an empty binding name",
+                ascription.id.get()
+            ));
+        }
+        if ascription
+            .declaration_name
+            .as_ref()
+            .is_some_and(String::is_empty)
+        {
+            traces.push(format!(
+                "local tensor-ascription {} has an empty declaration name",
+                ascription.id.get()
+            ));
+        }
+        let Some(declared_dims) = tensor_dims(&ascription.declared_type) else {
+            traces.push(format!(
+                "local tensor-ascription {} does not carry a tensor type",
+                ascription.id.get()
+            ));
+            continue;
+        };
+        let mut previous_axis = None;
+        for claim in &ascription.outstanding_claims {
+            if previous_axis.is_some_and(|axis| claim.axis <= axis) {
+                traces.push(format!(
+                    "local tensor-ascription {} claims are not in authored axis order",
+                    ascription.id.get()
+                ));
+            }
+            previous_axis = Some(claim.axis);
+            match declared_dims.get(claim.axis) {
+                Some(declared) if declared == &claim.required_extent => {}
+                Some(_) => traces.push(format!(
+                    "local tensor-ascription {} axis {} claim differs from its declared type",
+                    ascription.id.get(),
+                    claim.axis
+                )),
+                None => traces.push(format!(
+                    "local tensor-ascription {} claims out-of-rank axis {}",
+                    ascription.id.get(),
+                    claim.axis
+                )),
+            }
+            if matches!(claim.required_extent, Dim::Wildcard | Dim::Rank(_)) {
+                traces.push(format!(
+                    "local tensor-ascription {} manufactures a claim from an unclaimed axis",
+                    ascription.id.get()
+                ));
+            }
+        }
+    }
+    traces
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2503,6 +2580,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
     let checked = CheckedProgram {
         annotated_exprs,
         type_env: original.type_env.clone(),
+        local_tensor_ascriptions: original.local_tensor_ascriptions.clone(),
         linearity: original.linearity.clone(),
         signature_inference: original.signature_inference.clone(),
         type_headers: original.type_headers.clone(),

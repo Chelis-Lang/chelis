@@ -30,12 +30,13 @@ pub(crate) const LEGACY_INFER_PATH: &str = "infer.rs";
 ///
 /// These mirror the `type-inference-architecture` capability: separate
 /// modules own program orchestration, checked-program construction,
-/// validation, expression forms, and application inference, and the
-/// application dispatcher is separate from the numeric, tensor, shape, and
-/// collection rules.
+/// annotation ownership, validation, expression forms, and application
+/// inference, and the application dispatcher is separate from the numeric,
+/// tensor, shape, and collection rules.
 pub(crate) const REQUIRED_INFER_ROLES: &[(&str, &str)] = &[
     ("stack and recursion protection", "infer/stack.rs"),
     ("checked-program construction", "infer/checked.rs"),
+    ("annotation ownership", "infer/annotate.rs"),
     ("program orchestration", "infer/program.rs"),
     ("validation", "infer/validate.rs"),
     ("expression forms", "infer/expr.rs"),

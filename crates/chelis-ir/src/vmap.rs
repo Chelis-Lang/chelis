@@ -116,6 +116,20 @@ pub fn vectorize_axis0_with_node_map(
                         claim: claim.clone(),
                         axis: RtAxis::Lit(axis.checked_add(1).expect("vmap result axis fits i32")),
                     },
+                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                        ascription_id,
+                        binding,
+                        claim,
+                        axis: RtAxis::Lit(axis),
+                    } => crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                        ascription_id: *ascription_id,
+                        binding: binding.clone(),
+                        claim: claim.clone(),
+                        axis: RtAxis::Lit(
+                            axis.checked_add(1)
+                                .expect("vmap local claim axis fits int32"),
+                        ),
+                    },
                     other => other.clone(),
                 },
                 parameter: parameter.clone(),

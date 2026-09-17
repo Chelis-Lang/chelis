@@ -6481,6 +6481,115 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
 /// so consuming `p` in the body does not let the elementwise operand check
 /// preempt it - which the disagreeing case below measures rather than
 /// assumes.
+fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
+    let source = "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+                  if flag then {\n  \
+                    y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+                    y\n\
+                  } else x\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&decls))
+        .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let generated = codegen_with_options(
+        &dag,
+        "runtime_branch_local_ascription",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("runtime branch codegen");
+    assert_eq!(generated.input_labels, ["flag", "x"]);
+    assert!(
+        generated.c_source.contains("chelis_tensor_to_scalar(t"),
+        "branch activation crosses the exact tagged scalar carrier"
+    );
+    generated
+}
+
+fn runtime_branch_local_ascription_harness(flag: bool) -> String {
+    let flag = u8::from(flag);
+    format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void runtime_branch_local_ascription(
+    chelis_tensor **inputs,
+    int n_in,
+    chelis_tensor **outputs,
+    int n_out
+);
+
+int main(void) {{
+    uint8_t flag_data[1] = {{{flag}}};
+    float x_data[3] = {{1.0f, 2.0f, 3.0f}};
+    int64_t x_shape[1] = {{3}};
+    chelis_tensor *flag = chelis_tensor_entry_borrow(
+        0, NULL, CHELIS_DTYPE_BOOL, flag_data, sizeof(flag_data)
+    );
+    chelis_tensor *x = chelis_tensor_entry_borrow(
+        1, x_shape, CHELIS_DTYPE_F32, x_data, sizeof(x_data)
+    );
+    chelis_tensor *inputs[2] = {{flag, x}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    runtime_branch_local_ascription(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    printf("RAN %lld %.1f %.1f %.1f\n",
+           (long long)chelis_tensor_shape(outputs[0], 0),
+           ((const float*)view.data)[0],
+           ((const float*)view.data)[1],
+           ((const float*)view.data)[2]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(flag);
+    return 0;
+}}
+"#
+    )
+}
+
+#[test]
+fn an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c() {
+    let generated = runtime_branch_local_ascription_c();
+    let run = compile_and_capture_run(
+        "local_ascription_runtime_branch_untaken",
+        &generated.c_source,
+        &runtime_branch_local_ascription_harness(false),
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "RAN 3 1.0 2.0 3.0\n");
+}
+
+#[test]
+fn a_selected_runtime_branch_emits_its_local_ascription_guard_on_c() {
+    let generated = runtime_branch_local_ascription_c();
+    let run = compile_and_capture_run(
+        "local_ascription_runtime_branch_selected",
+        &generated.c_source,
+        &runtime_branch_local_ascription_harness(true),
+    );
+    assert!(!run.status.success(), "the selected local claim must trap");
+    let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    assert!(
+        text.contains("extent `2`: claimed = 2, pad axis 0 = 3"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "numeric trap: domain in pad at i64"),
+        "{text}"
+    );
+    assert!(!text.contains("RAN "), "{text}");
+}
+
 fn two_witness_dag() -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     let named = || TensorType {

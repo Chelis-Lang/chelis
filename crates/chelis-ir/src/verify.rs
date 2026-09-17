@@ -136,6 +136,21 @@ pub(crate) fn verify_mapped_gradient_closure(
                             .ok_or_else(|| "entry witness result axis overflow".to_string())?,
                     ),
                 },
+                ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id,
+                    binding,
+                    claim,
+                    axis: RtAxis::Lit(result_axis),
+                } => ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: *ascription_id,
+                    binding: binding.clone(),
+                    claim: claim.clone(),
+                    axis: RtAxis::Lit(
+                        result_axis
+                            .checked_add(1)
+                            .ok_or_else(|| "local ascription result axis overflow".to_string())?,
+                    ),
+                },
                 other => other.clone(),
             };
             let expected = RiscOp::ExtentWitness {
@@ -768,6 +783,19 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } => {
+                let expected = usize::from(requirements.is_empty());
+                if arity != expected {
+                    errors.push(format!(
+                        "local ascription claim at node {} must carry either one literal or one observed tensor",
+                        node.id.0
+                    ));
+                }
+            }
             RiscOp::ExtentWitness { claims, .. } => {
                 if arity != claims.len() + 1 {
                     errors.push(format!(
@@ -963,6 +991,66 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             ..
         } = &node.op
         {
+            if let crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                binding,
+                claim,
+                axis: crate::dag::RtAxis::Lit(claimed_axis),
+                ..
+            } = site
+            {
+                let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
+                    unreachable!()
+                };
+                let owners = dag
+                    .nodes()
+                    .iter()
+                    .filter(|owner| owner.shape_deps.contains(&node.id))
+                    .collect::<Vec<_>>();
+                if let [owner] = owners.as_slice()
+                    && let Err(reason) = crate::axis_sources::local_ascription_guard_activation(
+                        dag, owner.id, node.id,
+                    )
+                {
+                    errors.push(reason);
+                }
+                let literal = node.inputs.is_empty()
+                    && node.shape_deps.is_empty()
+                    && matches!(&node.op, RiscOp::ExtentWitness { parameter, .. } if parameter.is_empty())
+                    && requirements.len() == 1;
+                let named = requirements.is_empty()
+                    && node.inputs.len() == 1
+                    && node.shape_deps.len() == 1
+                    && !parameter.is_empty()
+                    && dag.get(node.shape_deps[0]).is_some_and(|declared| {
+                        matches!(declared.op, RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::Caller,
+                            axis: crate::dag::RtAxis::Lit(observed),
+                            ..
+                        } if observed == *axis)
+                            && declared.inputs.first() == node.inputs.first()
+                            && declared.id.0 < node.id.0
+                    });
+                if binding.is_empty()
+                    || claim.is_empty()
+                    || *claimed_axis < 0
+                    || claimed_axis != axis
+                    || !claims.is_empty()
+                    || owners.len() != 1
+                    || (!literal && !named)
+                    || requirements.iter().any(|value| {
+                        value.prim() != Prim::Int64
+                            || value.as_i64_exact().is_none_or(|value| value < 0)
+                    })
+                    || !node.output_type.dims.is_empty()
+                    || node.output_type.precision != Prim::Int64
+                {
+                    errors.push(format!(
+                        "local ascription claim at node {} requires exact nonempty provenance, one literal or declaring witness, one initializer owner, normalized axis, and scalar int64 output",
+                        node.id.0
+                    ));
+                }
+                continue;
+            }
             if matches!(site, crate::dag::ExtentWitnessSite::LiteralResultClaim) {
                 let owners = dag
                     .nodes()
@@ -1081,6 +1169,30 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                                axis: crate::dag::RtAxis::Lit(axis),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                if required.0 >= node.id.0
+                    || usize::try_from(*axis)
+                        .map_or(true, |axis| axis >= node.output_type.dims.len())
+                {
+                    errors.push(format!(
+                        "local ascription claim at node {} requires an earlier token and a valid initializer axis",
+                        node.id.0
+                    ));
+                }
+                continue;
+            }
             if let Some(crate::dag::DagNode {
                 op:
                     RiscOp::ExtentWitness {

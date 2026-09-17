@@ -5,6 +5,34 @@
 
 use super::*;
 
+/// Recover the exact Surf source range stamped onto a desugared Deep node.
+///
+/// Ordinary desugared expressions retain a zero structural span, while their
+/// authored range travels in canonical `surf:<start>..<end>` metadata.
+/// Programmatic or non-Surf Deep inputs fall back to the structural span.
+fn surf_source_span(expr: &deep::Expr) -> Span {
+    let structural_span = expr.span();
+    let Some((_, meta, _)) = stamped_parts(expr) else {
+        return structural_span;
+    };
+    let Some(span_id) = meta.span_id() else {
+        return structural_span;
+    };
+    let Some(range) = span_id.value().strip_prefix("surf:") else {
+        return structural_span;
+    };
+    let Some((start, end)) = range.split_once("..") else {
+        return structural_span;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+        return structural_span;
+    };
+    let Some(len) = end.checked_sub(start) else {
+        return structural_span;
+    };
+    Span::new(start, len)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_fn(
     list: &deep::List,
@@ -469,6 +497,18 @@ pub(super) fn infer_let(
                     None,
                     Some(&mut rhs_type_metadata_resolution),
                 );
+                let rhs_type_before_ascription = subst.apply(&expr_ty);
+                let local_ascription_origin = match stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| meta.surf_binding_type())
+                    .map(|origin| *origin.value())
+                {
+                    Some(BindingTypeOrigin::Explicit) => {
+                        Some(LocalTensorAscriptionOrigin::SurfExplicit)
+                    }
+                    Some(BindingTypeOrigin::Inferred) => None,
+                    None => Some(LocalTensorAscriptionOrigin::DeepTypeMetadata),
+                };
+                let mut checked_local_ascription = None;
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
                 // inject the declared type `T` as a `"type"` metadata
@@ -503,18 +543,28 @@ pub(super) fn infer_let(
                             Err(witness) => propagate(&witness),
                         },
                     };
-                    if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
-                        errors.push(CheckError::new(
-                            check_error_kind_from_type_error_kind(&e.kind),
-                            format!(
-                                "let-binding `{name}` ascription does not match RHS: {}",
-                                e.message
-                            ),
-                            vec![format!(
-                                "Declared type for `{name}` is {declared_ty}; \
-                                 RHS inferred to {expr_ty}"
-                            )],
-                        ));
+                    match unify(&expr_ty, &declared_ty, subst) {
+                        Ok(()) if local_ascription_origin.is_some() => {
+                            checked_local_ascription = Some((
+                                local_ascription_origin.expect("checked above"),
+                                declared_ty_expr.clone(),
+                                declared_ty.clone(),
+                            ));
+                        }
+                        Ok(()) => {}
+                        Err(e) => {
+                            errors.push(CheckError::new(
+                                check_error_kind_from_type_error_kind(&e.kind),
+                                format!(
+                                    "let-binding `{name}` ascription does not match RHS: {}",
+                                    e.message
+                                ),
+                                vec![format!(
+                                    "Declared type for `{name}` is {declared_ty}; \
+                                     RHS inferred to {expr_ty}"
+                                )],
+                            ));
+                        }
                     }
                     // On unify failure, bind `name` to the declared
                     // type rather than the inferred RHS type. This
@@ -533,6 +583,19 @@ pub(super) fn infer_let(
                 } else {
                     expr_ty
                 };
+                if let Some((origin, authored_type, declared_type)) = checked_local_ascription {
+                    product.record_local_tensor_ascription(
+                        origin,
+                        name,
+                        bind_children[i].span(),
+                        authored_type.span(),
+                        surf_source_span(rhs_expr),
+                        authored_type,
+                        declared_type,
+                        &rhs_type_before_ascription,
+                        errors,
+                    );
+                }
 
                 subst.leave_level(rhs_level, vg);
 

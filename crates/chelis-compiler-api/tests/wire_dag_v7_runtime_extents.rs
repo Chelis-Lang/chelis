@@ -69,7 +69,7 @@ fn assert_contract_rejects(dag: &WireDag, expected: &str) {
 
 #[test]
 fn v7_input_axis_round_trips_as_typed_structure() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 13);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 14);
     let dag = expand_dag(
         WireRtDim::InputAxis {
             tensor: 1,
@@ -79,7 +79,10 @@ fn v7_input_axis_round_trips_as_typed_structure() {
     );
 
     let json = serde_json::to_string(&dag).expect("valid InputAxis must encode");
-    assert!(json.contains(r#""schema_version":13"#), "{json}");
+    assert!(
+        json.contains(&format!(r#""schema_version":{WIRE_DAG_SCHEMA_VERSION}"#)),
+        "{json}"
+    );
     assert!(
         json.contains(
             r#""size":{"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}}"#
@@ -252,7 +255,10 @@ fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
         ))
     ));
 
-    let stale_spelling = old.replace("\"schema_version\":6", "\"schema_version\":13");
+    let stale_spelling = old.replace(
+        "\"schema_version\":6",
+        &format!("\"schema_version\":{WIRE_DAG_SCHEMA_VERSION}"),
+    );
     assert!(matches!(
         WireDag::from_validated_json(&stale_spelling),
         Err(WireDagDecodeError::Parse(_))

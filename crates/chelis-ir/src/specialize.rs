@@ -53,11 +53,11 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
-        if let Some(source) = identity_source(node, dag, claimed_result_producers[node.id.0]) {
+        if let Some(source) = identity_source(node, dag, claimed_producers[node.id.0]) {
             let mapped = id_map[&source];
             id_map.insert(node.id, mapped);
             append_node_provenance(&mut out, mapped, node);
@@ -142,12 +142,12 @@ fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id)
             && matched_region_is_claim_free(
-                &claimed_result_producers,
+                &claimed_producers,
                 info.replaced_region(node.id),
             )
             // Empty contractions (including [05-OP-51]'s zero-channel
@@ -217,14 +217,11 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
-    let claimed_result_producers = crate::axis_sources::claimed_result_producers(dag);
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         if let Some(info) = detect_dense_gather_pattern(dag, node.id)
-            && matched_region_is_claim_free(
-                &claimed_result_producers,
-                info.replaced_region(node.id),
-            )
+            && matched_region_is_claim_free(&claimed_producers, info.replaced_region(node.id))
         {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
@@ -464,11 +461,11 @@ struct DenseGatherInfo {
 /// boundary. One-node expansions such as `lower_unmatched_one_hot` instead
 /// remap the source node's dependencies onto their replacement result.
 fn matched_region_is_claim_free(
-    claimed_result_producers: &[bool],
+    claimed_producers: &[bool],
     replaced_region: impl IntoIterator<Item = NodeId>,
 ) -> bool {
     replaced_region.into_iter().all(|id| {
-        !*claimed_result_producers
+        !*claimed_producers
             .get(id.0)
             .expect("matched specialization region belongs to the input DAG")
     })

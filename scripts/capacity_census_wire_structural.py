@@ -51,6 +51,10 @@ def structural_contracts():
     add("WireDagNode.id", "dag-position")
     add("WireDagNode.inputs", "earlier-dag-node", vector)
     add("WireDagNode.shape_deps", "earlier-shape-dependency", vector)
+    add(
+        "WireExtentWitnessSite::LocalAscriptionClaim.ascription_id",
+        "local-ascription-identity",
+    )
     for owner in ("WireDag", "WireDagFields", "WireDagFieldsRef"):
         ty = (
             ("borrow", False, "'a", ("slice", u64)) if owner.endswith("Ref") else vector
@@ -218,7 +222,16 @@ def structural_evidence():
         ),
         "dag-root": pairs("WireDag", "owned-reference", ("root-owner",)),
         "dag-version": pairs(
-            "WireDag", "empty", ("version-None", "version-10", "version-11", "version-12", "version-14")
+            "WireDag",
+            "empty",
+            (
+                "version-None",
+                "version-10",
+                "version-11",
+                "version-12",
+                "version-13",
+                "version-15",
+            ),
         ),
         "earlier-shape-dependency": pairs(
             "WireDag",
@@ -229,6 +242,11 @@ def structural_evidence():
                 "shape-dep-negative",
                 "shape-dep-float",
             ),
+        ),
+        "local-ascription-identity": pairs(
+            "WireDag",
+            "local-ascription-owned",
+            ("local-ascription-id-negative", "local-ascription-id-float"),
         ),
         "lower-result-node": pairs("LowerResult", "owned", ("named_roots-1",)),
         "grad-result-node": pairs(

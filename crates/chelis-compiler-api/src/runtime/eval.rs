@@ -1833,12 +1833,42 @@ impl<'a> EvalContext<'a> {
         let saved_types = self.binding_types.clone();
         let result = (|| {
             let bind_kids = children(bind_list);
+            let declaration_name = self
+                .active_declaration_names
+                .last()
+                .or_else(|| self.resolving_top_levels.last())
+                .cloned();
+            let lowering = self
+                .session
+                .as_ref()
+                .map(chelis_ir::host::HostLoweringSession::checked_subexpr_lowering_context);
+            let local_regions = lowering
+                .as_ref()
+                .map(|context| {
+                    context.local_ascription_binding_regions(
+                        bind_list_expr,
+                        declaration_name.as_deref(),
+                    )
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|region| (region.producer_binding_index(), region))
+                .collect::<BTreeMap<_, _>>();
             let mut index = 0;
             while index + 1 < bind_kids.len() {
                 let name = symbol_name(&bind_kids[index])
                     .ok_or_else(|| "let binding must bind a name".to_string())?;
                 let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-                let value = if guarded == Some(index) {
+                let local_claims = if guarded == Some(index) { claims } else { &[] };
+                let value = if let Some(region) = local_regions.get(&index) {
+                    self.eval_checked_local_ascription_region(
+                        lowering
+                            .as_ref()
+                            .expect("a local region requires its lowering context"),
+                        region,
+                        local_claims,
+                    )?
+                } else if guarded == Some(index) {
                     self.eval_under_result_claim(&bind_kids[index + 1], claims)?
                 } else {
                     self.eval_expr(&bind_kids[index + 1])?
@@ -1858,6 +1888,109 @@ impl<'a> EvalContext<'a> {
         result
     }
 
+    fn eval_checked_local_ascription_region(
+        &mut self,
+        lowering: &chelis_ir::lower::SubexprLoweringContext,
+        region: &chelis_ir::lower::LocalAscriptionBindingRegion,
+        inherited_result_claims: &[DeclaredResultClaim],
+    ) -> Result<RuntimeValue, String> {
+        let lowering = lowering.for_local_ascription_region(region);
+        let mut scoped_types = UnordMap::new();
+        let mut staged_inputs = UnordMap::new();
+        for (name, value) in self.bindings.to_sorted() {
+            let ty = match value {
+                RuntimeValue::Tensor(tensor) => match self.binding_types.get(name) {
+                    Some(Some(declared)) => declared_tensor_type_for_value(declared, tensor)
+                        .map_err(|error| {
+                            format!(
+                                "host runtime could not type local-ascription input \
+                                 `{name}` for checked lowering: {error}"
+                            )
+                        })?,
+                    Some(None) | None => TensorType {
+                        dims: tensor
+                            .value
+                            .shape
+                            .iter()
+                            .copied()
+                            .map(DimInfo::Lit)
+                            .collect(),
+                        precision: tensor.precision,
+                    },
+                },
+                RuntimeValue::Scalar(payload) => TensorType {
+                    dims: Vec::new(),
+                    precision: self
+                        .binding_types
+                        .get(name)
+                        .and_then(Option::as_ref)
+                        .and_then(extract_prim_from_type_expr)
+                        .unwrap_or(payload.dtype()),
+                },
+                RuntimeValue::Bool(_) => TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                _ => continue,
+            };
+            let input =
+                stage_kernel_argument("local tensor ascription", name, value, ty.precision)?;
+            scoped_types.insert(name.clone(), ty);
+            staged_inputs.insert(name.clone(), input);
+        }
+
+        let planning = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let plan = lowering
+            .lower_evaluation_plan(region.expression(), scoped_types, &planning)
+            .map_err(|diagnostic| {
+                format!(
+                    "host runtime could not lower a checked local tensor ascription \
+                     for evaluation: {diagnostic}"
+                )
+            })?;
+        let dag = plan.dag_for_inspection();
+        let roots = dag.roots().to_vec();
+        if roots.is_empty() {
+            return Err(
+                "host runtime: checked local tensor-ascription lowering produced no roots"
+                    .to_string(),
+            );
+        }
+        let producer_operation = chelis_ir::axis_sources::local_dim_guard_sites(dag)
+            .first()
+            .map(|(_, claim)| claim.op)
+            .ok_or_else(|| {
+                "host runtime: checked local tensor ascription produced no local guard site"
+                    .to_string()
+            })?;
+        let preparation_context = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let prepared = chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
+            &plan,
+            &preparation_context,
+            |name, demand| self.prepare_named_axis_input(name, demand, &staged_inputs),
+        )?;
+        let mut execution = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let values =
+            chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut execution, |name| {
+                prepared.get(name).cloned()
+            })?;
+        self.random_counter = execution.state().counter;
+        let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
+        for claim in inherited_result_claims {
+            claim.verdict(&value, producer_operation)?;
+        }
+        Ok(value)
+    }
+
     fn eval_let(&mut self, list: &List) -> Result<RuntimeValue, String> {
         let kids = children(list);
         let bind_list = kids
@@ -1874,6 +2007,27 @@ impl<'a> EvalContext<'a> {
         // never leak partial binds or stale binding types.
         let result = (|| {
             let bind_kids = children(bind_list);
+            let declaration_name = self
+                .active_declaration_names
+                .last()
+                .or_else(|| self.resolving_top_levels.last())
+                .cloned();
+            let lowering = self
+                .session
+                .as_ref()
+                .map(chelis_ir::host::HostLoweringSession::checked_subexpr_lowering_context);
+            let local_regions = lowering
+                .as_ref()
+                .map(|context| {
+                    context.local_ascription_binding_regions(
+                        kids.first().expect("let bindings were checked above"),
+                        declaration_name.as_deref(),
+                    )
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|region| (region.producer_binding_index(), region))
+                .collect::<BTreeMap<_, _>>();
             let mut index = 0;
             while index + 1 < bind_kids.len() {
                 let name = symbol_name(&bind_kids[index])
@@ -1884,7 +2038,16 @@ impl<'a> EvalContext<'a> {
                 // can recover named dims for let-bound tensors. The explicit
                 // `None` insert masks any same-named top-level type.
                 let static_ty = self.static_type_expr_of(&bind_kids[index + 1]);
-                let value = self.eval_expr(&bind_kids[index + 1])?;
+                let value = match local_regions.get(&index) {
+                    Some(region) => self.eval_checked_local_ascription_region(
+                        lowering
+                            .as_ref()
+                            .expect("a local region requires its lowering context"),
+                        region,
+                        &[],
+                    )?,
+                    None => self.eval_expr(&bind_kids[index + 1])?,
+                };
                 self.binding_types.insert(name.to_string(), static_ty);
                 self.bindings.insert(name.to_string(), value);
                 index += 2;
@@ -2059,6 +2222,7 @@ impl<'a> EvalContext<'a> {
                         args.len()
                     ));
                 }
+                let active_declaration = def_name.clone();
                 // chelis#1277 B2h: a def the C lane lowers as a kernel is
                 // applied through that kernel, so eval runs the DAG C emits
                 // for it and the runtime-extent classes and guards derived
@@ -2085,6 +2249,9 @@ impl<'a> EvalContext<'a> {
                 let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
                 self.precision_bindings = precision_env;
+                if let Some(name) = active_declaration.as_ref() {
+                    self.active_declaration_names.push(name.clone());
+                }
                 let value = (|| {
                     // A dimension variable declared by a tensor parameter is
                     // also an exact runtime i64 value in the callee frame.
@@ -2286,6 +2453,10 @@ impl<'a> EvalContext<'a> {
                     claims.extend_from_slice(inherited_claims);
                     self.eval_under_result_claim(&body, &claims)
                 })();
+                if active_declaration.is_some() {
+                    let popped = self.active_declaration_names.pop();
+                    debug_assert_eq!(popped.as_ref(), active_declaration.as_ref());
+                }
                 self.bindings = saved;
                 self.binding_types = saved_types;
                 self.precision_bindings = saved_precisions;
@@ -4258,6 +4429,7 @@ mod legacy_capture_order_tests {
             adt_registry: checked.adt_registry().clone(),
             tensor_bindings: tensors,
             session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
+            active_declaration_names: Vec::new(),
             def_kernels: UnordMap::new(),
             transcript: Vec::new(),
             transcript_capture: None,

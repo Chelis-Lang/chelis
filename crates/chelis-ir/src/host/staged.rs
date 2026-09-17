@@ -375,7 +375,8 @@ impl Partition<'_> {
                 node.op,
                 RiscOp::ExtentWitness {
                     site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                        | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                        | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                     ..
                 }
             ) {
@@ -432,6 +433,9 @@ impl Partition<'_> {
                     RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
                             | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    } | RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     }
                 )
@@ -1018,6 +1022,134 @@ mod tests {
                     dag.get(*dependency).map(|node| &node.op),
                     Some(RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                )));
+            }
+        }
+        assert!(claimed_result);
+    }
+
+    #[test]
+    fn local_ascription_claims_remain_nondata_tokens_across_host_source_cuts() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            input_ty.clone(),
+            None,
+        );
+        let claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: 4,
+                    binding: "y".into(),
+                    claim: "2".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![scalar_from_i64("reshape", Prim::Int64, 2).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let actual = dag.add_node(
+            RiscOp::Load {
+                name: "host-source".into(),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
+        );
+        let checked = dag.add_node(
+            RiscOp::CheckedReshapeExtent {
+                claims: vec!["2".into()],
+                axis: RtAxis::Lit(0),
+            },
+            vec![actual, required],
+            scalar_type(),
+            None,
+        );
+        let result = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![input, checked],
+            TensorType {
+                dims: vec![DimInfo::Named("actual".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_shape_dep(result, claim);
+        dag.add_root(result);
+
+        let sources = vec![HostSource {
+            before: actual.0,
+            occurrences_before: None,
+            value: StageValue::Tensor(actual),
+            ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+                .unwrap()
+                .remove(0),
+            captures: vec![(
+                "x".into(),
+                StageValue::Tensor(input),
+                HostTypeTerm::Tensor(input_ty.clone()),
+            )],
+        }];
+        let params = vec![HostParam {
+            name: "x".into(),
+            ty: HostTypeTerm::Tensor(input_ty),
+        }];
+        let plan = partition(
+            &dag,
+            &sources,
+            &params,
+            &BTreeMap::from([(input, "x".into())]),
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+
+        let exported_claim = format!("__checked_stage_{}", claim.0);
+        let mut claimed_result = false;
+        for stage in plan.stages() {
+            let HostStage::Kernel { dag, outputs } = stage else {
+                continue;
+            };
+            assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
+            assert!(!outputs.contains(&exported_claim));
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(&node.op, RiscOp::Load { name } if name == &exported_claim)
+                )
+            );
+            for node in dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+            {
+                claimed_result = true;
+                assert!(node.shape_deps.iter().any(|dependency| matches!(
+                    dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     })
                 )));
