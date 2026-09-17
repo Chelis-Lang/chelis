@@ -84,13 +84,11 @@ fn expr_is_var_named(expr: &Expr, expected: &str) -> bool {
 /// one distinguishes an unstamped expression from a stamped scalar.
 fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
     let metadata = match expr.carrier() {
-        ExprCarrier::DecodedNode(_, metadata, _) => metadata,
-        ExprCarrier::UndecodableHead(_, _, _) if matches!(expr, Expr::List(_, _)) => {
-            return None;
+        ExprCarrier::DecodedNode(_, metadata, _) | ExprCarrier::UndecodableHead(_, metadata, _) => {
+            metadata
         }
         ExprCarrier::MalformedLegacyList(_) => return None,
         ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
         | ExprCarrier::MetadataExpression(_) => return Some(None),
@@ -228,27 +226,35 @@ mod tests {
         Span::new(0, 0)
     }
 
-    fn i64_literal(value: i64) -> Expr {
+    fn type_metadata(type_expr: Expr) -> Metadata {
+        Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(type_expr)
+                .expect("canonical test type syntax"),
+        ))
+    }
+
+    fn i64_literal_with_type(value: i64, prim: Expr) -> Expr {
         let span = span();
-        let prim = Expr::node(
+        Expr::node(
+            DeepTag::Lit,
+            type_metadata(prim),
+            vec![Expr::Atom(Atom::Int(value), span)],
+            span,
+        )
+    }
+
+    fn i64_type() -> Expr {
+        let span = span();
+        Expr::node(
             DeepTag::TPrim,
             Metadata::default(),
             vec![Expr::Atom(Atom::Name("i64".into()), span)],
             span,
-        );
-        let mut metadata = Metadata::default();
-        metadata
-            .insert(chelis_deep::annotations::MetadataValue::Type(
-                chelis_deep::annotations::TypeSyntax::try_new(prim)
-                    .expect("canonical i64 type syntax"),
-            ))
-            .expect("canonical i64 type metadata");
-        Expr::node(
-            DeepTag::Lit,
-            metadata,
-            vec![Expr::Atom(Atom::Int(value), span)],
-            span,
         )
+    }
+
+    fn i64_literal(value: i64) -> Expr {
+        i64_literal_with_type(value, i64_type())
     }
 
     fn legacy_node(expr: &Expr) -> Expr {
@@ -272,6 +278,76 @@ mod tests {
         let legacy_constant = constant_seed(&legacy, true);
         assert!(successor_constant.is_some());
         assert_eq!(legacy_constant, successor_constant);
+    }
+
+    #[test]
+    fn seed_reader_preserves_nested_legacy_type_parity() {
+        let successor_type = i64_type();
+        let successor = i64_literal_with_type(7, successor_type.clone());
+        let nested_legacy = i64_literal_with_type(7, legacy_node(&successor_type));
+        let fully_legacy = legacy_node(&nested_legacy);
+
+        let expected_literal = literal_seed(&successor, true);
+        assert!(expected_literal.is_some());
+        assert_eq!(literal_seed(&nested_legacy, true), expected_literal);
+        assert_eq!(literal_seed(&fully_legacy, true), expected_literal);
+
+        let expected_constant = constant_seed(&successor, true);
+        assert!(expected_constant.is_some());
+        assert_eq!(constant_seed(&nested_legacy, true), expected_constant);
+        assert_eq!(constant_seed(&fully_legacy, true), expected_constant);
+    }
+
+    #[test]
+    fn optional_scalar_reader_matches_undecodable_successor_and_legacy_carriers() {
+        let span = span();
+        let metadata = type_metadata(i64_type());
+        let successor = Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "future-literal".into(),
+            meta: metadata.clone(),
+            children: vec![],
+            span,
+        }));
+        let legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("future-literal".into()), span),
+                    Expr::Map(metadata, span),
+                ],
+            },
+            span,
+        );
+        assert!(matches!(
+            successor.carrier(),
+            ExprCarrier::UndecodableHead(..)
+        ));
+        assert!(matches!(legacy.carrier(), ExprCarrier::UndecodableHead(..)));
+        assert_eq!(optional_scalar_prim(&successor), Some(Some(Prim::Int64)));
+        assert_eq!(
+            optional_scalar_prim(&legacy),
+            optional_scalar_prim(&successor)
+        );
+
+        let missing_successor = Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "future-literal".into(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        }));
+        let missing_legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("future-literal".into()), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+            },
+            span,
+        );
+        assert_eq!(optional_scalar_prim(&missing_successor), Some(None));
+        assert_eq!(
+            optional_scalar_prim(&missing_legacy),
+            optional_scalar_prim(&missing_successor)
+        );
     }
 
     #[test]

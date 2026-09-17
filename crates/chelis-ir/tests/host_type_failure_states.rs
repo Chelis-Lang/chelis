@@ -166,6 +166,13 @@ fn legacy_node(expr: &Expr) -> Expr {
     Expr::List(node.to_list(*span), *span)
 }
 
+fn type_metadata(type_expr: Expr) -> Metadata {
+    Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+        chelis_deep::annotations::TypeSyntax::try_new(type_expr)
+            .expect("canonical test type syntax"),
+    ))
+}
+
 #[test]
 fn raw_decoder_matches_successor_and_legacy_carriers() {
     for source in [
@@ -184,6 +191,117 @@ fn raw_decoder_matches_successor_and_legacy_carriers() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn metadata_decoder_matches_undecodable_successor_and_legacy_carriers() {
+    let span = Span::new(0, 0);
+    let metadata = type_metadata(parse_one("(t-prim {} i64)"));
+    let successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: metadata.clone(),
+        children: vec![],
+        span,
+    }));
+    let legacy = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future-literal".into()), span),
+                Expr::Map(metadata, span),
+            ],
+        },
+        span,
+    );
+    assert!(matches!(
+        successor.carrier(),
+        chelis_deep::ExprCarrier::UndecodableHead(..)
+    ));
+    assert!(matches!(
+        legacy.carrier(),
+        chelis_deep::ExprCarrier::UndecodableHead(..)
+    ));
+    assert_eq!(
+        decode_host_type_metadata(&successor),
+        Ok(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+            Prim::Int64
+        )))
+    );
+    assert_eq!(
+        decode_host_type_metadata(&legacy),
+        decode_host_type_metadata(&successor)
+    );
+
+    let missing_successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: Metadata::default(),
+        children: vec![],
+        span,
+    }));
+    let missing_legacy = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future-literal".into()), span),
+                Expr::Map(Metadata::default(), span),
+            ],
+        },
+        span,
+    );
+    assert_eq!(
+        decode_host_type_metadata(&missing_successor),
+        Err(HostTypeDecodeError::MissingTypeMetadata)
+    );
+    assert_eq!(
+        decode_host_type_metadata(&missing_legacy),
+        decode_host_type_metadata(&missing_successor)
+    );
+}
+
+#[test]
+fn raw_decoder_preserves_nested_legacy_precision_parity() {
+    let span = Span::new(0, 0);
+    let dim = parse_one("(d-lit {} 4)");
+    let precision = parse_one("(t-var {} p)");
+    let successor = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![dim.clone(), precision.clone()],
+        span,
+    );
+    let nested_legacy = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![dim, legacy_node(&precision)],
+        span,
+    );
+    assert_eq!(
+        decode_host_type(&nested_legacy),
+        decode_host_type(&successor)
+    );
+    assert_eq!(
+        decode_host_type(&legacy_node(&nested_legacy)),
+        decode_host_type(&successor)
+    );
+
+    let malformed_precision = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TVar), span),
+                Expr::Atom(Atom::Name("not-metadata".into()), span),
+                Expr::Atom(Atom::Name("p".into()), span),
+            ],
+        },
+        span,
+    );
+    let malformed_tensor = Expr::node(
+        chelis_deep::DeepTag::TTensor,
+        Metadata::default(),
+        vec![parse_one("(d-lit {} 4)"), malformed_precision],
+        span,
+    );
+    assert!(matches!(
+        decode_host_type(&malformed_tensor),
+        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
+    ));
 }
 
 #[test]

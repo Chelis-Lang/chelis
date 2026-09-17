@@ -374,7 +374,7 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
 /// that replaces `expr_type(...).unwrap_or(Unknown)` in the legacy lowerer.
 pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError> {
     match expr.carrier() {
-        ExprCarrier::DecodedNode(_, metadata, _) => {
+        ExprCarrier::DecodedNode(_, metadata, _) | ExprCarrier::UndecodableHead(_, metadata, _) => {
             let type_expr = metadata
                 .ty()
                 .map(|value| value.expression())
@@ -389,13 +389,9 @@ pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDe
             }
         }
         ExprCarrier::MalformedLegacyList(list) => Err(malformed_legacy_type_node(list)),
-        ExprCarrier::UndecodableHead(_, _, _) if matches!(expr, Expr::List(_, _)) => {
-            Err(malformed("expected a Deep type node"))
+        ExprCarrier::StructuralList(_) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
+            Err(HostTypeDecodeError::MissingTypeMetadata)
         }
-        ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_) => Err(HostTypeDecodeError::MissingTypeMetadata),
     }
 }
 

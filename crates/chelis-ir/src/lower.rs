@@ -19533,6 +19533,117 @@ mod tests {
     }
 
     #[test]
+    fn precision_variable_reader_traverses_metadata_expressions() {
+        let span = Span::new(0, 0);
+        let precision = Expr::node(
+            DeepTag::TVar,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("p".into()), span)],
+            span,
+        );
+        let tensor = Expr::node(
+            DeepTag::TTensor,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::DLit,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Int(4), span)],
+                    span,
+                ),
+                precision,
+            ],
+            span,
+        );
+        let metadata_expr = Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                    chelis_deep::annotations::TypeSyntax::try_new(tensor)
+                        .expect("precision type metadata"),
+                )),
+                expr: Box::new(Expr::Atom(Atom::Int(0), span)),
+            },
+            span,
+        );
+        assert!(matches!(
+            metadata_expr.carrier(),
+            chelis_deep::ExprCarrier::MetadataExpression(_)
+        ));
+
+        let mut names = UnordSet::new();
+        collect_body_precision_var_names(&metadata_expr, &mut names);
+        assert_eq!(names.into_sorted(), ["p"]);
+
+        let negative = Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(Expr::Atom(Atom::Int(0), span)),
+            },
+            span,
+        );
+        let mut names = UnordSet::new();
+        collect_body_precision_var_names(&negative, &mut names);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn precision_variable_reader_traverses_malformed_legacy_lists() {
+        let span = Span::new(0, 0);
+        let precision = Expr::node(
+            DeepTag::TVar,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("p".into()), span)],
+            span,
+        );
+        let tensor = Expr::node(
+            DeepTag::TTensor,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::DLit,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Int(4), span)],
+                    span,
+                ),
+                precision,
+            ],
+            span,
+        );
+        let malformed = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Module), span),
+                    Expr::Atom(Atom::Name("not-metadata".into()), span),
+                    tensor,
+                ],
+            },
+            span,
+        );
+        assert!(matches!(
+            malformed.carrier(),
+            chelis_deep::ExprCarrier::MalformedLegacyList(_)
+        ));
+
+        let mut names = UnordSet::new();
+        collect_body_precision_var_names(&malformed, &mut names);
+        assert_eq!(names.into_sorted(), ["p"]);
+
+        let negative = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
+                    Expr::Atom(Atom::Name("not-metadata".into()), span),
+                    Expr::Atom(Atom::Int(4), span),
+                ],
+            },
+            span,
+        );
+        let mut names = UnordSet::new();
+        collect_body_precision_var_names(&negative, &mut names);
+        assert!(names.is_empty());
+    }
+
+    #[test]
     fn precision_variable_reader_has_no_shallow_list_bridge() {
         let source = include_str!("lower.rs");
         let start = source

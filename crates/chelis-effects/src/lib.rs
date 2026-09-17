@@ -572,33 +572,39 @@ fn infer_let_effects(
     let mut local_scope = locals.clone();
     let mut effects = EffectSet::new();
 
-    let bind_kids = match kids[0].carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => Some(children),
+    match kids[0].carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_kids) => {
+            let mut i = 0;
+            while i + 1 < bind_kids.len() {
+                let value = &bind_kids[i + 1];
+                let value_effects =
+                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+                effects.extend(&value_effects);
+                if let Some(name) = symbol_name(&bind_kids[i]) {
+                    let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                        value_effects
+                    } else {
+                        EffectSet::new()
+                    };
+                    local_scope.insert(name.to_string(), binding_effects);
+                }
+                i += 2;
+            }
+        }
+        ExprCarrier::MalformedLegacyList(list) => {
+            effects.extend(&infer_children_effects(
+                &list.elements,
+                top_level_effects,
+                top_level_callables,
+                &local_scope,
+            ));
+        }
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => None,
-    };
-    if let Some(bind_kids) = bind_kids {
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            let value = &bind_kids[i + 1];
-            let value_effects =
-                infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
-            effects.extend(&value_effects);
-            if let Some(name) = symbol_name(&bind_kids[i]) {
-                let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                    value_effects
-                } else {
-                    EffectSet::new()
-                };
-                local_scope.insert(name.to_string(), binding_effects);
-            }
-            i += 2;
-        }
+        | ExprCarrier::MetadataExpression(_) => {}
     }
 
     effects.extend(&infer_expr_effects(
@@ -1646,15 +1652,32 @@ mod tests {
         assert!(top_level_def_bodies(&[malformed_module]).is_empty());
 
         let malformed_bind = malformed(DeepTag::Bind, vec![name("x"), io_body.clone()]);
+        let pure_body = Expr::node(
+            DeepTag::Lit,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Int(0), span)],
+            span,
+        );
         let let_effects = infer_let_effects(
-            &[malformed_bind.clone(), io_body.clone()],
+            &[malformed_bind.clone(), pure_body.clone()],
             &BTreeMap::new(),
             &BTreeSet::new(),
             &BTreeMap::new(),
         );
         assert!(
             let_effects.contains(&Effect::Io),
-            "an unreadable bind must not exempt the let body from effect analysis"
+            "a malformed bind must not hide effects in its initializer"
+        );
+        let pure_bind = malformed(DeepTag::Bind, vec![name("x"), pure_body.clone()]);
+        let pure_let_effects = infer_let_effects(
+            &[pure_bind, pure_body],
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert!(
+            !pure_let_effects.contains(&Effect::Io),
+            "malformation alone must not invent an effect"
         );
         let annotated = annotate_let_children(
             &[malformed_bind.clone(), io_body.clone()],
