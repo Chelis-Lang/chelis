@@ -1,5 +1,8 @@
+mod common;
+
 use assert_cmd::Command;
 use chelis_shell::{ShellSymbol, SymbolKind, read_shell, write_shell};
+use common::authored_c_symbol;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::env;
@@ -144,14 +147,9 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
-/// Authored Chelis definitions use the injective C ABI namespace rather than
-/// borrowing source spellings that can collide with platform declarations.
-fn authored_c_symbol(name: &str) -> String {
-    let mut symbol = "chelis_fn_".to_string();
-    for byte in name.bytes() {
-        symbol.push_str(&format!("{byte:02x}"));
-    }
-    symbol
+#[test]
+fn issue_2160_authored_c_symbol_encodes_utf8_bytes() {
+    assert_eq!(authored_c_symbol("é"), "chelis_fn_c3a9");
 }
 
 fn run_cost_json(path: &Path) -> Value {

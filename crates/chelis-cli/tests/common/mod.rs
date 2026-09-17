@@ -71,6 +71,18 @@ use tempfile::{TempDir, tempdir};
 /// and therefore auto-syncs with `workspace.package.version` on bumps.
 pub use chelis_compiler_api::COMPILER_VERSION;
 
+/// Return the injective C ABI symbol for an authored Chelis definition.
+///
+/// The emitter encodes the authored UTF-8 bytes as lowercase hexadecimal so
+/// source names never borrow platform or C implementation namespaces.
+pub fn authored_c_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 pub fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/chelis-std")

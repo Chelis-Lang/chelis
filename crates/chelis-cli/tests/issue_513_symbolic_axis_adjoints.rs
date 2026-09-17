@@ -42,6 +42,9 @@
 //! form is a runtime numel-mismatch error in both lanes. A target the fold
 //! PROVES negative still fails loud at lowering (proven-invalid program).
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -524,6 +527,7 @@ fn compile_and_run(build_dir: &Path, stem: &str, driver_src: &str) -> String {
 /// element on its own line.
 fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
     let n = rows * cols;
+    let out = authored_c_symbol("out");
     let init = values
         .iter()
         .map(|v| format!("{v:?}f"))
@@ -534,7 +538,8 @@ fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* {out}(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) {{ chelis_tensor_retain(arg0); return arg0; }}
 int main(void) {{
     int64_t shape[2] = {{{rows}, {cols}}};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
@@ -543,7 +548,7 @@ int main(void) {{
     chelis_write_view x_view = chelis_tensor_write_view(x_guard);
     memcpy(x_view.data, xd, sizeof(xd));
     chelis_tensor_end_write(x_guard);
-    chelis_tensor* g = out(x);
+    chelis_tensor* g = {out}(x);
     chelis_read_view g_view = chelis_tensor_read_view(g);
     if (g_view.count != {n}) {{ printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }}
     for (int i = 0; i < {n}; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);

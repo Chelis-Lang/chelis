@@ -32,10 +32,12 @@
 //!   * `add(t, cast(s, f64))` mixing f64 native + cast-from-f32
 //!   * `cast(add(t, t), f64)` arithmetic-then-cast (widening at end)
 
+mod common;
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod runtime_archive;
 
 use assert_cmd::Command;
+use common::authored_c_symbol;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -221,11 +223,13 @@ fn cbackend_add_of_two_casts_f64_from_f32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -233,7 +237,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -267,11 +271,13 @@ fn cbackend_mul_of_two_casts_f64_from_f32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -279,7 +285,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -313,11 +319,13 @@ fn cbackend_cast_after_add_widens_to_f64() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -325,7 +333,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -358,11 +366,13 @@ fn cbackend_mul_cast_with_native_f64() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y);
+extern chelis_tensor* {composed}(chelis_tensor* x, chelis_tensor* y);
+static chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y) {{ (void)y; chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_x[3] = {{2.0f, 3.0f, 4.0f}};
@@ -373,7 +383,7 @@ int main(void) {{
     chelis_tensor* ty = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F64, in_y, (int64_t)sizeof(in_y));
 
-    chelis_tensor* out = composed(tx, ty);
+    chelis_tensor* out = {composed}(tx, ty);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -408,11 +418,13 @@ fn cbackend_add_of_two_casts_f64_from_int32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     int32_t in_data[3] = {{7, 11, 13}};
@@ -420,7 +432,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_I32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);

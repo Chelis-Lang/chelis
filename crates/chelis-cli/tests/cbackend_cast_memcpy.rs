@@ -39,10 +39,12 @@
 //! Originally gated `#[ignore]` in the failing-test commit; flipped to
 //! running in the fix commit on this branch.
 
+mod common;
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod runtime_archive;
 
 use assert_cmd::Command;
+use common::authored_c_symbol;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -201,11 +203,13 @@ fn cbackend_cast_tensor_f32_to_f64() {
     );
     let kernel_c = build.path().join("cast_demo.c");
     let main_c = build.path().join("main.c");
+    let cast_demo = authored_c_symbol("cast_demo");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* cast_demo(chelis_tensor* x);
+extern chelis_tensor* {cast_demo}(chelis_tensor* x);
+static chelis_tensor* cast_demo(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -213,7 +217,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F32,
                                                   in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(t);
+    chelis_tensor* out = {cast_demo}(t);
     chelis_read_view out_view = chelis_tensor_read_view(out);
     if (out_view.dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
     const double* d = (const double*)out_view.data;
@@ -246,11 +250,13 @@ fn cbackend_cast_tensor_f64_to_f32() {
     );
     let kernel_c = build.path().join("cast_demo.c");
     let main_c = build.path().join("main.c");
+    let cast_demo = authored_c_symbol("cast_demo");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* cast_demo(chelis_tensor* x);
+extern chelis_tensor* {cast_demo}(chelis_tensor* x);
+static chelis_tensor* cast_demo(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     double in_data[3] = {{1.5, 2.5, 3.5}};
@@ -258,7 +264,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F64,
                                                   in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(t);
+    chelis_tensor* out = {cast_demo}(t);
     chelis_read_view out_view = chelis_tensor_read_view(out);
     if (out_view.dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
     const float* d = (const float*)out_view.data;
@@ -291,11 +297,13 @@ fn cbackend_cast_tensor_f32_to_int32() {
     );
     let kernel_c = build.path().join("cast_demo.c");
     let main_c = build.path().join("main.c");
+    let cast_demo = authored_c_symbol("cast_demo");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* cast_demo(chelis_tensor* x);
+extern chelis_tensor* {cast_demo}(chelis_tensor* x);
+static chelis_tensor* cast_demo(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.0f, 2.0f, 3.0f}};
@@ -303,7 +311,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F32,
                                                   in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(t);
+    chelis_tensor* out = {cast_demo}(t);
     chelis_read_view out_view = chelis_tensor_read_view(out);
     if (out_view.dtype != CHELIS_DTYPE_I32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
     const int32_t* d = (const int32_t*)out_view.data;
@@ -336,11 +344,13 @@ fn cbackend_cast_tensor_int32_to_f32() {
     );
     let kernel_c = build.path().join("cast_demo.c");
     let main_c = build.path().join("main.c");
+    let cast_demo = authored_c_symbol("cast_demo");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* cast_demo(chelis_tensor* x);
+extern chelis_tensor* {cast_demo}(chelis_tensor* x);
+static chelis_tensor* cast_demo(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     int32_t in_data[3] = {{1, 2, 3}};
@@ -348,7 +358,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_I32,
                                                   in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(t);
+    chelis_tensor* out = {cast_demo}(t);
     chelis_read_view out_view = chelis_tensor_read_view(out);
     if (out_view.dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
     const float* d = (const float*)out_view.data;

@@ -14,6 +14,9 @@
 //! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2i64)`
 //! then keeps every other element: `[2, 4, 6, ...]`.
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -193,6 +196,7 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         "module Repro.RtShrink\nsig out: tensor[n, f32] -> tensor[u, f32]\ndef out(x) = {{\n{SHRINK_BODY}\n}}\n"
     );
     let (_dir, build_dir) = build_c(&source, "rtshrink");
+    let out_symbol = authored_c_symbol("out");
 
     let lengths = [4usize, 5, 9];
     let runs = lengths
@@ -202,7 +206,7 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
                 "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
                  chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
                  for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
-                 chelis_tensor* w = out(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
+                 chelis_tensor* w = {out_symbol}(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
                  for (int64_t i = 0; i < w_view.count; i++) printf(\"%.6f\\n\", ((const float *)w_view.data)[i]); \
                  printf(\"---\\n\"); chelis_tensor_release(w); chelis_tensor_release(x); }}"
             )
@@ -213,7 +217,13 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* {out_symbol}(chelis_tensor* arg0);
+/* If the driver regresses to the authored spelling, it must link but return
+ * the unshrunk input so the numeric oracle catches the wrong call target. */
+static chelis_tensor* out(chelis_tensor* arg0) {{
+    chelis_tensor_retain(arg0);
+    return arg0;
+}}
 int main(void) {{
 {runs}
     return 0;
