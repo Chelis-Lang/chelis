@@ -11717,6 +11717,21 @@ fn lower_app_host_expr(
         let definitions = adt_constructor_definitions(program);
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
+        // chelis#2152: the inlined body keeps the callee's checked types, which
+        // name the callee's own type variables. The DAG lane actualizes a
+        // TENSOR precision from the concrete arguments by itself, but a host-
+        // lane node inside the body (a scalar `cast(k, p)`, for one) reads its
+        // type through the active substitution. Without one it stayed
+        // `TypeVariable` at every call site and was rejected as an unactualized
+        // cast target, even for a concrete f32 caller. Pin this call site's
+        // bindings exactly as a monomorphized specialization does.
+        let _subst_guard = ActiveTypeSubstGuard::push(inline_call_type_subst(
+            &name,
+            &kids[1..],
+            &explicit_ty,
+            program,
+            scope,
+        ));
         let lowered = lower_host_expr_with_expected(
             &specialized,
             program,
@@ -19235,6 +19250,42 @@ fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
     (!terminal_is_ambiguous).then_some(terminal_match).flatten()
 }
 
+/// The type substitution for a generic callee inlined at one call site
+/// (chelis#2152).
+///
+/// This is the inline counterpart of the substitution
+/// `lower_mono_specialized_function` pins for a monomorphized body. It is
+/// solved against the callee `fn` node's OWN recorded type, whose variables
+/// share the inlined body's namespace, and against the concrete argument and
+/// result types of this call.
+///
+/// It extends the enclosing substitution rather than replacing it. Inlining
+/// substitutes the caller's argument expressions into the body, and those
+/// still carry the CALLER's type variables, which only the enclosing
+/// substitution resolves. Existing bindings win over new ones, as in
+/// `solve_host_type_vars`.
+fn inline_call_type_subst(
+    name: &str,
+    args: &[Expr],
+    call_ty: &HostTypeTerm,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> UnordMap<String, HostTypeTerm> {
+    let mut subst = active_type_subst();
+    let Some((_, fn_expr)) = find_top_level_def_named(program.exprs(), name) else {
+        return subst;
+    };
+    let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) else {
+        return subst;
+    };
+    for (generic, arg) in generic_params.iter().zip(args.iter()) {
+        let actual = expr_host_type(arg, program, scope);
+        solve_host_type_vars(generic, &actual, &mut subst);
+    }
+    solve_host_type_vars(&generic_ret, call_ty, &mut subst);
+    subst
+}
+
 /// Structurally match a declared host type against a resolved one, binding
 /// each `TypeVariable` on the declared side (chelis#1201).
 ///
@@ -19248,6 +19299,24 @@ fn solve_host_type_vars(
     match (declared, actual) {
         (HostTypeTerm::TypeVariable(name), resolved) if !resolved.is_unresolved() => {
             out.entry(name.clone()).or_insert_with(|| resolved.clone());
+        }
+        // chelis#2152: a tensor's precision variable is the same checked
+        // variable a scalar occurrence spells as `TypeVariable(name)`. Bind it
+        // to the scalar of that precision, which is also the shape
+        // `substitute_host_type_term` expects for a precision binding.
+        (
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Variable(name),
+                ..
+            }),
+            HostTypeTerm::Tensor(TensorType { precision, .. })
+            | HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Concrete(precision),
+                ..
+            }),
+        ) => {
+            out.entry(name.clone())
+                .or_insert_with(|| HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(*precision)));
         }
         (HostTypeTerm::Adt(dname, dargs), HostTypeTerm::Adt(aname, aargs))
             if terminal_name_matches(dname, aname) && dargs.len() == aargs.len() =>
