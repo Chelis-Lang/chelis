@@ -17548,14 +17548,12 @@ impl<'program> LowerCtx<'program> {
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
-        let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+        let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
-            self.dag
-                .get(then_node)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type)
+            Self::default_type()
         };
+        let out_ty = self.actualized_runtime_if_output_type(then_node, else_node, &stamped_out_ty);
         if !out_ty.precision.is_float() {
             return self.lower_unrepresentable("if", elems);
         }
@@ -18007,6 +18005,98 @@ impl<'program> LowerCtx<'program> {
             span_expr.map(Expr::span),
             span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
         )
+    }
+
+    /// Choose the tensor type for a dynamic `if` from the branch producers
+    /// that the current activation actually lowered.
+    ///
+    /// The stamped `if` result describes the authored callable. Inside an
+    /// instantiated rank-polymorphic callable that annotation can still
+    /// contain unsplit rank spreads even though both branch nodes already
+    /// carry the caller's realized rank. Reusing the annotation for the mask
+    /// arithmetic therefore builds a malformed graph. The branch producers
+    /// are the structural authority at this point.
+    ///
+    /// `fail(...)` is the one exception: bottom lowers as an input-less
+    /// scalar or anonymous `Const` placeholder and obtains its shape from the
+    /// sibling below. When exactly one branch is such a placeholder, use the
+    /// sibling's type. Two ordinary producers must agree in rank, dtype, and
+    /// all statically-known extents; a checked program reaching a disagreement
+    /// is an internal lowering error and must fail loudly.
+    fn actualized_runtime_if_output_type(
+        &self,
+        then_node: NodeId,
+        else_node: NodeId,
+        stamped_out_ty: &TensorType,
+    ) -> TensorType {
+        let Some(then_branch) = self.dag.get(then_node) else {
+            raise_fatal_lowering_error(
+                "dynamic `if` then-branch has no lowered producer",
+                None,
+                self.current_span_id.clone(),
+            );
+        };
+        let Some(else_branch) = self.dag.get(else_node) else {
+            raise_fatal_lowering_error(
+                "dynamic `if` else-branch has no lowered producer",
+                None,
+                self.current_span_id.clone(),
+            );
+        };
+        let then_ty = &then_branch.output_type;
+        let else_ty = &else_branch.output_type;
+        let then_placeholder = Self::is_runtime_if_bottom_placeholder(then_branch);
+        let else_placeholder = Self::is_runtime_if_bottom_placeholder(else_branch);
+
+        match (then_placeholder, else_placeholder) {
+            (true, false) => return else_ty.clone(),
+            (false, true) => return then_ty.clone(),
+            (true, true) if Self::runtime_if_types_compatible(then_ty, else_ty) => {
+                return then_ty.clone();
+            }
+            (true, true) => return stamped_out_ty.clone(),
+            (false, false) => {}
+        }
+
+        if !Self::runtime_if_types_compatible(then_ty, else_ty) {
+            raise_fatal_lowering_error(
+                format!(
+                    "checked dynamic `if` branches lowered to incompatible tensor types: \
+                     then {then_ty:?}, else {else_ty:?}"
+                ),
+                None,
+                self.current_span_id.clone(),
+            );
+        }
+        then_ty.clone()
+    }
+
+    fn is_runtime_if_bottom_placeholder(node: &crate::dag::DagNode) -> bool {
+        matches!(node.op, RiscOp::Const { .. })
+            && node.inputs.is_empty()
+            && node.shape_deps.is_empty()
+            && (node.output_type.dims.is_empty()
+                || node
+                    .output_type
+                    .dims
+                    .iter()
+                    .any(|dim| matches!(dim, DimInfo::Named(name, None) if name.is_empty())))
+    }
+
+    fn runtime_if_types_compatible(left: &TensorType, right: &TensorType) -> bool {
+        left.precision == right.precision
+            && left.dims.len() == right.dims.len()
+            && left
+                .dims
+                .iter()
+                .zip(&right.dims)
+                .all(|(left, right)| match (left, right) {
+                    (DimInfo::Lit(left), DimInfo::Lit(right)) => left == right,
+                    (DimInfo::Named(_, Some(left)), DimInfo::Named(_, Some(right)))
+                    | (DimInfo::Named(_, Some(left)), DimInfo::Lit(right))
+                    | (DimInfo::Lit(left), DimInfo::Named(_, Some(right))) => left == right,
+                    (DimInfo::Named(_, None), _) | (_, DimInfo::Named(_, None)) => true,
+                })
     }
 
     fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
@@ -19298,6 +19388,132 @@ mod tests {
              source={} placeholder={}",
             shape_source.0,
             placeholder.id.0
+        );
+    }
+
+    #[test]
+    fn runtime_if_uses_actualized_branch_rank_instead_of_stamped_spreads() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let actual_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+                DimInfo::Lit(1),
+            ],
+            precision: Prim::F32,
+        };
+        let then_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+        let else_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+        let stale_stamped_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("seq".into(), None),
+                DimInfo::Named("post".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+
+        assert_eq!(
+            ctx.actualized_runtime_if_output_type(then_node, else_node, &stale_stamped_ty),
+            actual_ty
+        );
+    }
+
+    #[test]
+    fn runtime_if_uses_concrete_sibling_type_for_bottom_placeholder() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let placeholder = ctx.dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let actual_ty = TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let sibling = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+
+        assert_eq!(
+            ctx.actualized_runtime_if_output_type(placeholder, sibling, &TensorType::scalar_f32()),
+            actual_ty
+        );
+    }
+
+    #[test]
+    fn runtime_if_rejects_incompatible_non_placeholder_branch_types() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let then_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let else_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ctx.actualized_runtime_if_output_type(
+                then_node,
+                else_node,
+                &TensorType::scalar_f32(),
+            );
+        }))
+        .expect_err("incompatible checked branch producers must fail loudly");
+        let message = err
+            .downcast_ref::<LowerDiagnostic>()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            message.contains("checked dynamic `if` branches lowered to incompatible tensor types")
         );
     }
 

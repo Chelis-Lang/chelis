@@ -812,6 +812,52 @@ fn nonzero_axis_vmap_grad_actualizes_two_spread_signature_and_matches_backend() 
     assert_eval_agrees_with_backend(source, "nonzero_axis_vmap_grad_two_spreads", &backend);
 }
 
+/// A dynamic branch's stamped result still contains authored rank spreads.
+/// Vmap must use the branch values' already-actualized type for the blend,
+/// preserve the shared scalar as a broadcast input, and produce the selected
+/// branch at both canonical and nonzero mapped axes.
+#[test]
+fn vmap_dynamic_branch_uses_actualized_two_spread_result_type() {
+    let source = "def choose_pair(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32], choose: bool) -> tensor[..pre, seq, ..post, f32] = if choose then add(x, y) else mul(x, y)\n\
+         def apply0(x: &tensor[batch, left, seq, right, f32], y: &tensor[batch, left, seq, right, f32], choose: bool) -> tensor[batch, left, seq, right, f32] = vmap(choose_pair)(x, y, choose)\n\
+         def apply2(x: &tensor[left, seq, batch, right, f32], y: &tensor[left, seq, batch, right, f32], choose: bool) -> tensor[left, seq, batch, right, f32] = vmap(choose_pair, axis=2)(x, y, choose)\n\
+         x: tensor[1, 2, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [1i64, 2i64, 3i64, 1i64])\n\
+         y: tensor[1, 2, 3, 1, f32] = reshape(to_tensor([10.0f32, 20.0f32, 30.0f32, 40.0f32, 50.0f32, 60.0f32]), [1i64, 2i64, 3i64, 1i64])\n\
+         summed = apply0(x, y, true)\n\
+         multiplied = apply2(x, y, false)\n";
+    assert_clean(
+        &check_json(source),
+        "dynamic branch over an actualized two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "vmap_dynamic_branch_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let summed = tensors
+        .iter()
+        .find(|(name, _, _)| name == "summed")
+        .unwrap_or_else(|| panic!("backend output missing `summed`: {backend}"));
+    assert_eq!(summed.1, vec![1, 2, 3, 1], "summed shape ({backend})");
+    assert_eq!(
+        summed.2,
+        vec![11.0, 22.0, 33.0, 44.0, 55.0, 66.0],
+        "summed values ({backend})"
+    );
+    let multiplied = tensors
+        .iter()
+        .find(|(name, _, _)| name == "multiplied")
+        .unwrap_or_else(|| panic!("backend output missing `multiplied`: {backend}"));
+    assert_eq!(
+        multiplied.1,
+        vec![1, 2, 3, 1],
+        "multiplied shape ({backend})"
+    );
+    assert_eq!(
+        multiplied.2,
+        vec![10.0, 40.0, 90.0, 160.0, 250.0, 360.0],
+        "multiplied values ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "vmap_dynamic_branch_two_spreads", &backend);
+}
+
 /// A mapped axis is outside the authored row at every legal insertion
 /// position, including positions before, inside, and after the realized
 /// spreads. This matrix keeps the repair structural rather than tied to the
