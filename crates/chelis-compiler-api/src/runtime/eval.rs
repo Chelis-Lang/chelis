@@ -5299,9 +5299,32 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
-    fn transform_preparation_retains_vmap_capture_rank_refusal() {
+    fn transform_preparation_supports_vmap_capture_at_authored_rank() {
         let library = checked_library(
             "weights = { _ = print(\"initialize\")\n scalar_to_tensor(3.0f32) }\n\
+             def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
+             def mapped() = vmap(weighted)\n",
+        );
+        let tensors = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        let factory = ctx.resolve_top_level("mapped").unwrap();
+        let callable = ctx.apply_resolved_callable(factory, vec![]).unwrap();
+        let input = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![2.0, 4.0]).unwrap(),
+        );
+        let actual = ctx.apply_resolved_callable(callable, vec![input]).unwrap();
+        let expected = RuntimeValue::Tensor(
+            RuntimeTensorValue::from_wide("test", Prim::F32, vec![2], vec![6.0, 12.0]).unwrap(),
+        );
+        assert_eq!(bits(&actual), bits(&expected));
+        assert_eq!(ctx.transcript, ["initialize"]);
+        assert_eq!(ctx.random_counter, 5);
+    }
+
+    #[test]
+    fn transform_preparation_vmap_capture_preserves_initializer_failure() {
+        let library = checked_library(
+            "weights = { _ = print(\"initialize\")\n scalar_to_tensor(cast(floor_div(1i32, 0i32), f32)) }\n\
              def weighted(x: tensor[f32]) -> tensor[f32] = mul(x, weights)\n\
              def mapped() = vmap(weighted)\n",
         );
@@ -5312,12 +5335,11 @@ mod legacy_capture_order_tests {
         let error = ctx
             .apply_resolved_callable(callable, vec![zeros()])
             .unwrap_err();
-        assert_eq!(
-            error,
-            "host runtime: `vmap(...)` over a def capturing top-level binding `weights` is unsupported: the transform types the capture as rank 1 (batched) but the binding is rank 0. vmap-with-captures must broadcast the capture across the batch axis, not batch it (tracked residual, chelis#377)."
-        );
+        assert_eq!(error, "numeric trap: division by zero in floor_div at i32");
         assert_eq!(ctx.transcript, ["initialize"]);
         assert_eq!(ctx.random_counter, 5);
+        assert!(!ctx.bindings.contains_key("weights"));
+        assert!(!ctx.declaration_values.contains_key("weights"));
     }
 
     #[test]
