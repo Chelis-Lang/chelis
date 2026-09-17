@@ -165,6 +165,54 @@ receive a flat multi-argument function type.
 - **WHEN** the two branches of an `if` have different types
 - **THEN** unification fails with a type error
 
+### Requirement: Authored declaration binders are rigid
+
+Every authored type, dimension, or rank variable listed in a declaration's explicit binder
+list SHALL be universally quantified and rigid throughout that declaration's body, whether
+the `defsig` declares a function or a non-function value. The body SHALL type-check for every
+admissible instantiation. A body constraint that identifies an authored binder with a
+concrete type or shape, with another authored binder of the same signature, or with a type
+or shape containing either SHALL be a type error reported at the declaration. The installed
+scheme SHALL remain the declared signature and SHALL NOT be narrowed by the body. A wildcard
+slot that resolves to an authored binder SHALL take that binder's type, and a dtype-family
+bound SHALL restrict the admissible instantiations without making the binder concrete.
+
+The sole role-sensitive exception is a dimension binder that appears only in a function
+result. It SHALL be output-inferred under the numbered specification's return-only dimension
+rule: the body may leave it unbound or resolve it to a body-internal concrete output, but
+SHALL NOT pin or collapse it from a declared input dimension. A non-function declaration has
+no return-only dimension position and therefore receives no such exception.
+
+#### Scenario: Concrete type narrowing is rejected
+
+- **WHEN** a non-function declaration binds `p`, declares type `p`, and its body has concrete type `f32`
+- **THEN** the checker reports a declaration type error and does not install `f32` as the declaration's scheme
+
+#### Scenario: Concrete dimension and rank narrowing are rejected
+
+- **WHEN** a non-function declaration binds `n` or `r`, declares `tensor[n, f32]` or `tensor[..r, f32]`, and its body produces a concrete shape
+- **THEN** the checker reports a `DimensionMismatch` for the narrowed authored binder
+
+#### Scenario: Distinct authored binders remain distinct
+
+- **WHEN** a declaration body identifies two distinct authored type, dimension, or rank binders from the same signature
+- **THEN** the checker rejects the declaration rather than installing the collapsed scheme
+
+#### Scenario: Unconstrained polymorphic value is preserved
+
+- **WHEN** `empty[p]` is declared as `List[p]` and its body is an empty list
+- **THEN** the declaration is accepted with its unconstrained polymorphic `List[p]` scheme
+
+#### Scenario: Wildcard filled by an authored binder preserves that binder
+
+- **WHEN** a wildcard signature slot is resolved by the body to an authored binder
+- **THEN** that slot takes the binder's type without converting the binder into an inference hole or a concrete type
+
+#### Scenario: Return-only dimension remains output-inferred
+
+- **WHEN** a function has no dimension-bearing input, declares a return-only `n`, and its body creates a body-internal `tensor[3, f32]`
+- **THEN** the declaration is accepted with the produced output dimension because no input dimension participates
+
 ### Requirement: Named dimension matching and no broadcasting
 
 Tensor operations SHALL require strict dimension matching: two `d-name` unify only when equal,

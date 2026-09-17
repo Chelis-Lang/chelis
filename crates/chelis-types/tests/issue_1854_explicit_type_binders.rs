@@ -375,6 +375,101 @@ fn body_only_surf_binders_check_at_both_ingresses() {
     }
 }
 
+fn assert_non_function_binder_narrowing_rejects(source: &str, declaration: &str, binders: &[&str]) {
+    let surf_program = surf(source);
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared non-function Deep must parse");
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        let ir = diagnostics(check_ir_program(program));
+        let typed = diagnostics(check_typed_program(program));
+        assert_eq!(
+            typed, ir,
+            "typed-Deep and normalized-IR ingresses must agree for `{declaration}` via {carrier}"
+        );
+        assert!(
+            !ir.is_empty(),
+            "`{declaration}` must reject concrete narrowing of its declared scheme via {carrier}"
+        );
+        for binder in binders {
+            assert!(
+                ir.iter().any(|diagnostic| {
+                    diagnostic.message.contains(declaration)
+                        && diagnostic.message.contains(&format!("`{binder}`"))
+                        && diagnostic.message.contains("[04-INF-6]")
+                }),
+                "`{declaration}` must report concrete narrowing of binder `{binder}` via \
+                 {carrier}: {ir:?}\n{canonical_source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_function_declaration_binders_reject_concrete_narrowing_at_both_ingresses() {
+    for (source, declaration, binders) in [
+        (
+            "sig type_value[p]: p\n\
+             type_value = 1.0f32",
+            "type_value",
+            &["p"][..],
+        ),
+        (
+            "sig dimension_value[n]: tensor[n, f32]\n\
+             dimension_value = to_tensor([1.0f32, 2.0f32])",
+            "dimension_value",
+            &["n"][..],
+        ),
+        (
+            "sig rank_value[r]: tensor[..r, f32]\n\
+             rank_value = to_tensor([1.0f32])",
+            "rank_value",
+            &["r"][..],
+        ),
+        (
+            "sig matrix_value[rows, cols]: tensor[rows, cols, f32]\n\
+             matrix_value = to_tensor([\n\
+               [1.0f32, 2.0f32],\n\
+               [3.0f32, 4.0f32]\n\
+             ])",
+            "matrix_value",
+            &["rows", "cols"][..],
+        ),
+    ] {
+        assert_non_function_binder_narrowing_rejects(source, declaration, binders);
+    }
+}
+
+#[test]
+fn unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses() {
+    let surf_program = surf("sig empty[p]: List[p]\nempty = []");
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared polymorphic value must parse");
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        check_ir_program(program).unwrap_or_else(|report| {
+            panic!(
+                "normalized-IR ingress must preserve an unconstrained polymorphic value through \
+                 {carrier}: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(program).unwrap_or_else(|report| {
+            panic!(
+                "typed-Deep ingress must preserve an unconstrained polymorphic value through \
+                 {carrier}: {:?}",
+                report.errors
+            )
+        });
+    }
+}
+
 #[test]
 fn body_only_type_binder_is_generalized_and_remains_rigid() {
     let polymorphic = surf(

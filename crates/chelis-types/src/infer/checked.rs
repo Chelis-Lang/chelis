@@ -1835,10 +1835,11 @@ pub(super) fn collect_declared_sig_metadata<'a>(
     map
 }
 
-/// Recursively collect `(defsig name [(binders...)] (t-fn arg-exprs... ret))` entries,
-/// descending through `(module ...)` wrappers. Only the leading
-/// argument type expressions are stored (the trailing return type is
-/// dropped). A re-declared name keeps the first sig seen.
+/// Recursively collect every valid `(defsig name [(binders...)] type-expr)`
+/// entry, descending through `(module ...)` wrappers. Function signatures
+/// additionally retain their leading argument type expressions (the trailing
+/// return type is dropped); non-function signatures retain an empty parameter
+/// list. A re-declared name keeps the first sig seen.
 pub(super) fn collect_defsig_param_types(
     expr: &deep::Expr,
     map: &mut UnordMap<String, DeclaredSigMetadata>,
@@ -1861,22 +1862,24 @@ pub(super) fn collect_defsig_param_types(
             }
         }
         DeepTag::Defsig => {
-            let Some((name_expr, binder_list, fn_expr)) = defsig_parts(kids) else {
+            let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids) else {
                 return;
             };
             let Some(name) = symbol_name(name_expr) else {
                 return;
             };
-            let Some((DeepTag::TFn, _, fn_kids)) = stamped_parts(fn_expr) else {
-                return;
-            };
-            if fn_kids.is_empty() {
-                return;
-            }
-            // All but the trailing return type are parameter types.
-            let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
             let Some(binders) = valid_defsig_binder_names(binder_list) else {
                 return;
+            };
+            let param_type_exprs = match stamped_parts(type_expr) {
+                Some((DeepTag::TFn, _, fn_kids)) => {
+                    if fn_kids.is_empty() {
+                        return;
+                    }
+                    // All but the trailing return type are parameter types.
+                    fn_kids[..fn_kids.len() - 1].to_vec()
+                }
+                _ => Vec::new(),
             };
             map.entry(name.to_string())
                 .or_insert_with(|| DeclaredSigMetadata {

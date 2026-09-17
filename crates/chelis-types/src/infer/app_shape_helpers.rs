@@ -616,6 +616,17 @@ pub(super) fn check_authored_dvars_rigid(
     errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
+        // A non-function declaration has no parameter/result role split:
+        // every authored dimension in its declared value type is rigid under
+        // [04-INF-6]. In particular, §4.4.1's return-only output-inference
+        // exception applies only to a function result.
+        let mut rigid_dvars = dim_names
+            .to_sorted()
+            .into_iter()
+            .map(|(dv, _)| *dv)
+            .collect::<Vec<_>>();
+        rigid_dvars.sort_by_key(|dv| dv.0);
+        check_declared_dvars_rigid(Some(declaration), &rigid_dvars, dim_names, subst, errors);
         return;
     };
 

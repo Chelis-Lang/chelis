@@ -507,6 +507,99 @@ fn cli_rejects_concrete_pins_of_body_only_dimension_and_rank_binders() {
 }
 
 #[test]
+fn check_rejects_non_function_binder_narrowing_and_preserves_polymorphic_values() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source, declaration, binders) in [
+        (
+            0,
+            "sig type_value[p]: p\n\
+             type_value = 1.0f32\n",
+            "type_value",
+            &["p"][..],
+        ),
+        (
+            1,
+            "sig dimension_value[n]: tensor[n, f32]\n\
+             dimension_value = to_tensor([1.0f32, 2.0f32])\n",
+            "dimension_value",
+            &["n"][..],
+        ),
+        (
+            2,
+            "sig rank_value[r]: tensor[..r, f32]\n\
+             rank_value = to_tensor([1.0f32])\n",
+            "rank_value",
+            &["r"][..],
+        ),
+        (
+            3,
+            "sig matrix_value[rows, cols]: tensor[rows, cols, f32]\n\
+             matrix_value = to_tensor([\n\
+               [1.0f32, 2.0f32],\n\
+               [3.0f32, 4.0f32]\n\
+             ])\n",
+            "matrix_value",
+            &["rows", "cols"][..],
+        ),
+    ] {
+        let surf_path = format!("non-function-rigid-{index}.ch");
+        fs::write(dir.path().join(&surf_path), source).expect("write non-function Surf fixture");
+        let deep = run(dir.path(), &["deep", &surf_path]);
+        assert!(
+            deep.status.success(),
+            "`chelis deep` failed for `{declaration}`: {}",
+            text(&deep)
+        );
+        let deep_path = format!("non-function-rigid-{index}.dp");
+        fs::write(dir.path().join(&deep_path), &deep.stdout)
+            .expect("write canonical non-function Deep fixture");
+        for path in [&surf_path, &deep_path] {
+            let checked = check_json(dir.path(), path);
+            let messages = error_messages(&checked);
+            assert!(
+                checked["score"].as_f64() != Some(1.0),
+                "`chelis check` must reject concrete narrowing in `{declaration}` through \
+                 {path}: {checked}"
+            );
+            for binder in binders {
+                assert!(
+                    messages.iter().any(|message| {
+                        message.contains(declaration)
+                            && message.contains(&format!("`{binder}`"))
+                            && message.contains("[04-INF-6]")
+                    }),
+                    "`chelis check` must report narrowed binder `{binder}` in `{declaration}` \
+                     through {path}: {checked}"
+                );
+            }
+        }
+    }
+
+    fs::write(
+        dir.path().join("polymorphic-value.ch"),
+        "sig empty[p]: List[p]\nempty = []\n",
+    )
+    .expect("write polymorphic Surf value fixture");
+    let deep = run(dir.path(), &["deep", "polymorphic-value.ch"]);
+    assert!(
+        deep.status.success(),
+        "`chelis deep` failed for the polymorphic value: {}",
+        text(&deep)
+    );
+    fs::write(dir.path().join("polymorphic-value.dp"), &deep.stdout)
+        .expect("write canonical polymorphic Deep fixture");
+    for path in ["polymorphic-value.ch", "polymorphic-value.dp"] {
+        let accepted = check_json(dir.path(), path);
+        assert_eq!(
+            accepted["score"].as_f64(),
+            Some(1.0),
+            "`chelis check` must preserve an unconstrained polymorphic value through {path}: \
+             {accepted}"
+        );
+    }
+}
+
+#[test]
 fn cli_rejects_body_only_dimension_collapsed_into_return_only_at_both_surfaces() {
     let dir = tempdir().expect("tempdir");
     for (index, source, declaration) in [
