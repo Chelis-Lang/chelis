@@ -235,7 +235,11 @@ class MatrixCoverageTests(unittest.TestCase):
     """
 
     def test_live_matrix_covers_every_declared_feature_both_ways(self) -> None:
-        CLOSURE.check_matrix_covers_declared_features(REPO_ROOT)
+        by_row = CLOSURE.check_matrix_covers_declared_features(REPO_ROOT)
+        per_pull_request = CLOSURE.features_enabled_per_pull_request(by_row)
+        self.assertIn(("chelis-prove", "clarabel"), per_pull_request)
+        self.assertNotIn(("chelis-prove", "arb"), per_pull_request)
+        self.assertNotIn(("chelis-prove", "z3"), per_pull_request)
 
     def test_declared_features_include_implicit_optional_dependencies(self) -> None:
         declared = CLOSURE.declared_features(REPO_ROOT)
@@ -541,9 +545,38 @@ class SourceReconciliationTests(unittest.TestCase):
             self.assertIn(source.row, labels, source.path)
             self.assertEqual(labels[source.row].cadence, CLOSURE.NIGHTLY, source.path)
 
-    def test_reports_a_nightly_only_entry_a_run_already_compiled(self) -> None:
-        # The inventory prunes itself: an entry the per-pull-request matrix
-        # covers is dead weight that would hide a later regression.
+    def test_accumulated_dep_info_does_not_prune_a_nightly_only_entry(self) -> None:
+        # A warm target includes dep-info from cargo invocations outside the
+        # registered Clippy rows. That evidence can establish completeness,
+        # but it cannot prove that the nightly-only inventory is stale.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            (root / "src").mkdir()
+            (root / "src" / "nightly.rs").write_text("", encoding="utf-8")
+            deps = root / "target" / "debug" / "deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
+            )
+            nightly = (
+                CLOSURE.NightlyOnlySource(
+                    path="src/nightly.rs",
+                    feature="pkg/feature",
+                    row="all-features",
+                ),
+            )
+            CLOSURE.check_every_source_is_compiled(
+                (root / "target" / "debug",),
+                root,
+                exceptions=(),
+                nightly_only=nightly,
+                per_pull_request_features=(),
+            )
+
+    def test_reports_a_nightly_only_entry_a_registered_run_compiled(self) -> None:
+        # Cargo's resolved registered-row features prune the inventory: an
+        # entry that matrix covers is dead weight hiding a later regression.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
@@ -569,6 +602,7 @@ class SourceReconciliationTests(unittest.TestCase):
                     root,
                     exceptions=(),
                     nightly_only=nightly,
+                    per_pull_request_features={("pkg", "feature")},
                 )
 
     def test_require_complete_drops_the_nightly_allowance(self) -> None:
