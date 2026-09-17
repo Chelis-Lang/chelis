@@ -8286,6 +8286,25 @@ fn check_accepts_supported_core_transform_targets() {
              }\n",
         ),
         (
+            "vmap_typed_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_alias_after_module_alias_shadow",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+        ),
+        (
             "vmap_concrete_nested_tuple_parameter",
             "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
                vmap(fn (pair: (tensor[4, 3, f32], tensor[4, 3, f32])) -> \
@@ -8528,6 +8547,24 @@ fn check_fences_non_direct_transform_targets() {
              def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
                mapped = g\n\
                vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_direct_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             out = vmap(mapped)\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
              }\n",
             "vmap",
         ),

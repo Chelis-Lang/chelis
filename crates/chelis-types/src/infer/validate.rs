@@ -570,19 +570,28 @@ fn validate_core_transform_target(
     let shadows_top_level = name.is_some_and(|name| {
         top_level_functions.contains(name) && lexical_scope.local_values.contains_key(name)
     });
-    let aliases_top_level_function = name.is_some_and(|name| {
+    // Resolve a target name in lexical order. A local binding is authoritative
+    // even when it carries no fence provenance; only an absent local may fall
+    // back to the older module alias with the same spelling.
+    let target_value = name.map(|name| {
         lexical_scope
             .local_values
             .get(name)
-            .is_some_and(CoreTransformValue::aliases_top_level_function)
-            || module_function_aliases.contains(name)
+            .cloned()
+            .unwrap_or_else(|| {
+                if module_function_aliases.contains(name) {
+                    CoreTransformValue::TopLevelFunctionAlias
+                } else {
+                    CoreTransformValue::Ordinary
+                }
+            })
     });
-    let aliases_untyped_vmap_lambda = name.is_some_and(|name| {
-        lexical_scope
-            .local_values
-            .get(name)
-            .is_some_and(CoreTransformValue::is_untyped_vmap_lambda)
-    });
+    let aliases_top_level_function = target_value
+        .as_ref()
+        .is_some_and(CoreTransformValue::aliases_top_level_function);
+    let aliases_untyped_vmap_lambda = target_value
+        .as_ref()
+        .is_some_and(CoreTransformValue::is_untyped_vmap_lambda);
 
     let requires_fence = match tag {
         // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
