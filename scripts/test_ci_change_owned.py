@@ -81,6 +81,7 @@ def config_text(
     test_exclusion: tuple[str, str, str] = ("p", "smoke", "slow_case"),
     manual_only_target: tuple[str, str] | None = None,
     path_rule: str = "scripts/",
+    required_package_rule: tuple[str, tuple[str, ...]] | None = None,
 ) -> str:
     owner = "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
     manual = ""
@@ -91,7 +92,17 @@ package = {json.dumps(manual_only_target[0])}
 name = {json.dumps(manual_only_target[1])}
 {owner}
 """
-    return f"""version = 2
+    required = ""
+    if required_package_rule is not None:
+        prefix, packages = required_package_rule
+        required = f"""
+[[required_package_rule]]
+prefix = {json.dumps(prefix)}
+packages = {json.dumps(packages)}
+reason = "binder and defsig contract changes require every affected package owner"
+tracking_issue = "chelis#1854"
+"""
+    return f"""version = 3
 
 [[standing_target]]
 package = {json.dumps(standing[0])}
@@ -108,6 +119,7 @@ target = {json.dumps(test_exclusion[1])}
 name = {json.dumps(test_exclusion[2])}
 {owner}
 {manual}
+{required}
 
 [[path_rule]]
 prefix = {json.dumps(path_rule)}
@@ -274,9 +286,14 @@ def set_colocated_package_expansion(
 
 
 class SchemaTests(unittest.TestCase):
-    def test_strict_schema_reads_all_five_row_kinds(self) -> None:
-        config = load_config(config_text(manual_only_target=("q", "smoke")))
-        self.assertEqual(config.version, 2)
+    def test_strict_schema_reads_all_six_row_kinds(self) -> None:
+        config = load_config(
+            config_text(
+                manual_only_target=("q", "smoke"),
+                required_package_rule=("crates/p/src/contract.rs", ("p", "q")),
+            )
+        )
+        self.assertEqual(config.version, 3)
         self.assertEqual(config.standing_targets, (owned.Identity("p", "smoke"),))
         self.assertEqual(tuple(config.target_exclusions), (owned.Identity("p", "heavy"),))
         self.assertEqual(
@@ -287,12 +304,20 @@ class SchemaTests(unittest.TestCase):
             tuple(config.manual_only_targets),
             (owned.Identity("q", "smoke"),),
         )
+        self.assertEqual(
+            config.required_package_rules[0].prefix,
+            "crates/p/src/contract.rs",
+        )
+        self.assertEqual(
+            config.required_package_rules[0].packages,
+            ("p", "q"),
+        )
         self.assertEqual(config.path_rules[0].prefix, "scripts/")
 
     def test_malformed_unknown_duplicate_and_ambiguous_rows_fail(self) -> None:
         valid = config_text()
         mutations = [
-            valid.replace("version = 2", "version = 1", 1),
+            valid.replace("version = 3", "version = 2", 1),
             valid + "\nunknown = true\n",
             valid + '\n[[standing_target]]\npackage = "p"\nname = "smoke"\n',
             config_text(manual_only_target=("q", "smoke"))
@@ -305,6 +330,16 @@ class SchemaTests(unittest.TestCase):
             valid + f'\n[[path_rule]]\nprefix = "scripts/sub/"\ndisposition = "owner"\n'
             + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
             + "\n",
+            config_text(
+                required_package_rule=("crates/p/src/contract.rs", ("p",))
+            )
+            + '\n[[required_package_rule]]\nprefix = "crates/p/src/contract.rs"\n'
+            + 'packages = ["p"]\nreason = "duplicate"\ntracking_issue = "chelis#1854"\n',
+            config_text(
+                required_package_rule=("crates/p/src/", ("p",))
+            )
+            + '\n[[required_package_rule]]\nprefix = "crates/p/src/contract.rs"\n'
+            + 'packages = ["p"]\nreason = "overlap"\ntracking_issue = "chelis#1854"\n',
             valid.replace('reason = "real build path is nightly-owned"', "reason = \"\"", 1),
             valid.replace(
                 'tracking_issue = "chelis#1824"',
@@ -340,6 +375,15 @@ class SchemaTests(unittest.TestCase):
                 "manual-only target is not default-feature eligible",
             ),
             (config_text(path_rule="missing/"), "path rule"),
+            (
+                config_text(
+                    required_package_rule=(
+                        "crates/p/src/contract.rs",
+                        ("missing",),
+                    )
+                ),
+                "required package rule",
+            ),
         ]
         for content, message in cases:
             with self.subTest(message=message):
@@ -463,6 +507,28 @@ class SchemaTests(unittest.TestCase):
         }
         self.assertFalse(
             broad_unsupported & {rule.prefix for rule in config.path_rules}
+        )
+        self.assertEqual(
+            {
+                rule.prefix: rule.packages
+                for rule in config.required_package_rules
+            },
+            {
+                "crates/chelis-deep/src/dtype_bounds.rs": ("chelis-types",),
+                "crates/chelis-deep/src/role.rs": ("chelis-types",),
+                "crates/chelis-deep/src/stamp_to_typed.rs": (
+                    "chelis-types",
+                ),
+                "crates/chelis-surf/src/ast.rs": ("chelis-types",),
+                "crates/chelis-surf/src/desugar.rs": ("chelis-types",),
+                "crates/chelis-surf/src/dtype_name.rs": ("chelis-types",),
+                "crates/chelis-surf/src/format.rs": ("chelis-types",),
+                "crates/chelis-surf/src/parser.rs": ("chelis-types",),
+                "crates/chelis-surf/src/resugar.rs": ("chelis-types",),
+                "crates/chelis-types/src/deep_type.rs": ("chelis-types",),
+                "crates/chelis-types/src/infer/": ("chelis-types",),
+                "crates/chelis-types/src/session.rs": ("chelis-types",),
+            },
         )
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
@@ -878,6 +944,7 @@ class DurationBaselineTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p"],
+            "required_packages": [],
             "eligible_targets": [identity.canonical],
             "change_owned": [identity.canonical],
             "package_expansion": [],
@@ -1159,6 +1226,50 @@ class PlanningTests(unittest.TestCase):
         self.assertNotIn("p::heavy", plan["package_expansion"])
         self.assertEqual(plan["selected_packages"], ["p"])
         self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
+        owned.verify_plan_digest(plan)
+
+    def test_required_package_rule_promotes_complete_package_to_required(self) -> None:
+        sources = fixture_sources() | {"crates/p/src/contract.rs": ""}
+        plan = owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/contract.rs")],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(
+                config_text(
+                    required_package_rule=(
+                        "crates/p/src/contract.rs",
+                        ("p",),
+                    )
+                )
+            ),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertEqual(plan["required_packages"], ["p"])
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::smoke"],
+        )
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(
+            plan["path_dispositions"][0]["required_package_rules"],
+            [
+                {
+                    "rule": "crates/p/src/contract.rs",
+                    "packages": ["p"],
+                    "reason": (
+                        "binder and defsig contract changes require every "
+                        "affected package owner"
+                    ),
+                    "tracking_issue": "chelis#1854",
+                }
+            ],
+        )
         owned.verify_plan_digest(plan)
 
     def test_targeted_rebase_promotes_the_affected_package_to_required(self) -> None:
@@ -2364,6 +2475,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p"],
+            "required_packages": [],
             "eligible_targets": [identity.canonical],
             "change_owned": (
                 [identity.canonical] if lane_key == "change_owned" else []
@@ -3087,6 +3199,7 @@ class ReportTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p", "q"],
+            "required_packages": [],
             "eligible_targets": ["p::smoke", "q::smoke"],
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],

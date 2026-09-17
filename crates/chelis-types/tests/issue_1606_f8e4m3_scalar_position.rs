@@ -252,21 +252,55 @@ fn assert_rejected(src: &str, position: &str) {
     }
 }
 
-/// A source site owns one diagnostic, even when inference revisits its declaration.
+fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
+    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("`{name}`"))
+            && message.contains("cannot be a declaration binder"),
+        "wrong forbidden-binder diagnostic for `{name}` in {position}: {message}"
+    );
+}
+
+/// Each declaration owns one diagnostic per reserved spelling, even when the
+/// spelling appears at more than one type site.
 fn assert_one_report_per_site(source: &str, names: &[&str]) {
     let program = surf_to_deep(source);
-    let mut expected: Vec<_> = names
-        .iter()
-        .flat_map(|name| {
-            source.match_indices(name).map(move |(offset, _)| {
-                (
-                    *name,
-                    offset,
-                    format!("source:{offset}..{}", offset + name.len()),
-                )
-            })
-        })
-        .collect();
+    let declaration_at = |offset: usize| {
+        let mut declaration = 0;
+        let mut line_start = 0;
+        for line in source.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("def ")
+                || trimmed.starts_with("sig ")
+                || trimmed.starts_with("@property ")
+                || trimmed.starts_with("type ")
+            {
+                declaration = line_start;
+            }
+            if line_start + line.len() > offset {
+                break;
+            }
+            line_start += line.len();
+        }
+        declaration
+    };
+    let mut owner_keys = Vec::new();
+    let mut expected = Vec::new();
+    for name in names {
+        for (offset, _) in source.match_indices(name) {
+            let key = (declaration_at(offset), *name);
+            if owner_keys.contains(&key) {
+                continue;
+            }
+            owner_keys.push(key);
+            expected.push((
+                *name,
+                offset,
+                format!("source:{offset}..{}", offset + name.len()),
+            ));
+        }
+    }
     expected.sort_by_key(|(_, offset, _)| *offset);
     for (entry, result) in [
         ("ir", check_ir_program(&program)),
@@ -322,7 +356,7 @@ fn a_reserved_parameter_site_reports_once_at_both_entries() {
 
 #[test]
 fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
-    let source = "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x";
+    let source = "def inspect(x: tensor[3, p]) -> tensor[3, p] = x";
     let program = surf_to_deep(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("an unlisted precision name is not a binder");
@@ -485,7 +519,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                 ("ir", check_ir_program(&program)),
                 ("typed", check_typed_program(&program)),
             ] {
-                let report = result.expect_err("both independent reserved sites must reject");
+                let report = result.expect_err("the declaration-owned reserved type must reject");
                 assert_eq!(
                     report
                         .errors
@@ -494,7 +528,7 @@ fn property_copy_ownership_preserves_semantic_metadata_differences() {
                             matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision)
                         })
                         .count(),
-                    2,
+                    1,
                     "{entry}/{name}: {report:?}"
                 );
             }
@@ -550,7 +584,7 @@ fn property_copy_ownership_keeps_mixed_slot_dispositions_independent() {
             "(t-prim {} bool)".to_string(),
         ];
         let program = hand_authored_deep_property_slots(&signature, &parameter, "(lit {} true)");
-        assert_api_diagnostic_counts(&program, 2, 1, name);
+        assert_api_diagnostic_counts(&program, 1, 1, name);
     }
 }
 
@@ -683,8 +717,8 @@ fn nominal_arity_recovery_visits_every_header_owned_type_argument() {
                        (t-ref {{}} (t-prim {{}} {name})) \
                        (t-prim {{}} f32))"
                 ),
-                3,
-                "nested composites preserve every authored rejection",
+                2,
+                "nested composites preserve each declaration-owned spelling",
             ),
             (
                 "(t-adt {} Pair (t-prim {} f32))".to_string(),
@@ -820,7 +854,7 @@ fn calls_propagate_the_failed_signature_without_a_second_report() {
 }
 
 #[test]
-fn distinct_parameter_sites_in_one_signature_each_report_once() {
+fn one_declaration_reports_each_reserved_spelling_once() {
     assert_one_report_per_site(
         "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
         &["f8e4m3", "f8e5m2"],
@@ -1037,7 +1071,7 @@ fn a_failed_signature_preserves_its_other_binder_bounds() {
 }
 
 #[test]
-fn independent_deep_annotations_do_not_share_a_display_span_identity() {
+fn independent_deep_annotations_share_the_declaration_diagnostic_owner() {
     for display_span in ["same", "source:16..22"] {
         let source = format!(
             "(defsig {{}} classify (t-fn {{}} (t-prim {{span: \"{display_span}\"}} f8e4m3) (t-prim {{}} i32)))\n\
@@ -1045,8 +1079,8 @@ fn independent_deep_annotations_do_not_share_a_display_span_identity() {
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
         for result in [check_ir_program(&program), check_typed_program(&program)] {
-            let report = result.expect_err("both independently authored annotations must reject");
-            assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+            let report = result.expect_err("the declaration-owned annotation must reject");
+            assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
             assert!(
                 report
                     .errors
@@ -1212,19 +1246,19 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
     for (source, expected) in [
         (
             "def classify(x: f8e4m3, y: f8e5m2) -> i32 = 0i32",
-            ["f8e4m3", "f8e5m2"],
+            &["f8e4m3", "f8e5m2"][..],
         ),
         (
             "def classify(x: f8e4m3, y: f8e4m3) -> i32 = 0i32",
-            ["f8e4m3", "f8e4m3"],
+            &["f8e4m3"][..],
         ),
         (
             "def classify(x: f8e4m3) -> f8e5m2 = x",
-            ["f8e4m3", "f8e5m2"],
+            &["f8e4m3", "f8e5m2"][..],
         ),
         (
             "def classify(x: f8e4m3) -> i32 = cast(0i32, f8e5m2)",
-            ["f8e4m3", "f8e5m2"],
+            &["f8e4m3", "f8e5m2"][..],
         ),
     ] {
         let program = surf_to_deep(source);
@@ -1245,7 +1279,7 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
                     "{source}: {:?}",
                     report.errors
                 );
-                for (error, name) in report.errors.iter().zip(expected) {
+                for (error, name) in report.errors.iter().zip(expected.iter()) {
                     assert!(
                         matches!(
                             error.kind,
@@ -1371,7 +1405,7 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
             assert!(
                 report.errors.iter().any(|error| {
                     error.message.contains(name)
-                        && error.message.contains("spec/04-type-system.md §1.1.1")
+                        && error.message.contains("cannot be a `defsig` binder")
                 }),
                 "{:?}",
                 report.errors
@@ -1413,18 +1447,24 @@ fn standalone_sig_rejected() {
 
 #[test]
 fn explicit_binder_scalar_rejected() {
-    assert_rejected(
-        "def f[f8e4m3](x: f8e4m3) -> f8e4m3 = x",
-        "an explicit binder (scalar)",
-    );
+    for name in ["f8e4m3", "f8e5m2"] {
+        assert_forbidden_surf_binder(
+            &format!("def f[{name}](x: {name}) -> {name} = x"),
+            name,
+            "an explicit binder (scalar)",
+        );
+    }
 }
 
 #[test]
 fn explicit_binder_tensor_rejected() {
-    assert_rejected(
-        "def f[f8e4m3](x: tensor[3, f8e4m3]) -> tensor[3, f8e4m3] = x",
-        "an explicit binder (tensor)",
-    );
+    for name in ["f8e4m3", "f8e5m2"] {
+        assert_forbidden_surf_binder(
+            &format!("def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x"),
+            name,
+            "an explicit binder (tensor)",
+        );
+    }
 }
 
 #[test]

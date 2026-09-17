@@ -1,9 +1,22 @@
+# Historical Note
+
+This completed implementation plan is preserved as design-history context only.
+It is **not** current guidance. PR #1318 replaced environment-wide
+generalization sweeps with solver-local levels and closed chelis#1207.
+
+Current language semantics remain in `spec/04-type-system.md`. The maintained
+implementation and executable parity oracle live in
+`crates/chelis-types/src/`, `.github/workflows/heavy-e2e.yml`, and the
+`chelis-types/generalize-sweep-oracle` feature.
+
+---
+
 # chelis#1207 — Level-based generalization implementation plan
 
 **Issue:** [chelis#1207](https://github.com/Chelis-Lang/chelis/issues/1207)
 
 **Evidence:**
-[`docs/investigations/typecheck_generalize_superlinear_diagnosis.md`](../../docs/investigations/typecheck_generalize_superlinear_diagnosis.md)
+[`docs/investigations/typecheck_generalize_superlinear_diagnosis.md`](../../../docs/investigations/typecheck_generalize_superlinear_diagnosis.md)
 
 ## Scope and controlling contract
 

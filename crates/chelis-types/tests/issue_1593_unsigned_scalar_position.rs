@@ -77,6 +77,17 @@ fn messages(source: &str) -> Vec<String> {
     }
 }
 
+fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
+    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("`{name}`"))
+            && message.contains("cannot be a declaration binder"),
+        "the binder-list diagnostic for `{name}` in {position} must name the \
+         spelling and reject it as a declaration binder; got: {message}"
+    );
+}
+
 /// The three things the diagnostic owes a reader per §1.1.1 / §1.1.2: the
 /// offending spelling, the governing sections, and a remedy.
 fn assert_unsigned_diagnostic(source: &str, name: &str, position: &str) {
@@ -266,30 +277,27 @@ fn signed_spellings_do_not_match_the_unsigned_family() {
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_name() {
     for name in UNSIGNED {
-        assert_unsigned_diagnostic(
+        assert_forbidden_surf_binder(
             &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
             name,
             "an explicit binder in a scalar position",
         );
-        let tensor = messages(&format!(
-            "module P.M\nexport (f)\n\
-             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
-        ));
-        assert!(
-            tensor
-                .iter()
-                .any(|message| message.contains("unsigned integer types are deferred")),
-            "an explicit binder must not rebind `{name}` in a tensor precision \
-             slot; got: {tensor:?}"
+        assert_forbidden_surf_binder(
+            &format!(
+                "module P.M\nexport (f)\n\
+                 def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+            ),
+            name,
+            "an explicit binder in a tensor precision position",
         );
     }
     for name in DEFERRED {
-        assert_deferred_diagnostic(
+        assert_forbidden_surf_binder(
             &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
             name,
             "an explicit binder in a scalar position",
         );
-        assert_deferred_diagnostic(
+        assert_forbidden_surf_binder(
             &format!(
                 "module P.M\nexport (f)\n\
                  def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
@@ -367,9 +375,9 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 messages
                     .iter()
                     .any(|message| message.contains(&format!("`{name}`"))
-                        && message.contains("spec/04-type-system.md §1.1.1")),
+                        && message.contains("cannot be a `defsig` binder")),
                 "a Deep type variable named `{name}` in a {label} position must \
-                 reach the §1.1.1 rejection; got: {messages:?}"
+                 be rejected by the explicit binder-list owner; got: {messages:?}"
             );
         }
     }

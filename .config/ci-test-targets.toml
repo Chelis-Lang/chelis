@@ -1,7 +1,83 @@
 # Versioned pull-request integration ownership. All default-feature lib/bin units are automatic.
 # standing_target preserves the reviewed ci-fast set; exclusions and shared-path rules
 # are consumed by scripts/ci_change_owned.py and fail closed when stale.
-version = 2
+version = 3
+
+# Binder and defsig contract changes can invalidate Surf and Deep fixtures
+# embedded anywhere in the chelis-types integration package. These reviewed
+# triggers promote every eligible chelis-types integration target into the
+# required lane; package expansion is not sufficient migration evidence.
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/ast.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder representation changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/desugar.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder and type-desugaring changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/dtype_name.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder vocabulary changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/format.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder formatting changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/parser.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder grammar changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/resugar.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder reconstruction changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/dtype_bounds.rs"
+packages = ["chelis-types"]
+reason = "Deep declaration-binder bound metadata changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/role.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig child-role changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/stamp_to_typed.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig typed-carrier changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/deep_type.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig shape changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/infer/"
+packages = ["chelis-types"]
+reason = "declaration-binder resolution and diagnostic ownership changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/session.rs"
+packages = ["chelis-types"]
+reason = "binder diagnostic owner-key changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
 
 # The completion runner consumes these exact runtime-extent corpus inputs.
 [[path_rule]]

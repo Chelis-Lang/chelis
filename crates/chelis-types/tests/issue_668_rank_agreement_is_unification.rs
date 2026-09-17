@@ -511,7 +511,7 @@ fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
     assert_accepts(
         "module Repro.ShadowedIdentity\n\
          def lift[n](x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
-         def apply(\n\
+         def apply[n](\n\
            floor_div: (tensor[n, f32] -> tensor[2, n, f32]),\n\
            x: tensor[n, f32],\n\
          ) -> tensor[2, n, f32] = {\n\

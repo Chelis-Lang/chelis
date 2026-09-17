@@ -136,7 +136,7 @@ fn a_well_typed_conv_through_a_let_bound_expand_is_accepted() {
 fn a_symbolic_conv_chain_is_checker_legal() {
     let chained = ir_diagnostics(
         "module Repro.Conv2dCascade\n\
-         def f(\n\
+         def f[h](\n\
            x: tensor[2, 3, h, 8, f32],\n\
            k1: tensor[4, 3, 3, 3, f32],\n\
            k2: tensor[4, 4, 3, 3, f32],\n\
