@@ -2665,9 +2665,14 @@ mod core_transform_fragment_tests {
         assert!(
             result.errors.iter().any(|error| {
                 matches!(error.kind, CheckErrorKind::TypeMismatch)
-                    && error.message.contains("undeclared type variable `a`")
+                    && error
+                        .message
+                        .contains("unknown primitive type `a` in type annotation")
+                    && error.suggestions.iter().any(|suggestion| {
+                        suggestion.contains("declare `a` in the signature binder list")
+                    })
             }),
-            "Surf bare type variables remain owned by type resolution: {:?}",
+            "Surf bare type names remain owned by explicit-binder type resolution: {:?}",
             result.errors
         );
         assert!(
