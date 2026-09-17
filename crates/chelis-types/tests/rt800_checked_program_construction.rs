@@ -30,6 +30,60 @@ fn mutate_annotation_leaves(
     changed
 }
 
+fn legacy_mutation_metadata(metadata: &chelis_deep::Metadata) -> chelis_deep::Metadata {
+    metadata
+        .map_expressions(&mut |value, _| legacy_mutation_expr(value))
+        .expect("legacy mutation conversion preserves metadata payloads")
+}
+
+fn legacy_mutation_expr(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            Expr::List(
+                List {
+                    elements: list.elements.iter().map(legacy_mutation_expr).collect(),
+                },
+                *span,
+            )
+        }
+        Expr::BareList(elements, span) => {
+            Expr::BareList(elements.iter().map(legacy_mutation_expr).collect(), *span)
+        }
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list.elements.iter().map(legacy_mutation_expr).collect(),
+            },
+            *span,
+        ),
+        Expr::Map(metadata, span) => Expr::Map(legacy_mutation_metadata(metadata), *span),
+        Expr::MetaExpr(metadata_expr, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: legacy_mutation_metadata(&metadata_expr.metadata),
+                expr: Box::new(legacy_mutation_expr(&metadata_expr.expr)),
+            },
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            let mut elements = vec![
+                Expr::Atom(Atom::Name(data.head.clone()), data.span),
+                Expr::Map(legacy_mutation_metadata(&data.meta), data.span),
+            ];
+            elements.extend(data.children.iter().map(legacy_mutation_expr));
+            Expr::List(List { elements }, data.span)
+        }
+        Expr::Atom(..) => expr.clone(),
+    }
+}
+
+fn legacy_mutation_candidate(checked: &CheckedProgram) -> Vec<Expr> {
+    checked
+        .annotated_exprs()
+        .iter()
+        .map(legacy_mutation_expr)
+        .collect()
+}
+
 fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
     match expr {
         Expr::List(list, _) => {
@@ -48,12 +102,9 @@ fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
             None
         }
         // These mutation targets are ordinary function/body nodes. Typed
-        // metadata exposes no mutable Expr reference that could invalidate it.
-        Expr::Map(_, _) => None,
+        // metadata and structural carriers are not list-mutation targets.
+        Expr::Map(_, _) | Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => None,
         Expr::MetaExpr(meta, _) => find_list_mut(&mut meta.expr, tag),
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            panic!("rt800 list mutation helper requires the legacy checked-AST representation")
-        }
         Expr::Atom(_, _) => None,
     }
 }
@@ -75,8 +126,30 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
                     replace_symbol(value, from, to)
                 })
         }
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            panic!("rt800 symbol mutation helper requires the legacy checked-AST representation")
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            let mut metadata = node.meta().clone();
+            let mut children = node.children_slice().to_vec();
+            let span = *span;
+            let changed =
+                mutate_annotation_leaves(&mut metadata, |value| replace_symbol(value, from, to))
+                    || children
+                        .iter_mut()
+                        .any(|child| replace_symbol(child, from, to));
+            if changed {
+                *expr = Expr::node(tag, metadata, children, span);
+            }
+            changed
+        }
+        Expr::BareList(elements, _) => elements
+            .iter_mut()
+            .any(|element| replace_symbol(element, from, to)),
+        Expr::UnknownForm(data) => {
+            mutate_annotation_leaves(&mut data.meta, |value| replace_symbol(value, from, to))
+                || data
+                    .children
+                    .iter_mut()
+                    .any(|child| replace_symbol(child, from, to))
         }
         Expr::Atom(_, _) => false,
     }
@@ -103,8 +176,35 @@ fn remove_first_metadata_key(expr: &mut Expr, key: chelis_deep::annotations::Met
                     remove_first_metadata_key(value, key)
                 })
         }
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            panic!("rt800 metadata mutation helper requires the legacy checked-AST representation")
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            let mut metadata = node.meta().clone();
+            let mut children = node.children_slice().to_vec();
+            let span = *span;
+            let changed = metadata.remove(key).is_some()
+                || mutate_annotation_leaves(&mut metadata, |value| {
+                    remove_first_metadata_key(value, key)
+                })
+                || children
+                    .iter_mut()
+                    .any(|child| remove_first_metadata_key(child, key));
+            if changed {
+                *expr = Expr::node(tag, metadata, children, span);
+            }
+            changed
+        }
+        Expr::BareList(elements, _) => elements
+            .iter_mut()
+            .any(|element| remove_first_metadata_key(element, key)),
+        Expr::UnknownForm(data) => {
+            data.meta.remove(key).is_some()
+                || mutate_annotation_leaves(&mut data.meta, |value| {
+                    remove_first_metadata_key(value, key)
+                })
+                || data
+                    .children
+                    .iter_mut()
+                    .any(|child| remove_first_metadata_key(child, key))
         }
         Expr::Atom(_, _) => false,
     }
@@ -189,7 +289,7 @@ fn root_metadata_mut(exprs: &mut [Expr]) -> &mut chelis_deep::Metadata {
 #[test]
 fn effect_only_reannotation_preserves_every_checked_context() {
     let checked = checked_program();
-    let mut annotated = checked.annotated_exprs().to_vec();
+    let mut annotated = legacy_mutation_candidate(&checked);
     add_effects_metadata(&mut annotated);
     let expected_annotated = annotated.clone();
 
@@ -221,7 +321,7 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
     ];
 
     for (label, mutate, diagnostic) in cases {
-        let mut forged = checked.annotated_exprs().to_vec();
+        let mut forged = legacy_mutation_candidate(&checked);
         mutate(&mut forged);
         let result = checked
             .try_with_effect_annotations(forged)
@@ -243,7 +343,7 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
 #[test]
 fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
     let checked = checked_program();
-    let mut reordered = checked.annotated_exprs().to_vec();
+    let mut reordered = legacy_mutation_candidate(&checked);
     let root = root_metadata_mut(&mut reordered);
     let mut values = root.values().cloned().collect::<Vec<_>>();
     values.reverse();
@@ -252,7 +352,7 @@ fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
     *root = reversed;
     checked.try_with_effect_annotations(reordered).unwrap();
 
-    let mut candidate = checked.annotated_exprs().to_vec();
+    let mut candidate = legacy_mutation_candidate(&checked);
     let root = root_metadata_mut(&mut candidate);
     let before = root.clone();
     let duplicate = root.values().next().unwrap().clone();
