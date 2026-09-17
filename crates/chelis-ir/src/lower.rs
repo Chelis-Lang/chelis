@@ -6949,6 +6949,12 @@ struct LowerCtx<'program> {
     local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
     /// Activation-local lowering tokens allocated before its body executes.
     local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
+    /// Scalar Bool selecting the runtime control-flow path currently being
+    /// lowered. A local-ascription owner retains this as a non-value
+    /// dependency so its guard executes only when that source branch is
+    /// selected. Unlike [`Self::random_path_condition`], this is present in
+    /// ordinary tensor DAGs as well as transform/helper subcontexts.
+    local_ascription_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -7105,6 +7111,7 @@ impl<'program> LowerCtx<'program> {
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
             local_tensor_ascriptions: Arc::new(Vec::new()),
             local_ascription_tokens: Vec::new(),
+            local_ascription_path_condition: None,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -9048,8 +9055,14 @@ impl<'program> LowerCtx<'program> {
                                     bind_kids[i + 1].span_id().map(str::to_owned),
                                 )
                             };
+                            for (axis, _) in &claims {
+                                self.restore_local_ascription_owner_axis(owner, *axis);
+                            }
                             for (_axis, token) in &claims {
-                                if owner.0 <= token.0 {
+                                let latest_dependency = self
+                                    .local_ascription_path_condition
+                                    .map_or(token.0, |activation| token.0.max(activation.0));
+                                if owner.0 <= latest_dependency {
                                     let ty = self
                                         .dag
                                         .get(owner)
@@ -9065,6 +9078,11 @@ impl<'program> LowerCtx<'program> {
                                     val_id = LoweredValue::Node(owner);
                                 }
                                 self.dag.add_shape_dep(owner, *token);
+                            }
+                            if let Some(activation) = self.local_ascription_path_condition
+                                && !claims.is_empty()
+                            {
+                                self.dag.add_shape_dep(owner, activation);
                             }
                             if !claims.is_empty() {
                                 self.invocation_witnesses.push(owner);
@@ -9199,6 +9217,13 @@ impl<'program> LowerCtx<'program> {
         contains(body, ascription)
     }
 
+    fn body_contains_outstanding_local_ascription(&self, body: &Expr) -> bool {
+        self.local_tensor_ascriptions.iter().any(|ascription| {
+            !ascription.outstanding_claims().is_empty()
+                && Self::body_contains_local_ascription(body, ascription)
+        })
+    }
+
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
         let discarded = self
             .local_tensor_ascriptions
@@ -9222,6 +9247,54 @@ impl<'program> LowerCtx<'program> {
                 || stamped_parts(initializer)
                     .and_then(|(_, meta, _)| meta.surf_binding_type())
                     .is_some_and(|origin| origin.span() == ascription.ascription_span()))
+    }
+
+    /// Remove an authored local claim from the initializer's physical shape.
+    ///
+    /// The checker stamp on the initializer is the obligation this PR
+    /// transports; it is not evidence that the producer actually has that
+    /// extent. Keeping the claimed literal/name in `output_type` makes the C
+    /// movement plan validate against the claim a second time, even on an
+    /// untaken runtime branch. Recover the producer's structural source
+    /// instead and leave the exact claim on its dedicated witness token.
+    fn restore_local_ascription_owner_axis(&mut self, owner: NodeId, axis: usize) {
+        use crate::axis_sources::AxisSource;
+        let replacement = match crate::axis_sources::output_axis_sources(&self.dag, owner)
+            .get(axis)
+            .cloned()
+        {
+            Some(AxisSource::Literal { value }) => usize::try_from(value).ok().map(DimInfo::Lit),
+            Some(AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(source_axis),
+            }) => self
+                .dag
+                .get(owner)
+                .and_then(|node| node.inputs.get(input))
+                .and_then(|input| self.dag.get(*input))
+                .and_then(|input| {
+                    input
+                        .output_type
+                        .dims
+                        .get(usize::try_from(source_axis).ok()?)
+                })
+                .cloned(),
+            Some(
+                AxisSource::ScalarInput { .. }
+                | AxisSource::OpComputed { .. }
+                | AxisSource::ClassSupplied { .. }
+                | AxisSource::ExternalAxis { .. },
+            )
+            | None => Some(DimInfo::Named(String::new(), None)),
+        };
+        if let Some(replacement) = replacement
+            && let Some(dim) = self
+                .dag
+                .node_mut(owner)
+                .and_then(|node| node.output_type.dims.get_mut(axis))
+        {
+            *dim = replacement;
+        }
     }
 
     fn expr_has_source_span(expr: &Expr, target: Span) -> bool {
@@ -18127,6 +18200,23 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
+        let saved_local_path = self.local_ascription_path_condition;
+        let then_has_local_claim = self.body_contains_outstanding_local_ascription(then_expr);
+        let else_has_local_claim = self.body_contains_outstanding_local_ascription(else_expr);
+        if then_has_local_claim {
+            self.local_ascription_path_condition = Some(match saved_local_path {
+                Some(parent_path) => self.dag.add_node(
+                    RiscOp::Mul,
+                    vec![parent_path, cond],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Bool,
+                    },
+                    self.current_span_id.clone(),
+                ),
+                None => cond,
+            });
+        }
         let saved_random_path = self.random_path_condition;
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -18168,9 +18258,39 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(else_path);
         }
+        if else_has_local_claim {
+            let path_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            };
+            let one = self.dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let not_cond = self.dag.add_node(
+                RiscOp::CmpLt,
+                vec![cond, one],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            self.local_ascription_path_condition = Some(match saved_local_path {
+                Some(parent_path) => self.dag.add_node(
+                    RiscOp::Mul,
+                    vec![parent_path, not_cond],
+                    path_ty,
+                    self.current_span_id.clone(),
+                ),
+                None => not_cond,
+            });
+        } else {
+            self.local_ascription_path_condition = saved_local_path;
+        }
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
+        self.local_ascription_path_condition = saved_local_path;
         let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
@@ -18696,7 +18816,26 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
-        then_ty.clone()
+        let dims = then_ty
+            .dims
+            .iter()
+            .zip(&else_ty.dims)
+            .map(|(then_dim, else_dim)| match (then_dim, else_dim) {
+                // A dynamic branch cannot publish one arm's concrete extent
+                // when the other arm remains runtime-sized. In particular, a
+                // local ascription's literal is an obligation, not physical
+                // shape evidence for the branch blend. Keep the unresolved
+                // arm so the mask takes its extent from the selected runtime
+                // value instead of allocating to the untaken claim.
+                (DimInfo::Named(_, None), _) => then_dim.clone(),
+                (_, DimInfo::Named(_, None)) => else_dim.clone(),
+                _ => then_dim.clone(),
+            })
+            .collect();
+        TensorType {
+            dims,
+            precision: then_ty.precision,
+        }
     }
 
     fn is_runtime_if_bottom_placeholder(node: &crate::dag::DagNode) -> bool {

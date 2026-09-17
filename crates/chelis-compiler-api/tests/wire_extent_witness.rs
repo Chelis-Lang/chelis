@@ -10,6 +10,10 @@ fn extent(value: i64) -> numbers::NonnegativeExtent {
     numbers::NonnegativeExtent::new(value).unwrap()
 }
 
+fn boolean(value: bool) -> chelis_types::ScalarValue {
+    scalar_from_i64("load", Prim::Bool, i64::from(value)).unwrap()
+}
+
 fn fixture() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
@@ -57,6 +61,88 @@ fn fixture() -> WireDag {
                     precision: "int64".into(),
                 },
                 shape_deps: vec![1],
+                span_id: None,
+                merged_spans: vec![],
+            },
+        ],
+    }
+}
+
+fn local_ascription_with_activation_fixture() -> WireDag {
+    WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        roots: vec![3],
+        nodes: vec![
+            WireDagNode {
+                id: 0,
+                op: WireRiscOp::Load { name: "x".into() },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![WireDimInfo::Named {
+                        name: "*".into(),
+                        size: None,
+                    }],
+                    precision: "f32".into(),
+                },
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+            },
+            WireDagNode {
+                id: 1,
+                op: WireRiscOp::ExtentWitness {
+                    site: WireExtentWitnessSite::LocalAscriptionClaim {
+                        ascription_id: 7,
+                        binding: "y".into(),
+                        claim: "2".into(),
+                        axis: WireRtAxis::Lit { value: 0 },
+                    },
+                    parameter: String::new(),
+                    axis: WireRtAxis::Lit { value: 0 },
+                    requirements: vec![extent(2)],
+                    claims: vec![],
+                },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "int64".into(),
+                },
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+            },
+            WireDagNode {
+                id: 2,
+                op: WireRiscOp::Const {
+                    value: boolean(true),
+                },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "bool".into(),
+                },
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+            },
+            WireDagNode {
+                id: 3,
+                op: WireRiscOp::Pad {
+                    padding: vec![(
+                        WireRtDim::Lit { value: extent(0) },
+                        WireRtDim::Lit { value: extent(0) },
+                    )],
+                    fill: chelis_types::scalar_from_f64("pad", Prim::F32, 0.0).unwrap(),
+                },
+                inputs: vec![0],
+                output_type: WireTensorType {
+                    dims: vec![WireDimInfo::Named {
+                        name: "*".into(),
+                        size: None,
+                    }],
+                    precision: "f32".into(),
+                },
+                shape_deps: vec![1, 2],
                 span_id: None,
                 merged_spans: vec![],
             },
@@ -283,6 +369,35 @@ fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknow
     let mut unknown = json;
     unknown["nodes"][1]["op"]["site"] = serde_json::json!("local_claim");
     assert!(WireDag::from_validated_json(&unknown.to_string()).is_err());
+}
+
+#[test]
+fn local_ascription_owner_rejects_multiple_runtime_branch_activations() {
+    let dag = local_ascription_with_activation_fixture();
+    let json = serde_json::to_value(&dag).unwrap();
+    let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+
+    let mut malformed = json;
+    let nodes = malformed["nodes"].as_array_mut().unwrap();
+    let mut second_activation = nodes[2].clone();
+    second_activation["id"] = 3.into();
+    second_activation["op"]["value"] =
+        serde_json::to_value(boolean(false)).expect("Bool scalar encodes");
+    let mut owner = nodes.pop().unwrap();
+    owner["id"] = 4.into();
+    owner["shape_deps"] = serde_json::json!([1, 2, 3]);
+    nodes.push(second_activation);
+    nodes.push(owner);
+    malformed["roots"] = serde_json::json!([4]);
+
+    let error = WireDag::from_validated_json(&malformed.to_string())
+        .expect_err("multiple path activations are ambiguous");
+    assert!(
+        format!("{error:#}")
+            .contains("local ascription owner has multiple runtime branch activations"),
+        "{error:#}"
+    );
 }
 
 #[test]

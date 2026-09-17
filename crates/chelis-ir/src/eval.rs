@@ -2497,6 +2497,7 @@ where
                         canonical: crate::axis_sources::CanonicalExtent::Resolved(*required),
                         op: site.operation(),
                         observed: site.observation().clone(),
+                        activation: None,
                     },
                 ));
             }
@@ -2590,6 +2591,9 @@ where
         // existed.
         if let Some(sites) = local_guard_sites.get(&node.id) {
             for (axis, claim) in sites {
+                if !local_guard_is_active(claim, &values)? {
+                    continue;
+                }
                 // Exhaustive on purpose: a future observation kind has to say
                 // here whether it is readable before the node runs, rather
                 // than falling through a wildcard and disappearing from this
@@ -3427,6 +3431,9 @@ where
                 ) {
                     continue;
                 }
+                if !local_guard_is_active(claim, &values)? {
+                    continue;
+                }
                 let Some(&observed) = value.shape.get(*axis) else {
                     continue;
                 };
@@ -3437,6 +3444,28 @@ where
     }
 
     Ok((values, path_random_counter))
+}
+
+fn local_guard_is_active(
+    claim: &crate::axis_sources::LocalGuardClaim,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<bool, String> {
+    let Some(activation) = claim.activation else {
+        return Ok(true);
+    };
+    let value = values.get(&activation).ok_or_else(|| {
+        format!(
+            "local extent guard activation at node {} is not available",
+            activation.0
+        )
+    })?;
+    match value.storage().to_raw() {
+        RawTensor::Int(values) if values.len() == 1 => Ok(values[0] != 0),
+        _ => Err(format!(
+            "local extent guard activation at node {} is not a scalar Bool",
+            activation.0
+        )),
+    }
 }
 
 /// One local extent guard, compared and reported.

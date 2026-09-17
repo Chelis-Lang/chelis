@@ -6919,9 +6919,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 }
                 other => other.to_string(),
             };
+            let mismatch = format!("(({extent_expr}) != {operand})");
+            let predicate = site.activation.map_or(mismatch.clone(), |activation| {
+                format!(
+                    "(((const uint8_t*)t{}_data)[0] != 0 && {mismatch})",
+                    activation.0
+                )
+            });
             let (name, op) = (site.claim, site.op);
             let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
-            self.line(&format!("if (({extent_expr}) != {operand}) {{"));
+            self.line(&format!("if ({predicate}) {{"));
             self.indent += 1;
             self.line(&format!(
                 "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"

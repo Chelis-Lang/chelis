@@ -7350,6 +7350,62 @@ mod tests {
     }
 
     #[test]
+    fn native_wire_projection_preserves_local_claim_runtime_branch_activation() {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+             if flag then {\n  \
+               y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+               y\n\
+             } else x\n",
+        )
+        .unwrap();
+        let checked =
+            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
+                .unwrap();
+        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
+        let projected = wire_dag(&dag).unwrap();
+        let claim = projected
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.op,
+                    WireRiscOp::ExtentWitness {
+                        site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("native lowering projects the path-local claim");
+        let owner = projected
+            .nodes
+            .iter()
+            .find(|node| node.shape_deps.contains(&claim.id))
+            .expect("the initializer owns the projected claim");
+        let activations = owner
+            .shape_deps
+            .iter()
+            .filter_map(|dependency| {
+                projected
+                    .nodes
+                    .get(usize::try_from(*dependency).ok()?)
+                    .filter(|node| {
+                        node.output_type.dims.is_empty() && node.output_type.precision == "bool"
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            activations.len(),
+            1,
+            "one exact scalar Bool activation crosses the artifact boundary"
+        );
+        let json = serde_json::to_value(&projected).unwrap();
+        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+            .expect("the projected path-local artifact validates");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
     fn native_wire_witness_projection_rejects_invalid_requirements_and_edges() {
         use chelis_ir::dag::{NodeId, RtAxis};
         for (invalid, expected) in [

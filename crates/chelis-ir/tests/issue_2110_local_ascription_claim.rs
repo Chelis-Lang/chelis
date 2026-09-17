@@ -57,6 +57,79 @@ fn direct_source(body: &str) -> String {
     format!("def f(x: tensor[*, f32]) -> tensor[*, f32] = {{\n  {body}\n}}\n")
 }
 
+fn runtime_branch_source() -> &'static str {
+    "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+     if flag then {\n  \
+       y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+       y\n\
+     } else x\n"
+}
+
+fn runtime_bool(value: bool) -> TensorValue {
+    TensorValue::finalize_from_wide_int(
+        "issue_2110_runtime_branch",
+        Prim::Bool,
+        vec![],
+        vec![i64::from(value)],
+    )
+    .expect("typed scalar Bool")
+}
+
+#[test]
+fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
+    let dag = lower(runtime_branch_source());
+    let token = chelis_ir::dag::NodeId(local_claims(&dag)[0].0);
+    let owner = dag
+        .nodes()
+        .iter()
+        .find(|node| node.shape_deps.contains(&token))
+        .expect("runtime-branch initializer owns its local claim");
+    let activations = owner
+        .shape_deps
+        .iter()
+        .filter(|dependency| {
+            dag.get(**dependency).is_some_and(|node| {
+                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activations.len(),
+        1,
+        "a path-local claim has one exact scalar Bool activation"
+    );
+    assert!(
+        chelis_ir::verify::verify(&dag).is_empty(),
+        "{:?}",
+        chelis_ir::verify::verify(&dag)
+    );
+    let values = eval_tensor_with(&dag, |name| match name {
+        "flag" => Some(runtime_bool(false)),
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        _ => None,
+    })
+    .expect("the untaken branch's disagreeing local claim is not observed");
+    let root = *dag.roots().last().expect("entry root");
+    assert_eq!(values[&root].shape, vec![3]);
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn selected_runtime_branch_executes_its_local_ascription_guard() {
+    let dag = lower(runtime_branch_source());
+    let error = eval_tensor_with(&dag, |name| match name {
+        "flag" => Some(runtime_bool(true)),
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        _ => None,
+    })
+    .expect_err("the selected branch's disagreeing local claim must trap");
+    assert_eq!(
+        error,
+        "extent `2`: claimed = 2, pad axis 0 = 3\n\
+         numeric trap: domain in pad at i64"
+    );
+}
+
 #[test]
 fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer() {
     let dag = lower(&direct_source(
@@ -386,7 +459,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     ));
     let token = chelis_ir::dag::NodeId(local_claims(&direct)[0].0);
     assert!(chelis_ir::verify::verify(&direct).is_empty());
-    for mutation in 0..7 {
+    for mutation in 0..8 {
         let mut dag = direct.clone();
         match mutation {
             0 => {
@@ -456,12 +529,47 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
                 let duplicate = dag.add_node(RiscOp::Copy, vec![owner], ty, None);
                 dag.add_shape_dep(duplicate, token);
             }
+            7 => {
+                let owner = dag
+                    .nodes()
+                    .iter()
+                    .find(|node| node.shape_deps.contains(&token))
+                    .unwrap()
+                    .id;
+                let bool_ty = TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                };
+                let first = dag.add_node(
+                    RiscOp::synth_const(Prim::Bool, 1.0),
+                    Vec::new(),
+                    bool_ty.clone(),
+                    None,
+                );
+                let second = dag.add_node(
+                    RiscOp::synth_const(Prim::Bool, 0.0),
+                    Vec::new(),
+                    bool_ty,
+                    None,
+                );
+                dag.add_shape_dep(owner, first);
+                dag.add_shape_dep(owner, second);
+            }
             _ => unreachable!(),
         }
+        let errors = chelis_ir::verify::verify(&dag);
         assert!(
-            !chelis_ir::verify::verify(&dag).is_empty(),
+            !errors.is_empty(),
             "malformed local role {mutation} was accepted"
         );
+        if mutation == 7 {
+            assert!(
+                errors.iter().any(|error| {
+                    error == "local ascription owner 2 has multiple runtime branch activations"
+                }),
+                "{errors:?}"
+            );
+        }
     }
 
     let named = lower(

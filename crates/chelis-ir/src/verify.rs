@@ -1005,7 +1005,14 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     .nodes()
                     .iter()
                     .filter(|owner| owner.shape_deps.contains(&node.id))
-                    .count();
+                    .collect::<Vec<_>>();
+                if let [owner] = owners.as_slice()
+                    && let Err(reason) = crate::axis_sources::local_ascription_guard_activation(
+                        dag, owner.id, node.id,
+                    )
+                {
+                    errors.push(reason);
+                }
                 let literal = node.inputs.is_empty()
                     && node.shape_deps.is_empty()
                     && matches!(&node.op, RiscOp::ExtentWitness { parameter, .. } if parameter.is_empty())
@@ -1028,7 +1035,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     || *claimed_axis < 0
                     || claimed_axis != axis
                     || !claims.is_empty()
-                    || owners != 1
+                    || owners.len() != 1
                     || (!literal && !named)
                     || requirements.iter().any(|value| {
                         value.prim() != Prim::Int64

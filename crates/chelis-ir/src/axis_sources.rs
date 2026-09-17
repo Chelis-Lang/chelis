@@ -2845,6 +2845,11 @@ pub struct LocalGuardClaim {
     pub op: &'static str,
     /// How to read the extent this guard observes.
     pub observed: LocalGuardObservation,
+    /// Runtime branch activation for a path-local authored ascription.
+    ///
+    /// The lowering owner carries this scalar Bool beside its claim token as
+    /// a non-value dependency. `None` is the ordinary unconditional guard.
+    pub activation: Option<NodeId>,
 }
 
 /// A returned axis and the operation where its inherited claim becomes ready.
@@ -3359,6 +3364,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
+                        activation: local_ascription_guard_activation(dag, node.id, *required)
+                            .expect("verified local ascription activation"),
                     },
                 ));
                 continue;
@@ -3407,6 +3414,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
+                        activation: None,
                     },
                 ));
                 continue;
@@ -3441,6 +3449,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                     canonical: CanonicalExtent::Witness(*required),
                     op: site.operation,
                     observed: site.observation,
+                    activation: None,
                 },
             ));
         }
@@ -3502,6 +3511,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         },
                         op: crate::grad::risc_op_name(&node.op),
                         observed: LocalGuardObservation::ComputedExtent(observed),
+                        activation: None,
                     },
                 ));
                 continue;
@@ -3573,6 +3583,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                     },
                     op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
+                    activation: None,
                 },
             ));
         }
@@ -3613,10 +3624,46 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // shape, which is why the read instruction is data rather than
                 // something a consumer infers from the site's `op`.
                 observed: LocalGuardObservation::RealizedExtent,
+                activation: None,
             },
         ));
     }
     sites
+}
+
+/// The one scalar Bool dependency that activates a path-local ascription.
+///
+/// Claim tokens and ordinary shape sources share `shape_deps`; the activation
+/// is structurally distinct because it is rank-0 Bool. More than one such
+/// dependency is ambiguous and therefore malformed rather than ordered or
+/// guessed.
+pub(crate) fn local_ascription_guard_activation(
+    dag: &Dag,
+    owner: NodeId,
+    claim: NodeId,
+) -> Result<Option<NodeId>, String> {
+    let owner = dag
+        .get(owner)
+        .ok_or_else(|| "local ascription owner is missing".to_string())?;
+    let activations = owner
+        .shape_deps
+        .iter()
+        .copied()
+        .filter(|dependency| *dependency != claim)
+        .filter(|dependency| {
+            dag.get(*dependency).is_some_and(|node| {
+                node.output_type.dims.is_empty() && node.output_type.precision == Prim::Bool
+            })
+        })
+        .collect::<Vec<_>>();
+    match activations.as_slice() {
+        [] => Ok(None),
+        [activation] => Ok(Some(*activation)),
+        _ => Err(format!(
+            "local ascription owner {} has multiple runtime branch activations",
+            owner.id.0
+        )),
+    }
 }
 
 #[cfg(test)]

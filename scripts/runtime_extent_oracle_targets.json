@@ -623,10 +623,12 @@
         "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
         "ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
         "rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        "selected_runtime_branch_executes_its_local_ascription_guard",
         "staged_host_partition_retains_the_local_ascription_site",
+        "untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
         "vmap_shifts_the_local_claim_and_initializer_axis_together"
       ],
-      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inferred metadata creates no site and malformed roles fail closed."
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; selected runtime branches enforce their site, untaken runtime branches do not, inferred metadata creates no site, and malformed roles fail closed."
     },
     {
       "phase": "b",
@@ -721,9 +723,10 @@
         "mode": "exact"
       },
       "expected": [
+        "local_ascription_owner_rejects_multiple_runtime_branch_activations",
         "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
       ],
-      "note": "WireDag v14 requires the exact local-ascription identity; missing, hybrid, empty or unknown representations reject."
+      "note": "WireDag v14 requires the exact local-ascription identity and preserves one exact scalar Bool runtime-branch activation; missing, hybrid, empty, unknown or multiply activated representations reject."
     },
     {
       "phase": "b",
@@ -735,9 +738,10 @@
         "mode": "exact"
       },
       "expected": [
+        "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation",
         "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims"
       ],
-      "note": "Live checker and lowering output projects its exact local-ascription role into WireDag v14 and validates on decode."
+      "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v14, then validates both on decode."
     },
     {
       "phase": "b",
@@ -752,8 +756,10 @@
         "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
         "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+        "a_selected_runtime_branch_emits_its_local_ascription_guard_on_c",
         "an_all_interface_class_runs_when_its_witnesses_agree",
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+        "an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
         "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
@@ -761,7 +767,7 @@
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
       ],
-      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement, runtime-branch activation and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
     },
     {
       "phase": "b",
