@@ -515,20 +515,15 @@ pub(super) fn walk_for_tensor_precision(
         "validate_tensor_precisions (walk_for_tensor_precision)",
         expr
     );
-    match expr {
-        deep::Expr::List(list, _span) => {
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, metadata, kids) => {
             // Check t-tensor nodes at this level.
-            if get_tag(list) == Some(DeepTag::TTensor) {
-                let kids = children(list);
+            if tag == DeepTag::TTensor {
                 // chelis#1125 PP7 / [04-TOT-5]: read the trailing `t-prim`
-                // through the carrier-preserving `stamped_parts`. The
-                // `Expr::Node` arm below bridges through `Node::to_list`, so
-                // this walker LOOKS carrier-complete to a grep for `Expr::Node`
-                // coverage -- but `to_list` copies children verbatim, so the
-                // rebuilt list's trailing precision child is still a `Node` and
-                // the old `Expr::List`-only destructure failed on it. The whole
-                // tensor-precision check was therefore skipped on the stamped
-                // ingress, by a walker with a `Node` arm (PP7 finding 3).
+                // through the shared carrier-total accessor. The former
+                // `Node::to_list` bridge copied children verbatim, so its
+                // trailing `t-prim` remained a `Node` and a List-only
+                // destructure silently skipped the check (PP7 finding 3).
                 if let Some(last) = kids.last()
                     && let Some((DeepTag::TPrim, _, prec_kids)) = stamped_parts(last)
                     && let Some(name) = prec_kids.first().and_then(symbol_name)
@@ -583,50 +578,47 @@ pub(super) fn walk_for_tensor_precision(
             // `cast` is inferred by infer_cast which already emits a clearer
             // site-local error for bad precisions. Skip the walker's recursion
             // inside a cast so we don't duplicate the diagnostic.
-            if get_tag(list) == Some(DeepTag::Cast) {
+            if tag == DeepTag::Cast {
                 return;
             }
 
-            // Recurse into metadata map (element[1]), which may carry
-            // `type:` ascriptions that also contain t-tensor types.
-            if list.elements.len() >= 2
-                && let deep::Expr::Map(map, _) = &list.elements[1]
-            {
-                map.visit_syntax(&mut |_, v| {
-                    walk_for_tensor_precision(v, errors, seen, def_context);
-                });
-            }
+            // Metadata may carry `type:` ascriptions containing tensor types.
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, def_context);
+            });
 
-            // Recurse into children (elements after index 1).
-            for child in children(list) {
+            for child in kids {
                 walk_for_tensor_precision(child, errors, seen, def_context);
             }
         }
-        deep::Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, v| {
-                walk_for_tensor_precision(v, errors, seen, def_context);
+        deep::ExprCarrier::MetadataMap(metadata) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, def_context);
             });
         }
-        deep::Expr::MetaExpr(meta, _) => {
-            meta.metadata.visit_syntax(&mut |_, v| {
-                walk_for_tensor_precision(v, errors, seen, def_context);
+        deep::ExprCarrier::MetadataExpression(metadata_expr) => {
+            metadata_expr.metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, def_context);
             });
-            walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
+            walk_for_tensor_precision(&metadata_expr.expr, errors, seen, def_context);
         }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_tensor_precision(&bridged, errors, seen, def_context);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
+        deep::ExprCarrier::Atom(_) => {}
+        deep::ExprCarrier::StructuralList(elements) => {
+            for child in elements {
                 walk_for_tensor_precision(child, errors, seen, def_context);
             }
         }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
+        deep::ExprCarrier::UndecodableHead(_, metadata, children) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, def_context);
+            });
+            for child in children {
                 walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
+        deep::ExprCarrier::MalformedLegacyList(list) => {
+            for element in &list.elements {
+                walk_for_tensor_precision(element, errors, seen, def_context);
             }
         }
     }

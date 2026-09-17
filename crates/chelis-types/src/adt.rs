@@ -593,16 +593,16 @@ impl AdtRegistry {
     }
 }
 
-/// Helper: get tag string from a Deep List.
-fn get_tag(list: &deep::List) -> Option<DeepTag> {
-    list.tag()
-}
-
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &[deep::Expr])> {
-    match expr {
-        deep::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        deep::Expr::List(list, _) => Some((get_tag(list)?, list_children(list))),
-        _ => None,
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+        deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_)
+        | deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -615,15 +615,6 @@ fn terminal_name(name: &str) -> &str {
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
         .unwrap_or(name)
-}
-
-/// Helper: get children (elements after tag and metadata) from a Deep List.
-fn list_children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 pub(crate) fn substitute_alias_type(ty: &Type, subst: &UnordMap<TypeVar, Type>) -> Type {

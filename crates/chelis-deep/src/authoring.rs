@@ -1527,25 +1527,18 @@ fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
 }
 
 fn node_view(expr: &Expr) -> Option<NodeView<'_>> {
-    match expr {
-        Expr::Node(node, _) => Some(NodeView {
-            tag: node.tag(),
-            meta: Some(node.meta()),
-            children: node.children_slice(),
+    match expr.carrier() {
+        crate::ExprCarrier::DecodedNode(tag, metadata, children) => Some(NodeView {
+            tag,
+            meta: Some(metadata),
+            children,
         }),
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let meta = match list.elements.get(1) {
-                Some(Expr::Map(meta, _)) => Some(meta),
-                _ => None,
-            };
-            Some(NodeView {
-                tag,
-                meta,
-                children: list.elements.get(2..).unwrap_or_default(),
-            })
-        }
-        _ => None,
+        crate::ExprCarrier::StructuralList(_)
+        | crate::ExprCarrier::UndecodableHead(_, _, _)
+        | crate::ExprCarrier::Atom(_)
+        | crate::ExprCarrier::MetadataMap(_)
+        | crate::ExprCarrier::MetadataExpression(_)
+        | crate::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

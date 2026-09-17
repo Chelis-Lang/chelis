@@ -23,19 +23,19 @@ pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
 /// the #1023 migration. Stamped compiler ingress uses `Expr::Node`; readers at
 /// semantic boundaries must preserve that carrier instead of rebuilding a
 /// `List` through `Node::to_list`.
+// Transitional E5b adapter: carrier classification is centralized in
+// `Expr::carrier`; the follow-on call-site migration removes this Option edge.
 pub(super) fn stamped_parts(
     expr: &deep::Expr,
 ) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
-    match expr {
-        deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list)?;
-            let deep::Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((tag, meta, children(list)))
-        }
-        _ => None,
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_)
+        | deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

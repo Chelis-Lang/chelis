@@ -27,7 +27,7 @@ pub mod stamp_to_typed;
 pub mod tag;
 pub mod validate;
 
-pub use ast::{Atom, CastMode, Expr, List, MetaExpr, UnknownFormData, cast_mode_of};
+pub use ast::{Atom, CastMode, Expr, ExprCarrier, List, MetaExpr, UnknownFormData, cast_mode_of};
 pub mod annotations;
 pub use annotations::Metadata;
 mod annotations_codec;

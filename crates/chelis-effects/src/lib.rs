@@ -366,16 +366,19 @@ fn stamped_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
     stamped_parts(expr, expected).map(|(_, children)| children)
 }
 
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &Expr, expected: DeepTag) -> Option<(&Metadata, &[Expr])> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(expected) => {
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((meta, children(list)))
+    match expr.carrier() {
+        chelis_deep::ExprCarrier::DecodedNode(tag, metadata, children) if tag == expected => {
+            Some((metadata, children))
         }
-        Expr::Node(node, _) if node.tag() == expected => Some((node.meta(), node.children_slice())),
-        _ => None,
+        chelis_deep::ExprCarrier::DecodedNode(_, _, _)
+        | chelis_deep::ExprCarrier::StructuralList(_)
+        | chelis_deep::ExprCarrier::UndecodableHead(_, _, _)
+        | chelis_deep::ExprCarrier::Atom(_)
+        | chelis_deep::ExprCarrier::MetadataMap(_)
+        | chelis_deep::ExprCarrier::MetadataExpression(_)
+        | chelis_deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

@@ -21,16 +21,18 @@ pub fn literal_seed(expr: &Expr, neg_is_builtin: bool) -> Option<crate::ScalarVa
     constant_seed(expr, neg_is_builtin)
 }
 
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
-    match expr {
-        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        Expr::List(list, _) => {
-            let Expr::Map(metadata, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((list.tag()?, metadata, &list.elements[2..]))
+    match expr.carrier() {
+        chelis_deep::ExprCarrier::DecodedNode(tag, metadata, children) => {
+            Some((tag, metadata, children))
         }
-        _ => None,
+        chelis_deep::ExprCarrier::StructuralList(_)
+        | chelis_deep::ExprCarrier::UndecodableHead(_, _, _)
+        | chelis_deep::ExprCarrier::Atom(_)
+        | chelis_deep::ExprCarrier::MetadataMap(_)
+        | chelis_deep::ExprCarrier::MetadataExpression(_)
+        | chelis_deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

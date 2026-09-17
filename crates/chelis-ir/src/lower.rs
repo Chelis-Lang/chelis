@@ -5199,16 +5199,18 @@ fn children(list: &List) -> &[Expr] {
 }
 
 /// Borrow the canonical stamped shape without reconstructing a legacy `List`.
+// Transitional E5b adapter; `Expr::carrier` owns physical-carrier decoding.
 fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
-    match expr {
-        Expr::List(list, _) => {
-            let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-                return None;
-            };
-            Some((get_tag(list)?, meta, children(list)))
+    match expr.carrier() {
+        chelis_deep::ExprCarrier::DecodedNode(tag, metadata, children) => {
+            Some((tag, metadata, children))
         }
-        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        _ => None,
+        chelis_deep::ExprCarrier::StructuralList(_)
+        | chelis_deep::ExprCarrier::UndecodableHead(_, _, _)
+        | chelis_deep::ExprCarrier::Atom(_)
+        | chelis_deep::ExprCarrier::MetadataMap(_)
+        | chelis_deep::ExprCarrier::MetadataExpression(_)
+        | chelis_deep::ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 

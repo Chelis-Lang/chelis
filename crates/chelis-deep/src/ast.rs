@@ -45,6 +45,31 @@ pub struct UnknownFormData {
     pub span: Span,
 }
 
+/// A total borrowed view of an admitted Deep expression carrier.
+///
+/// Readers use this accessor instead of independently matching `Expr::Node`
+/// and the transitional `Expr::List`. Every non-node carrier has a distinct
+/// variant, so declining one is an explicit match arm rather than a silent
+/// `Option::None`.
+#[derive(Debug, Clone, Copy)]
+pub enum ExprCarrier<'a> {
+    /// A decoded vocabulary node, whether carried by `Expr::Node` or by a
+    /// well-formed transitional `Expr::List`.
+    DecodedNode(DeepTag, &'a Metadata, &'a [Expr]),
+    /// A structural list whose first element has no vocabulary-head role.
+    StructuralList(&'a [Expr]),
+    /// A head that was considered for vocabulary decoding but did not decode.
+    UndecodableHead(&'a str, &'a Metadata, &'a [Expr]),
+    /// An atomic leaf.
+    Atom(&'a Atom),
+    /// A standalone metadata map.
+    MetadataMap(&'a Metadata),
+    /// A legacy metadata wrapper around another expression.
+    MetadataExpression(&'a MetaExpr),
+    /// A transitional tagged list that lacks the required metadata-map slot.
+    MalformedLegacyList(&'a List),
+}
+
 impl Expr {
     /// Construct a canonical tagged node `(tag {meta} children...)` with a
     /// decoded tag. This is the typed producer entry point (decode-once,
@@ -55,11 +80,44 @@ impl Expr {
         Expr::Node(Box::new(crate::node::Node::new(tag, meta, children)), span)
     }
 
+    /// Borrow this expression through the carrier-total reader interface.
+    ///
+    /// The accessor performs the transitional `List` decode once and exposes
+    /// every other admitted representation as a distinct enum variant. A
+    /// semantic reader must therefore state what it does with carriers it
+    /// cannot consume instead of inheriting an implicit catch-all.
+    pub fn carrier(&self) -> ExprCarrier<'_> {
+        match self {
+            Expr::Node(node, _) => {
+                ExprCarrier::DecodedNode(node.tag(), node.meta(), node.children_slice())
+            }
+            Expr::List(list, _) => match list.elements.as_slice() {
+                [
+                    Expr::Atom(Atom::Tag(tag), _),
+                    Expr::Map(metadata, _),
+                    children @ ..,
+                ] => ExprCarrier::DecodedNode(*tag, metadata, children),
+                [
+                    Expr::Atom(Atom::Name(head), _),
+                    Expr::Map(metadata, _),
+                    children @ ..,
+                ] => ExprCarrier::UndecodableHead(head, metadata, children),
+                _ => ExprCarrier::MalformedLegacyList(list),
+            },
+            Expr::BareList(elements, _) => ExprCarrier::StructuralList(elements),
+            Expr::UnknownForm(data) => {
+                ExprCarrier::UndecodableHead(&data.head, &data.meta, &data.children)
+            }
+            Expr::Atom(atom, _) => ExprCarrier::Atom(atom),
+            Expr::Map(metadata, _) => ExprCarrier::MetadataMap(metadata),
+            Expr::MetaExpr(metadata_expr, _) => ExprCarrier::MetadataExpression(metadata_expr),
+        }
+    }
+
     /// The decoded tag when this expression is a stamped vocabulary node.
     pub fn tag(&self) -> Option<DeepTag> {
-        match self {
-            Expr::List(list, _) => list.tag(),
-            Expr::Node(node, _) => Some(node.tag()),
+        match self.carrier() {
+            ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
             _ => None,
         }
     }
@@ -85,26 +143,23 @@ impl Expr {
     /// index 1. The `span` key holds an opaque string identifier issued by
     /// an external producer (e.g., Octant's LaTeX-to-Deep translator).
     ///
-    /// Returns `Some(id)` when:
-    /// - the node is an `Expr::Node`,
-    /// - its metadata map contains a `span` entry whose value is a string literal
-    ///   (`Expr::Atom(Atom::Str(_), _)`).
+    /// Returns `Some(id)` when the expression is a decoded vocabulary node,
+    /// carried either by `Expr::Node` or by a well-formed transitional
+    /// `Expr::List`, and its metadata map contains a `span` entry whose value
+    /// is a string literal (`Expr::Atom(Atom::Str(_), _)`).
     ///
     /// The empty string is a valid (though unusual) span ID and is returned
     /// as `Some("")`. Lock this convention in tests; do not silently coerce
     /// `Some("")` to `None`.
     ///
-    /// Returns `None` for atoms, bare maps, legacy `MetaExpr` nodes,
-    /// nodes whose metadata map has no `span` key, or `span` values that
-    /// are not string literals (those are shape errors callers handle
-    /// separately, not a missing span).
+    /// Returns `None` for structural lists, undecodable heads, atoms, bare
+    /// maps, legacy `MetaExpr` nodes, malformed legacy lists, decoded nodes
+    /// whose metadata map has no `span` key, or `span` values that are not
+    /// string literals (those are shape errors callers handle separately,
+    /// not a missing span).
     pub fn span_id(&self) -> Option<&str> {
-        let meta = match self {
-            Expr::List(list, _) => match list.elements.get(1)? {
-                Expr::Map(m, _) => m,
-                _ => return None,
-            },
-            Expr::Node(node, _) => node.meta(),
+        let meta = match self.carrier() {
+            ExprCarrier::DecodedNode(_, metadata, _) => metadata,
             _ => return None,
         };
         meta.span_id().map(|v| v.value())
