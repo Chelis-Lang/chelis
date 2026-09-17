@@ -1103,35 +1103,6 @@ pub(super) fn cast_result_from_source(
     vg: &mut VarGen,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    // chelis#2151: a scalar source typed by a variable with a declared
-    // dtype-family bound can often be decided now. [04-DTYPE-2] instantiates
-    // such a variable only at an active primitive, so it is never a tensor and
-    // the result is always the named primitive. Suspending it (below) waits for
-    // a binding; an authored binder is rigid and never gets one, so the gate
-    // never discharged and surfaced as "cast requires tensor or prim type, got
-    // `p`".
-    //
-    // The variable may also be a non-rigid inference variable that inherited
-    // the bound. So this decides only what cannot change when that variable is
-    // bound later: an acceptance, or a rejection that depends on the target
-    // alone. Anything that would reject on the SOURCE still suspends, so the
-    // verdict never depends on inference order (chelis#1489).
-    //
-    // Only the three declared families qualify. The `*Value` restrictions
-    // admit a tensor as well as a scalar, so those sources still suspend.
-    if let Type::Var(source_var) = &resolved
-        && let Some(
-            bound @ (TypeVarRestriction::ActiveFloat
-            | TypeVarRestriction::ActiveInt
-            | TypeVarRestriction::ActiveNumeric),
-        ) = subst.tvar_restriction(*source_var)
-        && let Some(decision) = bounded_scalar_cast_result(bound, new_prec, mode)
-    {
-        return match decision {
-            Ok(result) => result,
-            Err(error) => report(errors, *error),
-        };
-    }
     match resolved {
         // chelis#1489: the source may simply not be resolved YET. Deciding
         // here bound the verdict to inference order rather than to the
@@ -1145,6 +1116,12 @@ pub(super) fn cast_result_from_source(
         // settled answer into it: returning an unconstrained variable with
         // nothing to settle it is how an earlier revision let an ill-typed
         // program reach codegen.
+        //
+        // chelis#2151: a source carrying a declared dtype-family bound suspends
+        // here too. It is settled by `unify::discharge_bounded_scalar_casts`
+        // at the first binding that follows. The result variable returned
+        // below is always consumed by one, so no second, cast-time copy of that
+        // decision is needed.
         Type::Var(source_var) => {
             let result = vg.fresh_type();
             subst.record_deferred_tensor_operand(
@@ -1169,7 +1146,7 @@ pub(super) fn cast_result_from_source(
 
 /// The [05-OP-6] / [05-OP-63] decision for a scalar source whose type is a
 /// variable carrying a declared dtype-family bound (chelis#2151), when that
-/// decision is final.
+/// decision is final. Its only caller is `unify::discharge_bounded_scalar_casts`.
 ///
 /// It mirrors the `Type::Prim` arm of [`cast_result_from_settled_source`], with
 /// the bound standing in for the concrete source. It returns `None` when the
@@ -1184,7 +1161,7 @@ pub(super) fn cast_result_from_source(
 /// - `cast_trunc` from an `Int` or `Numeric` bound would reject on the SOURCE.
 ///   For an inference variable that later binds to a float, rejecting now would
 ///   refuse a valid program, so it is not decided here.
-fn bounded_scalar_cast_result(
+pub(crate) fn bounded_scalar_cast_result(
     bound: TypeVarRestriction,
     new_prec: Prim,
     mode: CastMode,

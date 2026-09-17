@@ -1687,6 +1687,54 @@ impl Subst {
     /// Identifying two variables must carry the obligation across, exactly as
     /// the shape ledgers' `merge_alias` does; dropping it here would silently
     /// un-defer the constraint.
+    /// Remove and decide every suspended scalar `Cast` gate whose operand now
+    /// resolves to a variable with a declared dtype-family bound, when that
+    /// bound alone settles it (chelis#2151). See
+    /// [`discharge_bounded_scalar_casts`].
+    ///
+    /// Almost every binding runs with an empty ledger, so it returns early
+    /// without applying the substitution in that case.
+    #[allow(clippy::type_complexity)]
+    fn take_bounded_scalar_cast_gates(
+        &self,
+    ) -> Vec<(
+        DeferredOperandGate,
+        Result<Type, Box<crate::errors::CheckError>>,
+    )> {
+        let mut ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        if ledger.is_empty() {
+            return Vec::new();
+        }
+        let mut decided = Vec::new();
+        ledger.retain(|(tv, gate)| {
+            let DeferredOperandGate::Cast { target, mode, .. } = gate else {
+                return true;
+            };
+            let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
+                return true;
+            };
+            let Some(
+                bound @ (TypeVarRestriction::ActiveFloat
+                | TypeVarRestriction::ActiveInt
+                | TypeVarRestriction::ActiveNumeric),
+            ) = self.tvar_restriction(operand)
+            else {
+                return true;
+            };
+            match crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode) {
+                Some(decision) => {
+                    decided.push((gate.clone(), decision));
+                    false
+                }
+                None => true,
+            }
+        });
+        decided
+    }
+
     fn realias_operand_gate(&self, target: TypeVar, gate: DeferredOperandGate) {
         self.deferred_tensor_operands
             .lock()
@@ -3154,7 +3202,41 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
 fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     bind_tvar_inner(v, ty, subst)?;
     discharge_operand_gates(v, subst);
+    discharge_bounded_scalar_casts(subst);
     Ok(())
+}
+
+/// Settle the suspended scalar `cast`/`cast_trunc` gates that a binding has
+/// made decidable without binding their operand to a type (chelis#2151).
+///
+/// A binding is also the event through which a variable GAINS a declared
+/// dtype-family bound: identified with a bounded variable, or with a rigid
+/// authored binder. Such a variable may never be bound to a concrete type, so
+/// [`discharge_operand_gates`] would only carry its gate from one variable to
+/// the next, and the per-def pass would reject a well-typed cast. [04-DTYPE-2]
+/// makes the bound enough to decide it: the operand is a scalar primitive of
+/// that family at every instantiation.
+///
+/// The decision is [`crate::infer::expr_record::bounded_scalar_cast_result`].
+/// This is its only call site. A cast whose operand already carries the bound
+/// is suspended like any other, and it settles at the next binding, which the
+/// suspended cast's own result variable guarantees. The cast and the bound are
+/// therefore settled together by whichever arrives second, and the verdict
+/// cannot depend on which operand inference visits first. Only what later
+/// bindings cannot change is decided here (every acceptance, and a rejection
+/// that reads only the target); a gate it declines stays suspended.
+fn discharge_bounded_scalar_casts(subst: &mut Subst) {
+    for (gate, decision) in subst.take_bounded_scalar_cast_gates() {
+        let DeferredOperandGate::Cast { ref result, .. } = gate else {
+            continue;
+        };
+        match decision {
+            Ok(settled) => gate.reconcile_result(result, settled, subst),
+            Err(error) => {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision { error: *error })
+            }
+        }
+    }
 }
 
 /// Settle the constraints suspended on `v`, now that it is bound.

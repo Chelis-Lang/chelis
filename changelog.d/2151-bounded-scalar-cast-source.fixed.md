@@ -5,8 +5,13 @@ though the tensor form over the same binder was accepted and [05-OP-6] gives
 both surfaces the same semantics. Evaluation and generated C agree on the
 result at `f32` and `f64`.
 
-An invalid scalar target, or a non-integer `cast_trunc` target, is now rejected
-at the cast with its real reason. A `cast_trunc` from a scalar bounded by `Int`
-or `Numeric` is still rejected, with the same message as before. An unbounded
-binder source stays rejected. See
+The same holds when the bound reaches the cast through an inference variable,
+for example a lambda parameter later identified with the binder or passed
+through a `Float`-bounded function. The verdict no longer depends on which
+operand inference visits first.
+
+An invalid scalar target, or a non-integer `cast_trunc` target, is rejected
+with its real reason. A `cast_trunc` from a scalar bounded by `Int` or
+`Numeric` is still rejected, with the same message as before, and so is an
+unbounded binder source. See
 [#2151](https://github.com/Chelis-Lang/chelis/issues/2151).

@@ -13,19 +13,24 @@
 //! [04-DTYPE-2] restricts a family-bounded binder to active primitives, so the
 //! source is always a scalar and the result is always the named primitive.
 //!
-//! The same bound can sit on a non-rigid INFERENCE variable, which inherits it
-//! when a bounded function is instantiated. That variable is bound later, so
-//! only decisions that cannot change when it is bound are taken early: an
-//! acceptance, or a rejection that reads only the target. `cast_trunc` from an
-//! `Int` or `Numeric` bound would reject on the source, so it keeps
-//! suspending (#1489). A valid program where such a variable later binds to a
-//! float must therefore pass, whichever operand inference visits first.
+//! The decision is made at the EVENT that makes it decidable, never on a
+//! schedule (#1489). There are two such events:
 //!
-//! Negative parity: invalid casts are still rejected in every lane. A
-//! target-only rejection names its real reason. A rigid `Int`/`Numeric`
-//! `cast_trunc` source is still rejected, but through the suspended gate, with
-//! the same generic message as before this change. An unbounded binder admits
-//! non-dtypes ([04-DTYPE-2]), so it stays rejected.
+//! - the cast is inferred while its source already carries a declared bound;
+//! - a variable with a suspended cast acquires a bound through a binding (it
+//!   is identified with a bounded variable, or with a rigid binder).
+//!
+//! Whichever comes second settles the cast, so the verdict cannot depend on
+//! which operand inference visits first. Only verdicts that no later binding
+//! can change are taken there: an acceptance, or a rejection that reads only
+//! the target. `cast_trunc` from an `Int` or `Numeric` bound would reject on
+//! the source, so it stays suspended until the source binds.
+//!
+//! Negative parity: invalid casts are still rejected in every lane, whatever
+//! the order. A target-only rejection names its real reason. A rigid
+//! `Int`/`Numeric` `cast_trunc` source is still rejected, through the
+//! suspended gate, with the same generic message as before this change. An
+//! unbounded binder admits non-dtypes ([04-DTYPE-2]), so it stays rejected.
 use assert_cmd::Command;
 use std::fs;
 use tempfile::tempdir;
@@ -275,11 +280,90 @@ fn an_unbounded_scalar_binder_source_stays_rejected() {
         "def g[p](k: p) -> f64 = cast(k, f64)\n\
          def main() -> tensor[1, f64] = to_tensor([g(7.5f32)])",
     );
-    for command in ["eval", "build"] {
-        let output = run(command, &source);
-        assert!(
-            !output.status.success(),
-            "{command} accepted an unbounded binder source"
+    rejected_in_every_lane(&source, "an unbounded binder source");
+}
+
+#[test]
+fn a_rigid_float_binder_reached_through_an_inference_variable_decides_in_either_order() {
+    // Round 2 of the #2154 review: `x` is an inference variable later
+    // identified with the rigid `p`, which is never bound to a concrete type.
+    // With `fid(x)` first the bound arrives before the cast; with the bare `x`
+    // first it arrives after. Both orders must settle the same way.
+    for (name, body) in [
+        (
+            "rigid_apply_bare_first",
+            "apply_it(fn (x) -> add(cast_trunc(x, i64), cast_trunc(fid(x), i64)), u)",
+        ),
+        (
+            "rigid_apply_fid_first",
+            "apply_it(fn (x) -> add(cast_trunc(fid(x), i64), cast_trunc(x, i64)), u)",
+        ),
+        (
+            "rigid_let_bare_first",
+            "{\n  g = fn (x) -> add(cast_trunc(x, i64), cast_trunc(fid(x), i64))\n  g(u)\n}",
+        ),
+        (
+            "rigid_let_fid_first",
+            "{\n  g = fn (x) -> add(cast_trunc(fid(x), i64), cast_trunc(x, i64))\n  g(u)\n}",
+        ),
+    ] {
+        assert_lanes_agree(
+            &format!(
+                "{HIGHER_ORDER}def t[p: Float](u: p) -> i64 = {body}\n\
+                 def main() -> tensor[1, i64] = to_tensor([t(2.5f32)])"
+            ),
+            name,
+            &[4.0],
         );
+    }
+}
+
+#[test]
+fn a_cast_and_a_truncation_sharing_a_rigid_bound_variable_agree_in_either_order() {
+    for (name, operands) in [
+        ("shared_cast_first", "cast(x, i64), cast_trunc(fid(x), i64)"),
+        (
+            "shared_trunc_first",
+            "cast_trunc(fid(x), i64), cast(x, i64)",
+        ),
+    ] {
+        assert_lanes_agree(
+            &format!(
+                "{HIGHER_ORDER}def t[p: Float](u: p) -> i64 = {{\n  g = fn (x) -> add({operands})\n  g(u)\n}}\n\
+                 def main() -> tensor[1, i64] = to_tensor([t(2.0f32)])"
+            ),
+            name,
+            &[4.0],
+        );
+    }
+}
+
+#[test]
+fn a_bare_inference_variable_later_bound_to_a_rigid_float_binder_truncates() {
+    // The cast is inferred before the variable meets `p` at all. `main` rejected
+    // this; the binding that brings the bound now settles the cast.
+    assert_lanes_agree(
+        &format!(
+            "{HIGHER_ORDER}def t[p: Float](u: p) -> i64 = apply_it(fn (x) -> cast_trunc(x, i64), u)\n\
+             def main() -> tensor[1, i64] = to_tensor([t(2.5f32)])"
+        ),
+        "rigid_bare_apply",
+        &[2.0],
+    );
+}
+
+#[test]
+fn an_integer_source_reached_by_either_order_is_rejected_in_every_lane() {
+    // Deferring the source-dependent rejection must not turn it into an
+    // acceptance: once the variable binds to an integer, every order rejects.
+    for operands in [
+        "cast_trunc(num_id(x), i64), cast(num_id(x), i64)",
+        "cast(num_id(x), i64), cast_trunc(num_id(x), i64)",
+    ] {
+        let body = format!(
+            "{HIGHER_ORDER}def main() -> tensor[1, i64] = \
+             to_tensor([apply_it(fn (x) -> add({operands}), 3i32)])"
+        );
+        rejected_in_every_lane(&program(&body), &body);
     }
 }
