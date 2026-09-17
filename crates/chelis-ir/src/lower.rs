@@ -10814,6 +10814,58 @@ impl<'program> LowerCtx<'program> {
         self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span)
     }
 
+    fn restore_vmapped_entry_witness_axes(
+        &mut self,
+        source: &Dag,
+        remap: &UnordMap<NodeId, NodeId>,
+        param_names: &[String],
+        actual_args: &[NodeId],
+        mapped_axis: usize,
+    ) {
+        let actuals = param_names
+            .iter()
+            .zip(actual_args.iter().copied())
+            .collect::<UnordMap<_, _>>();
+        for source_node in source.nodes() {
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter,
+                axis: RtAxis::Lit(canonical_axis),
+                ..
+            } = &source_node.op
+            else {
+                continue;
+            };
+            let Ok(canonical_axis) = usize::try_from(*canonical_axis) else {
+                continue;
+            };
+            let Some(unbatched_axis) = canonical_axis.checked_sub(1) else {
+                continue;
+            };
+            let authored_axis = unbatched_axis + usize::from(unbatched_axis >= mapped_axis);
+            let Some(actual) = actuals.get(parameter).copied() else {
+                continue;
+            };
+            let Some(remapped) = remap.get(&source_node.id).copied() else {
+                continue;
+            };
+            let Some(node) = self.dag.node_mut(remapped) else {
+                continue;
+            };
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                axis,
+                ..
+            } = &mut node.op
+            else {
+                continue;
+            };
+            node.inputs[0] = actual;
+            *axis =
+                RtAxis::Lit(i32::try_from(authored_axis).expect("vmap parameter axis fits i32"));
+        }
+    }
+
     fn lower_vmap_callable_with_nodes(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -11000,6 +11052,13 @@ impl<'program> LowerCtx<'program> {
                     body.span_id().map(ToOwned::to_owned),
                 )
             });
+        self.restore_vmapped_entry_witness_axes(
+            &specialized_vmapped,
+            &remap,
+            &param_names,
+            actual_args,
+            axis,
+        );
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
@@ -11244,6 +11303,7 @@ impl<'program> LowerCtx<'program> {
         let remap = self
             .splice_dag(&vmapped, &arg_map)
             .unwrap_or_else(|message| invalid_mapping(format!("splice failed: {message}")));
+        self.restore_vmapped_entry_witness_axes(&vmapped, &remap, &param_names, actual_args, axis);
         let mapped_root = |old: NodeId| {
             root_map
                 .get(&old)

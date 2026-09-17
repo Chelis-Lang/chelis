@@ -850,6 +850,7 @@
         "mixed_helpers_keep_unused_signature_witnesses",
         "mixed_literal_and_binder_failures_follow_parameter_order",
         "mixed_literal_checks_survive_when_the_repeated_binder_agrees",
+        "nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses",
         "successive_higher_order_invocations_have_independent_signature_instances"
       ],
       "note": "Complete signature obligations across mixed helpers and higher-order/callback entry, with exact precedence, argument/body effects, unused witnesses and agreeing controls. Beta-reduced direct, local and passed lambdas retain eager actuals and independent ordered signature guards. Indirect and direct-vmap calls retain the authored formal contract across broader actuals, aliases, local callables, wrappers, transforms, rank spreads and repeated-binder signatures.",

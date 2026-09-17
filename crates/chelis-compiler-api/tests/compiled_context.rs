@@ -600,6 +600,75 @@ fn check_in_context_accepts_well_typed_snippet() {
     );
 }
 
+/// chelis#1889: a stored nonzero-axis transform carries a private mapped-axis
+/// identity in the checker substitution. The live and decoded compiled-context
+/// paths must both freshen that identity before splitting the authored rank
+/// spreads, then lower the result with the batch restored to axis 1.
+#[test]
+fn stored_nonzero_vmap_spreads_survive_decoded_context() {
+    let _linked = chelis_compiler_api::install_linked_program_guard();
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib src");
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
+    fs::write(
+        root.join("mylib/src/axes.ch"),
+        "module Mylib.Axes\nexport (mapped)\n\n\
+         def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         mapped = vmap(identity, axis=1)\n",
+    )
+    .expect("write axes.ch");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
+
+    let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("compile context");
+    let decoded = CompiledContext::decode(&context.encode().expect("encode context"))
+        .expect("decode context");
+    let values = (1..=18)
+        .map(|value| format!("{value}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let snippet = format!(
+        "module App.Eval\nimport Mylib.Axes (mapped)\n\n\
+         def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = mapped(x)\n\
+         x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([{values}]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
+         out = apply(x)\n"
+    );
+    let expected_bits = (1..=18)
+        .map(|value| format!("{:08x}", (value as f32).to_bits()))
+        .collect::<Vec<_>>();
+
+    for (label, context) in [("live", &context), ("decoded", &decoded)] {
+        check_in_context(context, &snippet)
+            .unwrap_or_else(|error| panic!("{label} context must check: {error:?}"));
+        let evaluated = eval_in_context(context, &snippet)
+            .unwrap_or_else(|error| panic!("{label} context must eval: {error:?}"));
+        let out = evaluated
+            .roots
+            .iter()
+            .find(|root| root.name.as_deref() == Some("out"))
+            .unwrap_or_else(|| panic!("{label} context did not return `out`: {evaluated:?}"));
+        let value = serde_json::to_value(&out.value).expect("serialize out");
+        assert_eq!(
+            value["value"]["shape"],
+            serde_json::json!([3, 2, 1, 3, 1]),
+            "{label} context shape"
+        );
+        assert_eq!(value["value"]["data"]["dtype"], "f32", "{label} dtype");
+        assert_eq!(
+            value["value"]["data"]["bits"],
+            serde_json::json!(expected_bits),
+            "{label} context values"
+        );
+    }
+}
+
 #[test]
 fn check_in_context_rejects_unbound_library_reference() {
     let (_dir, root) = library_fixture();

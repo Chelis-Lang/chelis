@@ -28,6 +28,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
+const INTERNAL_VMAP_AXIS_PREFIX: &str = "\0vmap-axis:";
+
+fn mapped_axis_annotation(axis: usize) -> String {
+    format!("{INTERNAL_VMAP_AXIS_PREFIX}{axis}")
+}
+
+fn parse_mapped_axis_annotation(annotation: &str) -> Option<usize> {
+    annotation
+        .strip_prefix(INTERNAL_VMAP_AXIS_PREFIX)?
+        .parse()
+        .ok()
+}
+
 /// A level change and the variable-generator state at which it took effect.
 /// Transitions are append-only between persisted-context resumptions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +163,11 @@ pub struct Subst {
     #[serde(default)]
     tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
     dims: Mutex<UnordMap<DimVar, Dim>>,
-    /// Named-axis view of a checker dimension identity. Schemes retain these
-    /// IDs and instantiation copies their labels to fresh IDs. This mandatory
-    /// snapshot field is not evidence that arbitrary equal names have equal sizes.
+    /// Named-axis view of a checker dimension identity, plus reserved
+    /// compiler-owned annotations on synthetic dimension identities. Schemes
+    /// retain these IDs and instantiation copies their annotations to fresh
+    /// IDs. This mandatory snapshot field is not evidence that arbitrary
+    /// equal names have equal sizes.
     dimension_labels: Mutex<UnordMap<DimVar, String>>,
     #[serde(skip)]
     protected_dimensions: UnordSet<DimVar>,
@@ -1797,6 +1812,90 @@ impl Subst {
         terminal
     }
 
+    fn place_mapped_axes(mut base: Vec<Dim>, mut mapped: Vec<(usize, DimVar, Dim)>) -> Vec<Dim> {
+        let deferred = |var, resolved: Dim| match resolved {
+            Dim::Var(_) => resolved,
+            _ => Dim::Var(var),
+        };
+        mapped.sort_by_key(|(axis, var, _)| (*axis, var.0));
+        if base.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
+            // An unresolved spread has no physical width yet. Keep the
+            // compiler-owned identities present; row unification uses their
+            // recorded axes rather than this storage order.
+            base.extend(
+                mapped
+                    .into_iter()
+                    .map(|(_, var, resolved)| deferred(var, resolved)),
+            );
+            return base;
+        }
+        for (axis, var, resolved) in mapped {
+            if axis <= base.len() {
+                base.insert(axis, resolved);
+            } else {
+                // Bounds checking belongs to vmap inference/application. An
+                // unresolved stored transform must remain representable until
+                // that boundary reports the user-facing error.
+                base.push(deferred(var, resolved));
+            }
+        }
+        base
+    }
+
+    fn apply_tensor_dims(&self, dims: &[Dim]) -> Vec<Dim> {
+        let mut base = Vec::with_capacity(dims.len());
+        let mut mapped = Vec::new();
+        for dim in dims {
+            match dim {
+                Dim::Var(var) if self.mapped_axis(*var).is_some() => {
+                    let axis = self.mapped_axis(*var).expect("guarded mapped axis");
+                    let resolved = self.resolve_dvar(*var);
+                    let resolved = if resolved == Dim::Var(*var) {
+                        Dim::Var(*var)
+                    } else {
+                        self.apply_dim(&resolved)
+                    };
+                    mapped.push((axis, *var, resolved));
+                }
+                Dim::Rank(rank) => {
+                    for resolved in self.resolve_rvar(*rank) {
+                        base.push(self.apply_dim(&resolved));
+                    }
+                }
+                _ => base.push(self.apply_dim(dim)),
+            }
+        }
+        Self::place_mapped_axes(base, mapped)
+    }
+
+    fn apply_tensor_dims_excluding(
+        &self,
+        dims: &[Dim],
+        quantified_dvars: &chelis_unord::UnordSet<DimVar>,
+        quantified_rvars: &chelis_unord::UnordSet<RankVar>,
+    ) -> Vec<Dim> {
+        let mut base = Vec::with_capacity(dims.len());
+        let mut mapped = Vec::new();
+        for dim in dims {
+            match dim {
+                Dim::Var(var) if self.mapped_axis(*var).is_some() => {
+                    let axis = self.mapped_axis(*var).expect("guarded mapped axis");
+                    let resolved = self.apply_dim_excluding(dim, quantified_dvars);
+                    mapped.push((axis, *var, resolved));
+                }
+                Dim::Var(var) if quantified_dvars.contains(var) => base.push(dim.clone()),
+                Dim::Rank(var) if quantified_rvars.contains(var) => base.push(dim.clone()),
+                Dim::Rank(var) => {
+                    for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
+                        base.push(self.apply_dim_excluding(&resolved, quantified_dvars));
+                    }
+                }
+                _ => base.push(self.apply_dim_excluding(dim, quantified_dvars)),
+            }
+        }
+        Self::place_mapped_axes(base, mapped)
+    }
+
     /// Apply this substitution to a type, resolving all bound variables.
     /// Path-compresses any chains of length ≥ 2 it encounters so future
     /// lookups land in O(1).
@@ -1810,20 +1909,7 @@ impl Subst {
             }
             Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
             Type::Tensor(dims, prec) => {
-                // A `Dim::Rank` expands to the whole shape vector it is bound
-                // to (or stays as the sole `Dim::Rank` while unbound).
-                let mut out: Vec<Dim> = Vec::with_capacity(dims.len());
-                for d in dims {
-                    match d {
-                        Dim::Rank(r) => {
-                            for rd in self.resolve_rvar(*r) {
-                                out.push(self.apply_dim(&rd));
-                            }
-                        }
-                        _ => out.push(self.apply_dim(d)),
-                    }
-                }
-                Type::Tensor(out, self.apply_tensor_prec(prec))
+                Type::Tensor(self.apply_tensor_dims(dims), self.apply_tensor_prec(prec))
             }
             Type::Adt(name, args) => {
                 let args = args.iter().map(|a| self.apply(a)).collect();
@@ -1914,24 +2000,8 @@ impl Subst {
                 quantified_rvars,
             ))),
             Type::Tensor(dims, prec) => {
-                let mut resolved_dims = Vec::with_capacity(dims.len());
-                for dim in dims {
-                    match dim {
-                        Dim::Var(var) if quantified_dvars.contains(var) => {
-                            resolved_dims.push(dim.clone());
-                        }
-                        Dim::Rank(var) if quantified_rvars.contains(var) => {
-                            resolved_dims.push(dim.clone());
-                        }
-                        Dim::Rank(var) => {
-                            for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
-                                resolved_dims
-                                    .push(self.apply_dim_excluding(&resolved, quantified_dvars));
-                            }
-                        }
-                        _ => resolved_dims.push(self.apply_dim_excluding(dim, quantified_dvars)),
-                    }
-                }
+                let resolved_dims =
+                    self.apply_tensor_dims_excluding(dims, quantified_dvars, quantified_rvars);
                 let resolved_prec = match prec {
                     TensorPrec::Var(var) if quantified_tvars.contains(var) => prec.clone(),
                     TensorPrec::Var(var) => {
@@ -2068,6 +2138,12 @@ impl Subst {
     pub fn apply_dim(&self, dim: &Dim) -> Dim {
         match dim {
             Dim::Var(v) => {
+                if self.mapped_axis(*v).is_some() {
+                    // The tensor-shape applicator must see the transform
+                    // boundary before it can place the resolved batch
+                    // identity at its requested axis.
+                    return Dim::Var(*v);
+                }
                 let resolved = self.resolve_dvar(*v);
                 if self.dimension_label(*v).is_some() && !matches!(resolved, Dim::Var(_)) {
                     // Keep the label's identity available to aliases and
@@ -2108,6 +2184,11 @@ impl Subst {
     }
 
     pub(crate) fn dimension_label(&self, v: DimVar) -> Option<String> {
+        self.raw_dimension_annotation(v)
+            .filter(|annotation| parse_mapped_axis_annotation(annotation).is_none())
+    }
+
+    fn raw_dimension_annotation(&self, v: DimVar) -> Option<String> {
         let root = self.resolve_dvar(v);
         let labels = self
             .dimension_labels
@@ -2122,9 +2203,23 @@ impl Subst {
             .cloned()
     }
 
+    pub(crate) fn mapped_axis(&self, v: DimVar) -> Option<usize> {
+        let labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        labels
+            .get(&v)
+            .and_then(|annotation| parse_mapped_axis_annotation(annotation))
+    }
+
+    pub(crate) fn mark_mapped_axis(&self, var: DimVar, axis: usize) {
+        self.set_dimension_label(var, mapped_axis_annotation(axis));
+    }
+
     pub(crate) fn copy_dimension_label(&self, old: DimVar, fresh: DimVar) {
-        if let Some(label) = self.dimension_label(old) {
-            self.set_dimension_label(fresh, label);
+        if let Some(annotation) = self.raw_dimension_annotation(old) {
+            self.set_dimension_label(fresh, annotation);
         }
     }
 
@@ -2171,6 +2266,7 @@ impl Subst {
 
     pub(crate) fn semantic_dim(&self, dim: &Dim) -> Dim {
         if let Dim::Var(v) = dim
+            && self.mapped_axis(*v).is_none()
             && let Some(label) = self.dimension_label(*v)
         {
             return Dim::Name(label);
@@ -2340,6 +2436,9 @@ impl Subst {
             if var.0 >= var_gen.watermarks().next_dvar {
                 return Err("dimension label refers to an unallocated checker identity");
             }
+            if parse_mapped_axis_annotation(label).is_some() {
+                continue;
+            }
             if label.is_empty() || label == "_" || label.chars().any(char::is_whitespace) {
                 return Err("invalid dimension label in checker snapshot");
             }
@@ -2400,16 +2499,20 @@ impl Subst {
         // Re-canonicalize BOTH operands' labels through the composed alias
         // graph; merely copying incoming entries misses a newly joined class.
         let mut incoming = Vec::new();
+        let mut mapped_axes = Vec::new();
         for source in [&*self, other] {
-            incoming.extend(
-                source
-                    .dimension_labels
-                    .lock()
-                    .expect("dimension labels poisoned")
-                    .to_sorted()
-                    .into_iter()
-                    .map(|(v, label)| (*v, label.clone())),
-            );
+            for (v, annotation) in source
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned")
+                .to_sorted()
+            {
+                if parse_mapped_axis_annotation(annotation).is_some() {
+                    mapped_axes.push((*v, annotation.clone()));
+                } else {
+                    incoming.push((*v, annotation.clone()));
+                }
+            }
         }
         trial
             .dimension_labels
@@ -2435,6 +2538,21 @@ impl Subst {
             }
             labels.insert(v, label.clone());
             labels.insert(root, label);
+        }
+        for (v, annotation) in mapped_axes {
+            let mut labels = trial
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned");
+            if let Some(existing) = labels.get(&v)
+                && existing != &annotation
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!("conflicting mapped-axis annotations while composing {v:?}"),
+                });
+            }
+            labels.insert(v, annotation);
         }
 
         let mut restrictions = self.tvar_restrictions_snapshot();
@@ -2797,6 +2915,8 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
             match (s1, s2) {
                 // Both ground (Tier-1 / fully-monomorphic): length + element-wise.
                 (0, 0) => {
+                    let d1 = canonicalize_ground_mapped_axes(&d1, subst)?;
+                    let d2 = canonicalize_ground_mapped_axes(&d2, subst)?;
                     if d1.len() != d2.len() {
                         return Err(TypeError {
                             kind: TypeErrorKind::DimensionMismatch,
@@ -2813,10 +2933,10 @@ fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeErr
                     Ok(())
                 }
                 // Exactly one side carries spreads: split the ground side.
-                (_, 0) => unify_row_against_ground(&d1, &d2, subst),
-                (0, _) => unify_row_against_ground(&d2, &d1, subst),
+                (_, 0) => unify_row_against_ground_with_mapped_axes(&d1, &d2, subst),
+                (0, _) => unify_row_against_ground_with_mapped_axes(&d2, &d1, subst),
                 // Both carry spreads: only structurally-identical rows unify.
-                (_, _) => unify_row_against_row(&d1, &d2, subst),
+                (_, _) => unify_rows_with_mapped_axes(&d1, &d2, subst),
             }
         }
 
@@ -3191,8 +3311,12 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             .dimension_label(v)
             .or_else(|| subst.dimension_label(*other))
         {
-            subst.set_dimension_label(v, label.clone());
-            subst.set_dimension_label(*other, label);
+            if subst.mapped_axis(v).is_none() {
+                subst.set_dimension_label(v, label.clone());
+            }
+            if subst.mapped_axis(*other).is_none() {
+                subst.set_dimension_label(*other, label);
+            }
         }
     }
     if let Dim::Var(v2) = dim
@@ -3239,6 +3363,142 @@ fn resolve_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
         }
     }
     out
+}
+
+fn mapped_axis_dim(dim: &Dim, subst: &Subst) -> Option<(usize, DimVar)> {
+    let Dim::Var(var) = dim else {
+        return None;
+    };
+    subst.mapped_axis(*var).map(|axis| (axis, *var))
+}
+
+fn mapped_axis_error(axis: usize, unbatched_rank: usize) -> TypeError {
+    TypeError {
+        kind: TypeErrorKind::DimensionMismatch,
+        message: format!("vmap axis {axis} is out of bounds for rank {unbatched_rank} tensor"),
+    }
+}
+
+fn canonicalize_ground_mapped_axes(dims: &[Dim], subst: &Subst) -> Result<Vec<Dim>, TypeError> {
+    let mut base = Vec::with_capacity(dims.len());
+    let mut mapped = Vec::new();
+    for dim in dims {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            mapped.push(marker);
+        } else {
+            base.push(dim.clone());
+        }
+    }
+    mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    for pair in mapped.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!("two vmap batch dimensions claim mapped axis {}", pair[0].0),
+            });
+        }
+    }
+    let unbatched_rank = base.len();
+    for (axis, var) in mapped {
+        if axis > base.len() {
+            return Err(mapped_axis_error(axis, unbatched_rank));
+        }
+        base.insert(axis, Dim::Var(var));
+    }
+    Ok(base)
+}
+
+fn split_row_mapped_axes(
+    row: &[Dim],
+    ground: &[Dim],
+    subst: &mut Subst,
+) -> Result<(Vec<Dim>, Vec<Dim>), TypeError> {
+    let mut clean_row = Vec::with_capacity(row.len());
+    let mut mapped = Vec::new();
+    for dim in row {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            mapped.push(marker);
+        } else {
+            clean_row.push(dim.clone());
+        }
+    }
+    mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    for pair in mapped.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!("two vmap batch dimensions claim mapped axis {}", pair[0].0),
+            });
+        }
+    }
+
+    let mut clean_ground = ground.to_vec();
+    let unbatched_rank = ground.len().saturating_sub(mapped.len());
+    for (axis, var) in &mapped {
+        let Some(batch) = ground.get(*axis) else {
+            return Err(mapped_axis_error(*axis, unbatched_rank));
+        };
+        // Bind the compiler-owned batch identity in this direction so an
+        // authored operand identity remains the class root and retains its
+        // user-facing label.
+        unify_dim(&Dim::Var(*var), batch, subst)?;
+    }
+    for (axis, _) in mapped.into_iter().rev() {
+        clean_ground.remove(axis);
+    }
+    Ok((clean_row, clean_ground))
+}
+
+fn unify_row_against_ground_with_mapped_axes(
+    row: &[Dim],
+    ground: &[Dim],
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let ground = canonicalize_ground_mapped_axes(ground, subst)?;
+    let (row, ground) = split_row_mapped_axes(row, &ground, subst)?;
+    unify_row_against_ground(&row, &ground, subst)
+}
+
+fn unify_rows_with_mapped_axes(
+    left: &[Dim],
+    right: &[Dim],
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let mut left_row = Vec::with_capacity(left.len());
+    let mut right_row = Vec::with_capacity(right.len());
+    let mut left_mapped = Vec::new();
+    let mut right_mapped = Vec::new();
+    for dim in left {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            left_mapped.push(marker);
+        } else {
+            left_row.push(dim.clone());
+        }
+    }
+    for dim in right {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            right_mapped.push(marker);
+        } else {
+            right_row.push(dim.clone());
+        }
+    }
+    left_mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    right_mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    if left_mapped
+        .iter()
+        .map(|(axis, _)| axis)
+        .ne(right_mapped.iter().map(|(axis, _)| axis))
+    {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: "cannot unify vectorized rank-spread rows with different mapped axes"
+                .to_string(),
+        });
+    }
+    for ((_, left_var), (_, right_var)) in left_mapped.iter().zip(&right_mapped) {
+        unify_dim(&Dim::Var(*left_var), &Dim::Var(*right_var), subst)?;
+    }
+    unify_row_against_row(&left_row, &right_row, subst)
 }
 
 /// chelis#339 named-axis expand: a signature whose result rows *introduce* an
@@ -3663,6 +3923,78 @@ mod tests {
             assert_eq!(
                 independent.dimension_label(DimVar(0)).as_deref(),
                 Some("fixed")
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_axis_annotation_survives_clone_wire_and_compose() {
+        let mapped = DimVar(0);
+        let mut subst = Subst::new();
+        subst.mark_mapped_axis(mapped, 3);
+        assert_eq!(subst.mapped_axis(mapped), Some(3));
+        assert_eq!(
+            subst.dimension_label(mapped),
+            None,
+            "compiler transform metadata must never become a user dimension name"
+        );
+
+        let cloned = subst.clone();
+        let decoded: Subst = bincode::deserialize(&bincode::serialize(&subst).unwrap()).unwrap();
+        for carrier in [&cloned, &decoded] {
+            assert_eq!(carrier.mapped_axis(mapped), Some(3));
+        }
+
+        let mut receiver = Subst::new();
+        receiver.compose(&subst).unwrap();
+        assert_eq!(receiver.mapped_axis(mapped), Some(3));
+        subst.compose(&Subst::new()).unwrap();
+        assert_eq!(subst.mapped_axis(mapped), Some(3));
+    }
+
+    #[test]
+    fn mapped_axis_is_removed_before_every_anchored_spread_split() {
+        for axis in 0..=4 {
+            let batch = DimVar(0);
+            let pre = RankVar(0);
+            let post = RankVar(1);
+            let mut subst = Subst::new();
+            subst.mark_mapped_axis(batch, axis);
+            let row = Type::Tensor(
+                vec![
+                    Dim::Rank(pre),
+                    Dim::Name("seq".into()),
+                    Dim::Rank(post),
+                    Dim::Var(batch),
+                ],
+                TensorPrec::Concrete(Prim::F32),
+            );
+            let authored = vec![
+                Dim::Name("left".into()),
+                Dim::Name("inner".into()),
+                Dim::Name("seq".into()),
+                Dim::Name("right".into()),
+            ];
+            let mut ground = authored.clone();
+            ground.insert(axis, Dim::Name("batch".into()));
+            let ground = Type::Tensor(ground, TensorPrec::Concrete(Prim::F32));
+
+            unify(&row, &ground, &mut subst)
+                .unwrap_or_else(|error| panic!("axis {axis}: {error:?}"));
+            assert_eq!(
+                subst.resolve_rvar(pre),
+                authored[..2],
+                "axis {axis}: mapped batch leaked into the leading spread"
+            );
+            assert_eq!(
+                subst.resolve_rvar(post),
+                authored[3..],
+                "axis {axis}: mapped batch leaked into the trailing spread"
+            );
+            assert_eq!(
+                subst.resolve_dvar(batch),
+                Dim::Name("batch".into()),
+                "axis {axis}: mapped batch lost its actual extent identity"
             );
         }
     }
