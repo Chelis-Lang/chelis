@@ -18,9 +18,10 @@ const DEF_NAME_INDEX: usize = 2;
 const DEF_VALUE_INDEX: usize = 3;
 const FN_PARAMS_INDEX: usize = 2;
 
-/// Recursively bridge stamped trees to the legacy `List` carrier used by the
-/// mutating authoring implementation. Read-only authoring APIs must consume
-/// `Node` directly and therefore never call this adapter.
+/// Recursively bridge stamped vocabulary nodes to the legacy `List` carrier
+/// used by the mutating authoring implementation while preserving structural
+/// `BareList` role. Read-only authoring APIs must consume `Node` directly and
+/// therefore never call this adapter.
 fn normalize_for_mutation(exprs: &[Expr]) -> Vec<Expr> {
     exprs.iter().map(normalize_expr_for_mutation).collect()
 }
@@ -36,10 +37,8 @@ fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
                 .collect();
             Expr::List(List { elements }, *span)
         }
-        Expr::BareList(elements, span) => Expr::List(
-            List {
-                elements: elements.iter().map(normalize_expr_for_mutation).collect(),
-            },
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements.iter().map(normalize_expr_for_mutation).collect(),
             *span,
         ),
         Expr::List(list, span) => Expr::List(

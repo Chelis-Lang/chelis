@@ -723,13 +723,12 @@ fn property_names(decls: &[Decl]) -> Vec<String> {
     names
 }
 
-/// Emit a module type-check failure as a prove error record, for the default
-/// (no obligation engine) build's up-front type-check. Mirrors the shape of
-/// the capability path's check-failure record (`kind:"error", stage:"check"`)
-/// so a type-broken module reports identically whether or not the obligation
-/// engine is compiled in. The diagnostics go to the stdout NDJSON stream under
-/// `--json` and to stderr otherwise; the caller returns `Status::Error`.
-#[cfg(not(feature = "chelis-prove"))]
+/// Emit a module type-check failure as a prove error record. Mirrors the shape
+/// of the capability path's check-failure record (`kind:"error",
+/// stage:"check"`) so a type-broken module reports identically whether or not
+/// the obligation engine is compiled in. The diagnostics go to the stdout
+/// NDJSON stream under `--json` and to stderr otherwise; the caller returns
+/// `Status::Error`.
 fn emit_module_check_failure(
     options: &ProveOptions<'_>,
     messages: &[String],
@@ -753,6 +752,23 @@ fn emit_module_check_failure(
             eprintln!("  - {m}");
         }
     }
+}
+
+fn emit_deep_check_failure_if_any(
+    exprs: &[DeepExpr],
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Option<Status> {
+    let Err(infer) = chelis_types::check_typed_program(exprs) else {
+        return None;
+    };
+    let messages = infer
+        .errors
+        .iter()
+        .map(|err| err.message.clone())
+        .collect::<Vec<_>>();
+    emit_module_check_failure(options, &messages, totals);
+    Some(Status::Error)
 }
 
 #[cfg(not(feature = "chelis-prove"))]
@@ -1705,6 +1721,14 @@ fn prove_deep_file(
     let exprs = chelis_deep::parse_and_stamp_file(&source)
         .map_err(|err| format!("parse {}: {err}", path.display()))?;
     if let Err(err) = chelis_validate::validate_deep(&source) {
+        // Strict Deep-shape validation may reject a carrier that still
+        // contains language-required checker defects. [04-TOT-5] requires
+        // every checker entry to report those defects rather than letting an
+        // earlier admission gate mask them. Preserve the validation error only
+        // when the checker accepts the stamped program.
+        if let Some(status) = emit_deep_check_failure_if_any(&exprs, options, totals) {
+            return Ok(status);
+        }
         return Err(format!("validate {}: {err}", path.display()));
     }
     // Default (no obligation engine) build: type-check the module up-front so a
@@ -1714,14 +1738,8 @@ fn prove_deep_file(
     // `check_typed_program` the engine uses, so the default and capability
     // builds agree on what is type-broken (the checker needs no solver).
     #[cfg(not(feature = "chelis-prove"))]
-    if let Err(infer) = chelis_types::check_typed_program(&exprs) {
-        let messages = infer
-            .errors
-            .iter()
-            .map(|err| err.message.clone())
-            .collect::<Vec<_>>();
-        emit_module_check_failure(options, &messages, totals);
-        return Ok(Status::Error);
+    if let Some(status) = emit_deep_check_failure_if_any(&exprs, options, totals) {
+        return Ok(status);
     }
     let properties = discover_deep_properties(path, &exprs, options.only)?;
     let mut file_status = Status::Passed;

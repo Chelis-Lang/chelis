@@ -51,6 +51,94 @@ const MATCHED_SIGNATURE_AND_DEFINITION: &str = "\
   (var {} x)))
 ";
 
+const DEFINITION_BEFORE_SIGNATURE: &str = "\
+(def {} shared (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+  (var {} x)))
+(defsig {} shared \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup))))
+";
+
+const INTERLEAVED_SIGNATURE_DEFINITION_PAIRS: &str = "\
+(defsig {} left \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup))))
+(defsig {} right \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 3) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 3) (t-prim {} madeup))))
+(def {} left (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+  (var {} x)))
+(def {} right (fn {} (params {} \
+  (y {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+  (var {} y)))
+";
+
+const SAME_SPELLING_DISTINCT_MODULES: &str = "\
+(module {} left.module
+  (defsig {} shared \
+    (t-fn {} \
+      (t-tensor {} (d-lit {} 2) (t-prim {} madeup)) \
+      (t-tensor {} (d-lit {} 2) (t-prim {} madeup))))
+  (def {} shared (fn {} (params {} \
+    (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+    (var {} x))))
+(module {} right.module
+  (defsig {} shared \
+    (t-fn {} \
+      (t-tensor {} (d-lit {} 3) (t-prim {} madeup)) \
+      (t-tensor {} (d-lit {} 3) (t-prim {} madeup))))
+  (def {} shared (fn {} (params {} \
+    (y {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+    (var {} y))))
+";
+
+const REPEATED_SIGNATURE_DEFINITION_OCCURRENCES: &str = "\
+(def {} shared (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+  (var {} x)))
+(defsig {} shared \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup))))
+(def {} shared (fn {} (params {} \
+  (y {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+  (var {} y)))
+(defsig {} shared \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 3) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 3) (t-prim {} madeup))))
+";
+
+const REOPENED_MODULE_OCCURRENCES: &str = "\
+(module {} repeated.module
+  (def {} shared (fn {} (params {} \
+    (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+    (var {} x))))
+(module {} repeated.module
+  (def {} shared (fn {} (params {} \
+    (y {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+    (var {} y))))
+";
+
+const UNDECODABLE_HEAD_METADATA: &str = "\
+(def {} holder
+  (future-form {
+    type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))
+  }))
+";
+
+const CAST_OWNED_DIAGNOSTIC: &str = "\
+(def {} source
+  (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 0))
+(def {} converted
+  (cast {} (var {} source) (t-prim {} f8e4m3)))
+";
+
 fn diagnostics(errors: &[CheckError]) -> Vec<String> {
     let mut diagnostics = errors
         .iter()
@@ -143,6 +231,8 @@ fn prove_unsupported_count(source: &str) -> usize {
         .filter(|diagnostic| {
             diagnostic.as_str().is_some_and(|text| {
                 text.contains("tensor element precision `madeup` is not a recognized primitive")
+                    || text.contains("cannot cast tensor element to `f8e4m3`")
+                    || text.contains("cannot use `f8e4m3` as a scalar dtype")
             })
         })
         .count()
@@ -217,4 +307,59 @@ fn matching_signature_and_definition_share_one_value_owner() {
         1,
         "matching signature and definition",
     );
+}
+
+#[test]
+fn matching_definition_before_signature_shares_one_value_owner() {
+    assert_multiplicity(
+        DEFINITION_BEFORE_SIGNATURE,
+        1,
+        "matching definition before signature",
+    );
+}
+
+#[test]
+fn interleaved_signature_definition_pairs_keep_two_owners() {
+    assert_multiplicity(
+        INTERLEAVED_SIGNATURE_DEFINITION_PAIRS,
+        2,
+        "interleaved signature and definition pairs",
+    );
+}
+
+#[test]
+fn same_spelling_in_distinct_modules_keeps_both_diagnostics() {
+    assert_multiplicity(
+        SAME_SPELLING_DISTINCT_MODULES,
+        2,
+        "same spelling in distinct modules",
+    );
+}
+
+#[test]
+fn repeated_signature_definition_occurrences_keep_two_owners() {
+    assert_multiplicity(
+        REPEATED_SIGNATURE_DEFINITION_OCCURRENCES,
+        2,
+        "repeated signature and definition occurrences",
+    );
+}
+
+#[test]
+fn reopened_module_occurrences_keep_both_precision_diagnostics() {
+    assert_multiplicity(
+        REOPENED_MODULE_OCCURRENCES,
+        2,
+        "reopened module occurrences",
+    );
+}
+
+#[test]
+fn undecodable_head_metadata_is_traversed() {
+    assert_multiplicity(UNDECODABLE_HEAD_METADATA, 1, "undecodable-head metadata");
+}
+
+#[test]
+fn cast_recursion_does_not_duplicate_the_cast_owned_diagnostic() {
+    assert_multiplicity(CAST_OWNED_DIAGNOSTIC, 1, "cast-owned diagnostic");
 }

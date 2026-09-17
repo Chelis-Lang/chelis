@@ -143,23 +143,24 @@ impl Expr {
     /// index 1. The `span` key holds an opaque string identifier issued by
     /// an external producer (e.g., Octant's LaTeX-to-Deep translator).
     ///
-    /// Returns `Some(id)` when the expression is a decoded vocabulary node,
-    /// carried either by `Expr::Node` or by a well-formed transitional
-    /// `Expr::List`, and its metadata map contains a `span` entry whose value
-    /// is a string literal (`Expr::Atom(Atom::Str(_), _)`).
+    /// Returns `Some(id)` when the expression is a decoded vocabulary node or
+    /// an undecodable-head carrier, and its metadata map contains a `span`
+    /// entry whose value is a string literal
+    /// (`Expr::Atom(Atom::Str(_), _)`).
     ///
     /// The empty string is a valid (though unusual) span ID and is returned
     /// as `Some("")`. Lock this convention in tests; do not silently coerce
     /// `Some("")` to `None`.
     ///
-    /// Returns `None` for structural lists, undecodable heads, atoms, bare
-    /// maps, legacy `MetaExpr` nodes, malformed legacy lists, decoded nodes
-    /// whose metadata map has no `span` key, or `span` values that are not
-    /// string literals (those are shape errors callers handle separately,
-    /// not a missing span).
+    /// Returns `None` for structural lists, atoms, bare maps, legacy
+    /// `MetaExpr` nodes, malformed legacy lists, metadata-bearing carriers
+    /// whose map has no `span` key, or `span` values that are not string
+    /// literals (those are shape errors callers handle separately, not a
+    /// missing span).
     pub fn span_id(&self) -> Option<&str> {
         let meta = match self.carrier() {
-            ExprCarrier::DecodedNode(_, metadata, _) => metadata,
+            ExprCarrier::DecodedNode(_, metadata, _)
+            | ExprCarrier::UndecodableHead(_, metadata, _) => metadata,
             _ => return None,
         };
         meta.span_id().map(|v| v.value())

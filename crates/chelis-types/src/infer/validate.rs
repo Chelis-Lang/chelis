@@ -476,24 +476,147 @@ enum TensorPrecisionOwnerKind {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct TensorPrecisionOwner {
-    module: Option<String>,
-    kind: TensorPrecisionOwnerKind,
-    ordinal: usize,
+struct TensorPrecisionScope {
+    path: Option<String>,
+    occurrence: usize,
 }
 
-fn new_tensor_precision_owner(
-    module: Option<String>,
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionOwner {
+    scope: TensorPrecisionScope,
     kind: TensorPrecisionOwnerKind,
-    next_ordinal: &mut usize,
-) -> TensorPrecisionOwner {
-    let owner = TensorPrecisionOwner {
-        module,
-        kind,
-        ordinal: *next_ordinal,
+    name: Option<String>,
+    occurrence: usize,
+}
+
+struct TensorPrecisionItem<'a> {
+    scope: TensorPrecisionScope,
+    expr: &'a deep::Expr,
+}
+
+#[derive(Default)]
+struct TensorPrecisionValueOccurrences {
+    signatures: Vec<usize>,
+    definitions: Vec<usize>,
+}
+
+fn tensor_precision_items(exprs: &[deep::Expr]) -> Vec<TensorPrecisionItem<'_>> {
+    fn push<'a>(
+        expr: &'a deep::Expr,
+        scope: &TensorPrecisionScope,
+        next_scope_occurrence: &mut usize,
+        out: &mut Vec<TensorPrecisionItem<'a>>,
+    ) {
+        if let deep::ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+            let name = children.first().and_then(symbol_name);
+            let path = match (scope.path.as_deref(), name) {
+                (Some(prefix), Some(name)) => Some(format!("{prefix}.{name}")),
+                (None, Some(name)) => Some(name.to_string()),
+                (prefix, None) => prefix.map(str::to_string),
+            };
+            let module_scope = TensorPrecisionScope {
+                path,
+                occurrence: *next_scope_occurrence,
+            };
+            *next_scope_occurrence += 1;
+            for child in children.iter().skip(1) {
+                push(child, &module_scope, next_scope_occurrence, out);
+            }
+            return;
+        }
+        out.push(TensorPrecisionItem {
+            scope: scope.clone(),
+            expr,
+        });
+    }
+
+    let root = TensorPrecisionScope {
+        path: None,
+        occurrence: 0,
     };
-    *next_ordinal += 1;
-    owner
+    let mut next_scope_occurrence = 1;
+    let mut items = Vec::new();
+    for expr in exprs {
+        push(expr, &root, &mut next_scope_occurrence, &mut items);
+    }
+    items
+}
+
+fn tensor_precision_owner_plan(items: &[TensorPrecisionItem<'_>]) -> Vec<TensorPrecisionOwner> {
+    let mut owners = items
+        .iter()
+        .enumerate()
+        .map(|(occurrence, item)| TensorPrecisionOwner {
+            scope: item.scope.clone(),
+            kind: TensorPrecisionOwnerKind::Other,
+            name: None,
+            occurrence,
+        })
+        .collect::<Vec<_>>();
+    let mut value_occurrences: BTreeMap<
+        (TensorPrecisionScope, String),
+        TensorPrecisionValueOccurrences,
+    > = BTreeMap::new();
+    let mut type_occurrences: BTreeMap<(TensorPrecisionScope, String), usize> = BTreeMap::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let deep::ExprCarrier::DecodedNode(tag, _, children) = item.expr.carrier() else {
+            continue;
+        };
+        let Some(name) = children.first().and_then(symbol_name).map(str::to_string) else {
+            continue;
+        };
+        match tag {
+            DeepTag::Defsig => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .signatures
+                .push(index),
+            DeepTag::Def => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .definitions
+                .push(index),
+            DeepTag::Deftype | DeepTag::Typealias => {
+                let occurrence = type_occurrences
+                    .entry((item.scope.clone(), name.clone()))
+                    .or_default();
+                owners[index] = TensorPrecisionOwner {
+                    scope: item.scope.clone(),
+                    kind: TensorPrecisionOwnerKind::Type,
+                    name: Some(name),
+                    occurrence: *occurrence,
+                };
+                *occurrence += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Pair the nth signature and nth definition for a value declaration
+    // independently of which kind appears first in source. Extra declarations
+    // retain their own occurrence owner. The lexical scope occurrence keeps
+    // reopened module blocks distinct even when their path spelling matches.
+    for ((scope, name), occurrences) in value_occurrences {
+        for (occurrence, index) in occurrences.signatures.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+        for (occurrence, index) in occurrences.definitions.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+    }
+
+    owners
 }
 
 pub(super) fn validate_tensor_precisions_in_program(
@@ -501,67 +624,10 @@ pub(super) fn validate_tensor_precisions_in_program(
     errors: &mut impl DiagnosticOutput,
 ) {
     let mut seen: UnordSet<(TensorPrecisionOwner, String)> = UnordSet::new();
-    let mut pending_signatures: UnordMap<(Option<String>, String), Vec<TensorPrecisionOwner>> =
-        UnordMap::new();
-    let mut next_ordinal = 0;
-    // Descend through `(module {} name ...)` wrappers so per-def dedup
-    // keeps each declaration's tensor types in its own key space. A matching
-    // `defsig` and `def` deliberately share one value owner; declarations in
-    // another namespace or a repeated declaration occurrence do not.
-    for (module, expr) in top_level_decl_items_with_modules(exprs) {
-        let owner = match expr.carrier() {
-            deep::ExprCarrier::DecodedNode(tag, _, children) => {
-                let name = children.first().and_then(symbol_name).map(str::to_string);
-                match (tag, name) {
-                    (DeepTag::Defsig, Some(name)) => {
-                        let owner = new_tensor_precision_owner(
-                            module.clone(),
-                            TensorPrecisionOwnerKind::Value,
-                            &mut next_ordinal,
-                        );
-                        pending_signatures
-                            .entry((module.clone(), name))
-                            .or_default()
-                            .push(owner.clone());
-                        owner
-                    }
-                    (DeepTag::Def, Some(name)) => {
-                        let key = (module.clone(), name);
-                        pending_signatures
-                            .get_mut(&key)
-                            .and_then(|owners| (!owners.is_empty()).then(|| owners.remove(0)))
-                            .unwrap_or_else(|| {
-                                new_tensor_precision_owner(
-                                    module.clone(),
-                                    TensorPrecisionOwnerKind::Value,
-                                    &mut next_ordinal,
-                                )
-                            })
-                    }
-                    (DeepTag::Deftype | DeepTag::Typealias, _) => new_tensor_precision_owner(
-                        module.clone(),
-                        TensorPrecisionOwnerKind::Type,
-                        &mut next_ordinal,
-                    ),
-                    _ => new_tensor_precision_owner(
-                        module.clone(),
-                        TensorPrecisionOwnerKind::Other,
-                        &mut next_ordinal,
-                    ),
-                }
-            }
-            deep::ExprCarrier::StructuralList(_)
-            | deep::ExprCarrier::UndecodableHead(_, _, _)
-            | deep::ExprCarrier::Atom(_)
-            | deep::ExprCarrier::MetadataMap(_)
-            | deep::ExprCarrier::MetadataExpression(_)
-            | deep::ExprCarrier::MalformedLegacyList(_) => new_tensor_precision_owner(
-                module,
-                TensorPrecisionOwnerKind::Other,
-                &mut next_ordinal,
-            ),
-        };
-        walk_for_tensor_precision(expr, errors, &mut seen, &owner);
+    let items = tensor_precision_items(exprs);
+    let owners = tensor_precision_owner_plan(&items);
+    for (item, owner) in items.into_iter().zip(owners) {
+        walk_for_tensor_precision(item.expr, errors, &mut seen, &owner);
     }
 }
 

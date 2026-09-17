@@ -1,5 +1,6 @@
 use chelis_deep::{
     Atom, DeepTag, Expr, ExprCarrier, List, MetaExpr, Metadata, Span, UnknownFormData,
+    authoring::rename_function, parse_and_stamp_file,
 };
 
 fn span() -> Span {
@@ -48,6 +49,103 @@ fn undecodable_parts(expr: &Expr) -> (&str, &Metadata, &[Expr]) {
     }
 }
 
+fn structural_names_match(elements: &[Expr], expected: &[&str]) -> bool {
+    elements.len() == expected.len()
+        && elements
+            .iter()
+            .zip(expected)
+            .all(|(expr, expected)| matches!(expr, Expr::Atom(Atom::Name(found), _) if found == expected))
+}
+
+fn structural_head_matches(elements: &[Expr], expected: &str) -> bool {
+    matches!(
+        elements,
+        [Expr::Atom(Atom::Name(found), _), Expr::Map(_, _)] if found == expected
+    )
+}
+
+fn contains_structural_names(expr: &Expr, expected: &[&str]) -> bool {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, children)
+        | ExprCarrier::UndecodableHead(_, metadata, children) => {
+            let mut found = false;
+            metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_names(value, expected);
+            });
+            found
+                || children
+                    .iter()
+                    .any(|child| contains_structural_names(child, expected))
+        }
+        ExprCarrier::StructuralList(elements) => {
+            structural_names_match(elements, expected)
+                || elements
+                    .iter()
+                    .any(|child| contains_structural_names(child, expected))
+        }
+        ExprCarrier::MetadataMap(metadata) => {
+            let mut found = false;
+            metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_names(value, expected);
+            });
+            found
+        }
+        ExprCarrier::MetadataExpression(metadata_expr) => {
+            let mut found = contains_structural_names(&metadata_expr.expr, expected);
+            metadata_expr.metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_names(value, expected);
+            });
+            found
+        }
+        ExprCarrier::MalformedLegacyList(list) => list
+            .elements
+            .iter()
+            .any(|child| contains_structural_names(child, expected)),
+        ExprCarrier::Atom(_) => false,
+    }
+}
+
+fn contains_structural_head(expr: &Expr, expected: &str) -> bool {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, children)
+        | ExprCarrier::UndecodableHead(_, metadata, children) => {
+            let mut found = false;
+            metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_head(value, expected);
+            });
+            found
+                || children
+                    .iter()
+                    .any(|child| contains_structural_head(child, expected))
+        }
+        ExprCarrier::StructuralList(elements) => {
+            structural_head_matches(elements, expected)
+                || elements
+                    .iter()
+                    .any(|child| contains_structural_head(child, expected))
+        }
+        ExprCarrier::MetadataMap(metadata) => {
+            let mut found = false;
+            metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_head(value, expected);
+            });
+            found
+        }
+        ExprCarrier::MetadataExpression(metadata_expr) => {
+            let mut found = contains_structural_head(&metadata_expr.expr, expected);
+            metadata_expr.metadata.visit_syntax(&mut |_, value| {
+                found |= contains_structural_head(value, expected);
+            });
+            found
+        }
+        ExprCarrier::MalformedLegacyList(list) => list
+            .elements
+            .iter()
+            .any(|child| contains_structural_head(child, expected)),
+        ExprCarrier::Atom(_) => false,
+    }
+}
+
 #[test]
 fn decoded_node_read_is_identical_for_successor_and_legacy_carriers() {
     let successor = Expr::node(
@@ -67,6 +165,51 @@ fn decoded_node_read_is_identical_for_successor_and_legacy_carriers() {
             [Expr::Atom(Atom::Name(found), _)] if found == expected_name
         ));
     }
+}
+
+#[test]
+fn legal_legacy_structural_lists_share_the_structural_disposition() {
+    let source = "\
+(module {} demo.structural
+  (import {} std.linalg (copy fill))
+  (def {} target
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (var {} x))))";
+    let stamped = parse_and_stamp_file(source).expect("fixture must stamp");
+    let renamed =
+        rename_function(&stamped, "target", "renamed").expect("authoring normalization succeeds");
+
+    assert!(
+        renamed
+            .module
+            .iter()
+            .any(|expr| contains_structural_head(expr, "x")),
+        "an annotated binder must remain a structural-list carrier after authoring normalization"
+    );
+    assert!(
+        renamed
+            .module
+            .iter()
+            .any(|expr| contains_structural_names(expr, &["copy", "fill"])),
+        "an import name list must remain a structural-list carrier after authoring normalization"
+    );
+
+    let undecodable = legacy_unknown("future-form", vec![]);
+    assert!(matches!(
+        undecodable.carrier(),
+        ExprCarrier::UndecodableHead("future-form", _, [])
+    ));
+    let malformed = Expr::List(
+        List {
+            elements: vec![Expr::Atom(Atom::Tag(DeepTag::Copy), span()), name("value")],
+        },
+        span(),
+    );
+    assert!(matches!(
+        malformed.carrier(),
+        ExprCarrier::MalformedLegacyList(_)
+    ));
 }
 
 #[test]
@@ -91,6 +234,60 @@ fn undecodable_head_read_is_identical_for_successor_and_legacy_carriers() {
             [Expr::Atom(Atom::Name(found), _)] if found == expected_payload
         ));
     }
+}
+
+#[test]
+fn undecodable_legacy_head_retains_its_external_span_id() {
+    let parsed =
+        chelis_deep::parser::parse_str(r#"(future-form {span: "legacy-unknown"} payload)"#)
+            .expect("legacy metadata fixture parses")
+            .remove(0);
+    let Expr::BareList(elements, _) = parsed else {
+        panic!("unstamped source list must retain its structural role");
+    };
+    let Expr::Map(metadata, _) = &elements[1] else {
+        panic!("fixture must contain metadata in the legacy metadata slot");
+    };
+    let metadata = metadata.clone();
+
+    let undecodable = Expr::List(
+        List {
+            elements: vec![
+                name("future-form"),
+                Expr::Map(metadata.clone(), span()),
+                name("payload"),
+            ],
+        },
+        span(),
+    );
+    assert!(matches!(
+        undecodable.carrier(),
+        ExprCarrier::UndecodableHead("future-form", _, _)
+    ));
+    assert_eq!(undecodable.span_id(), Some("legacy-unknown"));
+
+    let known = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
+                Expr::Map(metadata, span()),
+                name("value"),
+            ],
+        },
+        span(),
+    );
+    assert_eq!(known.span_id(), Some("legacy-unknown"));
+
+    let malformed = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), span()),
+                name("not-metadata"),
+            ],
+        },
+        span(),
+    );
+    assert_eq!(malformed.span_id(), None);
 }
 
 #[test]

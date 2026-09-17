@@ -1329,6 +1329,10 @@ pub(super) fn param_decl_type_expr(param: &Expr) -> Option<&Expr> {
             Some(Expr::Map(meta, _)) => meta.ty().map(|ty| ty.expression()),
             _ => None,
         },
+        Expr::BareList(elements, _) => match elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta.ty().map(|ty| ty.expression()),
+            _ => None,
+        },
         Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|ty| ty.expression()),
         _ => None,
     }
@@ -1604,6 +1608,7 @@ pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         Expr::MetaExpr(meta, _) => runtime_param_name(&meta.expr),
+        Expr::BareList(elements, _) => elements.first().and_then(symbol_name),
         Expr::List(list, _) => list
             .elements
             .first()

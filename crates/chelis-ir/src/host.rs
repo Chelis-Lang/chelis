@@ -16139,6 +16139,10 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
             Some(Expr::Map(meta, _)) => meta,
             _ => return None,
         },
+        Expr::BareList(elements, _) => match elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
         Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
@@ -18346,6 +18350,7 @@ fn param_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
         Expr::MetaExpr(meta, _) => param_name(&meta.expr),
+        Expr::BareList(elements, _) => elements.first().and_then(symbol_name).map(str::to_string),
         Expr::List(list, _) => list
             .elements
             .first()
@@ -18361,7 +18366,7 @@ fn param_host_type(expr: &Expr) -> Option<HostTypeTerm> {
         Expr::MetaExpr(meta, _) => expr_type(expr)
             .filter(|ty| !ty.is_unresolved())
             .or_else(|| param_host_type(&meta.expr)),
-        Expr::List(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
+        Expr::List(_, _) | Expr::BareList(_, _) => expr_type(expr).filter(|ty| !ty.is_unresolved()),
         _ => None,
     }
 }
@@ -18432,6 +18437,10 @@ fn params_list_of(fn_expr: &Expr) -> Option<&List> {
 fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
     let meta = match param {
         Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::BareList(elements, _) => match elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
             _ => return None,
         },
