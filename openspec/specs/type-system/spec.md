@@ -167,23 +167,28 @@ receive a flat multi-argument function type.
 
 ### Requirement: Authored declaration binders are rigid
 
-Every authored type, dimension, or rank variable listed in a declaration's explicit binder
-list SHALL be universally quantified and rigid throughout that declaration's body, whether
-the `defsig` declares a function, property, or non-function value. A property's binder list
-SHALL scope its quantifier types, preconditions, predicate body, and expression-valued
-options. The body SHALL type-check for every
-admissible instantiation. A body constraint that identifies an authored binder with a
-concrete type or shape, with another authored binder of the same signature, or with a type
-or shape containing either SHALL be a type error reported at the declaration. The installed
-scheme SHALL remain the declared signature and SHALL NOT be narrowed by the body. A wildcard
-slot that resolves to an authored binder SHALL take that binder's type, and a dtype-family
-bound SHALL restrict the admissible instantiations without making the binder concrete.
+An authored type, dimension, or rank variable listed in a declaration's binder list has one
+scope throughout that declaration's body. Every type-position occurrence of that name within
+the body SHALL resolve to the same binder, including a tensor precision slot in a lambda
+parameter, expression ascription, block binding, nested ADT argument, property quantifier
+type, precondition, predicate body, or expression-valued option. A name not declared by an
+enclosing explicit binder remains subject to §5.8.1's closed primitive and undeclared-name
+rules; no occurrence introduces a binder.
 
-The sole role-sensitive exception is a dimension binder that appears only in a function
-result. It SHALL be output-inferred under the numbered specification's return-only dimension
-rule: the body may leave it unbound or resolve it to a body-internal concrete output, but
-SHALL NOT pin or collapse it from a declared input dimension. A non-function declaration has
-no return-only dimension position and therefore receives no such exception.
+Except for the sole role-sensitive exception below, each such binder is universally
+quantified and rigid: the body SHALL type-check for every admissible instantiation. A body
+constraint that identifies an authored binder with a concrete type or shape, with another
+authored binder of the same signature, or with a type or shape containing either SHALL be a
+type error reported at the declaration, and the declaration's scheme is its declared
+signature, never a narrowing of it. A wildcard slot that the body resolves to an authored
+binder takes that binder's type. A dtype-family bound ([04-DTYPE-2]) restricts the admissible
+instantiations without making the binder concrete.
+
+The sole role-sensitive exception is §4.4.1: a dimension binder appearing only in a function
+result remains output-inferred. The body may leave it unbound or resolve it to a body-internal
+output, but SHALL NOT pin it to a dimension from a declared input or collapse it with an
+input-position dimension binder. A non-function declaration has no function-result position
+and receives no such exception.
 
 #### Scenario: Concrete type narrowing is rejected
 
@@ -209,6 +214,16 @@ no return-only dimension position and therefore receives no such exception.
 
 - **WHEN** `@property accepts[p] forall(x: p): true` is checked
 - **THEN** `p` remains rigid and universally quantified through the property `defsig`
+
+#### Scenario: Body tensor precision uses the enclosing declaration binder
+
+- **WHEN** a declaration explicitly binds `p` and uses `p` in a tensor precision slot in a lambda parameter, expression ascription, block binding, nested ADT argument, property body, or expression-valued option
+- **THEN** every occurrence resolves to that declaration's same binder `p`
+
+#### Scenario: Undeclared body tensor precision remains rejected
+
+- **WHEN** a body tensor precision slot names `q` and no enclosing explicit binder declares `q`
+- **THEN** `q` does not become a binder and is rejected under the closed primitive rule
 
 #### Scenario: Wildcard filled by an authored binder preserves that binder
 

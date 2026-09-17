@@ -861,17 +861,32 @@ differently.
 > [04-INF-2] provides for a recursive call.
 
 > **[04-INF-6]** An authored type, dimension, or rank variable listed in a
-> declaration's binder list is universally quantified and rigid within the
-> declaration's body: the body SHALL type-check for every admissible
-> instantiation of the binder. A body constraint that identifies an authored
-> binder with a concrete type, with another authored binder of the same
-> signature, or with a type containing either is a type error reported at
-> the declaration, and the declaration's scheme is its declared signature,
-> never a narrowing of it. A wildcard slot that the body resolves to an
-> authored binder takes that binder's type. A dtype-family bound
+> declaration's binder list has one scope throughout that declaration's body.
+> Every type-position occurrence of that name within the body SHALL resolve to
+> the same binder, including a tensor precision slot in a lambda parameter,
+> expression ascription, block binding, nested ADT argument, property
+> quantifier type, precondition, predicate body, or expression-valued option.
+> A name not declared by an enclosing explicit binder remains subject to
+> §5.8.1's closed primitive and undeclared-name rules; no occurrence introduces
+> a binder.
+>
+> Except for the sole role-sensitive exception below, each such binder is
+> universally quantified and rigid: the body SHALL type-check for every
+> admissible instantiation. A body constraint that identifies an authored
+> binder with a concrete type or shape, with another authored binder of the
+> same signature, or with a type or shape containing either is a type error
+> reported at the declaration, and the declaration's scheme is its declared
+> signature, never a narrowing of it. A wildcard slot that the body resolves
+> to an authored binder takes that binder's type. A dtype-family bound
 > ([04-DTYPE-2]) restricts the admissible instantiations without making the
-> binder concrete. The dimension parameter rule of §4.4 is this rule for
-> dimension binders.
+> binder concrete.
+>
+> The sole role-sensitive exception is §4.4.1: a dimension binder appearing
+> only in a function result remains output-inferred. The body may leave it
+> unbound or resolve it to a body-internal output, but SHALL NOT pin it to a
+> dimension from a declared input or collapse it with an input-position
+> dimension binder. A non-function declaration has no function-result position
+> and receives no such exception.
 
 An unsuffixed literal binds at its default primitive type
 (`spec/02-surf-syntax.md` §P10), so `lt(x, 0.0)` with `x: p` identifies the
@@ -1613,8 +1628,8 @@ explicit type, dimension, and rank binder list under [04-INF-6] and §5.8.1.
 Those binders are rigid and scope the property quantifier types, preconditions,
 predicate body, and expression-valued options. Duplicate, forbidden, unlisted,
 and dtype-family-bounded names follow the same rules as a function
-declaration. Body-local tensor precision slots remain governed by §5.8.1's
-closed primitive rule.
+declaration. That same binder scope applies to tensor precision slots
+throughout those property positions.
 
 Desugaring emits a `defsig` with that explicit binder list, the quantifier
 types, and `bool` result, plus an ordinary `def` carrying the property metadata specified in
@@ -2230,11 +2245,14 @@ through the declaration's explicit `[..]` binder list:
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
-An enclosing declaration binder remains available in ordinary type positions
-inside that declaration's body, including lambda parameters, expression
-ascriptions, block bindings, and nested ADT arguments. Body-local tensor
-precision slots remain value-position annotations and therefore use the closed
-primitive rule rather than inheriting the declaration's precision binders.
+An enclosing explicit declaration binder has one scope throughout that
+declaration's body. Every type-position occurrence of its name resolves to the
+same binder, including tensor precision slots in lambda parameters, expression
+ascriptions, block bindings, nested ADT arguments, property quantifier types,
+preconditions, predicate bodies, and expression-valued options. With no
+enclosing explicit binder for the name, a body-local occurrence remains a
+value-position request and follows the closed primitive or undeclared-name
+rule below; it does not introduce a binder.
 
 No occurrence introduces a binder. Every `t-var`, `d-var`, and `d-rank`
 name in a signature appears in its explicit list. An unlisted lowercase
