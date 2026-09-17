@@ -219,9 +219,10 @@ error.
 
 ### Requirement: Rank variables
 
-A rank variable `..r` SHALL stand for a name-preserving run of dimensions, introduced
-contextually without an `[..r]` quantifier. A spread name SHALL NOT repeat within one tensor
-shape, and a `def` mentioning `..r` SHALL be restricted to name-trackable operations
+A rank variable `..r` SHALL stand for a name-preserving run of dimensions. Its plain name
+`r` SHALL appear in the function's complete `[...]` binder clause; `[..r]` is not a binder
+spelling. A spread name SHALL NOT repeat within one tensor shape, and a `def` mentioning
+`..r` SHALL be restricted to name-trackable operations
 (elementwise and named-axis reductions), never positional shape-rewriters.
 
 #### Scenario: Rank-generic identity function

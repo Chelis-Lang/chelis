@@ -101,19 +101,25 @@ fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
 
 #[test]
 fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
-    let text = deep_text("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)");
+    let error = surf_parse("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)")
+        .expect_err("an active primitive cannot enter the binder list");
     assert!(
-        text.matches("(t-prim {} f32)").count() == 3 && !text.contains("(t-var {} f32)"),
-        "an explicit binder list must not rebind an active primitive:\n{text}"
+        error
+            .to_string()
+            .contains("`f32` cannot be a declaration binder"),
+        "the binder-list owner must reject the active primitive: {error}"
     );
 }
 
 #[test]
 fn a_lambda_valued_binding_does_not_rebind_a_reserved_sig_binder_name() {
-    let text = deep_text("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)");
+    let error = surf_parse("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)")
+        .expect_err("a reserved dtype cannot enter the binder list");
     assert!(
-        text.matches("(t-prim {} u8)").count() == 3 && !text.contains("(t-var {} u8)"),
-        "an explicit binder list must not turn a reserved dtype into a type variable:\n{text}"
+        error
+            .to_string()
+            .contains("`u8` cannot be a declaration binder"),
+        "the binder-list owner must reject the reserved dtype: {error}"
     );
 }
 

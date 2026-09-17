@@ -394,7 +394,7 @@ def f[p: Float](x: p) -> p = x
     assert!(
         error
             .to_string()
-            .contains("a declaration's `defsig` owns its binders"),
+            .contains("a declaration's `defsig` owns its binder list"),
         "a bound belongs to one binder list; got: {error}"
     );
 }

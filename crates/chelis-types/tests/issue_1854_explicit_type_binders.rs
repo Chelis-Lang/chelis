@@ -82,9 +82,34 @@ fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Opti
 fn unknown_surf_scalar_names_reject_once_at_both_checker_ingresses() {
     for (name, nearest) in REJECTED_DTYPES {
         assert_both_ingresses_reject_once(
-            &surf(&format!("def ident(x: {name}) = 0.0f32")),
+            &surf(&format!("def ident(x: {name}) -> {name} = x")),
             name,
             nearest,
+        );
+    }
+}
+
+#[test]
+fn distinct_unknown_surf_scalar_names_keep_distinct_diagnostics() {
+    let program = surf("def convert(x: float32) -> fp32 = x");
+    let ir = diagnostics(check_ir_program(&program));
+    let typed = diagnostics(check_typed_program(&program));
+    assert_eq!(
+        typed, ir,
+        "checker ingresses must preserve diagnostic order"
+    );
+    assert_eq!(
+        ir.len(),
+        2,
+        "distinct invalid names need distinct owners: {ir:?}"
+    );
+    for name in ["float32", "fp32"] {
+        assert_eq!(
+            ir.iter()
+                .filter(|diagnostic| diagnostic.message.contains(&format!("`{name}`")))
+                .count(),
+            1,
+            "`{name}` must have exactly one diagnostic: {ir:?}"
         );
     }
 }
@@ -166,22 +191,63 @@ fn explicit_deep_t_var_nodes_remain_valid_binders() {
 }
 
 #[test]
-fn active_primitive_names_cannot_be_rebound_by_deep_t_var_nodes() {
-    for name in ["f32", "i64", "bool"] {
+fn forbidden_dtype_names_reject_once_at_the_deep_binder_list() {
+    for (name, ty, body) in [
+        (
+            "f32",
+            "(t-fn {} (t-tensor {} (d-var {} f32) (t-prim {} i32)) (t-prim {} i32))",
+            "(fn {} (params {} x) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "f8e4m3",
+            "(t-fn {} (t-tensor {} (d-var {} f8e4m3) (t-prim {} i32)) (t-prim {} i32))",
+            "(fn {} (params {} x) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "i32",
+            "(t-fn {} (t-tensor {} (d-rank {} i32) (t-prim {} f32)) (t-prim {} i32))",
+            "(fn {} (params {} x) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "f8e5m2",
+            "(t-fn {} (t-tensor {} (d-rank {} f8e5m2) (t-prim {} f32)) (t-prim {} i32))",
+            "(fn {} (params {} x) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "bool",
+            "(t-fn {} (t-prim {} i32))",
+            "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "u8",
+            "(t-fn {} (t-prim {} i32))",
+            "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "int32",
+            "(t-fn {} (t-prim {} i32))",
+            "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
+        ),
+        (
+            "complex64",
+            "(t-fn {} (t-prim {} i32))",
+            "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
+        ),
+    ] {
         let program = parse_deep(&format!(
             "(defsig {{}} ident ({name})
-               (t-fn {{}} (t-var {{}} {name}) (t-prim {{}} f32)))
-             (def {{}} ident (fn {{}} (params {{}} x) (var {{}} x)))"
+               {ty})
+             (def {{}} ident {body})"
         ))
         .expect("Deep fixture must parse");
         let ir = diagnostics(check_ir_program(&program));
         let typed = diagnostics(check_typed_program(&program));
-        assert_eq!(typed, ir, "active-primitive rejection parity for `{name}`");
+        assert_eq!(typed, ir, "forbidden-binder rejection parity for `{name}`");
         assert_eq!(ir.len(), 1, "`{name}` must report once: {ir:?}");
         assert!(
-            ir[0].message.contains("active primitive")
+            ir[0].message.contains("cannot be a `defsig` binder")
                 && ir[0].message.contains(&format!("`{name}`")),
-            "wrong active-primitive binder diagnostic: {ir:?}"
+            "wrong forbidden-binder diagnostic: {ir:?}"
         );
     }
 }
@@ -191,12 +257,70 @@ fn explicit_deep_unknown_primitives_reject_like_desugared_surf() {
     for (name, nearest) in REJECTED_DTYPES {
         let program = parse_deep(&format!(
             "(defsig {{}} ident
-               (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} f32)))
+               (t-fn {{}} (t-prim {{}} {name}) (t-prim {{}} {name})))
              (def {{}} ident
-               (fn {{}} (params {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.0)))"
+               (fn {{}} (params {{}} x) (var {{}} x)))"
         ))
         .expect("Deep fixture must parse");
         assert_both_ingresses_reject_once(&program, name, nearest);
+    }
+}
+
+#[test]
+fn distinct_unknown_deep_scalar_names_keep_distinct_diagnostics() {
+    let program = parse_deep(
+        "(defsig {} convert
+           (t-fn {} (t-prim {} float32) (t-prim {} fp32)))
+         (def {} convert (fn {} (params {} x) (var {} x)))",
+    )
+    .expect("Deep fixture must parse");
+    let ir = diagnostics(check_ir_program(&program));
+    let typed = diagnostics(check_typed_program(&program));
+    assert_eq!(
+        typed, ir,
+        "checker ingresses must preserve diagnostic order"
+    );
+    assert_eq!(
+        ir.len(),
+        2,
+        "distinct invalid names need distinct owners: {ir:?}"
+    );
+    for name in ["float32", "fp32"] {
+        assert_eq!(
+            ir.iter()
+                .filter(|diagnostic| diagnostic.message.contains(&format!("`{name}`")))
+                .count(),
+            1,
+            "`{name}` must have exactly one diagnostic: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn arbitrary_non_dtype_names_remain_legal_deep_binders() {
+    for (ty, body) in [
+        (
+            "(t-fn {} (t-tensor {} (d-var {} float32) (t-prim {} f32)) \
+                       (t-tensor {} (d-var {} float32) (t-prim {} f32)))",
+            "(fn {} (params {} x) (var {} x))",
+        ),
+        (
+            "(t-fn {} (t-tensor {} (d-rank {} float32) (t-prim {} f32)) \
+                       (t-tensor {} (d-rank {} float32) (t-prim {} f32)))",
+            "(fn {} (params {} x) (var {} x))",
+        ),
+        (
+            "(t-fn {} (t-prim {} i32))",
+            "(fn {} (params {}) (lit {type: (t-prim {} i32)} 0))",
+        ),
+    ] {
+        let program = parse_deep(&format!(
+            "(defsig {{}} ident (float32) {ty})
+             (def {{}} ident {body})"
+        ))
+        .expect("Deep fixture must parse");
+        check_ir_program(&program).expect("arbitrary Deep binder must remain legal");
+        check_typed_program(&program).expect("typed ingress must agree");
     }
 }
 

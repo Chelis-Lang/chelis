@@ -21,6 +21,9 @@ use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
 
 use crate::ast::*;
+pub(crate) use crate::dtype_name::{
+    canonical_primitive_name, is_reserved_dtype_name, migrated_integer_dtype_name,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -810,91 +813,6 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
         TypeExpr::Tuple(items, _) => items.iter().any(|item| type_mentions_name(item, name)),
         TypeExpr::Infer(_) => false,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Primitive type names
-// ---------------------------------------------------------------------------
-
-// `f8e4m3` is reserved, not active. DEFERRED_DTYPE_NAMES below keeps it
-// on the primitive-request path so the checker reports [04-DTYPE-1].
-const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "i8", "i16", "i32", "i64", "bool", "string", "unit",
-];
-
-/// The canonical primitive spelling for a type-position name, or `None` when
-/// the name is not a primitive at all.
-///
-/// chelis#1592 makes the literal-suffix spellings (`i8`..`i64`) the sole
-/// canonical signed-integer names in Surf and Deep. Retired `int*` source is
-/// handled only by the versioned migration command below.
-pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
-    PRIMITIVES
-        .iter()
-        .copied()
-        .find(|primitive| *primitive == name)
-}
-
-const RETIRED_INTEGER_DTYPE_NAMES: &[&str] = &["int8", "int16", "int32", "int64"];
-
-pub(crate) fn is_retired_integer_dtype_name(name: &str) -> bool {
-    RETIRED_INTEGER_DTYPE_NAMES.contains(&name)
-}
-
-pub(crate) fn migrated_integer_dtype_name(name: &str) -> Option<&'static str> {
-    match name {
-        "int8" => Some("i8"),
-        "int16" => Some("i16"),
-        "int32" => Some("i32"),
-        "int64" => Some("i64"),
-        _ => None,
-    }
-}
-
-/// Unsigned dtype names, deferred per `spec/04-type-system.md` §1.1.1
-/// (§1.1.2 names the `uint*` spellings canonical; the short `u*`
-/// spellings are not reserved). These are not in the active numeric
-/// primitive set, but they are well-known dtype identifiers that users
-/// (especially LLMs translating from numpy/PyTorch) reach for. Treat
-/// them as "intended-precision" identifiers in desugar so they reach
-/// the type-checker's §1.1.1 rejection path with a precise diagnostic,
-/// NOT as candidate quantified type variables.
-///
-/// Mirrors `chelis_types::deep_type::is_unsigned_dtype_name`. Kept as a
-/// parallel const here because chelis-surf does not depend on
-/// chelis-types and pulling in the dependency just for this list
-/// would invert the desugar / typecheck layering.
-const UNSIGNED_DTYPE_NAMES: &[&str] = &[
-    "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
-];
-
-/// Reserved dtype names must reach the checker as `t-prim`, not `t-var`.
-/// The internal `Prim::F8e4m3` variant does not authorize a Surf binder.
-const DEFERRED_DTYPE_NAMES: &[&str] = &[
-    "f8e4m3",
-    "f8e5m2",
-    "int4",
-    "uint4",
-    "complex64",
-    "complex128",
-    "decimal128",
-    "decimal256",
-];
-
-/// True if `name` is reserved under `spec/04-type-system.md` §1.1.1 and
-/// therefore names no type at all: the §1.1.2 unsigned spellings or one of the
-/// other reserved-but-deferred names.
-///
-/// A reserved spelling is not a candidate type variable and is not rebindable
-/// by an explicit quantifier list. §5.8.1 states the rule on the category, so
-/// this predicate is the category and every type-name decision below consults
-/// exactly it. Splitting the two lists across two decisions is what let
-/// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
-/// (chelis#1593).
-pub(crate) fn is_reserved_dtype_name(name: &str) -> bool {
-    UNSIGNED_DTYPE_NAMES.contains(&name)
-        || DEFERRED_DTYPE_NAMES.contains(&name)
-        || is_retired_integer_dtype_name(name)
 }
 
 // ---------------------------------------------------------------------------

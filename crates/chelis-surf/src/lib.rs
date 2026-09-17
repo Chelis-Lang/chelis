@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod decompile;
 pub mod desugar;
+mod dtype_name;
 pub mod format;
 pub mod lexer;
 pub mod parser;

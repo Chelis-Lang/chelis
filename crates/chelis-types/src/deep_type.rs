@@ -212,6 +212,10 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     type_vars: UnordMap<String, TypeVar>,
     dim_vars: UnordMap<String, DimVar>,
     rank_vars: UnordMap<String, RankVar>,
+    /// First diagnostic witness for each rejected primitive spelling in this
+    /// declaration/name scope. Repeated occurrences propagate that witness
+    /// instead of emitting one diagnostic per type-tree occurrence.
+    rejected_primitive_names: UnordMap<String, ErrorWitness>,
     /// Declared dtype-family bounds, keyed by binder name
     /// (`spec/04-type-system.md` §5.9 [04-DTYPE-2]). Empty for every
     /// declaration that declares no bound.
@@ -247,6 +251,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             type_vars: UnordMap::new(),
             dim_vars: UnordMap::new(),
             rank_vars: UnordMap::new(),
+            rejected_primitive_names: UnordMap::new(),
             dtype_bounds: UnordMap::new(),
             installed_bounds: Vec::new(),
             owner_location: None,
@@ -533,10 +538,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     // through the same [04-DTYPE-1] rejection.
                     let tensor = self.resolving_tensor_precision;
                     let diagnostic = f8e4m3_diagnostic(tensor);
-                    let diagnostic = self
-                        .diagnostic_location()
-                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
-                    return Err(report_witness(self.errors, diagnostic));
+                    return Err(self.report_primitive_diagnostic_once(name, diagnostic));
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -561,20 +563,21 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     .or_else(|| unsigned_family_diagnostic(name, tensor))
                     .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
-                    let diagnostic = self
-                        .diagnostic_location()
-                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
-                    return Err(report_witness(self.errors, diagnostic));
+                    return Err(self.report_primitive_diagnostic_once(name, diagnostic));
                 }
                 let nearest = nearest_active_dtype(name);
-                Err(self.type_error_with_suggestions(
-                    format!(
-                        "unknown primitive type `{name}` in {}",
-                        self.use_site.label()
+                Err(self.report_primitive_diagnostic_once(
+                    name,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "unknown primitive type `{name}` in {}",
+                            self.use_site.label()
+                        ),
+                        vec![format!(
+                            "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
+                        )],
                     ),
-                    vec![format!(
-                        "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
-                    )],
                 ))
             }
             Some(DeepTag::TVar) => {
@@ -893,6 +896,23 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .map_or(error.clone(), |location| location.attach(error));
         report_witness(self.errors, error)
     }
+
+    fn report_primitive_diagnostic_once(
+        &mut self,
+        name: &str,
+        diagnostic: CheckError,
+    ) -> ErrorWitness {
+        if let Some(witness) = self.rejected_primitive_names.get(name).copied() {
+            return witness;
+        }
+        let diagnostic = self
+            .diagnostic_location()
+            .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+        let witness = report_witness(self.errors, diagnostic);
+        self.rejected_primitive_names
+            .insert(name.to_string(), witness);
+        witness
+    }
 }
 
 const ACTIVE_DTYPE_NAMES: &[&str] = &[
@@ -997,6 +1017,17 @@ pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
 
 pub(crate) fn is_retired_integer_dtype_name(name: &str) -> bool {
     matches!(name, "int8" | "int16" | "int32" | "int64")
+}
+
+/// Active primitive names and every reserved, retired, or deferred dtype
+/// spelling are not declaration binders. An unknown intentional name such as
+/// `float32` remains available for explicit generic use.
+pub(crate) fn is_forbidden_dtype_binder_name(name: &str) -> bool {
+    name == "unit"
+        || Prim::parse_name(name).is_some()
+        || is_unsigned_dtype_name(name)
+        || is_deferred_dtype_name(name)
+        || is_retired_integer_dtype_name(name)
 }
 
 pub(crate) fn retired_integer_diagnostic(

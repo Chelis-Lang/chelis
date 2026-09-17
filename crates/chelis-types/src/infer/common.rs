@@ -1269,6 +1269,9 @@ pub(super) fn valid_defsig_binder_names(
     let mut names = UnordSet::new();
     for item in items {
         let name = symbol_name(item)?;
+        if crate::deep_type::is_forbidden_dtype_binder_name(name) {
+            return None;
+        }
         if !names.insert(name.to_string()) {
             return None;
         }
@@ -1313,6 +1316,18 @@ pub(super) fn defsig_binder_names(
             ));
             return None;
         };
+        if crate::deep_type::is_forbidden_dtype_binder_name(name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "dtype spelling `{name}` cannot be a `defsig` binder: active, reserved, retired, and deferred dtype vocabulary is not rebindable"
+                ),
+                vec![format!(
+                    "remove `{name}` from the binder list and use its canonical dtype meaning, or choose an intentional non-dtype binder name"
+                )],
+            ));
+            return None;
+        }
         if !names.insert(name.to_string()) {
             errors.push(CheckError::new(
                 CheckErrorKind::DuplicateDefinition,

@@ -212,8 +212,8 @@ sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
 
 ```chelis-deep-fragment
 (t-fn {eff: (effects {} random)}
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (d-name {} n) (t-prim {} f32)))
+  (t-tensor {} (d-var {} n) (t-prim {} f32))
+  (t-tensor {} (d-var {} n) (t-prim {} f32)))
 ```
 
 Effect inference runs after type inference. A function's effect set is the union of the
@@ -239,7 +239,7 @@ def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 ```chelis-deep-fragment
-(t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
 ```
 
 Passing an owned value where a borrow is expected auto-borrows. Passing a borrow where an

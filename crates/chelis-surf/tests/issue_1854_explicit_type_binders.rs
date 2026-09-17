@@ -151,12 +151,52 @@ fn dimension_and_rank_variables_require_declared_binders() {
 }
 
 #[test]
-fn active_primitives_are_never_rebound_by_a_binder_list() {
-    let rendered = deep("def ident[f32](x: f32) -> f32 = x");
-    assert!(
-        rendered.contains("(t-prim {} f32)") && !rendered.contains("(t-var {} f32)"),
-        "the active primitive vocabulary must outrank binder spelling: {rendered}"
-    );
+fn forbidden_dtype_vocabulary_is_rejected_at_the_surf_binder_list() {
+    for (name, source) in [
+        ("f32", "def shaped[f32](x: tensor[f32, i32]) -> i32 = 0i32"),
+        (
+            "f8e4m3",
+            "def shaped[f8e4m3](x: tensor[f8e4m3, i32]) -> i32 = 0i32",
+        ),
+        (
+            "i32",
+            "def shaped[i32](x: tensor[..i32, f32]) -> i32 = 0i32",
+        ),
+        (
+            "f8e5m2",
+            "def shaped[f8e5m2](x: tensor[..f8e5m2, f32]) -> i32 = 0i32",
+        ),
+        ("bool", "def constant[bool]() -> i32 = 1i32"),
+        ("u8", "def constant[u8]() -> i32 = 1i32"),
+        ("int32", "def constant[int32]() -> i32 = 1i32"),
+        ("complex64", "def constant[complex64]() -> i32 = 1i32"),
+    ] {
+        let error = parse_str(source).expect_err("dtype vocabulary cannot be rebound");
+        assert!(
+            error.to_string().contains(&format!("`{name}`"))
+                && error.to_string().contains("cannot be a declaration binder"),
+            "wrong forbidden-binder diagnostic for `{name}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn arbitrary_non_dtype_names_remain_legal_surf_binders() {
+    for source in [
+        "def shaped[float32](x: tensor[float32, f32]) -> tensor[float32, f32] = x",
+        "def shaped[float32](x: tensor[..float32, f32]) -> tensor[..float32, f32] = x",
+        "def constant[float32]() -> i32 = 1i32",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(defsig {}")
+                && rendered.contains("(float32)")
+                && (rendered.contains("(d-var {} float32)")
+                    || rendered.contains("(d-rank {} float32)")
+                    || rendered.contains("(t-prim {} i32)")),
+            "an arbitrary intentional binder must remain legal: {source}\n{rendered}"
+        );
+    }
 }
 
 #[test]
@@ -218,6 +258,27 @@ fn defsig_resugar_arity_reports_the_two_or_three_child_contract() {
         assert!(
             error.to_string().contains("expects 2 or 3 children"),
             "the diagnostic must state the complete contract: {error}"
+        );
+    }
+}
+
+#[test]
+fn deep_defsig_ingress_reports_the_declared_arity_before_child_decoding() {
+    for (source, actual) in [
+        ("(defsig {} ident)", 1),
+        ("(defsig {} ident (a) (t-var {} a) (t-prim {} f32))", 4),
+    ] {
+        let error = parse_deep(source).expect_err("invalid defsig arity must reject");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!(
+                "wrong child count for `defsig`: expected Range(2, 3), got {actual}"
+            )),
+            "arity must preempt child decoding for `{source}`: {rendered}"
+        );
+        assert!(
+            !rendered.contains("undecodable type head"),
+            "a child-role diagnostic must not mask the defsig arity: {rendered}"
         );
     }
 }

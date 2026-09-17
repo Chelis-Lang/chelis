@@ -27,8 +27,8 @@ In Deep the effect set is `eff` metadata on the function type:
 
 ```chelis-deep-fragment
 (t-fn {eff: (effects {} random)}
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (d-name {} n) (t-prim {} f32)))
+  (t-tensor {} (d-var {} n) (t-prim {} f32))
+  (t-tensor {} (d-var {} n) (t-prim {} f32)))
 ```
 
 ## Handlers

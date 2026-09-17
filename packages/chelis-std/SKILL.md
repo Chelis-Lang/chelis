@@ -155,31 +155,33 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   add_vec
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   add_vec
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (y {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (y {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} add) (var {} x) (var {} y))))
 ```
 
 ```chelis-deep
 (defsig {}
   twice_then_relu
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   twice_then_relu
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (let {}
       (bind {} y (app {} (var {} add) (var {} x) (var {} x)))
       (app {} (var {} relu) (var {} y)))))
@@ -188,14 +190,15 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   relu_then_softmax
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   relu_then_softmax
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {}
       (var {} softmax)
       (app {} (var {} relu) (var {} x))
@@ -205,17 +208,18 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   classify
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
     (t-tensor {} (t-prim {} f32))))
 
 (def {}
   classify
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (labels {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (labels {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (let {}
       (bind {}
         logits
@@ -235,37 +239,40 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   logistic_step
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   logistic_step
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} sigmoid) (var {} x))))
 ```
 
 ```chelis-deep
 (defsig {}
   clamp_low
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   clamp_low
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (low {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (low {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} max_elem) (var {} x) (var {} low))))
 ```
 
 ```chelis-deep
 (defsig {}
   identity
+  (a)
   (t-fn {}
     (t-tensor {} (d-var {} a) (t-prim {} f32))
     (t-tensor {} (d-var {} a) (t-prim {} f32))))
@@ -294,17 +301,18 @@ map, calls use `app`, references use `var`, and literals carry a type.
 
 (defsig {}
   activate
+  (n)
   (t-fn {}
     (t-adt {} Activation)
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   activate
   (fn {}
     (params {}
       (act {type: (t-adt {} Activation)})
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (match {}
       (var {} act)
       (arm {} (pat-ctor {} Relu) () (app {} (var {} relu) (var {} x)))

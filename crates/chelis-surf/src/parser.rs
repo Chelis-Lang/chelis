@@ -125,6 +125,18 @@ pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError>
         {
             let mut declared = UnordSet::new();
             for binder in type_binders {
+                if crate::dtype_name::is_forbidden_binder_name(&binder.name) {
+                    return Err(ParseError::Expected {
+                        expected:
+                            "a declaration binder outside the primitive and reserved dtype vocabulary"
+                                .into(),
+                        found: format!(
+                            "dtype spelling `{}` cannot be a declaration binder",
+                            binder.name
+                        ),
+                        offset: span.offset,
+                    });
+                }
                 if !declared.insert(binder.name.as_str()) {
                     return Err(ParseError::Expected {
                         expected: "one declaration per binder".into(),

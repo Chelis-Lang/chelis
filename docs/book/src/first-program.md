@@ -31,13 +31,13 @@ Deep is the stable machine form that shell tooling can inspect.
   relu_then_softmax
   (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   relu_then_softmax
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {}
       (var {} softmax)
       (app {} (var {} relu) (var {} x))

@@ -50,7 +50,7 @@ A missing inner extent is an error; empty payloads do not supply shape evidence.
 def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
-Both arguments share the named dimension `n`, so the checker requires the two inputs to
+Both arguments share the dimension variable `n`, so the checker requires the two inputs to
 have the same length and gives the result that same length.
 
 ## Reading the Deep shape
@@ -63,9 +63,9 @@ A `def` with annotations desugars to a signature plus the function. The signatur
   add_vec
   (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 ```
 
 ## Dimension polymorphism
