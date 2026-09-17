@@ -1,9 +1,11 @@
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
-use chelis_ir::vmap::{vectorize_axis0, vectorize_axis0_with_node_map};
+use chelis_ir::vmap::{
+    vectorize_axis0, vectorize_axis0_with_node_map, vectorize_axis0_with_node_map_and_captures,
+};
 use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
-use chelis_unord::UnordMap;
+use chelis_unord::{UnordMap, UnordSet};
 
 /// #2003: a metadata read is scalar even without a movement-bound consumer.
 #[test]
@@ -152,6 +154,62 @@ fn vmap_elementwise_vectorizes_axis_zero() {
     assert_eq!(
         value.to_f64_lossy_vec(),
         vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]
+    );
+}
+
+#[test]
+fn vmap_capture_keeps_authored_load_rank_and_maps_to_explicit_insert() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
+    let w = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], vec_f32(2), None);
+    let product = dag.add_node(RiscOp::Mul, vec![x, w], vec_f32(2), None);
+    dag.add_root(product);
+
+    let captures = UnordSet::from(["w".to_string()]);
+    let (mapped, node_map) =
+        vectorize_axis0_with_node_map_and_captures(&dag, DimInfo::Lit(3), &captures)
+            .expect("capture-aware vmap");
+    let lifted = mapped.get(node_map[w.0]).expect("mapped capture identity");
+    assert!(
+        matches!(
+            lifted.op,
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::RtDim::Lit(3)
+            }
+        ),
+        "capture identity must be an explicit rank-inserting movement: {lifted:?}"
+    );
+    let raw = mapped.get(lifted.inputs[0]).expect("raw capture load");
+    assert_eq!(raw.output_type, vec_f32(2));
+    assert!(matches!(&raw.op, RiscOp::Load { name } if name == "w"));
+    assert_eq!(
+        mapped
+            .get(node_map[x.0])
+            .expect("mapped formal")
+            .output_type,
+        mat_f32(3, 2),
+        "an actual mapped formal still receives the batch axis"
+    );
+    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+
+    let value = eval_root(
+        &mapped,
+        &UnordMap::from([
+            (
+                "x".to_string(),
+                TensorValue::from_vec(vec![3, 2], vec![1.0, 1.0, 2.0, 2.0, 0.0, 1.0]),
+            ),
+            (
+                "w".to_string(),
+                TensorValue::from_vec(vec![2], vec![10.0, 20.0]),
+            ),
+        ]),
+    );
+    assert_eq!(value.shape, vec![3, 2]);
+    assert_eq!(
+        value.to_f64_lossy_vec(),
+        vec![10.0, 20.0, 20.0, 40.0, 0.0, 20.0]
     );
 }
 
