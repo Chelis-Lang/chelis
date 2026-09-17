@@ -8286,6 +8286,14 @@ fn check_accepts_supported_core_transform_targets() {
              }\n",
         ),
         (
+            "vmap_local_binding_ascription",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped: tensor[4, 3, f32] -> tensor[3, f32] = \
+                 fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
             "vmap_typed_shadow_of_module_alias",
             "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
              mapped = reduce\n\
@@ -8402,6 +8410,49 @@ fn check_accepts_supported_core_transform_targets() {
             );
         }
     }
+
+    let mut multi_module_deep = Vec::new();
+    for (stem, source) in [
+        (
+            "alpha_transform_name",
+            "module Alpha\n\
+             def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n",
+        ),
+        (
+            "beta_local_shadow",
+            "module Beta\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               reduce = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(reduce)(t)\n\
+             }\n",
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        write_file(&path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        multi_module_deep.extend(deep);
+        multi_module_deep.push(b'\n');
+    }
+    let multi_module_path = dir.path().join("module_scoped_transform_names.dp");
+    fs::write(&multi_module_path, multi_module_deep).expect("write combined module Deep");
+    let json = run_json_check(&multi_module_path);
+    assert_eq!(
+        json["score"].as_f64(),
+        Some(1.0),
+        "an unrelated module's function name must not taint a local lambda: {json}"
+    );
+    assert!(
+        json["errors"].as_array().is_some_and(Vec::is_empty),
+        "module-scoped transform provenance must remain isolated: {json}"
+    );
 }
 
 /// #1887, #1952, #1954, and #2109: local aliases, shadowing local lambdas,

@@ -107,17 +107,23 @@ pub(super) fn validate_semantic_program(
 /// remain in spec/06; the release supported-fragment document records this
 /// temporary admission fence.
 fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let top_level_functions = collect_top_level_function_names(exprs);
-    let module_values = collect_top_level_transform_values(exprs, &top_level_functions);
-    let lexical_scope = CoreTransformScope::default();
-    for expr in top_level_decl_items(exprs) {
-        walk_core_transform_targets(
-            expr,
-            &top_level_functions,
-            &module_values,
-            &lexical_scope,
-            errors,
-        );
+    let mut module_items: UnordMap<Option<String>, Vec<&deep::Expr>> = UnordMap::new();
+    for (module, expr) in top_level_decl_items_with_modules(exprs) {
+        module_items.entry(module).or_default().push(expr);
+    }
+    for (_, items) in module_items.to_sorted() {
+        let top_level_functions = collect_top_level_function_names(items);
+        let module_values = collect_top_level_transform_values(items, &top_level_functions);
+        let lexical_scope = CoreTransformScope::default();
+        for expr in items {
+            walk_core_transform_targets(
+                expr,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+                errors,
+            );
+        }
     }
 }
 
@@ -278,9 +284,9 @@ fn core_transform_value_matches_pattern(value: &CoreTransformValue, pattern: &de
     }
 }
 
-fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
+fn collect_top_level_function_names(exprs: &[&deep::Expr]) -> UnordSet<String> {
     let mut names = UnordSet::new();
-    for expr in top_level_decl_items(exprs) {
+    for expr in exprs {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
             continue;
         };
@@ -299,12 +305,12 @@ fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
 }
 
 fn collect_top_level_transform_values(
-    exprs: &[deep::Expr],
+    exprs: &[&deep::Expr],
     top_level_functions: &UnordSet<String>,
 ) -> UnordMap<String, CoreTransformValue> {
     let mut module_values = UnordMap::new();
     let lexical_scope = CoreTransformScope::default();
-    for expr in top_level_decl_items(exprs) {
+    for expr in exprs {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
             continue;
         };
@@ -716,6 +722,16 @@ fn vmap_lambda_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
     let Some((DeepTag::Params, _, params)) = children.first().and_then(stamped_parts) else {
         return false;
     };
+    if let Some((effective_params, _)) = target
+        .and_then(|target| expr_type_expr(target, &IrTypeEnv::new()))
+        .as_ref()
+        .and_then(parse_t_fn_parts)
+        && effective_params.len() == params.len()
+    {
+        return effective_params
+            .iter()
+            .any(vmap_parameter_type_has_unmapped_hole);
+    }
     params
         .iter()
         .any(|param| match param_name_and_inline_type(param) {
@@ -2238,13 +2254,81 @@ mod core_transform_fragment_tests {
                       mapped = pair.0\n";
         let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
         let program = chelis_surf::desugar::desugar_program(&declarations);
-        let top_level_functions = collect_top_level_function_names(&program);
-        let module_values = collect_top_level_transform_values(&program, &top_level_functions);
+        let items = program.iter().collect::<Vec<_>>();
+        let top_level_functions = collect_top_level_function_names(&items);
+        let module_values = collect_top_level_transform_values(&items, &top_level_functions);
         assert!(
             module_values
                 .get("mapped")
                 .is_some_and(CoreTransformValue::aliases_top_level_function),
             "module tuple projection must retain top-level alias provenance"
+        );
+    }
+
+    #[test]
+    fn local_vmap_lambda_uses_effective_function_type_metadata() {
+        let top_level_functions = UnordSet::new();
+        let module_values = UnordMap::new();
+        let lexical_scope = CoreTransformScope::default();
+        let concrete = deep_type(
+            "(fn {type: (t-fn {} \
+               (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)) \
+               (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} \
+             (params {} v) (var {} v))",
+        );
+        assert_eq!(
+            classify_core_transform_value(
+                &concrete,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+            ),
+            CoreTransformValue::Ordinary,
+            "a local ascription supplies the pre-transform function structure"
+        );
+
+        let unresolved = deep_type(
+            "(fn {type: (t-fn {} (t-var {} _) (t-var {} _))} \
+             (params {} v) (var {} v))",
+        );
+        assert_eq!(
+            classify_core_transform_value(
+                &unresolved,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+            ),
+            CoreTransformValue::UntypedVmapLambda,
+            "an ascription containing a mapped type hole remains fenced"
+        );
+    }
+
+    #[test]
+    fn core_transform_provenance_is_scoped_by_enclosing_module() {
+        let source = "\
+          (module {} Alpha \
+            (def {} reduce \
+              (fn {} (params {} (v {type: \
+                (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) \
+                (var {} v)))) \
+          (module {} Beta \
+            (def {} probe \
+              (fn {} (params {} t) \
+                (let {} \
+                  (bind {} reduce \
+                    (fn {} (params {} (v {type: \
+                      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) \
+                      (var {} v))) \
+                  (vmap {} (var {} reduce))))))";
+        let program = chelis_deep::parser::parse_str(source).expect("canonical module program");
+        let result = crate::infer_program(&program);
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("core transform fragment")),
+            "Alpha.reduce must not taint Beta's local reduce: {:?}",
+            result.errors
         );
     }
 
