@@ -3,7 +3,9 @@ top-level functions at module or local scope, local bindings that shadow
 transform targets, and inline or locally bound `vmap` lambdas with untyped
 parameters, including whole or nested type holes, Deep rank holes, and lambdas
 forwarded through local alias chains, blocks, tuple destructuring, or
-match-pattern binding. See
+match-pattern binding. Direct projections, match results, and module or local
+bindings consume the same structural provenance, preserving tuple sibling
+isolation and lexical shadowing. See
 [#1887](https://github.com/Chelis-Lang/chelis/issues/1887),
 [#1952](https://github.com/Chelis-Lang/chelis/issues/1952), and
 [#1954](https://github.com/Chelis-Lang/chelis/issues/1954), with the

@@ -99,20 +99,22 @@ pub(super) fn validate_semantic_program(
 /// The walk is lexical rather than type-directed.  A local `loss` with the
 /// same function type as a top-level `loss` is exactly the #1954 hazard, so
 /// looking only at `Type::Fn` would recreate the silent global fallback.  The
-/// local values retain only the structural provenance this fence needs through
-/// transparent `let`, tuple, tuple-projection, and match-pattern flow; each
-/// binder replaces the previous value so lexical order and shadowing stay
-/// explicit. The normative transformation semantics remain in spec/06; the
-/// release supported-fragment document records this temporary admission fence.
+/// module and local values retain only the structural provenance this fence
+/// needs through transparent `let`, block result, tuple, tuple-projection,
+/// match-pattern, and match-result flow. The target is classified by that same
+/// representation, and each binder replaces the previous value so lexical
+/// order and shadowing stay explicit. The normative transformation semantics
+/// remain in spec/06; the release supported-fragment document records this
+/// temporary admission fence.
 fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let top_level_functions = collect_top_level_function_names(exprs);
-    let module_function_aliases = collect_top_level_function_aliases(exprs, &top_level_functions);
+    let module_values = collect_top_level_transform_values(exprs, &top_level_functions);
     let lexical_scope = CoreTransformScope::default();
     for expr in top_level_decl_items(exprs) {
         walk_core_transform_targets(
             expr,
             &top_level_functions,
-            &module_function_aliases,
+            &module_values,
             &lexical_scope,
             errors,
         );
@@ -146,6 +148,27 @@ impl CoreTransformValue {
 
     fn is_untyped_vmap_lambda(&self) -> bool {
         matches!(self, Self::UntypedVmapLambda)
+    }
+
+    /// Conservative union for alternate result paths. `Ordinary` carries no
+    /// hazard and is the bottom value; callable hazards dominate direct
+    /// targets, while equal tuple structures join element by element so
+    /// projection keeps sibling isolation.
+    fn join(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Ordinary, value) | (value, Self::Ordinary) => value.clone(),
+            (Self::TopLevelFunctionAlias, _) | (_, Self::TopLevelFunctionAlias) => {
+                Self::TopLevelFunctionAlias
+            }
+            (Self::UntypedVmapLambda, _) | (_, Self::UntypedVmapLambda) => Self::UntypedVmapLambda,
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| left.join(right))
+                    .collect(),
+            ),
+            (Self::Tuple(_), Self::Tuple(_)) => Self::Ordinary,
+        }
     }
 }
 
@@ -275,11 +298,12 @@ fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
     names
 }
 
-fn collect_top_level_function_aliases(
+fn collect_top_level_transform_values(
     exprs: &[deep::Expr],
     top_level_functions: &UnordSet<String>,
-) -> UnordSet<String> {
-    let mut aliases = UnordSet::new();
+) -> UnordMap<String, CoreTransformValue> {
+    let mut module_values = UnordMap::new();
+    let lexical_scope = CoreTransformScope::default();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
             continue;
@@ -288,17 +312,21 @@ fn collect_top_level_function_aliases(
         else {
             continue;
         };
-        if direct_module_function_alias(value, top_level_functions, &aliases) {
-            aliases.insert(name.to_string());
-        }
+        let value = classify_core_transform_value(
+            value,
+            top_level_functions,
+            &module_values,
+            &lexical_scope,
+        );
+        module_values.insert(name.to_string(), value);
     }
-    aliases
+    module_values
 }
 
 fn walk_core_transform_targets(
     expr: &deep::Expr,
     top_level_functions: &UnordSet<String>,
-    module_function_aliases: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
     lexical_scope: &CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -307,7 +335,7 @@ fn walk_core_transform_targets(
         walk_core_transform_targets(
             &meta.expr,
             top_level_functions,
-            module_function_aliases,
+            module_values,
             lexical_scope,
             errors,
         );
@@ -322,7 +350,7 @@ fn walk_core_transform_targets(
                 walk_core_transform_targets(
                     body,
                     top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     lexical_scope,
                     errors,
                 );
@@ -343,14 +371,14 @@ fn walk_core_transform_targets(
                 walk_core_transform_targets(
                     body,
                     top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     &scoped,
                     errors,
                 );
             }
         }
         DeepTag::Let => {
-            let Some(binding) = children.first() else {
+            let (Some(binding), Some(body)) = (children.first(), children.get(1)) else {
                 return;
             };
             let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(binding) else {
@@ -358,45 +386,46 @@ fn walk_core_transform_targets(
                     walk_core_transform_targets(
                         child,
                         top_level_functions,
-                        module_function_aliases,
+                        module_values,
                         lexical_scope,
                         errors,
                     );
                 }
                 return;
             };
-            if let Some(value) = bind_children.get(1) {
+            if !bind_children.len().is_multiple_of(2) {
+                for child in children {
+                    walk_core_transform_targets(
+                        child,
+                        top_level_functions,
+                        module_values,
+                        lexical_scope,
+                        errors,
+                    );
+                }
+                return;
+            }
+            let mut scoped = lexical_scope.clone();
+            for pair in bind_children.as_chunks::<2>().0 {
+                let value = &pair[1];
                 walk_core_transform_targets(
                     value,
                     top_level_functions,
-                    module_function_aliases,
-                    lexical_scope,
-                    errors,
-                );
-            }
-            let mut scoped = lexical_scope.clone();
-            if let Some(name) = bind_children.first().and_then(symbol_name) {
-                let value = bind_children
-                    .get(1)
-                    .map_or(CoreTransformValue::Ordinary, |value| {
-                        classify_core_transform_value(
-                            value,
-                            top_level_functions,
-                            module_function_aliases,
-                            lexical_scope,
-                        )
-                    });
-                scoped.bind_local(name.to_string(), value);
-            }
-            if let Some(body) = children.get(1) {
-                walk_core_transform_targets(
-                    body,
-                    top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     &scoped,
                     errors,
                 );
+                if let Some(name) = symbol_name(&pair[0]) {
+                    let value = classify_core_transform_value(
+                        value,
+                        top_level_functions,
+                        module_values,
+                        &scoped,
+                    );
+                    scoped.bind_local(name.to_string(), value);
+                }
             }
+            walk_core_transform_targets(body, top_level_functions, module_values, &scoped, errors);
         }
         DeepTag::Match => {
             let scrutinee_value =
@@ -406,7 +435,7 @@ fn walk_core_transform_targets(
                         classify_core_transform_value(
                             scrutinee,
                             top_level_functions,
-                            module_function_aliases,
+                            module_values,
                             lexical_scope,
                         )
                     });
@@ -414,7 +443,7 @@ fn walk_core_transform_targets(
                 walk_core_transform_targets(
                     scrutinee,
                     top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     lexical_scope,
                     errors,
                 );
@@ -424,7 +453,7 @@ fn walk_core_transform_targets(
                     walk_core_transform_targets(
                         arm,
                         top_level_functions,
-                        module_function_aliases,
+                        module_values,
                         lexical_scope,
                         errors,
                     );
@@ -438,7 +467,7 @@ fn walk_core_transform_targets(
                     walk_core_transform_targets(
                         child,
                         top_level_functions,
-                        module_function_aliases,
+                        module_values,
                         &scoped,
                         errors,
                     );
@@ -450,7 +479,7 @@ fn walk_core_transform_targets(
                 tag,
                 children.first(),
                 top_level_functions,
-                module_function_aliases,
+                module_values,
                 lexical_scope,
                 errors,
             );
@@ -458,7 +487,7 @@ fn walk_core_transform_targets(
                 walk_core_transform_targets(
                     child,
                     top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     lexical_scope,
                     errors,
                 );
@@ -469,7 +498,7 @@ fn walk_core_transform_targets(
                 walk_core_transform_targets(
                     child,
                     top_level_functions,
-                    module_function_aliases,
+                    module_values,
                     lexical_scope,
                     errors,
                 );
@@ -478,30 +507,19 @@ fn walk_core_transform_targets(
     }
 }
 
-fn direct_module_function_alias(
-    expr: &deep::Expr,
-    top_level_functions: &UnordSet<String>,
-    module_function_aliases: &UnordSet<String>,
-) -> bool {
-    stamped_parts(expr).is_some_and(|(tag, _, children)| {
-        tag == DeepTag::Var
-            && children.first().and_then(symbol_name).is_some_and(|name| {
-                top_level_functions.contains(name) || module_function_aliases.contains(name)
-            })
-    })
-}
-
-/// Preserve the transform-relevant identity of a local value through the
-/// transparent forms produced by Surf block and tuple-destructuring lowering.
+/// Preserve the transform-relevant identity of a module, local, result, or
+/// direct-target value through the transparent forwarding forms admitted by
+/// the release fragment.
 ///
 /// This deliberately is not general value inference: applications, branches,
-/// records, and arbitrary computation collapse to `Ordinary`. The fence only
-/// needs to retain a callable already known to be unsupported while it flows
-/// through lexical aliases or a statically selected tuple component.
+/// records, constructors, and arbitrary computation collapse to `Ordinary`.
+/// The fence only retains a callable already known to be unsupported while it
+/// flows through lexical aliases, blocks, match results, or statically selected
+/// tuple components.
 fn classify_core_transform_value(
     value: &deep::Expr,
     top_level_functions: &UnordSet<String>,
-    module_function_aliases: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
     lexical_scope: &CoreTransformScope,
 ) -> CoreTransformValue {
     stack_guard!(
@@ -513,7 +531,7 @@ fn classify_core_transform_value(
         return classify_core_transform_value(
             &meta.expr,
             top_level_functions,
-            module_function_aliases,
+            module_values,
             lexical_scope,
         );
     }
@@ -533,11 +551,10 @@ fn classify_core_transform_value(
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| {
-                    if top_level_functions.contains(name) || module_function_aliases.contains(name)
-                    {
+                    if top_level_functions.contains(name) {
                         CoreTransformValue::TopLevelFunctionAlias
                     } else {
-                        CoreTransformValue::Ordinary
+                        module_values.get(name).cloned().unwrap_or_default()
                     }
                 })
         }
@@ -548,7 +565,7 @@ fn classify_core_transform_value(
                     classify_core_transform_value(
                         child,
                         top_level_functions,
-                        module_function_aliases,
+                        module_values,
                         lexical_scope,
                     )
                 })
@@ -563,7 +580,7 @@ fn classify_core_transform_value(
             let CoreTransformValue::Tuple(elements) = classify_core_transform_value(
                 tuple,
                 top_level_functions,
-                module_function_aliases,
+                module_values,
                 lexical_scope,
             ) else {
                 return CoreTransformValue::Ordinary;
@@ -571,31 +588,70 @@ fn classify_core_transform_value(
             elements.get(index).cloned().unwrap_or_default()
         }
         DeepTag::Let => {
-            let Some((DeepTag::Bind, _, bind_children)) = children.first().and_then(stamped_parts)
+            let (Some((DeepTag::Bind, _, bind_children)), Some(body)) =
+                (children.first().and_then(stamped_parts), children.get(1))
             else {
                 return CoreTransformValue::Ordinary;
             };
-            let (Some(name), Some(bound_value), Some(body)) = (
-                bind_children.first().and_then(symbol_name),
-                bind_children.get(1),
-                children.get(1),
-            ) else {
+            if !bind_children.len().is_multiple_of(2) {
+                return CoreTransformValue::Ordinary;
+            }
+            let mut scoped = lexical_scope.clone();
+            for pair in bind_children.as_chunks::<2>().0 {
+                let Some(name) = symbol_name(&pair[0]) else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let bound_value = classify_core_transform_value(
+                    &pair[1],
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                );
+                scoped.bind_local(name.to_string(), bound_value);
+            }
+            classify_core_transform_value(body, top_level_functions, module_values, &scoped)
+        }
+        DeepTag::Block => children
+            .last()
+            .map_or(CoreTransformValue::Ordinary, |result| {
+                classify_core_transform_value(
+                    result,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                )
+            }),
+        DeepTag::Match => {
+            let Some(scrutinee) = children.first() else {
                 return CoreTransformValue::Ordinary;
             };
-            let bound_value = classify_core_transform_value(
-                bound_value,
+            let scrutinee_value = classify_core_transform_value(
+                scrutinee,
                 top_level_functions,
-                module_function_aliases,
+                module_values,
                 lexical_scope,
             );
-            let mut scoped = lexical_scope.clone();
-            scoped.bind_local(name.to_string(), bound_value);
-            classify_core_transform_value(
-                body,
-                top_level_functions,
-                module_function_aliases,
-                &scoped,
-            )
+            let mut result: Option<CoreTransformValue> = None;
+            for arm in children.iter().skip(1) {
+                let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let (Some(pattern), Some(body)) = (arm_children.first(), arm_children.get(2))
+                else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let mut scoped = lexical_scope.clone();
+                bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
+                let arm_value = classify_core_transform_value(
+                    body,
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                );
+                result =
+                    Some(result.map_or_else(|| arm_value.clone(), |known| known.join(&arm_value)));
+            }
+            result.unwrap_or_default()
         }
         _ => CoreTransformValue::Ordinary,
     }
@@ -672,7 +728,7 @@ fn validate_core_transform_target(
     tag: DeepTag,
     target: Option<&deep::Expr>,
     top_level_functions: &UnordSet<String>,
-    module_function_aliases: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
     lexical_scope: &CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -685,28 +741,15 @@ fn validate_core_transform_target(
     let shadows_top_level = name.is_some_and(|name| {
         top_level_functions.contains(name) && lexical_scope.local_values.contains_key(name)
     });
-    // Resolve a target name in lexical order. A local binding is authoritative
-    // even when it carries no fence provenance; only an absent local may fall
-    // back to the older module alias with the same spelling.
-    let target_value = name.map(|name| {
-        lexical_scope
-            .local_values
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| {
-                if module_function_aliases.contains(name) {
-                    CoreTransformValue::TopLevelFunctionAlias
-                } else {
-                    CoreTransformValue::Ordinary
-                }
-            })
+    let direct_unshadowed_top_level = name.is_some_and(|name| {
+        top_level_functions.contains(name) && !lexical_scope.local_values.contains_key(name)
     });
-    let aliases_top_level_function = target_value
-        .as_ref()
-        .is_some_and(CoreTransformValue::aliases_top_level_function);
-    let aliases_untyped_vmap_lambda = target_value
-        .as_ref()
-        .is_some_and(CoreTransformValue::is_untyped_vmap_lambda);
+    let target_value = target.map_or(CoreTransformValue::Ordinary, |target| {
+        classify_core_transform_value(target, top_level_functions, module_values, lexical_scope)
+    });
+    let aliases_top_level_function =
+        !direct_unshadowed_top_level && target_value.aliases_top_level_function();
+    let aliases_untyped_vmap_lambda = target_value.is_untyped_vmap_lambda();
 
     let requires_fence = match tag {
         // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
@@ -716,12 +759,9 @@ fn validate_core_transform_target(
         // #1887 is specifically an inline lambda whose parameter was inferred
         // from the unsliced operand. Explicit parameter annotations provide
         // the pre-transform function type, so they remain supported.
-        // Aliases get the same direct-name fence as `grad`.
+        // Structurally forwarded aliases get the same fence as a direct alias.
         DeepTag::Vmap => {
-            vmap_lambda_has_untyped_parameter(target)
-                || aliases_untyped_vmap_lambda
-                || shadows_top_level
-                || aliases_top_level_function
+            aliases_untyped_vmap_lambda || shadows_top_level || aliases_top_level_function
         }
         _ => unreachable!("only transform tags call this validator"),
     };
@@ -2140,6 +2180,106 @@ mod core_transform_fragment_tests {
             .local_values
             .get(name)
             .unwrap_or_else(|| panic!("missing pattern binding `{name}`"))
+    }
+
+    #[test]
+    fn core_transform_value_classifier_covers_forwarding_and_results() {
+        let top_level_functions = UnordSet::new();
+        let module_values = UnordMap::new();
+        let lexical_scope = CoreTransformScope::default();
+        let untyped = "(fn {} (params {} v) (var {} v))";
+        let cases = [
+            (
+                "direct tuple projection",
+                format!(
+                    "(tuple-get {{}} (tuple {{}} {untyped} (lit {{type: (t-prim {{}} i32)}} 0)) \
+                     (lit {{type: (t-prim {{}} i32)}} 0))"
+                ),
+            ),
+            (
+                "transparent let result",
+                format!(
+                    "(let {{}} \
+                       (bind {{}} mapped {untyped} forwarded (var {{}} mapped)) \
+                       (var {{}} forwarded))"
+                ),
+            ),
+            (
+                "transparent block result",
+                format!("(block {{}} (lit {{type: (t-prim {{}} i32)}} 0) {untyped})"),
+            ),
+            (
+                "match result",
+                format!(
+                    "(match {{}} {untyped} \
+                       (arm {{}} (pat-var {{}} mapped) () (var {{}} mapped)))"
+                ),
+            ),
+        ];
+
+        for (name, source) in cases {
+            assert_eq!(
+                classify_core_transform_value(
+                    &deep_type(&source),
+                    &top_level_functions,
+                    &module_values,
+                    &lexical_scope,
+                ),
+                CoreTransformValue::UntypedVmapLambda,
+                "{name}: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_transform_values_use_structural_projection() {
+        let source = "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+                      pair = (reduce, 0i32)\n\
+                      mapped = pair.0\n";
+        let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
+        let program = chelis_surf::desugar::desugar_program(&declarations);
+        let top_level_functions = collect_top_level_function_names(&program);
+        let module_values = collect_top_level_transform_values(&program, &top_level_functions);
+        assert!(
+            module_values
+                .get("mapped")
+                .is_some_and(CoreTransformValue::aliases_top_level_function),
+            "module tuple projection must retain top-level alias provenance"
+        );
+    }
+
+    #[test]
+    fn alternate_result_join_preserves_hazards_and_tuple_siblings() {
+        let untyped = CoreTransformValue::UntypedVmapLambda;
+        let typed = CoreTransformValue::Ordinary;
+        assert_eq!(typed.join(&untyped), untyped);
+
+        let left = CoreTransformValue::Tuple(vec![
+            CoreTransformValue::UntypedVmapLambda,
+            CoreTransformValue::Ordinary,
+        ]);
+        let right = CoreTransformValue::Tuple(vec![
+            CoreTransformValue::Ordinary,
+            CoreTransformValue::TopLevelFunctionAlias,
+        ]);
+        assert_eq!(
+            left.join(&right),
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::UntypedVmapLambda,
+                CoreTransformValue::TopLevelFunctionAlias,
+            ])
+        );
+
+        assert_eq!(
+            CoreTransformValue::Tuple(vec![CoreTransformValue::UntypedVmapLambda]).join(
+                &CoreTransformValue::Tuple(vec![
+                    CoreTransformValue::Ordinary,
+                    CoreTransformValue::Ordinary,
+                ])
+            ),
+            CoreTransformValue::Ordinary,
+            "mismatched result structure must not invent transferable provenance"
+        );
     }
 
     #[test]

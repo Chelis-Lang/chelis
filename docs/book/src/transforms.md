@@ -22,10 +22,11 @@ because the tensor constructor and axis insertion are already determined;
 named type and rank variables remain governed by their ordinary binder rules.
 Surf uses `*` for a dynamic tensor extent and rejects `_` in tensor dimension,
 precision, or rank-spread slots. An unsupported lambda is rejected through
-local aliases and transparent local value flow, including block forwarding
-and tuple destructuring or match-pattern binding. Structural pattern and
-projection flow follows only the corresponding tuple component, and lexical
-shadowing replaces the earlier value.
+module or local aliases and transparent value flow, including block results,
+direct tuple projections, tuple destructuring, match-pattern binding, and
+match results. Structural pattern, result, and projection flow follows only
+the corresponding tuple component, and lexical shadowing replaces the earlier
+value.
 
 These are current supported-fragment fences, not changes to the language
 semantics in the numbered specification. The related launch rows are
