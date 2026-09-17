@@ -54,6 +54,15 @@ impl DeclarationDiagnosticOwner {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum UnknownPrimitiveDiagnosticOwner {
+    Declaration(DeclarationDiagnosticOwner),
+    Located {
+        span_offset: Option<usize>,
+        span_id: Option<String>,
+    },
+}
+
 /// The sole destination accepted by witness-minting checker code.
 ///
 /// Its storage and constructor are private to this module.  The narrow
@@ -62,7 +71,7 @@ impl DeclarationDiagnosticOwner {
 pub struct DiagnosticSink<'session> {
     errors: &'session mut Vec<CheckError>,
     declaration_unknown_primitive_witnesses:
-        UnordMap<(DeclarationDiagnosticOwner, String), ErrorWitness>,
+        UnordMap<(UnknownPrimitiveDiagnosticOwner, String), ErrorWitness>,
 }
 
 impl DiagnosticSink<'_> {
@@ -76,7 +85,10 @@ impl DiagnosticSink<'_> {
         primitive_name: &str,
     ) -> Option<ErrorWitness> {
         self.declaration_unknown_primitive_witnesses
-            .get(&(owner.clone(), primitive_name.to_string()))
+            .get(&(
+                UnknownPrimitiveDiagnosticOwner::Declaration(owner.clone()),
+                primitive_name.to_string(),
+            ))
             .copied()
     }
 
@@ -86,8 +98,49 @@ impl DiagnosticSink<'_> {
         primitive_name: String,
         witness: ErrorWitness,
     ) {
+        self.declaration_unknown_primitive_witnesses.insert(
+            (
+                UnknownPrimitiveDiagnosticOwner::Declaration(owner),
+                primitive_name,
+            ),
+            witness,
+        );
+    }
+
+    pub(crate) fn unknown_primitive_site_witness(
+        &self,
+        span_offset: Option<usize>,
+        span_id: Option<&str>,
+        primitive_name: &str,
+    ) -> Option<ErrorWitness> {
         self.declaration_unknown_primitive_witnesses
-            .insert((owner, primitive_name), witness);
+            .get(&(
+                UnknownPrimitiveDiagnosticOwner::Located {
+                    span_offset,
+                    span_id: span_id.map(str::to_string),
+                },
+                primitive_name.to_string(),
+            ))
+            .copied()
+    }
+
+    pub(crate) fn record_unknown_primitive_site_witness(
+        &mut self,
+        span_offset: Option<usize>,
+        span_id: Option<String>,
+        primitive_name: String,
+        witness: ErrorWitness,
+    ) {
+        self.declaration_unknown_primitive_witnesses.insert(
+            (
+                UnknownPrimitiveDiagnosticOwner::Located {
+                    span_offset,
+                    span_id,
+                },
+                primitive_name,
+            ),
+            witness,
+        );
     }
 
     pub(crate) fn is_empty(&self) -> bool {

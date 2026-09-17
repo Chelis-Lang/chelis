@@ -289,8 +289,8 @@ SHALL be rejected by the closed primitive resolver. The `[..]` clause SHALL over
 case-split so a listed PascalCase name is a type variable. A matching `def` SHALL NOT carry
 a second binder list. A declaration binder SHALL remain in scope for ordinary type
 positions in body-local lambda parameters, expression ascriptions, block bindings, and
-nested ADT arguments. A tensor precision slot in those body-local annotations SHALL remain
-a closed primitive request.
+nested ADT arguments, including tensor precision slots. One explicit declaration binder
+scope SHALL apply to every type position throughout the declaration body.
 
 #### Scenario: Property binders remain structural
 
@@ -318,10 +318,11 @@ a closed primitive request.
 - **WHEN** `def identity[p](x: p) -> p = (x: p)` uses `p` in an expression ascription
 - **THEN** that `p` desugars to the declaration's `t-var`
 
-#### Scenario: Body tensor precision remains closed
+#### Scenario: Body tensor precision uses the declaration scope
 
-- **WHEN** `def identity[n, p](x: tensor[n, p]) = (x: tensor[n, p])` uses `p` in a body-local tensor precision slot
-- **THEN** that body-local `p` remains a primitive request and is rejected by the closed primitive resolver
+- **WHEN** `def f[n, p](a: tensor[n, p]) -> tensor[n, p]` binds `b: tensor[n, p] = a`, returns `b`, and is called with a concrete tensor
+- **THEN** the body-local `p` desugars to the declaration's `t-var`
+- **AND** the Surf and canonical Deep programs type-check
 
 ### Requirement: Blocks and sequencing
 

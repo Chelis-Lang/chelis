@@ -354,47 +354,46 @@ fn explicit_surf_binders_and_active_primitives_check_clean() {
 }
 
 #[test]
-fn declaration_body_annotations_preserve_the_existing_role_sensitive_scope() {
+fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
     for source in [
         "def ident[p](x: p) -> p = { y: p = x\n y }",
         "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
         "def ident[p](x: p) -> p = (x: p)",
         "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
         "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
-    ] {
-        let program = surf(source);
-        check_ir_program(&program).unwrap_or_else(|report| {
-            panic!(
-                "IR ingress must accept body binder use in `{source}`: {:?}",
-                report.errors
-            )
-        });
-        check_typed_program(&program).unwrap_or_else(|report| {
-            panic!(
-                "typed ingress must accept body binder use in `{source}`: {:?}",
-                report.errors
-            )
-        });
-    }
-
-    for source in [
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          { y: tensor[n, p] = x\n y }",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          (x: tensor[n, p])",
+        "def f[n, p](a: tensor[n, p]) -> tensor[n, p] = \
+         { b: tensor[n, p] = a\n b }\n\
+         def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))",
     ] {
-        let program = surf(source);
-        let ir = diagnostics(check_ir_program(&program));
-        let typed = diagnostics(check_typed_program(&program));
-        assert_eq!(typed, ir, "checker ingress parity for `{source}`");
-        assert!(
-            ir.iter()
-                .any(|diagnostic| { diagnostic.message.contains("tensor element precision `p`") }),
-            "chelis#1904's existing tensor-annotation boundary must remain rejected: \
-             {source}\n{ir:?}"
-        );
+        let surf_program = surf(source);
+        let canonical_source = print_canonical_flat(&surf_program);
+        let canonical_program =
+            parse_deep(&canonical_source).expect("desugared body-binder Deep must parse");
+        for (carrier, program) in [
+            ("Surf-desugared Deep", surf_program.as_slice()),
+            ("canonical Deep", canonical_program.as_slice()),
+        ] {
+            check_ir_program(program).unwrap_or_else(|report| {
+                panic!(
+                    "normalized IR ingress must accept body binder use through {carrier} in \
+                     `{source}`: {:?}",
+                    report.errors
+                )
+            });
+            check_typed_program(program).unwrap_or_else(|report| {
+                panic!(
+                    "typed ingress must accept body binder use through {carrier} in `{source}`: \
+                     {:?}",
+                    report.errors
+                )
+            });
+        }
     }
 }
 
@@ -404,6 +403,7 @@ fn body_only_surf_binders_check_at_both_ingresses() {
         "def maker[p]() = fn (x: p) -> x",
         "def maker[n]() = fn (x: tensor[n, f32]) -> x",
         "def maker[r]() = fn (x: tensor[..r, f32]) -> x",
+        "def maker[p]() = fn (x: tensor[2, p]) -> x",
     ] {
         let program = surf(source);
         check_ir_program(&program).unwrap_or_else(|report| {
@@ -729,6 +729,11 @@ fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
             "undeclared dimension variable",
         ),
         (
+            "def maker() = fn (x: tensor[2, p]) -> x",
+            "p",
+            "unknown primitive type",
+        ),
+        (
             "def maker() = fn (x: tensor[..r, f32]) -> x",
             "r",
             "undeclared rank variable",
@@ -743,6 +748,21 @@ fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
             ir[0].message.contains(needle) && ir[0].message.contains(&format!("`{name}`")),
             "wrong undeclared Surf body-binder diagnostic: {ir:?}"
         );
+        assert_eq!(
+            ir[0].kind, "TypeMismatch",
+            "the shared type resolver must own undeclared body binders: {ir:?}"
+        );
+        if source.contains("tensor[2, p]") {
+            assert!(
+                ir[0].span_offset.is_some()
+                    && ir[0].span_id.is_some()
+                    && ir[0]
+                        .suggestions
+                        .iter()
+                        .any(|suggestion| suggestion.contains("declare `p`")),
+                "the undeclared precision owner must explain the explicit binder repair: {ir:?}"
+            );
+        }
     }
 }
 
@@ -783,6 +803,11 @@ fn canonical_deep_body_only_binders_fill_a_wildcard_result_at_both_ingresses() {
 fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
     for (name, annotation, needle) in [
         ("p", "(t-var {} p)", "undeclared type variable"),
+        (
+            "p",
+            "(t-tensor {} (d-lit {} 2) (t-prim {} p))",
+            "unknown primitive type",
+        ),
         (
             "n",
             "(t-tensor {} (d-var {} n) (t-prim {} f32))",

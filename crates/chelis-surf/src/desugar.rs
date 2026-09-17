@@ -192,7 +192,7 @@ impl DesugarCtx {
             .into_iter()
             .map(|(name, _)| name.clone())
             .collect();
-        desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true, false)
+        desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true)
     }
 
     fn new(decls: &[Decl]) -> Self {
@@ -2560,7 +2560,7 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
 /// names remain unkinded declaration binders and are emitted according to
 /// their position (`t-var`, `d-var`, or precision `t-var`).
 fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -> deep::Expr {
-    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false, true)
+    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
 }
 
 /// Desugar a sig against its complete explicit binder list.
@@ -2582,7 +2582,7 @@ fn desugar_type_with_scope(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
-    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true, true)
+    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true)
 }
 
 fn desugar_type_with_scope_mode(
@@ -2590,7 +2590,6 @@ fn desugar_type_with_scope_mode(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
     single_letter_dim_vars: bool,
-    tensor_precision_binders: bool,
 ) -> deep::Expr {
     let desugared = match ty {
         TypeExpr::DimensionLiteral(value, _) => node(DeepTag::DLit, vec![int(value.value())]),
@@ -2688,15 +2687,15 @@ fn desugar_type_with_scope_mode(
                             dim_vars,
                             tvar_set,
                             single_letter_dim_vars,
-                            tensor_precision_binders,
                         )],
                     ),
                 })
                 .collect();
-            // Explicit precision-binder rule (spec/04-type-system.md §5.8.1,
-            // spec/02-surf-syntax.md P4b): the precision slot is a t-var only
-            // when its name is in `tvar_set`; otherwise it stays as t-prim and
-            // the type checker validates it against the closed primitive set.
+            // Explicit precision-binder rule (spec/02-surf-syntax.md P4b):
+            // the declaration's one explicit binder scope applies to every
+            // type position, so a listed precision name is a t-var in both
+            // the signature and body. An unlisted name stays t-prim and the
+            // type checker validates it against the closed primitive set.
             let prec_node = match canonical_primitive_name(precision) {
                 Some(canonical) => node(DeepTag::TPrim, vec![sym(canonical)]),
                 // A §1.1.1 reserved spelling outranks the quantifier set here
@@ -2707,7 +2706,7 @@ fn desugar_type_with_scope_mode(
                 None if is_reserved_dtype_name(precision) => {
                     node(DeepTag::TPrim, vec![sym(precision)])
                 }
-                None if tensor_precision_binders && tvar_set.contains(precision.as_str()) => {
+                None if tvar_set.contains(precision.as_str()) => {
                     node(DeepTag::TVar, vec![sym(precision)])
                 }
                 // Not a primitive and not quantified: still `t-prim`, so the
@@ -2722,13 +2721,7 @@ fn desugar_type_with_scope_mode(
             let mut children: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| {
-                    desugar_type_with_scope_mode(
-                        p,
-                        dim_vars,
-                        tvar_set,
-                        single_letter_dim_vars,
-                        tensor_precision_binders,
-                    )
+                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, single_letter_dim_vars)
                 })
                 .collect();
             children.push(desugar_type_with_scope_mode(
@@ -2736,7 +2729,6 @@ fn desugar_type_with_scope_mode(
                 dim_vars,
                 tvar_set,
                 single_letter_dim_vars,
-                tensor_precision_binders,
             ));
             node(DeepTag::TFn, children)
         }
@@ -2748,20 +2740,13 @@ fn desugar_type_with_scope_mode(
                 dim_vars,
                 tvar_set,
                 single_letter_dim_vars,
-                tensor_precision_binders,
             )],
         ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
             children.extend(args.iter().map(|a| {
-                desugar_type_with_scope_mode(
-                    a,
-                    dim_vars,
-                    tvar_set,
-                    single_letter_dim_vars,
-                    tensor_precision_binders,
-                )
+                desugar_type_with_scope_mode(a, dim_vars, tvar_set, single_letter_dim_vars)
             }));
             node(DeepTag::TAdt, children)
         }
@@ -2772,13 +2757,7 @@ fn desugar_type_with_scope_mode(
             elems
                 .iter()
                 .map(|e| {
-                    desugar_type_with_scope_mode(
-                        e,
-                        dim_vars,
-                        tvar_set,
-                        single_letter_dim_vars,
-                        tensor_precision_binders,
-                    )
+                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, single_letter_dim_vars)
                 })
                 .collect(),
         ),

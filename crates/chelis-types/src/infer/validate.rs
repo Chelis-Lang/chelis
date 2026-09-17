@@ -856,6 +856,18 @@ struct TensorPrecisionOwner {
     occurrence: usize,
 }
 
+impl TensorPrecisionOwner {
+    fn declaration_diagnostic_owner(&self) -> Option<DeclarationDiagnosticOwner> {
+        (self.kind == TensorPrecisionOwnerKind::Value)
+            .then(|| {
+                self.name
+                    .as_deref()
+                    .map(|name| DeclarationDiagnosticOwner::new(self.scope.path.as_deref(), name))
+            })
+            .flatten()
+    }
+}
+
 struct TensorPrecisionItem<'a> {
     scope: TensorPrecisionScope,
     expr: &'a deep::Expr,
@@ -1041,7 +1053,16 @@ fn walk_for_tensor_precision(
                     // rejecting an otherwise unknown `t-prim` precision from
                     // value-position metadata. The reserved-name exclusions
                     // keep those spellings from acquiring a second owner.
-                    if Prim::parse_name(name).is_none()
+                    let resolved_by_type_boundary =
+                        TypeDiagnosticLocation::from_expr(last).is_some_and(|location| {
+                            errors.resolved_unknown_primitive_at(&location, name)
+                        }) || owner
+                            .declaration_diagnostic_owner()
+                            .is_some_and(|declaration| {
+                                errors.declaration_owns_unknown_primitive(&declaration, name)
+                            });
+                    if !resolved_by_type_boundary
+                        && Prim::parse_name(name).is_none()
                         && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
@@ -1052,8 +1073,10 @@ fn walk_for_tensor_precision(
                         // precision slot that is neither a known active
                         // primitive nor a §1.1.1 deferred dtype name is an
                         // unbound name. Declaration signatures returned
-                        // above, so this arm cannot duplicate their shared
-                        // resolver diagnostic.
+                        // above, and declaration body annotations consult the
+                        // session's shared resolver witness before this arm,
+                        // so this legacy fallback cannot duplicate their
+                        // located unknown-primitive diagnostic.
                         // Without this guard the name silently collapses
                         // to a witnessed resolution failure at the centralized
                         // Deep type boundary's

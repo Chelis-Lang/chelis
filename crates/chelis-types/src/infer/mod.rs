@@ -37,6 +37,22 @@ use crate::unify::*;
 
 trait DiagnosticOutput {
     fn push(&mut self, error: CheckError);
+
+    fn declaration_owns_unknown_primitive(
+        &self,
+        _owner: &DeclarationDiagnosticOwner,
+        _primitive_name: &str,
+    ) -> bool {
+        false
+    }
+
+    fn resolved_unknown_primitive_at(
+        &self,
+        _location: &TypeDiagnosticLocation,
+        _primitive_name: &str,
+    ) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -49,6 +65,25 @@ impl DiagnosticOutput for Vec<CheckError> {
 impl DiagnosticOutput for DiagnosticSink<'_> {
     fn push(&mut self, error: CheckError) {
         DiagnosticSink::push(self, error);
+    }
+
+    fn declaration_owns_unknown_primitive(
+        &self,
+        owner: &DeclarationDiagnosticOwner,
+        primitive_name: &str,
+    ) -> bool {
+        self.declaration_unknown_primitive_witness(owner, primitive_name)
+            .is_some()
+    }
+
+    fn resolved_unknown_primitive_at(
+        &self,
+        location: &TypeDiagnosticLocation,
+        primitive_name: &str,
+    ) -> bool {
+        let (span_offset, span_id) = location.stable_key();
+        self.unknown_primitive_site_witness(span_offset, span_id, primitive_name)
+            .is_some()
     }
 }
 

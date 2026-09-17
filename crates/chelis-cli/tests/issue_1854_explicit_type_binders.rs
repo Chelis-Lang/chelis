@@ -458,6 +458,45 @@ fn declared_surf_type_binders_and_active_primitives_score_one() {
 }
 
 #[test]
+fn body_tensor_precision_binder_scores_one_through_surf_and_canonical_deep() {
+    let dir = tempdir().expect("tempdir");
+    let source = "def f[n, p](a: tensor[n, p]) -> tensor[n, p] = {\n\
+                    b: tensor[n, p] = a\n\
+                    b\n\
+                  }\n\
+                  def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))\n";
+    fs::write(dir.path().join("body-precision.ch"), source).expect("write Surf fixture");
+
+    let deep = run(dir.path(), &["deep", "body-precision.ch"]);
+    assert!(
+        deep.status.success(),
+        "`chelis deep` failed: {}",
+        text(&deep)
+    );
+    let rendered = String::from_utf8_lossy(&deep.stdout);
+    assert!(
+        rendered.contains("(t-var {} p)") && !rendered.contains("(t-prim {} p)"),
+        "body tensor precision must lower through the declaration binder: {rendered}"
+    );
+    fs::write(dir.path().join("body-precision.dp"), &deep.stdout)
+        .expect("write canonical Deep fixture");
+
+    for path in ["body-precision.ch", "body-precision.dp"] {
+        let checked = check_json(dir.path(), path);
+        assert_eq!(
+            checked["score"].as_f64(),
+            Some(1.0),
+            "body tensor precision binder must score 1 through {path}: {checked}"
+        );
+        assert_eq!(
+            error_messages(&checked),
+            Vec::<&str>::new(),
+            "body tensor precision binder must have no diagnostic through {path}: {checked}"
+        );
+    }
+}
+
+#[test]
 fn cli_preserves_and_checks_body_only_surf_binders() {
     let dir = tempdir().expect("tempdir");
     for (index, source, binder, annotation) in [
@@ -757,6 +796,7 @@ fn cli_checks_canonical_deep_body_only_binders_and_rejects_undeclared_neighbors(
         (0, "p", "(t-var {} p)"),
         (1, "n", "(t-tensor {} (d-var {} n) (t-prim {} f32))"),
         (2, "r", "(t-tensor {} (d-rank {} r) (t-prim {} f32))"),
+        (3, "p", "(t-tensor {} (d-lit {} 2) (t-var {} p))"),
     ] {
         let declared_path = format!("deep-body-only-{index}.dp");
         fs::write(
@@ -806,7 +846,8 @@ fn cli_checks_canonical_deep_body_only_binders_and_rejects_undeclared_neighbors(
 
         let surf_path = format!("surf-body-undeclared-{index}.ch");
         let surf_annotation = match binder {
-            "p" => "p",
+            "p" if index == 0 => "p",
+            "p" => "tensor[2, p]",
             "n" => "tensor[n, f32]",
             "r" => "tensor[..r, f32]",
             _ => unreachable!("closed test table"),

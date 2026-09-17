@@ -109,6 +109,10 @@ impl TypeDiagnosticLocation {
         }
         error
     }
+
+    pub(crate) fn stable_key(&self) -> (Option<usize>, Option<&str>) {
+        (self.span_offset, self.span_id.as_deref())
+    }
 }
 
 fn span_offset_from_id(span_id: &str) -> Option<usize> {
@@ -917,15 +921,18 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
+        let location = self.diagnostic_location();
         let declaration_owner = self.declaration_diagnostic_owner.clone();
         if let Some(owner) = &declaration_owner
             && let Some(witness) = self
                 .errors
                 .declaration_unknown_primitive_witness(owner, name)
         {
+            self.record_unknown_primitive_site(location.as_ref(), name, witness);
             return witness;
         }
         let witness = self.report_primitive_diagnostic(diagnostic);
+        self.record_unknown_primitive_site(location.as_ref(), name, witness);
         if let Some(owner) = declaration_owner {
             self.errors.record_declaration_unknown_primitive_witness(
                 owner,
@@ -934,6 +941,24 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             );
         }
         witness
+    }
+
+    fn record_unknown_primitive_site(
+        &mut self,
+        location: Option<&TypeDiagnosticLocation>,
+        name: &str,
+        witness: ErrorWitness,
+    ) {
+        let Some(location) = location else {
+            return;
+        };
+        let (span_offset, span_id) = location.stable_key();
+        self.errors.record_unknown_primitive_site_witness(
+            span_offset,
+            span_id.map(str::to_string),
+            name.to_string(),
+            witness,
+        );
     }
 }
 

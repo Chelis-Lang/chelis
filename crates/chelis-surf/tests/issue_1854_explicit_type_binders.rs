@@ -109,34 +109,27 @@ fn matching_def_annotations_reuse_the_standalone_signature_binders() {
 }
 
 #[test]
-fn declaration_body_annotations_reuse_bare_type_binders_without_broadening_tensors() {
+fn declaration_body_annotations_reuse_one_explicit_binder_scope() {
     for source in [
         "def ident[p](x: p) -> p = { y: p = x\n y }",
         "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
         "def ident[p](x: p) -> p = (x: p)",
         "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
         "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
-    ] {
-        let rendered = deep(source);
-        assert!(
-            rendered.contains("(t-var {} p)") && !rendered.contains("(t-prim {} p)"),
-            "an enclosing declaration binder must cover ordinary body type positions: \
-             {source}\n{rendered}"
-        );
-    }
-
-    for source in [
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          { y: tensor[n, p] = x\n y }",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
         "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
          (x: tensor[n, p])",
+        "def f[n, p](a: tensor[n, p]) -> tensor[n, p] = \
+         { b: tensor[n, p] = a\n b }\n\
+         def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))",
     ] {
         let rendered = deep(source);
         assert!(
-            rendered.contains("(t-prim {} p)"),
-            "chelis#1904 remains the owner of body-local tensor precision scope: \
+            rendered.contains("(t-var {} p)") && !rendered.contains("(t-prim {} p)"),
+            "one declaration binder scope must cover every body type position: \
              {source}\n{rendered}"
         );
     }
@@ -315,7 +308,7 @@ fn property_binder_lists_reject_duplicate_and_forbidden_names() {
 }
 
 #[test]
-fn property_body_type_positions_use_the_declaration_scope_without_widening_tensors() {
+fn property_body_type_positions_use_one_declaration_scope() {
     let rendered = deep(
         "@property accepts[n, p] forall(x: p) where \
          (fn(y: p) -> true)(x):\n  (fn(z: tensor[n, p]) -> true)(to_tensor([x]))",
@@ -325,8 +318,41 @@ fn property_body_type_positions_use_the_declaration_scope_without_widening_tenso
         "ordinary quantifier and body types must see property binder `p`: {rendered}"
     );
     assert!(
-        rendered.contains("(d-var {} n)") && rendered.contains("(t-prim {} p)"),
-        "body-local tensor precision stays a closed primitive request: {rendered}"
+        rendered.contains("(d-var {} n)")
+            && rendered.contains("(t-var {} p)")
+            && !rendered.contains("(t-prim {} p)"),
+        "property tensor precision slots must share the declaration binder scope: {rendered}"
+    );
+}
+
+#[test]
+fn nested_module_body_tensor_precision_binders_round_trip() {
+    let source = "module Demo.BodyScope\n\
+                  def f[n, p](a: tensor[n, p]) -> tensor[n, p] = {\n\
+                    b: tensor[n, p] = a\n\
+                    b\n\
+                  }\n\
+                  def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))\n";
+    let parsed = parse_str(source).expect("nested-module fixture must parse");
+    let lowered = desugar_program(&parsed);
+    let rendered = print_canonical_flat(&lowered);
+    assert!(
+        rendered.contains("(module ")
+            && rendered.contains("(t-var {} p)")
+            && !rendered.contains("(t-prim {} p)"),
+        "nested module bodies must reuse their declaration binder scope: {rendered}"
+    );
+
+    let recovered = resugar_program(&lowered).expect("nested module must resugar");
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&desugar_program(&recovered))
+                .expect("recovered nested module must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&lowered)
+                .expect("original nested module must normalize"),
+        ),
     );
 }
 
@@ -376,6 +402,11 @@ fn body_annotations_without_a_declaration_binder_remain_unbound() {
     for (source, variable, forbidden) in [
         (
             "def maker() = fn (x: p) -> x",
+            "(t-prim {} p)",
+            "(t-var {} p)",
+        ),
+        (
+            "def maker() = fn (x: tensor[2, p]) -> x",
             "(t-prim {} p)",
             "(t-var {} p)",
         ),
