@@ -44,7 +44,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 2
-PLAN_VERSION = 4
+PLAN_VERSION = 3
 RECEIPT_VERSION = 1
 STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
@@ -52,6 +52,8 @@ DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
 DEFAULT_DURATION_MILLISECONDS = 30_000
 CHANGE_OWNED_SHARD_ALGORITHM = "duration-lpt-v1"
 PACKAGE_EXPANSION_SHARD_ALGORITHM = "duration-lpt-v1"
+PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM = "sha256-modulo-v1"
+PACKAGE_EXPANSION_EXECUTION_KIND = "package_expansion_duration_plan"
 PACKAGE_EXPANSION_GROUP_TARGET_LIMIT = 16
 PACKAGE_EXPANSION_GROUP_ESTIMATED_MILLISECONDS = 300_000
 SHARDS = tuple(range(4))
@@ -1140,6 +1142,12 @@ def make_plan(
         expansion,
         duration_baseline,
     )
+    target_dispositions.append(
+        package_expansion_execution_disposition(
+            expansion_shards,
+            expansion_planning,
+        )
+    )
     plan: dict[str, Any] = {
         "version": PLAN_VERSION,
         "mode": mode,
@@ -1172,11 +1180,13 @@ def make_plan(
         "test_exclusions": test_exclusions,
         "shard_planning": {
             "change_owned": change_owned_planning,
-            "package_expansion": expansion_planning,
+            "package_expansion": {
+                "algorithm": PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+            },
         },
         "shards": {
             "change_owned": change_owned_shards,
-            "package_expansion": expansion_shards,
+            "package_expansion": shard_map(expansion),
         },
     }
     attach_plan_digest(plan)
@@ -1337,6 +1347,146 @@ def _validate_owner_mapping(owner: Any) -> None:
     _owner(owner)
 
 
+def package_expansion_execution_disposition(
+    shards: Mapping[str, list[str]],
+    planning: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": PACKAGE_EXPANSION_EXECUTION_KIND,
+        "planning": dict(planning),
+        "shards": {key: list(rows) for key, rows in shards.items()},
+    }
+
+
+def package_expansion_execution(
+    plan: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    rows = [
+        row
+        for row in plan["target_dispositions"]
+        if isinstance(row, dict)
+        and row.get("kind") == PACKAGE_EXPANSION_EXECUTION_KIND
+    ]
+    if len(rows) != 1:
+        raise ValueError(
+            "plan requires one package-expansion duration execution disposition"
+        )
+    execution = rows[0]
+    if set(execution) != {"kind", "planning", "shards"}:
+        raise ValueError(
+            "plan package-expansion execution disposition has the wrong shape"
+        )
+    return execution
+
+
+def _validated_duration_planning(
+    planning: Any,
+    expected_identities: set[str],
+    *,
+    algorithm: str,
+    lane_label: str,
+) -> dict[str, list[str]]:
+    expected_keys = {
+        "algorithm",
+        "baseline_digest",
+        "default_milliseconds",
+        "weights_milliseconds",
+        "estimated_milliseconds",
+    }
+    if not isinstance(planning, dict) or set(planning) != expected_keys:
+        raise ValueError(f"plan {lane_label} shard planning has the wrong shape")
+    if planning["algorithm"] != algorithm:
+        raise ValueError(f"plan {lane_label} shard algorithm is unsupported")
+    baseline_digest = planning["baseline_digest"]
+    if (
+        not isinstance(baseline_digest, str)
+        or not DIGEST.fullmatch(baseline_digest)
+    ):
+        raise ValueError(
+            f"plan {lane_label} duration baseline digest is malformed"
+        )
+    _positive_int(
+        planning["default_milliseconds"],
+        f"plan {lane_label} duration default_milliseconds",
+    )
+    raw_weights = planning["weights_milliseconds"]
+    if not isinstance(raw_weights, dict):
+        raise ValueError(
+            f"plan {lane_label} duration weights must be an identity mapping"
+        )
+    if set(raw_weights) != expected_identities:
+        raise ValueError(
+            f"plan {lane_label} duration weights must exactly cover "
+            "its execution targets"
+        )
+    weights: dict[Identity, int] = {}
+    for canonical, milliseconds in raw_weights.items():
+        weights[Identity.parse(canonical)] = _positive_int(
+            milliseconds,
+            f"plan {lane_label} duration weight for {canonical}",
+        )
+    shards, expected_estimates = duration_shard_map(weights)
+    estimates = planning["estimated_milliseconds"]
+    if (
+        not isinstance(estimates, dict)
+        or set(estimates) != {str(shard) for shard in SHARDS}
+        or any(
+            type(value) is not int or value < 0
+            for value in estimates.values()
+        )
+    ):
+        raise ValueError(
+            f"plan {lane_label} duration estimates must contain "
+            "four nonnegative totals"
+        )
+    if estimates != expected_estimates:
+        raise ValueError(
+            f"plan {lane_label} duration estimates do not match selected weights"
+        )
+    return shards
+
+
+def _validated_shards(
+    value: Any,
+    expected_identities: set[str],
+    *,
+    lane_label: str,
+) -> dict[str, list[str]]:
+    if not isinstance(value, dict) or set(value) != {
+        str(shard) for shard in SHARDS
+    }:
+        raise ValueError(f"plan {lane_label} must contain four exact shards")
+    flattened: list[str] = []
+    for shard in SHARDS:
+        rows = value[str(shard)]
+        if not isinstance(rows, list):
+            raise ValueError(f"plan {lane_label} shard {shard} must be a list")
+        for canonical in rows:
+            Identity.parse(canonical)
+        flattened.extend(rows)
+    if sorted(flattened) != sorted(expected_identities):
+        raise ValueError(f"plan {lane_label} shards do not exactly cover the lane")
+    return value
+
+
+def execution_shards(
+    plan: Mapping[str, Any],
+    lane: str,
+) -> Mapping[str, list[str]]:
+    if lane == "package-expansion":
+        return package_expansion_execution(plan)["shards"]
+    return plan["shards"][LANE_KEYS[lane]]
+
+
+def execution_planning(
+    plan: Mapping[str, Any],
+    lane: str,
+) -> Mapping[str, Any]:
+    if lane == "package-expansion":
+        return package_expansion_execution(plan)["planning"]
+    return plan["shard_planning"][LANE_KEYS[lane]]
+
+
 def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     expected_keys = {
         "version",
@@ -1465,115 +1615,61 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "package_expansion",
     }:
         raise ValueError("plan shard_planning must name both lanes")
-    expected_planning_keys = {
-        "algorithm",
-        "baseline_digest",
-        "default_milliseconds",
-        "weights_milliseconds",
-        "estimated_milliseconds",
-    }
-    expected_duration_shards: dict[str, dict[str, list[str]]] = {}
-    for lane_key, expected_identities, algorithm in (
-        (
-            "change_owned",
-            expected_change_owned,
-            CHANGE_OWNED_SHARD_ALGORITHM,
-        ),
-        (
-            "package_expansion",
-            expansion,
-            PACKAGE_EXPANSION_SHARD_ALGORITHM,
-        ),
-    ):
-        planning = shard_planning[lane_key]
-        lane_label = lane_key.replace("_", "-")
-        if (
-            not isinstance(planning, dict)
-            or set(planning) != expected_planning_keys
-        ):
-            raise ValueError(
-                f"plan {lane_label} shard planning has the wrong shape"
-            )
-        if planning["algorithm"] != algorithm:
-            raise ValueError(
-                f"plan {lane_label} shard algorithm is unsupported"
-            )
-        baseline_digest = planning["baseline_digest"]
-        if (
-            not isinstance(baseline_digest, str)
-            or not DIGEST.fullmatch(baseline_digest)
-        ):
-            raise ValueError(
-                f"plan {lane_label} duration baseline digest is malformed"
-            )
-        _positive_int(
-            planning["default_milliseconds"],
-            f"plan {lane_label} duration default_milliseconds",
+    expected_change_owned_shards = _validated_duration_planning(
+        shard_planning["change_owned"],
+        expected_change_owned,
+        algorithm=CHANGE_OWNED_SHARD_ALGORITHM,
+        lane_label="change-owned",
+    )
+    if shard_planning["package_expansion"] != {
+        "algorithm": PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+    }:
+        raise ValueError(
+            "plan package-expansion compatibility algorithm is unsupported"
         )
-        raw_weights = planning["weights_milliseconds"]
-        if not isinstance(raw_weights, dict):
-            raise ValueError(
-                f"plan {lane_label} duration weights must be an identity mapping"
-            )
-        if set(raw_weights) != set(expected_identities):
-            raise ValueError(
-                f"plan {lane_label} duration weights must exactly cover "
-                "its execution targets"
-            )
-        weights: dict[Identity, int] = {}
-        for canonical, milliseconds in raw_weights.items():
-            identity = Identity.parse(canonical)
-            weights[identity] = _positive_int(
-                milliseconds,
-                f"plan {lane_label} duration weight for {canonical}",
-            )
-        lane_shards, expected_estimates = duration_shard_map(weights)
-        estimates = planning["estimated_milliseconds"]
-        if (
-            not isinstance(estimates, dict)
-            or set(estimates) != {str(shard) for shard in SHARDS}
-            or any(
-                type(value) is not int or value < 0
-                for value in estimates.values()
-            )
-        ):
-            raise ValueError(
-                f"plan {lane_label} duration estimates must contain "
-                "four nonnegative totals"
-            )
-        if estimates != expected_estimates:
-            raise ValueError(
-                f"plan {lane_label} duration estimates do not match "
-                "selected weights"
-            )
-        expected_duration_shards[lane_key] = lane_shards
+    expansion_execution = package_expansion_execution(plan)
+    expected_expansion_shards = _validated_duration_planning(
+        expansion_execution["planning"],
+        expansion,
+        algorithm=PACKAGE_EXPANSION_SHARD_ALGORITHM,
+        lane_label="package-expansion",
+    )
 
     shards = plan.get("shards")
     if not isinstance(shards, dict) or set(shards) != set(LANE_KEYS.values()):
         raise ValueError("plan shards must name both lanes")
-    for lane_key in LANE_KEYS.values():
-        lane_shards = shards[lane_key]
-        if not isinstance(lane_shards, dict) or set(lane_shards) != {
-            str(shard) for shard in SHARDS
-        }:
-            raise ValueError(f"plan {lane_key} must contain four exact shards")
-        flattened: list[str] = []
-        for shard in SHARDS:
-            rows = lane_shards[str(shard)]
-            if not isinstance(rows, list):
-                raise ValueError(f"plan {lane_key} shard {shard} must be a list")
-            for canonical in rows:
-                Identity.parse(canonical)
-            flattened.extend(rows)
-        expected_lane = expected_change_owned if lane_key == "change_owned" else expansion
-        if sorted(flattened) != sorted(expected_lane):
-            raise ValueError(f"plan {lane_key} shards do not exactly cover the lane")
-        if lane_shards != expected_duration_shards[lane_key]:
-            lane_label = lane_key.replace("_", "-")
-            raise ValueError(
-                f"plan {lane_label} shard assignment does not match "
-                f"{lane_label} duration planning"
-            )
+    change_owned_shards = _validated_shards(
+        shards["change_owned"],
+        expected_change_owned,
+        lane_label="change-owned",
+    )
+    if change_owned_shards != expected_change_owned_shards:
+        raise ValueError(
+            "plan change-owned shard assignment does not match "
+            "change-owned duration planning"
+        )
+    compatibility_shards = _validated_shards(
+        shards["package_expansion"],
+        expansion,
+        lane_label="package-expansion compatibility",
+    )
+    if compatibility_shards != shard_map(
+        Identity.parse(canonical) for canonical in expansion
+    ):
+        raise ValueError(
+            "plan package-expansion compatibility assignment does not match "
+            "trusted v3 hashing"
+        )
+    expansion_shards = _validated_shards(
+        expansion_execution["shards"],
+        expansion,
+        lane_label="package-expansion execution",
+    )
+    if expansion_shards != expected_expansion_shards:
+        raise ValueError(
+            "plan package-expansion shard assignment does not match "
+            "package-expansion duration planning"
+        )
     if not isinstance(plan.get("plan_digest"), str) or not DIGEST.fullmatch(
         plan["plan_digest"]
     ):
@@ -1595,7 +1691,11 @@ def verify_plan_duration_baseline(
         ("package_expansion", sorted(plan["package_expansion"])),
     ):
         lane_label = lane_key.replace("_", "-")
-        planning = plan["shard_planning"][lane_key]
+        planning = (
+            package_expansion_execution(plan)["planning"]
+            if lane_key == "package_expansion"
+            else plan["shard_planning"][lane_key]
+        )
         if planning["baseline_digest"] != duration_baseline.digest:
             raise ValueError(
                 f"plan {lane_label} duration baseline digest does not match "
@@ -2243,7 +2343,7 @@ def execution_groups(
         TestIdentity.parse(row["identity"]).target_identity
         for row in plan["test_exclusions"]
     }
-    planning = plan["shard_planning"]["package_expansion"]
+    planning = execution_planning(plan, lane)
     weights = planning["weights_milliseconds"]
     default_milliseconds = planning["default_milliseconds"]
     groups: list[list[Identity]] = []
@@ -2562,8 +2662,7 @@ def execute_shard(
         if lane == "package-expansion" else None
     )
     deadline_exhausted = False
-    lane_key = LANE_KEYS[lane]
-    selected = list(plan["shards"][lane_key][str(shard)])
+    selected = list(execution_shards(plan, lane)[str(shard)])
     output.mkdir(parents=True, exist_ok=True)
     junit_output = output / "junit.xml"
     timing_output = output / "timings.json"
@@ -2976,7 +3075,7 @@ def prepare_shard(
         raise ValueError(f"unsupported lane: {lane}")
     if shard not in SHARDS:
         raise ValueError(f"shard must be one of {SHARDS}")
-    selected = plan["shards"][LANE_KEYS[lane]][str(shard)]
+    selected = execution_shards(plan, lane)[str(shard)]
     has_targets = bool(selected)
     github_output.parent.mkdir(parents=True, exist_ok=True)
     github_output.write_text(
@@ -3003,7 +3102,6 @@ def _report_findings(
     if duration_baseline is None:
         duration_baseline = load_duration_baseline()
     verify_plan_digest(plan, duration_baseline=duration_baseline)
-    lane_key = LANE_KEYS[lane]
     findings: list[str] = []
     by_shard: dict[int, Mapping[str, Any]] = {}
     for receipt in receipts:
@@ -3035,7 +3133,7 @@ def _report_findings(
     all_selected_tests: list[str] = []
     all_executed_tests: list[str] = []
     for shard, receipt in sorted(by_shard.items()):
-        expected = plan["shards"][lane_key][str(shard)]
+        expected = execution_shards(plan, lane)[str(shard)]
         selected = receipt.get("selected_targets")
         if selected != expected:
             findings.append(
@@ -3069,7 +3167,7 @@ def _report_findings(
 
     expected_targets = sorted(
         identity
-        for rows in plan["shards"][lane_key].values()
+        for rows in execution_shards(plan, lane).values()
         for identity in rows
     )
     if sorted(all_selected_targets) != expected_targets:
@@ -3146,8 +3244,7 @@ def shard_durations(
     *,
     lane: str,
 ) -> list[dict[str, int | None]]:
-    lane_key = LANE_KEYS[lane]
-    estimates = plan["shard_planning"][lane_key]["estimated_milliseconds"]
+    estimates = execution_planning(plan, lane)["estimated_milliseconds"]
     actual: dict[int, int] = {}
     for receipt in receipts:
         if (
@@ -3236,7 +3333,13 @@ def load_receipts(root: Path) -> list[dict[str, Any]]:
 
 def _verify_duration_sample_plan(plan: Mapping[str, Any]) -> None:
     version = plan.get("version")
-    if version == PLAN_VERSION:
+    target_dispositions = plan.get("target_dispositions")
+    has_package_execution = isinstance(target_dispositions, list) and any(
+        isinstance(row, dict)
+        and row.get("kind") == PACKAGE_EXPANSION_EXECUTION_KIND
+        for row in target_dispositions
+    )
+    if version == PLAN_VERSION and has_package_execution:
         verify_plan_digest(plan)
         return
     if version not in {2, 3}:

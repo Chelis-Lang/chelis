@@ -178,13 +178,21 @@ def shard_fields(
         baseline,
     )
     return {
+        "target_dispositions": [
+            owned.package_expansion_execution_disposition(
+                expansion_shards,
+                expansion_planning,
+            )
+        ],
         "shard_planning": {
             "change_owned": change_owned_planning,
-            "package_expansion": expansion_planning,
+            "package_expansion": {
+                "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+            },
         },
         "shards": {
             "change_owned": change_owned_shards,
-            "package_expansion": expansion_shards,
+            "package_expansion": owned.shard_map(package_expansion),
         },
     }
 
@@ -217,9 +225,19 @@ def set_package_expansion(
         identity.canonical for identity in identities
     )
     plan["shard_planning"]["change_owned"] = change_owned_planning
-    plan["shard_planning"]["package_expansion"] = planning
+    plan["target_dispositions"] = [
+        row
+        for row in plan["target_dispositions"]
+        if row.get("kind") != owned.PACKAGE_EXPANSION_EXECUTION_KIND
+    ]
+    plan["target_dispositions"].append(
+        owned.package_expansion_execution_disposition(shards, planning)
+    )
+    plan["shard_planning"]["package_expansion"] = {
+        "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+    }
     plan["shards"]["change_owned"] = change_owned_shards
-    plan["shards"]["package_expansion"] = shards
+    plan["shards"]["package_expansion"] = owned.shard_map(identities)
     return baseline
 
 
@@ -244,11 +262,11 @@ def set_colocated_package_expansion(
         shard
         for shard in owned.SHARDS
         if identities[0].canonical
-        in plan["shards"]["package_expansion"][str(shard)]
+        in owned.execution_shards(plan, "package-expansion")[str(shard)]
     )
     if not all(
         identity.canonical
-        in plan["shards"]["package_expansion"][str(shard)]
+        in owned.execution_shards(plan, "package-expansion")[str(shard)]
         for identity in identities
     ):
         raise AssertionError("fixture targets were not assigned together")
@@ -1743,7 +1761,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     shard
                     for shard in owned.SHARDS
                     if "p::smoke"
-                    in plan["shards"]["package_expansion"][str(shard)]
+                    in owned.execution_shards(plan, "package-expansion")[
+                        str(shard)
+                    ]
                 ),
                 output=Path(tmp), repo=Path(tmp), runner=run,
             )
@@ -1778,7 +1798,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
                     shard
                     for shard in owned.SHARDS
                     if "p::smoke"
-                    in plan["shards"]["package_expansion"][str(shard)]
+                    in owned.execution_shards(plan, "package-expansion")[
+                        str(shard)
+                    ]
                 ),
                 output=Path(tmp), repo=Path(tmp), runner=run,
             )
@@ -1890,6 +1912,31 @@ class ShardingAndExecutionTests(unittest.TestCase):
             sorted(identity.canonical for identity in weights),
         )
 
+    def test_package_expansion_preserves_the_trusted_v3_plan_envelope(
+        self,
+    ) -> None:
+        plan = self._plan(lane="package-expansion")
+        self.assertEqual(plan["version"], 3)
+        self.assertEqual(
+            plan["shard_planning"]["package_expansion"],
+            {"algorithm": "sha256-modulo-v1"},
+        )
+        self.assertEqual(
+            plan["shards"]["package_expansion"],
+            owned.shard_map(
+                [owned.Identity.parse(value) for value in plan["package_expansion"]]
+            ),
+        )
+        execution = owned.package_expansion_execution(plan)
+        self.assertEqual(
+            execution["planning"]["algorithm"],
+            owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+        )
+        self.assertNotEqual(
+            execution["planning"]["algorithm"],
+            plan["shard_planning"]["package_expansion"]["algorithm"],
+        )
+
     def test_plan_rejects_duration_assignment_tampering(self) -> None:
         plan = self._plan()
         source = next(
@@ -1908,14 +1955,15 @@ class ShardingAndExecutionTests(unittest.TestCase):
         self,
     ) -> None:
         plan = self._plan(lane="package-expansion")
+        execution = owned.package_expansion_execution(plan)
         source = next(
             shard
             for shard in owned.SHARDS
-            if plan["shards"]["package_expansion"][str(shard)]
+            if execution["shards"][str(shard)]
         )
         target = (source + 1) % len(owned.SHARDS)
-        canonical = plan["shards"]["package_expansion"][str(source)].pop()
-        plan["shards"]["package_expansion"][str(target)].append(canonical)
+        canonical = execution["shards"][str(source)].pop()
+        execution["shards"][str(target)].append(canonical)
         owned.attach_plan_digest(plan)
         with self.assertRaisesRegex(
             ValueError,
@@ -2008,7 +2056,14 @@ class ShardingAndExecutionTests(unittest.TestCase):
         )
         shards, planning = owned.package_expansion_shard_plan(many, baseline)
         selected = max(shards.values(), key=len)
-        plan["shard_planning"]["package_expansion"] = planning
+        plan["target_dispositions"] = [
+            row
+            for row in plan["target_dispositions"]
+            if row.get("kind") != owned.PACKAGE_EXPANSION_EXECUTION_KIND
+        ]
+        plan["target_dispositions"].append(
+            owned.package_expansion_execution_disposition(shards, planning)
+        )
         chunked = owned.execution_groups(
             plan,
             lane="package-expansion",
@@ -2055,11 +2110,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
             shard
             for shard in owned.SHARDS
             if first.canonical
-            in plan["shards"]["package_expansion"][str(shard)]
+            in owned.execution_shards(plan, "package-expansion")[str(shard)]
         )
         self.assertIn(
             second.canonical,
-            plan["shards"]["package_expansion"][str(shard)],
+            owned.execution_shards(plan, "package-expansion")[str(shard)],
         )
         plan["test_exclusions"] = []
         owned.attach_plan_digest(plan)
@@ -2513,7 +2568,7 @@ class ShardingAndExecutionTests(unittest.TestCase):
             shard
             for shard in owned.SHARDS
             if identity.canonical
-            in plan["shards"]["package_expansion"][str(shard)]
+            in owned.execution_shards(plan, "package-expansion")[str(shard)]
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2927,7 +2982,10 @@ class BoundedCommandTests(unittest.TestCase):
                             shard
                             for shard in owned.SHARDS
                             if "p::smoke"
-                            in plan["shards"]["package_expansion"][str(shard)]
+                            in owned.execution_shards(
+                                plan,
+                                "package-expansion",
+                            )[str(shard)]
                         ),
                         output=root / "receipt", repo=root,
                     )
@@ -3024,7 +3082,10 @@ class ReportTests(unittest.TestCase):
     def receipts(self, *, surface: str = "change_owned") -> list[dict]:
         result = []
         for shard in range(4):
-            selected = self.plan["shards"][surface][str(shard)]
+            selected = owned.execution_shards(
+                self.plan,
+                surface.replace("_", "-"),
+            )[str(shard)]
             tests = [f"{identity}::fast_case" for identity in selected]
             receipt = {
                 "version": 1,

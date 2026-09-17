@@ -52,7 +52,12 @@ def plan() -> dict:
         "config_digest": "d" * 64,
         "changed_records": [],
         "path_dispositions": [],
-        "target_dispositions": [],
+        "target_dispositions": [
+            owned.package_expansion_execution_disposition(
+                expansion_shards,
+                expansion_planning,
+            )
+        ],
         "selected_packages": [],
         "eligible_targets": [],
         "change_owned": [],
@@ -64,11 +69,13 @@ def plan() -> dict:
         "test_exclusions": [],
         "shard_planning": {
             "change_owned": change_owned_planning,
-            "package_expansion": expansion_planning,
+            "package_expansion": {
+                "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+            },
         },
         "shards": {
             "change_owned": change_owned_shards,
-            "package_expansion": expansion_shards,
+            "package_expansion": owned.shard_map([]),
         },
     }
     owned.attach_plan_digest(result)
