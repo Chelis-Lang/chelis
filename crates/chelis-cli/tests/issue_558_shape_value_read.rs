@@ -23,6 +23,9 @@
 //! (ii) eval-vs-`chelis build --target c` agreement, following the
 //! `issue_513_symbolic_axis_adjoints.rs` conventions.
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -256,6 +259,7 @@ fn build_c_bare(sig: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
 /// Compile the emitted kernel against a driver that feeds a `rows x 2` f32
 /// matrix `[1, 2, ..., rows*2]` and prints the gradient. Run for each `rows`.
 fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<f64>> {
+    let out_symbol = authored_c_symbol("out");
     let runs = rows
         .iter()
         .map(|r| {
@@ -263,7 +267,7 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
                 "    {{ int64_t shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32); \
                  chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
                  for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
-                 chelis_tensor* g = out(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
+                 chelis_tensor* g = {out_symbol}(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
                  for (int64_t i = 0; i < g_view.count; i++) printf(\"%.6f\\n\", ((const float *)g_view.data)[i]); \
                  printf(\"---\\n\"); chelis_tensor_release(g); chelis_tensor_release(x); }}",
                 n = r * 2
@@ -275,7 +279,8 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* {out_symbol}(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) {{ chelis_tensor_retain(arg0); return arg0; }}
 int main(void) {{
 {runs}
     return 0;

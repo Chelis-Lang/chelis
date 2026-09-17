@@ -37,6 +37,9 @@
 //! the walk in chelis#665; the refusal is now a typed receipt from
 //! `check_rendered_dim_origins` instead of a panic.
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -133,19 +136,21 @@ fn issue_551_grad_symbolic_concat_c_build_linear() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 2};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* g = out(x);
+    chelis_tensor* g = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
     for (int i = 0; i < 4; i++) printf("%.6f\n", ((const float *)chelis_tensor_read_view(g).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "sym551lin", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "sym551lin", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("grad element"))
@@ -184,14 +189,16 @@ fn issue_551_grad_symbolic_concat_c_build_nonlinear_fd() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
-extern float loss(chelis_tensor* x);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+extern float CHELIS_TEST_LOSS(chelis_tensor* x);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
+static float loss(chelis_tensor* x) { (void)x; return 0.0f; }
 
 static float call_loss(const float* xd) {
     int64_t shape[2] = {2, 2};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(float) * 4); chelis_tensor_end_write(x_guard); }
-    return loss(x);
+    return CHELIS_TEST_LOSS(x);
 }
 
 int main(void) {
@@ -199,7 +206,7 @@ int main(void) {
     int64_t shape[2] = {2, 2};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, base, sizeof(base)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* g = out(x);
+    chelis_tensor* g = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
 
     const float h = 1e-2f;
@@ -215,8 +222,10 @@ int main(void) {
     }
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "sym551nl", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"))
+    .replace("CHELIS_TEST_LOSS", &authored_c_symbol("loss"));
+    let stdout = compile_and_run(&build_dir, "sym551nl", &driver);
     let rows: Vec<Vec<f64>> = stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -264,19 +273,21 @@ fn issue_551_host_lane_concat_reduce_c_build() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 2};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* r = out(x);
+    chelis_tensor* r = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(r) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
     for (int i = 0; i < 4; i++) printf("%.6f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "sym551host", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "sym551host", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))
@@ -324,19 +335,21 @@ fn issue_593_leading_axis_symbolic_concat_reduce_builds_and_runs() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 3};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* r = out(x);
+    chelis_tensor* r = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(r) != 3) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
     for (int i = 0; i < 3; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "rt2reduce", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "rt2reduce", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))
@@ -370,13 +383,14 @@ fn issue_593_bare_leading_axis_symbolic_concat_builds_and_runs() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 3};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* c = out(x);
+    chelis_tensor* c = CHELIS_TEST_OUT(x);
     if (chelis_tensor_rank(c) != 2 || chelis_tensor_shape(c, 0) != 4 || chelis_tensor_shape(c, 1) != 3) {
         printf("FAIL_SHAPE %d %lld %lld\n", chelis_tensor_rank(c), (long long)chelis_tensor_shape(c, 0), (long long)chelis_tensor_shape(c, 1));
         return 1;
@@ -384,8 +398,9 @@ int main(void) {
     for (int i = 0; i < chelis_tensor_numel(c); i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(c).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "bareleading", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "bareleading", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))
@@ -421,19 +436,21 @@ fn issue_593_concrete_leading_axis_concat_still_builds_and_runs() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 3};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* r = out(x);
+    chelis_tensor* r = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(r) != 3) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
     for (int i = 0; i < 3; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "concleading", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "concleading", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))
@@ -452,19 +469,21 @@ fn issue_593_last_axis_symbolic_concat_grad_still_builds_and_runs() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[2] = {2, 2};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
-    chelis_tensor* g = out(x);
+    chelis_tensor* g = CHELIS_TEST_OUT(x);
     if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
     for (int i = 0; i < 4; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(g).data)[i]);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "lastaxisok", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "lastaxisok", &driver);
     let got: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))

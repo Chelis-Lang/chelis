@@ -30,6 +30,9 @@
 //!   - unbounded recursion errors loudly at the unroll cap
 //!   - runtime-condition non-float `if` stays unrepresentable
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -593,7 +596,8 @@ fn issue_620_static_if_grad_matches_c_backend() {
 #include <stdio.h>
 #include <string.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* CHELIS_TEST_OUT(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) { chelis_tensor_retain(arg0); return arg0; }
 int main(void) {
     int64_t shape[1] = {2};
     chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
@@ -602,7 +606,7 @@ int main(void) {
     chelis_write_view x_view = chelis_tensor_write_view(x_guard);
     memcpy(x_view.data, xd, sizeof(xd));
     chelis_tensor_end_write(x_guard);
-    chelis_tensor* g = out(x);
+    chelis_tensor* g = CHELIS_TEST_OUT(x);
     chelis_read_view g_view = chelis_tensor_read_view(g);
     if (g_view.count != 2) { printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }
     for (int i = 0; i < 2; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
@@ -610,8 +614,9 @@ int main(void) {
     chelis_tensor_release(x);
     return 0;
 }
-"#;
-    let stdout = compile_and_run(&build_dir, "if620", driver);
+"#
+    .replace("CHELIS_TEST_OUT", &authored_c_symbol("out"));
+    let stdout = compile_and_run(&build_dir, "if620", &driver);
     let c_grad: Vec<f64> = stdout
         .lines()
         .map(|l| l.trim().parse::<f64>().expect("element"))

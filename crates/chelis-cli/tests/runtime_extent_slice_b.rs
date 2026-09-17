@@ -99,7 +99,7 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
-use common::{gcc_available, link_generated};
+use common::{authored_c_symbol, gcc_available, link_generated};
 
 /// Chelis#1482's remaining reproducer: a runtime-bound `shrink` under a
 /// symbolic signature, consumed by a composite elementwise lowering that
@@ -8650,14 +8650,6 @@ const REPEATED_BINDER_CONTEXT: &str = "extent `seq`: x axis 0 = 3, y axis 1 = 2"
 const DISAGREEING_X: &str = "[1.0, 2.0, 3.0]";
 const AGREEING_X: &str = "[1.0, 2.0]";
 const TWO_BY_TWO_Y: &str = "[[1.0, 2.0], [3.0, 4.0]]";
-
-fn authored_c_symbol(name: &str) -> String {
-    let mut symbol = "chelis_fn_".to_string();
-    for byte in name.bytes() {
-        symbol.push_str(&format!("{byte:02x}"));
-    }
-    symbol
-}
 
 /// entry.host_tuple.repeated_binder.eval. REGRESSION TEST on the RENDERING.
 /// Measured on `0820ee28e`, eval refused with the private sentence
