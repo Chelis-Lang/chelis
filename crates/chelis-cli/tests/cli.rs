@@ -8185,37 +8185,67 @@ fn eval_vmap_returns_per_element_results() {
         ));
 }
 
-/// The core transform fragment admits direct top-level declarations and typed
-/// inline `vmap` lambdas. These controls retain those supported forms while
-/// the adjacent negative cases fence dynamic callable targets before
-/// evaluation.
+/// The core transform fragment admits direct top-level declarations and
+/// explicitly typed inline or local `vmap` lambdas. These controls retain
+/// those supported forms, including aliases and shadowing within the typed
+/// local fragment, while the adjacent negative cases fence underconstrained
+/// callable targets before evaluation.
 #[test]
 fn check_accepts_supported_core_transform_targets() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("direct_transform_targets.ch");
+    let surf_path = dir.path().join("direct_transform_targets.ch");
+    let deep_path = dir.path().join("direct_transform_targets.dp");
     write_file(
-        &path,
+        &surf_path,
         "def loss(x: f32) -> f32 = mul(x, x)\n\
          def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
          gradient = grad(loss)\n\
          mapped = vmap(reduce)\n\
          def inline(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
-         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n",
+         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n\
+         def local(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           vmap(mapped)(t)\n\
+         }\n\
+         def local_alias(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           alias = mapped\n\
+           vmap(alias)(t)\n\
+         }\n\
+         def typed_shadow(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v) -> sum(v, 0i32)\n\
+           first = mapped(copy(t))\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           vmap(mapped)(t)\n\
+         }\n",
     );
 
-    let json = run_json_check(&path);
-    assert_eq!(json["score"].as_f64(), Some(1.0), "{json}");
-    assert!(
-        json["errors"].as_array().is_some_and(Vec::is_empty),
-        "{json}"
-    );
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["deep", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, deep).expect("write desugared Deep program");
+
+    for path in [&surf_path, &deep_path] {
+        let json = run_json_check(path);
+        assert_eq!(json["score"].as_f64(), Some(1.0), "{path:?}: {json}");
+        assert!(
+            json["errors"].as_array().is_some_and(Vec::is_empty),
+            "{path:?}: {json}"
+        );
+    }
 }
 
-/// #1887, #1952, and #1954: local aliases, shadowing local lambdas, and
-/// untyped inline `vmap` lambdas can be accepted with a false transform
-/// contract. They are outside the documented core fragment until their
-/// independent semantics land, so `check` must reject each form loudly rather
-/// than let a later lane choose a different callable or rank.
+/// #1887, #1952, #1954, and #2109: local aliases, shadowing local lambdas,
+/// and untyped inline or locally bound `vmap` lambdas can be accepted with a
+/// false transform contract. They are outside the documented core fragment
+/// until their independent semantics land, so `check` must reject each form
+/// loudly rather than let a later lane choose a different callable or rank.
 #[test]
 fn check_fences_non_direct_transform_targets() {
     let cases = [
@@ -8260,6 +8290,31 @@ fn check_fences_non_direct_transform_targets() {
             "vmap_untyped_inline_lambda",
             "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
                vmap(fn (v) -> sum(v, 0i32))(t)\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_local_lambda_false_result",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_local_lambda_correct_result",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_local_lambda_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
             "vmap",
         ),
         (

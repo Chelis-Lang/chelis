@@ -88,12 +88,12 @@ pub(super) fn validate_semantic_program(
 /// the timeless transform language contract. A named target must not alias an
 /// unshadowed top-level function declaration; local wrapper closures remain
 /// on their separately tested path. `grad` keeps its existing
-/// direct-inline-lambda path. `vmap` admits inline lambdas only when every
-/// parameter is explicitly typed: otherwise the inference order can bind an
-/// untyped parameter to the unsliced operand. This keeps the checker from
-/// certifying a program whose evaluator could select a different callable or
-/// whose inline-vmap parameter could have the wrong rank (#1887, #1952,
-/// #1954).
+/// direct-inline-lambda path. `vmap` admits inline or locally bound lambdas
+/// only when every parameter is explicitly typed: otherwise the inference
+/// order can bind an untyped parameter to the unsliced operand. This keeps the
+/// checker from certifying a program whose evaluator could select a different
+/// callable or whose vmap parameter could have the wrong rank (#1887, #1952,
+/// #1954, #2109).
 ///
 /// The walk is lexical rather than type-directed.  A local `loss` with the
 /// same function type as a top-level `loss` is exactly the #1954 hazard, so
@@ -119,16 +119,31 @@ fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut Diagnosti
 struct CoreTransformScope {
     local_names: UnordSet<String>,
     direct_function_aliases: UnordSet<String>,
+    untyped_vmap_lambdas: UnordSet<String>,
 }
 
 impl CoreTransformScope {
-    fn bind_local(&mut self, name: String, aliases_top_level_function: bool) {
+    fn bind_local(&mut self, name: String, binding: CoreTransformBinding) {
         self.direct_function_aliases.remove(&name);
-        if aliases_top_level_function {
-            self.direct_function_aliases.insert(name.clone());
+        self.untyped_vmap_lambdas.remove(&name);
+        match binding {
+            CoreTransformBinding::Ordinary => {}
+            CoreTransformBinding::TopLevelFunctionAlias => {
+                self.direct_function_aliases.insert(name.clone());
+            }
+            CoreTransformBinding::UntypedVmapLambda => {
+                self.untyped_vmap_lambdas.insert(name.clone());
+            }
         }
         self.local_names.insert(name);
     }
+}
+
+#[derive(Clone, Copy)]
+enum CoreTransformBinding {
+    Ordinary,
+    TopLevelFunctionAlias,
+    UntypedVmapLambda,
 }
 
 fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
@@ -211,7 +226,7 @@ fn walk_core_transform_targets(
             {
                 for param in params {
                     if let Some(name) = param_name_for_refs(param) {
-                        scoped.bind_local(name, false);
+                        scoped.bind_local(name, CoreTransformBinding::Ordinary);
                     }
                 }
             }
@@ -252,15 +267,18 @@ fn walk_core_transform_targets(
             }
             let mut scoped = lexical_scope.clone();
             if let Some(name) = bind_children.first().and_then(symbol_name) {
-                let aliases_top_level_function = bind_children.get(1).is_some_and(|value| {
-                    direct_unshadowed_top_level_function(
-                        value,
-                        top_level_functions,
-                        module_function_aliases,
-                        lexical_scope,
-                    )
-                });
-                scoped.bind_local(name.to_string(), aliases_top_level_function);
+                let binding =
+                    bind_children
+                        .get(1)
+                        .map_or(CoreTransformBinding::Ordinary, |value| {
+                            classify_local_transform_binding(
+                                value,
+                                top_level_functions,
+                                module_function_aliases,
+                                lexical_scope,
+                            )
+                        });
+                scoped.bind_local(name.to_string(), binding);
             }
             if let Some(body) = children.get(1) {
                 walk_core_transform_targets(
@@ -296,7 +314,7 @@ fn walk_core_transform_targets(
                 let mut scoped = lexical_scope.clone();
                 if let Some(pattern) = arm_children.first() {
                     for name in pattern_names_for_signature(pattern).to_sorted() {
-                        scoped.bind_local(name.clone(), false);
+                        scoped.bind_local(name.clone(), CoreTransformBinding::Ordinary);
                     }
                 }
                 for child in arm_children.iter().skip(1) {
@@ -373,11 +391,44 @@ fn direct_unshadowed_top_level_function(
     })
 }
 
-/// An inline `vmap` target is safe on the release fragment when its parameter
-/// type is explicit. `infer_vmap` can then transform that type by inserting the
-/// mapped axis before the eventual application unifies it with the operand.
-/// Without an annotation, the lambda is inferred first and can instead bind to
-/// the unsliced operand (#1887).
+fn classify_local_transform_binding(
+    value: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    module_function_aliases: &UnordSet<String>,
+    lexical_scope: &CoreTransformScope,
+) -> CoreTransformBinding {
+    if direct_unshadowed_top_level_function(
+        value,
+        top_level_functions,
+        module_function_aliases,
+        lexical_scope,
+    ) {
+        CoreTransformBinding::TopLevelFunctionAlias
+    } else if inline_vmap_has_untyped_parameter(Some(value))
+        || direct_untyped_vmap_lambda_alias(value, lexical_scope)
+    {
+        CoreTransformBinding::UntypedVmapLambda
+    } else {
+        CoreTransformBinding::Ordinary
+    }
+}
+
+fn direct_untyped_vmap_lambda_alias(expr: &deep::Expr, lexical_scope: &CoreTransformScope) -> bool {
+    stamped_parts(expr).is_some_and(|(tag, _, children)| {
+        tag == DeepTag::Var
+            && children
+                .first()
+                .and_then(symbol_name)
+                .is_some_and(|name| lexical_scope.untyped_vmap_lambdas.contains(name))
+    })
+}
+
+/// An inline or locally bound `vmap` lambda is safe on the release fragment
+/// when every parameter type is explicit. `infer_vmap` can then transform
+/// those types by inserting the mapped axis before the eventual application
+/// unifies them with the operands. Without an annotation, the lambda is
+/// inferred first and can instead bind to the unsliced operand (#1887,
+/// #2109).
 fn inline_vmap_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
     let Some((DeepTag::Fn, _, children)) = target.and_then(stamped_parts) else {
         return false;
@@ -411,6 +462,8 @@ fn validate_core_transform_target(
         lexical_scope.direct_function_aliases.contains(name)
             || module_function_aliases.contains(name)
     });
+    let aliases_untyped_vmap_lambda =
+        name.is_some_and(|name| lexical_scope.untyped_vmap_lambdas.contains(name));
 
     let requires_fence = match tag {
         // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
@@ -423,6 +476,7 @@ fn validate_core_transform_target(
         // Aliases get the same direct-name fence as `grad`.
         DeepTag::Vmap => {
             inline_vmap_has_untyped_parameter(target)
+                || aliases_untyped_vmap_lambda
                 || shadows_top_level
                 || aliases_top_level_function
         }
@@ -442,12 +496,13 @@ fn validate_core_transform_target(
         format!(
             "the core transform fragment rejects this `{transform}` target: local aliases \
              and shadowing bindings must be direct, unshadowed top-level function \
-             declarations, and inline `vmap` parameters must be explicitly typed \
-             (chelis#1887, #1952, #1954)"
+             declarations, and inline or locally bound `vmap` parameters must be \
+             explicitly typed (chelis#1887, #1952, #1954, #2109)"
         ),
         vec![
             format!("Define a top-level function and write `{transform}(that_function)`."),
-            "For an inline `vmap` lambda, give every parameter an explicit type.".to_string(),
+            "For an inline or locally bound `vmap` lambda, give every parameter an explicit type."
+                .to_string(),
             "The rejected callable form is outside the Chelis 0.19 core fragment.".to_string(),
         ],
     ));

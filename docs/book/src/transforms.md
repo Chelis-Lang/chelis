@@ -12,16 +12,18 @@ For the 0.19 core promise, write named transforms against a direct, unshadowed
 top-level function declaration, such as `grad(loss)` or `vmap(process)`.
 The checker rejects aliases of a top-level function at either module or local
 scope, and a local binding that shadows a top-level target, rather than
-silently selecting a different callable. An inline `vmap` lambda remains
-supported when every parameter has an explicit type; an untyped parameter is
-rejected because it could be inferred from the unsliced input rather than the
-mapped slice.
+silently selecting a different callable. An inline or locally bound `vmap`
+lambda remains supported when every parameter has an explicit type; an
+untyped parameter is rejected, including through local aliases, because it
+could be inferred from the unsliced input rather than the mapped slice.
 
 These are current supported-fragment fences, not changes to the language
 semantics in the numbered specification. The related launch rows are
 [#1887](https://github.com/Chelis-Lang/chelis/issues/1887),
 [#1952](https://github.com/Chelis-Lang/chelis/issues/1952), and
-[#1954](https://github.com/Chelis-Lang/chelis/issues/1954).
+[#1954](https://github.com/Chelis-Lang/chelis/issues/1954), with the
+local-lambda fence completed by
+[#2109](https://github.com/Chelis-Lang/chelis/issues/2109).
 
 ## grad
 
