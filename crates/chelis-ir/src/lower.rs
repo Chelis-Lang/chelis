@@ -9217,13 +9217,6 @@ impl<'program> LowerCtx<'program> {
         contains(body, ascription)
     }
 
-    fn body_contains_outstanding_local_ascription(&self, body: &Expr) -> bool {
-        self.local_tensor_ascriptions.iter().any(|ascription| {
-            !ascription.outstanding_claims().is_empty()
-                && Self::body_contains_local_ascription(body, ascription)
-        })
-    }
-
     fn discard_local_ascription_tokens_in(&mut self, body: &Expr) {
         let discarded = self
             .local_tensor_ascriptions
@@ -18201,22 +18194,21 @@ impl<'program> LowerCtx<'program> {
             );
         }
         let saved_local_path = self.local_ascription_path_condition;
-        let then_has_local_claim = self.body_contains_outstanding_local_ascription(then_expr);
-        let else_has_local_claim = self.body_contains_outstanding_local_ascription(else_expr);
-        if then_has_local_claim {
-            self.local_ascription_path_condition = Some(match saved_local_path {
-                Some(parent_path) => self.dag.add_node(
-                    RiscOp::Mul,
-                    vec![parent_path, cond],
-                    TensorType {
-                        dims: Vec::new(),
-                        precision: Prim::Bool,
-                    },
-                    self.current_span_id.clone(),
-                ),
-                None => cond,
-            });
-        }
+        // Carry the selected path through arm lowering rather than guessing
+        // from the arm's syntax: inlining can introduce a local claim only
+        // after `lower_if` has entered the arm.
+        self.local_ascription_path_condition = Some(match saved_local_path {
+            Some(parent_path) => self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, cond],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                self.current_span_id.clone(),
+            ),
+            None => cond,
+        });
         let saved_random_path = self.random_path_condition;
         if let Some(parent_path) = saved_random_path {
             let path_ty = TensorType {
@@ -18258,35 +18250,31 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(else_path);
         }
-        if else_has_local_claim {
-            let path_ty = TensorType {
-                dims: Vec::new(),
-                precision: Prim::Bool,
-            };
-            let one = self.dag.add_node(
-                RiscOp::synth_const(Prim::Bool, 1.0),
-                vec![],
-                path_ty.clone(),
+        let path_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Bool,
+        };
+        let one = self.dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            path_ty.clone(),
+            self.current_span_id.clone(),
+        );
+        let not_cond = self.dag.add_node(
+            RiscOp::CmpLt,
+            vec![cond, one],
+            path_ty.clone(),
+            self.current_span_id.clone(),
+        );
+        self.local_ascription_path_condition = Some(match saved_local_path {
+            Some(parent_path) => self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, not_cond],
+                path_ty,
                 self.current_span_id.clone(),
-            );
-            let not_cond = self.dag.add_node(
-                RiscOp::CmpLt,
-                vec![cond, one],
-                path_ty.clone(),
-                self.current_span_id.clone(),
-            );
-            self.local_ascription_path_condition = Some(match saved_local_path {
-                Some(parent_path) => self.dag.add_node(
-                    RiscOp::Mul,
-                    vec![parent_path, not_cond],
-                    path_ty,
-                    self.current_span_id.clone(),
-                ),
-                None => not_cond,
-            });
-        } else {
-            self.local_ascription_path_condition = saved_local_path;
-        }
+            ),
+            None => not_cond,
+        });
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;

@@ -65,6 +65,15 @@ fn runtime_branch_source() -> &'static str {
      } else x\n"
 }
 
+fn runtime_branch_inlined_helper_source() -> &'static str {
+    "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+       y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+       y\n\
+     }\n\
+     def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+       if flag then helper(x) else x\n"
+}
+
 fn runtime_bool(value: bool) -> TensorValue {
     TensorValue::finalize_from_wide_int(
         "issue_2110_runtime_branch",
@@ -123,6 +132,36 @@ fn selected_runtime_branch_executes_its_local_ascription_guard() {
         _ => None,
     })
     .expect_err("the selected branch's disagreeing local claim must trap");
+    assert_eq!(
+        error,
+        "extent `2`: claimed = 2, pad axis 0 = 3\n\
+         numeric trap: domain in pad at i64"
+    );
+}
+
+#[test]
+fn untaken_runtime_branch_does_not_execute_an_inlined_helpers_local_ascription_guard() {
+    let dag = lower(runtime_branch_inlined_helper_source());
+    let values = eval_tensor_with(&dag, |name| match name {
+        "flag" => Some(runtime_bool(false)),
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        _ => None,
+    })
+    .expect("the untaken helper branch's disagreeing local claim is not observed");
+    let root = *dag.roots().last().expect("entry root");
+    assert_eq!(values[&root].shape, vec![3]);
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard() {
+    let dag = lower(runtime_branch_inlined_helper_source());
+    let error = eval_tensor_with(&dag, |name| match name {
+        "flag" => Some(runtime_bool(true)),
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        _ => None,
+    })
+    .expect_err("the selected helper branch's disagreeing local claim must trap");
     assert_eq!(
         error,
         "extent `2`: claimed = 2, pad axis 0 = 3\n\

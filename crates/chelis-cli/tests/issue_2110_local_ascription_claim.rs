@@ -551,6 +551,39 @@ fn an_inlined_callee_retains_its_local_ascription_obligation() {
     assert_pad_trap(&dir, "inlined", source, "2");
 }
 
+fn runtime_branch_inlined_helper_source(threshold: i64) -> String {
+    format!(
+        "def helper(x: tensor[*, f32]) -> tensor[*, f32] = {{\n  \
+         y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+         y\n\
+         }}\n\
+         def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+           if flag then helper(x) else x\n\
+         def run(x: tensor[*, f32]) -> tensor[*, f32] = \
+           f(lt(shape(x, 0i32), {threshold}i64), x)\n\
+         out = run(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    )
+}
+
+#[test]
+fn an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes() {
+    assert_exact_on_both_lanes(
+        "runtime_branch_inlined_helper_untaken",
+        &runtime_branch_inlined_helper_source(3),
+    );
+}
+
+#[test]
+fn a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_pad_trap(
+        &dir,
+        "runtime_branch_inlined_helper_selected",
+        &runtime_branch_inlined_helper_source(4),
+        "2",
+    );
+}
+
 #[test]
 fn an_invoked_local_closure_prepares_its_own_local_ascription() {
     let dir = tempfile::tempdir().expect("tempdir");
