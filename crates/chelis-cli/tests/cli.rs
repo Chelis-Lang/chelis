@@ -8333,6 +8333,35 @@ fn check_accepts_supported_core_transform_targets() {
              }\n",
         ),
         (
+            "vmap_typed_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32) with {\n\
+                 | (mapped, _) => vmap(mapped)(t)\n\
+               }\n",
+        ),
+        (
+            "vmap_typed_nested_match_sibling_isolation",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (\n\
+                 fn (v) -> sum(v, 0i32),\n\
+                 (0i32, fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))\n\
+               ) with {\n\
+                 | (ordinary, (_, mapped)) => {\n\
+                   first = ordinary(copy(t))\n\
+                   vmap(mapped)(t)\n\
+                 }\n\
+               }\n",
+        ),
+        (
+            "vmap_typed_match_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)) with {\n\
+                 | mapped => vmap(mapped)(t)\n\
+               }\n",
+        ),
+        (
             "non_vmap_block_forwarded_tuple_consumer",
             "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
                (mapped, keep) = (fn (v) -> sum(v, 0i32), 0i32)\n\
@@ -8566,6 +8595,52 @@ fn check_fences_non_direct_transform_targets() {
                alias = mapped\n\
                vmap(alias)(t)\n\
              }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_direct_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | mapped => vmap(mapped)(t)\n\
+               }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               match pair with {\n\
+                 | (mapped, _) => vmap(mapped)(t)\n\
+               }\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_nested_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = ((0i32, fn (v) -> sum(v, 0i32)), 1i32)\n\
+               match pair with {\n\
+                 | ((_, mapped), _) => vmap(mapped)(t)\n\
+               }\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_as_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | whole @ mapped => vmap(whole)(t)\n\
+               }\n",
+            "vmap",
+        ),
+        (
+            "vmap_module_alias_match_binding",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match mapped with {\n\
+                 | alias => vmap(alias)(t)\n\
+               }\n",
             "vmap",
         ),
     ];

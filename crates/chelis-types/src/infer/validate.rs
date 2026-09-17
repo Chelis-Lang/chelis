@@ -100,10 +100,10 @@ pub(super) fn validate_semantic_program(
 /// same function type as a top-level `loss` is exactly the #1954 hazard, so
 /// looking only at `Type::Fn` would recreate the silent global fallback.  The
 /// local values retain only the structural provenance this fence needs through
-/// transparent `let`, tuple, and tuple-projection flow; each binder replaces
-/// the previous value so lexical order and shadowing stay explicit. The
-/// normative transformation semantics remain in spec/06; the release
-/// supported-fragment document records this temporary admission fence.
+/// transparent `let`, tuple, tuple-projection, and match-pattern flow; each
+/// binder replaces the previous value so lexical order and shadowing stay
+/// explicit. The normative transformation semantics remain in spec/06; the
+/// release supported-fragment document records this temporary admission fence.
 fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let top_level_functions = collect_top_level_function_names(exprs);
     let module_function_aliases = collect_top_level_function_aliases(exprs, &top_level_functions);
@@ -130,7 +130,7 @@ impl CoreTransformScope {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum CoreTransformValue {
     #[default]
     Ordinary,
@@ -146,6 +146,112 @@ impl CoreTransformValue {
 
     fn is_untyped_vmap_lambda(&self) -> bool {
         matches!(self, Self::UntypedVmapLambda)
+    }
+}
+
+/// Bind the transform-relevant part of a known scrutinee value through one
+/// match pattern.
+///
+/// Direct and `as` binders receive the whole value. Tuple patterns transfer
+/// only through an exact structural correspondence, recursively, so one
+/// component cannot taint a sibling. Constructor and record structure is not
+/// represented by `CoreTransformValue`; their binders therefore shadow with
+/// `Ordinary`, as do malformed or otherwise non-matching shapes.
+fn bind_core_transform_pattern(
+    pattern: &deep::Expr,
+    value: &CoreTransformValue,
+    scope: &mut CoreTransformScope,
+) {
+    stack_guard!("bind_core_transform_pattern", pattern);
+    if let deep::Expr::MetaExpr(meta, _) = pattern {
+        bind_core_transform_pattern(&meta.expr, value, scope);
+        return;
+    }
+    let Some((tag, _, children)) = stamped_parts(pattern) else {
+        return;
+    };
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = children.first().and_then(symbol_name) {
+                scope.bind_local(name.to_string(), value.clone());
+            }
+        }
+        DeepTag::PatTuple => {
+            if let CoreTransformValue::Tuple(elements) = value
+                && elements.len() == children.len()
+            {
+                for (child, element) in children.iter().zip(elements) {
+                    bind_core_transform_pattern(child, element, scope);
+                }
+            } else {
+                for child in children {
+                    bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+                }
+            }
+        }
+        DeepTag::PatAs => {
+            let carried = children
+                .get(1)
+                .map_or(CoreTransformValue::Ordinary, |inner| {
+                    if core_transform_value_matches_pattern(value, inner) {
+                        value.clone()
+                    } else {
+                        CoreTransformValue::Ordinary
+                    }
+                });
+            if let Some(name) = children.first().and_then(symbol_name) {
+                scope.bind_local(name.to_string(), carried.clone());
+            }
+            if let Some(inner) = children.get(1) {
+                bind_core_transform_pattern(inner, &carried, scope);
+            }
+        }
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            for child in children.iter().skip(1) {
+                bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+            }
+        }
+        DeepTag::PatWild | DeepTag::PatLit => {}
+        _ => {
+            for name in pattern_names_for_signature(pattern).to_sorted() {
+                scope.bind_local(name.clone(), CoreTransformValue::Ordinary);
+            }
+        }
+    }
+}
+
+/// Whether an `as` pattern's inner structure can correspond to the represented
+/// value. `Ordinary` deliberately matches every pattern because it carries no
+/// transform provenance; the answer only matters for preventing a known
+/// callable or tuple from crossing incompatible pattern structure.
+fn core_transform_value_matches_pattern(value: &CoreTransformValue, pattern: &deep::Expr) -> bool {
+    stack_guard!("core_transform_value_matches_pattern", pattern, false);
+    if matches!(value, CoreTransformValue::Ordinary) {
+        return true;
+    }
+    if let deep::Expr::MetaExpr(meta, _) = pattern {
+        return core_transform_value_matches_pattern(value, &meta.expr);
+    }
+    let Some((tag, _, children)) = stamped_parts(pattern) else {
+        return false;
+    };
+    match tag {
+        DeepTag::PatVar | DeepTag::PatWild => true,
+        DeepTag::PatAs => children
+            .get(1)
+            .is_some_and(|inner| core_transform_value_matches_pattern(value, inner)),
+        DeepTag::PatTuple => {
+            let CoreTransformValue::Tuple(elements) = value else {
+                return false;
+            };
+            elements.len() == children.len()
+                && children
+                    .iter()
+                    .zip(elements)
+                    .all(|(child, element)| core_transform_value_matches_pattern(element, child))
+        }
+        DeepTag::PatLit | DeepTag::PatCtor | DeepTag::PatRecord => false,
+        _ => false,
     }
 }
 
@@ -293,6 +399,17 @@ fn walk_core_transform_targets(
             }
         }
         DeepTag::Match => {
+            let scrutinee_value =
+                children
+                    .first()
+                    .map_or(CoreTransformValue::Ordinary, |scrutinee| {
+                        classify_core_transform_value(
+                            scrutinee,
+                            top_level_functions,
+                            module_function_aliases,
+                            lexical_scope,
+                        )
+                    });
             if let Some(scrutinee) = children.first() {
                 walk_core_transform_targets(
                     scrutinee,
@@ -315,9 +432,7 @@ fn walk_core_transform_targets(
                 };
                 let mut scoped = lexical_scope.clone();
                 if let Some(pattern) = arm_children.first() {
-                    for name in pattern_names_for_signature(pattern).to_sorted() {
-                        scoped.bind_local(name.clone(), CoreTransformValue::Ordinary);
-                    }
+                    bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
                 }
                 for child in arm_children.iter().skip(1) {
                     walk_core_transform_targets(
@@ -2011,6 +2126,102 @@ mod core_transform_fragment_tests {
         let mut parsed = chelis_deep::parser::parse_str(source).expect("canonical Deep type");
         assert_eq!(parsed.len(), 1, "one Deep type expression");
         parsed.remove(0)
+    }
+
+    fn pattern_scope(source: &str, value: CoreTransformValue) -> CoreTransformScope {
+        let pattern = deep_type(source);
+        let mut scope = CoreTransformScope::default();
+        bind_core_transform_pattern(&pattern, &value, &mut scope);
+        scope
+    }
+
+    fn binding<'a>(scope: &'a CoreTransformScope, name: &str) -> &'a CoreTransformValue {
+        scope
+            .local_values
+            .get(name)
+            .unwrap_or_else(|| panic!("missing pattern binding `{name}`"))
+    }
+
+    #[test]
+    fn match_pattern_provenance_transfer_is_structural_and_conservative() {
+        let direct = pattern_scope("(pat-var {} mapped)", CoreTransformValue::UntypedVmapLambda);
+        assert_eq!(
+            binding(&direct, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+
+        let nested = pattern_scope(
+            "(pat-tuple {} \
+               (pat-var {} alias) \
+               (pat-tuple {} (pat-wild {}) (pat-var {} mapped)))",
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::TopLevelFunctionAlias,
+                CoreTransformValue::Tuple(vec![
+                    CoreTransformValue::Ordinary,
+                    CoreTransformValue::UntypedVmapLambda,
+                ]),
+            ]),
+        );
+        assert_eq!(
+            binding(&nested, "alias"),
+            &CoreTransformValue::TopLevelFunctionAlias
+        );
+        assert_eq!(
+            binding(&nested, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert!(!nested.local_values.contains_key("_"));
+
+        let siblings = pattern_scope(
+            "(pat-tuple {} (pat-var {} left) (pat-var {} right))",
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::UntypedVmapLambda,
+                CoreTransformValue::Ordinary,
+            ]),
+        );
+        assert_eq!(
+            binding(&siblings, "left"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert_eq!(binding(&siblings, "right"), &CoreTransformValue::Ordinary);
+
+        let as_pattern = pattern_scope(
+            "(pat-as {} whole (pat-var {} mapped))",
+            CoreTransformValue::UntypedVmapLambda,
+        );
+        assert_eq!(
+            binding(&as_pattern, "whole"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert_eq!(
+            binding(&as_pattern, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+
+        for pattern in [
+            "(pat-tuple {} (pat-var {} left) (pat-var {} right))",
+            "(pat-as {} whole (pat-tuple {} (pat-var {} mapped)))",
+            "(pat-ctor {} Box (pat-var {} mapped))",
+            "(pat-record {} Box (kv {} value (pat-var {} mapped)))",
+        ] {
+            let mismatched = pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda);
+            for (_, value) in mismatched.local_values.to_sorted() {
+                assert_eq!(
+                    value,
+                    &CoreTransformValue::Ordinary,
+                    "{pattern} must not transfer provenance through unknown or mismatched structure"
+                );
+            }
+        }
+
+        for pattern in ["(pat-wild {})", "(pat-lit {} 0)"] {
+            assert!(
+                pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda)
+                    .local_values
+                    .is_empty(),
+                "{pattern} binds no value"
+            );
+        }
     }
 
     #[test]
