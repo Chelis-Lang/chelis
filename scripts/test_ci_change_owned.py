@@ -1153,7 +1153,7 @@ class MetadataAndDiffTests(unittest.TestCase):
     def test_rename_diff_is_parsed_as_delete_and_add(self) -> None:
         raw = (
             b"M\0crates/p/src/lib.rs\0"
-            b"R100\0crates/p/tests/old.rs\0crates/p/tests/new.rs\0"
+            b"R097\0crates/p/tests/old.rs\0crates/p/tests/new.rs\0"
             b"D\0removed.txt\0"
         )
         records = owned.parse_name_status_z(raw)
@@ -1161,7 +1161,7 @@ class MetadataAndDiffTests(unittest.TestCase):
             [(record.status, record.old_path, record.path) for record in records],
             [
                 ("M", None, "crates/p/src/lib.rs"),
-                ("R100", "crates/p/tests/old.rs", "crates/p/tests/new.rs"),
+                ("R097", "crates/p/tests/old.rs", "crates/p/tests/new.rs"),
                 ("D", None, "removed.txt"),
             ],
         )
@@ -1170,12 +1170,24 @@ class MetadataAndDiffTests(unittest.TestCase):
             {"crates/p/src/lib.rs", "crates/p/tests/old.rs", "crates/p/tests/new.rs", "removed.txt"},
         )
 
+    def test_rename_diff_accepts_git_similarity_scores_from_zero_through_one_hundred(
+        self,
+    ) -> None:
+        statuses = ("R0", "R00", "R000", "R7", "R07", "R007", "R97", "R097", "R100")
+        raw = b"".join(
+            f"{status}\0old-{status}\0new-{status}\0".encode()
+            for status in statuses
+        )
+        records = owned.parse_name_status_z(raw)
+        self.assertEqual([record.status for record in records], list(statuses))
+
     def test_malformed_nul_diff_is_rejected(self) -> None:
         for raw in (
             b"M\0path",
             b"R100\0old\0",
             b"C100\0old\0copy\0",
             b"R101\0old\0new\0",
+            b"R0000\0old\0new\0",
             b"Rxx\0old\0new\0",
             b"U\0path\0",
             b"X\0path\0",

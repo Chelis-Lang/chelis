@@ -793,8 +793,13 @@ def parse_name_status_z(raw: bytes) -> list[ChangeRecord]:
         kind = status[:1]
         if kind == "C":
             raise ValueError("copy status is not supported; planner expects --find-renames")
-        valid_rename = re.fullmatch(r"R(?:100|[0-9]{1,2})", status)
-        if status not in {"A", "D", "M", "T"} and valid_rename is None:
+        rename_score = status[1:]
+        valid_rename = (
+            kind == "R"
+            and re.fullmatch(r"[0-9]{1,3}", rename_score) is not None
+            and int(rename_score) <= 100
+        )
+        if status not in {"A", "D", "M", "T"} and not valid_rename:
             raise ValueError(f"unsupported git diff status: {status!r}")
         if index >= len(fields):
             raise ValueError(f"missing path after git diff status {status}")
