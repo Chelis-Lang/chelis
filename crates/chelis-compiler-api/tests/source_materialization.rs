@@ -5,6 +5,12 @@
 #[path = "../examples/support/wire_materialization.rs"]
 mod materialization;
 
+use chelis_compiler_api::{
+    compiler,
+    schema::{CheckRequest, EvalRequest, SourceKind},
+};
+use chelis_types::errors::CheckErrorKind;
+use chelis_vocab::DiagnosticKind;
 use serde_json::json;
 
 #[test]
@@ -147,6 +153,82 @@ fn live_annotation_shape_uniqueness_and_placement_reject_at_program_ingress() {
     ] {
         let error = materialization::observe("SourceProgram", "parse-deep", source).unwrap_err();
         assert!(error.contains("parse"), "{error}");
+    }
+}
+
+#[test]
+fn registered_def_expression_metadata_has_check_and_eval_admission_parity() {
+    // spec/03 [03-META-2] assigns these three keys the expression role.
+    // [03-ROLE-2] and spec/04 [04-TOT-1/4] therefore require the same
+    // semantic admission as an ordinary runtime-expression child: a valid
+    // expression reaches both consumers, while a present unknown form is
+    // diagnosed rather than skipped with the enclosing def's body.
+    for key in ["property_seed", "property_samples", "property_tolerance"] {
+        let good = format!("(def {{{key}: (lit {{}} 1)}} value (lit {{}} 7))");
+        assert_eq!(
+            materialization::observe("SourceProgram", "check-deep", &good).unwrap(),
+            json!({"admitted": true}),
+            "check-deep must admit the registered {key} expression role"
+        );
+        assert_eq!(
+            materialization::observe("SourceProgram", "eval-deep", &good).unwrap(),
+            json!({"roots":[{"name":"value","value":{"type":"scalar","value":{"dtype":"int32","value":7}}}]}),
+            "eval-deep must admit the registered {key} expression role"
+        );
+
+        let bad = format!("(def {{{key}: (future_form {{}} 1)}} value (lit {{}} 7))");
+        for codec in ["check-deep", "eval-deep"] {
+            let error = materialization::observe("SourceProgram", codec, &bad)
+                .expect_err("an unknown form in expression metadata must be rejected");
+            assert!(
+                error.contains("future_form"),
+                "{codec} must identify the rejected {key} expression: {error}"
+            );
+        }
+
+        let nested =
+            format!("(def {{{key}: (tuple {{}} (future_nested {{}} 1))}} value (lit {{}} 7))");
+        let stamped = chelis_deep::parse_and_stamp_file(&nested)
+            .expect("the lenient Deep parser must preserve the nested unknown form");
+        let checker_errors = chelis_types::check_typed_program(&stamped)
+            .expect_err("a nested unknown metadata expression must fail checking")
+            .errors;
+        assert!(
+            checker_errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::UnknownForm)
+                    && error.message.contains("future_nested")
+            }),
+            "the checker must classify nested {key} metadata as UnknownForm: {checker_errors:?}"
+        );
+
+        let checked = compiler::check(CheckRequest {
+            source_kind: SourceKind::Deep,
+            source: nested.clone(),
+        })
+        .expect("check must return its structured diagnostic report");
+        assert!(
+            checked.errors.iter().any(|error| {
+                error.kind() == DiagnosticKind::UnknownForm
+                    && error.message.contains("future_nested")
+            }),
+            "check must preserve the nested {key} UnknownForm diagnostic: {:?}",
+            checked.errors
+        );
+
+        let eval_error = compiler::eval(EvalRequest {
+            source_kind: SourceKind::Deep,
+            source: nested,
+            bindings: Default::default(),
+        })
+        .expect_err("eval must reject a nested unknown metadata expression");
+        assert!(
+            eval_error.errors.iter().any(|error| {
+                error.kind() == DiagnosticKind::UnknownForm
+                    && error.message.contains("future_nested")
+            }),
+            "eval must preserve the nested {key} UnknownForm diagnostic: {:?}",
+            eval_error.errors
+        );
     }
 }
 

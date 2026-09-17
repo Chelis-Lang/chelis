@@ -1275,6 +1275,15 @@ pub(super) fn validate_ir_expr(
                 return StaticValue::Unknown;
             }
             if get_tag(list) == Some(DeepTag::Def) {
+                if let Some(metadata) = get_meta(list) {
+                    validate_expression_metadata(
+                        metadata,
+                        type_env,
+                        static_env,
+                        declared_signatures,
+                        errors,
+                    );
+                }
                 let kids = children(list);
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return StaticValue::Unknown;
@@ -1487,6 +1496,91 @@ pub(super) fn validate_ir_expr(
             }
             StaticValue::Unknown
         }
+    }
+}
+
+/// Apply semantic admission to metadata leaves whose registered key gives
+/// them the expression role.
+///
+/// spec/03 [03-META-2] makes `property_tolerance`, `property_seed`, and
+/// `property_samples` runtime expressions rather than preserved syntax.  A
+/// `def` therefore cannot return from validation after checking only its body:
+/// doing so lets an [`deep::Expr::UnknownForm`] in one of these leaves bypass
+/// the check and reach evaluation.  Keep the role decision in `chelis-deep`'s
+/// metadata registry and send only expression leaves through the same semantic
+/// validator as ordinary runtime children.
+fn validate_expression_metadata(
+    metadata: &deep::Metadata,
+    type_env: &ShapeTypeEnv,
+    static_env: &mut UnordMap<String, StaticValue>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    metadata.visit_expressions(&mut |value, role| {
+        if role != chelis_deep::metadata::MetadataRole::Expression {
+            return;
+        }
+        reject_unknown_metadata_forms(value, errors);
+        validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+    });
+}
+
+/// Reject undecodable forms inside a registered runtime-expression payload.
+///
+/// `validate_ir_expr` deliberately leaves the checker's ordinary unknown-form
+/// diagnostic to inference. Metadata expressions are not inference children,
+/// so this role-owned preflight supplies the otherwise missing disposition
+/// without duplicating diagnostics for ordinary bodies.
+fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
+    stack_guard!("reject_unknown_metadata_forms", expr);
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(_, metadata, children) => {
+            metadata.visit_expressions(&mut |value, role| {
+                if role == chelis_deep::metadata::MetadataRole::Expression {
+                    reject_unknown_metadata_forms(value, errors);
+                }
+            });
+            for child in children {
+                reject_unknown_metadata_forms(child, errors);
+            }
+        }
+        deep::ExprCarrier::UndecodableHead(head, _, _) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::UnknownForm,
+                format!(
+                    "unknown Deep form `{head}` in runtime-expression metadata; every expression form requires an explicit checker disposition (spec/03 [03-META-2]; spec/04 [04-TOT-1])"
+                ),
+                vec![],
+            ));
+        }
+        deep::ExprCarrier::MetadataMap(metadata) => {
+            metadata.visit_expressions(&mut |value, role| {
+                if role == chelis_deep::metadata::MetadataRole::Expression {
+                    reject_unknown_metadata_forms(value, errors);
+                }
+            });
+        }
+        deep::ExprCarrier::MetadataExpression(metadata_expr) => {
+            metadata_expr
+                .metadata
+                .visit_expressions(&mut |value, role| {
+                    if role == chelis_deep::metadata::MetadataRole::Expression {
+                        reject_unknown_metadata_forms(value, errors);
+                    }
+                });
+            reject_unknown_metadata_forms(&metadata_expr.expr, errors);
+        }
+        deep::ExprCarrier::StructuralList(elements) => {
+            for child in elements {
+                reject_unknown_metadata_forms(child, errors);
+            }
+        }
+        deep::ExprCarrier::MalformedLegacyList(list) => {
+            for child in &list.elements {
+                reject_unknown_metadata_forms(child, errors);
+            }
+        }
+        deep::ExprCarrier::Atom(_) => {}
     }
 }
 
