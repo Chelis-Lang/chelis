@@ -468,42 +468,108 @@ fn validate_core_transform_target(
 /// ascriptions, defsig tensor types, parameter type annotations, literal
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum TensorPrecisionOwnerKind {
+    Value,
+    Type,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionOwner {
+    module: Option<String>,
+    kind: TensorPrecisionOwnerKind,
+    ordinal: usize,
+}
+
+fn new_tensor_precision_owner(
+    module: Option<String>,
+    kind: TensorPrecisionOwnerKind,
+    next_ordinal: &mut usize,
+) -> TensorPrecisionOwner {
+    let owner = TensorPrecisionOwner {
+        module,
+        kind,
+        ordinal: *next_ordinal,
+    };
+    *next_ordinal += 1;
+    owner
+}
+
 pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
     errors: &mut impl DiagnosticOutput,
 ) {
-    let mut seen: UnordSet<(String, String)> = UnordSet::new();
+    let mut seen: UnordSet<(TensorPrecisionOwner, String)> = UnordSet::new();
+    let mut pending_signatures: UnordMap<(Option<String>, String), Vec<TensorPrecisionOwner>> =
+        UnordMap::new();
+    let mut next_ordinal = 0;
     // Descend through `(module {} name ...)` wrappers so per-def dedup
-    // keeps each def's tensor types in their own key space (otherwise
-    // every def lives under def_context="" and errors collapse).
-    for expr in top_level_decl_items(exprs) {
-        let def_name = match expr.carrier() {
-            deep::ExprCarrier::DecodedNode(
-                DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias,
-                _,
-                children,
-            ) => children
-                .first()
-                .and_then(symbol_name)
-                .unwrap_or("")
-                .to_string(),
-            deep::ExprCarrier::DecodedNode(_, _, _)
-            | deep::ExprCarrier::StructuralList(_)
+    // keeps each declaration's tensor types in its own key space. A matching
+    // `defsig` and `def` deliberately share one value owner; declarations in
+    // another namespace or a repeated declaration occurrence do not.
+    for (module, expr) in top_level_decl_items_with_modules(exprs) {
+        let owner = match expr.carrier() {
+            deep::ExprCarrier::DecodedNode(tag, _, children) => {
+                let name = children.first().and_then(symbol_name).map(str::to_string);
+                match (tag, name) {
+                    (DeepTag::Defsig, Some(name)) => {
+                        let owner = new_tensor_precision_owner(
+                            module.clone(),
+                            TensorPrecisionOwnerKind::Value,
+                            &mut next_ordinal,
+                        );
+                        pending_signatures
+                            .entry((module.clone(), name))
+                            .or_default()
+                            .push(owner.clone());
+                        owner
+                    }
+                    (DeepTag::Def, Some(name)) => {
+                        let key = (module.clone(), name);
+                        pending_signatures
+                            .get_mut(&key)
+                            .and_then(|owners| (!owners.is_empty()).then(|| owners.remove(0)))
+                            .unwrap_or_else(|| {
+                                new_tensor_precision_owner(
+                                    module.clone(),
+                                    TensorPrecisionOwnerKind::Value,
+                                    &mut next_ordinal,
+                                )
+                            })
+                    }
+                    (DeepTag::Deftype | DeepTag::Typealias, _) => new_tensor_precision_owner(
+                        module.clone(),
+                        TensorPrecisionOwnerKind::Type,
+                        &mut next_ordinal,
+                    ),
+                    _ => new_tensor_precision_owner(
+                        module.clone(),
+                        TensorPrecisionOwnerKind::Other,
+                        &mut next_ordinal,
+                    ),
+                }
+            }
+            deep::ExprCarrier::StructuralList(_)
             | deep::ExprCarrier::UndecodableHead(_, _, _)
             | deep::ExprCarrier::Atom(_)
             | deep::ExprCarrier::MetadataMap(_)
             | deep::ExprCarrier::MetadataExpression(_)
-            | deep::ExprCarrier::MalformedLegacyList(_) => String::new(),
+            | deep::ExprCarrier::MalformedLegacyList(_) => new_tensor_precision_owner(
+                module,
+                TensorPrecisionOwnerKind::Other,
+                &mut next_ordinal,
+            ),
         };
-        walk_for_tensor_precision(expr, errors, &mut seen, &def_name);
+        walk_for_tensor_precision(expr, errors, &mut seen, &owner);
     }
 }
 
-pub(super) fn walk_for_tensor_precision(
+fn walk_for_tensor_precision(
     expr: &deep::Expr,
     errors: &mut impl DiagnosticOutput,
-    seen: &mut UnordSet<(String, String)>,
-    def_context: &str,
+    seen: &mut UnordSet<(TensorPrecisionOwner, String)>,
+    owner: &TensorPrecisionOwner,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the
     // native stack (gdb confirmed this is a real SIGSEGV site on deep `app`
@@ -538,7 +604,7 @@ pub(super) fn walk_for_tensor_precision(
                         && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
-                        && seen.insert((def_context.to_string(), name.to_string()))
+                        && seen.insert((owner.clone(), name.to_string()))
                     {
                         let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
                         // WS-A5 RT-3a F3: an identifier in a `t-prim`
@@ -584,41 +650,41 @@ pub(super) fn walk_for_tensor_precision(
 
             // Metadata may carry `type:` ascriptions containing tensor types.
             metadata.visit_syntax(&mut |_, value| {
-                walk_for_tensor_precision(value, errors, seen, def_context);
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
 
             for child in kids {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
         deep::ExprCarrier::MetadataMap(metadata) => {
             metadata.visit_syntax(&mut |_, value| {
-                walk_for_tensor_precision(value, errors, seen, def_context);
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
         }
         deep::ExprCarrier::MetadataExpression(metadata_expr) => {
             metadata_expr.metadata.visit_syntax(&mut |_, value| {
-                walk_for_tensor_precision(value, errors, seen, def_context);
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
-            walk_for_tensor_precision(&metadata_expr.expr, errors, seen, def_context);
+            walk_for_tensor_precision(&metadata_expr.expr, errors, seen, owner);
         }
         deep::ExprCarrier::Atom(_) => {}
         deep::ExprCarrier::StructuralList(elements) => {
             for child in elements {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
         deep::ExprCarrier::UndecodableHead(_, metadata, children) => {
             metadata.visit_syntax(&mut |_, value| {
-                walk_for_tensor_precision(value, errors, seen, def_context);
+                walk_for_tensor_precision(value, errors, seen, owner);
             });
             for child in children {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
         deep::ExprCarrier::MalformedLegacyList(list) => {
             for element in &list.elements {
-                walk_for_tensor_precision(element, errors, seen, def_context);
+                walk_for_tensor_precision(element, errors, seen, owner);
             }
         }
     }

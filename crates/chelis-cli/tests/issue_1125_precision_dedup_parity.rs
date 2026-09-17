@@ -24,6 +24,33 @@ const ONE_DEFINITION_TWO_SITES: &str = "\
   (var {} x)))
 ";
 
+const SAME_SPELLING_CROSS_NAMESPACE: &str = "\
+(typealias {} shared () \
+  (t-tensor {} (d-lit {} 2) (t-prim {} madeup)))
+(def {} shared (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+  (var {} x)))
+";
+
+const DUPLICATE_VALUE_DECLARATIONS: &str = "\
+(def {} shared (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+  (var {} x)))
+(def {} shared (fn {} (params {} \
+  (y {type: (t-tensor {} (d-lit {} 3) (t-prim {} madeup))})) \
+  (var {} y)))
+";
+
+const MATCHED_SIGNATURE_AND_DEFINITION: &str = "\
+(defsig {} shared \
+  (t-fn {} \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup)) \
+    (t-tensor {} (d-lit {} 2) (t-prim {} madeup))))
+(def {} shared (fn {} (params {} \
+  (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} madeup))})) \
+  (var {} x)))
+";
+
 fn diagnostics(errors: &[CheckError]) -> Vec<String> {
     let mut diagnostics = errors
         .iter()
@@ -162,5 +189,32 @@ fn repeated_invalid_precision_within_one_definition_remains_deduplicated() {
         ONE_DEFINITION_TWO_SITES,
         1,
         "same invalid precision repeated within one definition",
+    );
+}
+
+#[test]
+fn same_spelling_in_type_and_value_namespaces_keeps_both_diagnostics() {
+    assert_multiplicity(
+        SAME_SPELLING_CROSS_NAMESPACE,
+        2,
+        "same spelling in distinct declaration namespaces",
+    );
+}
+
+#[test]
+fn repeated_value_declaration_occurrences_keep_both_diagnostics() {
+    assert_multiplicity(
+        DUPLICATE_VALUE_DECLARATIONS,
+        2,
+        "repeated value declaration occurrences",
+    );
+}
+
+#[test]
+fn matching_signature_and_definition_share_one_value_owner() {
+    assert_multiplicity(
+        MATCHED_SIGNATURE_AND_DEFINITION,
+        1,
+        "matching signature and definition",
     );
 }
