@@ -492,6 +492,47 @@ fn vmap_shifts_the_local_claim_and_initializer_axis_together() {
 }
 
 #[test]
+fn inserted_output_axis_and_observed_source_axis_are_independently_exact() {
+    let dag = lower(
+        "def f[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n  \
+         step1: tensor[c, h, f32] = insert(g, 1, shape(x, 2))\n  \
+         step2: tensor[c, h, w, f32] = insert(step1, 2, shape(x, 3))\n  \
+         step2\n\
+         }\n",
+    );
+    let coordinates = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            let RiscOp::ExtentWitness {
+                site:
+                    ExtentWitnessSite::LocalAscriptionClaim {
+                        axis: RtAxis::Lit(claimed),
+                        ..
+                    },
+                axis: RtAxis::Lit(observed),
+                ..
+            } = &node.op
+            else {
+                return None;
+            };
+            Some((*claimed, *observed))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coordinates,
+        vec![(1, 2), (2, 3)],
+        "an insert's authored output axis and its source-tensor observation \
+         are separate coordinates: {dag:#?}"
+    );
+    assert!(
+        chelis_ir::verify::verify(&dag).is_empty(),
+        "{:?}",
+        chelis_ir::verify::verify(&dag)
+    );
+}
+
+#[test]
 fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     let direct = lower(&direct_source(
         "y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y",

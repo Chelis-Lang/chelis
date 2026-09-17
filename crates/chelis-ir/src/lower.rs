@@ -11180,7 +11180,7 @@ impl<'program> LowerCtx<'program> {
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
+        let mut result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
             self.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
         });
         if let Some(ret_ty_expr) = fn_expr.result_type() {
@@ -11204,14 +11204,14 @@ impl<'program> LowerCtx<'program> {
         // do not resolve the caller spelling through this activation's
         // signature witnesses or import its checked optional extent.
         if expected_return_ty != &Self::default_type()
-            && let Some(id) = result.as_single_node()
+            && let LoweredValue::Node(id) = &mut result
             && expected_return_ty.dims.len()
-                == self.dag.get(id).expect("result").output_type.dims.len()
+                == self.dag.get(*id).expect("result").output_type.dims.len()
         {
             for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
                 if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
                 {
-                    self.refine_checked_result_axis_name(id, axis, checked_dim);
+                    *id = self.refine_checked_result_axis_name(*id, axis, checked_dim);
                 }
             }
         }
@@ -16547,9 +16547,14 @@ impl<'program> LowerCtx<'program> {
     /// from the checked annotation. A concrete extent already present on the
     /// produced axis remains useful information and is retained under the new
     /// spelling.
-    fn refine_checked_result_axis_name(&mut self, id: NodeId, axis: usize, checked: &DimInfo) {
+    fn refine_checked_result_axis_name(
+        &mut self,
+        id: NodeId,
+        axis: usize,
+        checked: &DimInfo,
+    ) -> NodeId {
         let DimInfo::Named(name, _) = checked else {
-            return;
+            return id;
         };
         // A checked caller view renames the diagnostic of an existing exact
         // obligation, never its declaring witness or physical result extent.
@@ -16594,7 +16599,7 @@ impl<'program> LowerCtx<'program> {
             }
         }
         if refined_claim {
-            return;
+            return id;
         }
         let Some(existing) = self
             .dag
@@ -16602,14 +16607,35 @@ impl<'program> LowerCtx<'program> {
             .and_then(|node| node.output_type.dims.get(axis))
             .cloned()
         else {
-            return;
+            return id;
         };
         let known_extent = match existing {
             DimInfo::Named(_, extent) => extent,
             DimInfo::Lit(extent) => Some(extent),
         };
-        self.dag.node_mut(id).expect("result").output_type.dims[axis] =
-            DimInfo::Named(name.clone(), known_extent);
+        let refined = DimInfo::Named(name.clone(), known_extent);
+
+        // A same-shape primitive's output type is part of its physical
+        // operand-agreement contract. A caller-side label is only a view, so
+        // stamping it directly on that producer can make a valid primitive
+        // internally inconsistent (for example, `relu` producing
+        // `Named("d", Some(2))` while its operand remains `Lit(2)`). Retain
+        // the exact producer and put the diagnostic-only refinement on an
+        // administrative carrier instead.
+        if matches!(
+            crate::axis_sources::same_shape_result_agreement(&self.dag, id),
+            Ok(Some(_))
+        ) {
+            let source = self.dag.get(id).expect("result");
+            let mut output_type = source.output_type.clone();
+            output_type.dims[axis] = refined;
+            return self
+                .dag
+                .add_node(RiscOp::Copy, vec![id], output_type, source.span_id.clone());
+        }
+
+        self.dag.node_mut(id).expect("result").output_type.dims[axis] = refined;
+        id
     }
 
     /// Retain a legacy literal result obligation on the operation that
@@ -23270,6 +23296,60 @@ mod tests {
             ctx.dag.get(id).expect("result").output_type.dims,
             vec![DimInfo::Named("fixed".into(), Some(3))],
             "a produced concrete extent survives the caller-side label"
+        );
+    }
+
+    #[test]
+    fn checked_result_name_transport_preserves_same_shape_producer_types() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let exact = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let input = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            exact.clone(),
+            None,
+        );
+        let relu = ctx
+            .dag
+            .add_node(RiscOp::Relu, vec![input], exact.clone(), None);
+
+        let mut invalid = ctx.dag.clone();
+        invalid.node_mut(relu).expect("relu").output_type.dims[0] =
+            DimInfo::Named("caller".into(), Some(2));
+        assert!(
+            crate::verify::verify(&invalid)
+                .iter()
+                .any(|error| error.contains("relu op")),
+            "directly stamping the primitive demonstrates the invalid representation"
+        );
+
+        let view =
+            ctx.refine_checked_result_axis_name(relu, 0, &DimInfo::Named("caller".into(), Some(2)));
+        assert_ne!(view, relu, "the caller label needs its own view node");
+        assert_eq!(
+            ctx.dag.get(relu).expect("relu").output_type,
+            exact,
+            "the same-shape primitive retains the operand's exact type"
+        );
+        let view_node = ctx.dag.get(view).expect("caller view");
+        assert!(matches!(view_node.op, RiscOp::Copy));
+        assert_eq!(view_node.inputs, vec![relu]);
+        assert_eq!(
+            view_node.output_type.dims,
+            vec![DimInfo::Named("caller".into(), Some(2))]
+        );
+        assert!(
+            crate::verify::verify(&ctx.dag).is_empty(),
+            "{:?}",
+            crate::verify::verify(&ctx.dag)
         );
     }
 
