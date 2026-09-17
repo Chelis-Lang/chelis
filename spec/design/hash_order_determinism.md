@@ -246,10 +246,12 @@ and to hold a Cargo project so a stale entry cannot survive.
 Dep-info accumulates, and every cargo invocation writes it, not only a
 registered row. A developer who has once built an unregistered configuration in
 that worktree therefore has dep-info for it, and leg 3 would count those files
-as covered. The authoritative reconciliation is consequently the CI one, where
-`Swatinem/rust-cache` prunes workspace-member artifacts before saving and the
-job builds only registered configurations; the local run is a fast
-approximation that can be too generous, never too strict.
+as covered. The accumulated union is therefore supporting completeness evidence:
+it can overstate coverage, and it carries no provenance that can prove a
+nightly-only entry stale. The gate therefore makes no automatic stale inference
+from it. Reviewers own the source-to-feature attribution when the exact residual
+changes; the nightly `--require-complete` run remains the executable proof that
+the named sources are compiled by the nightly matrix.
 
 **Executable controls.** `scripts/test_check_configuration_closure.py` proves
 the two properties the rest rests on, with rustc rather than assertion:
@@ -259,7 +261,8 @@ rustc compiles appears in its dep-info and so in the reconciled set. The
 remaining tests cover dep-info parsing, a member that fails to inherit the lint,
 a workspace that only warns, an uncovered feature, an invented feature, an
 unqualified feature spelling, a run its owner does not issue, an uncompiled
-source, an empty dep-info set, and a stale or ungated exception.
+source, an empty dep-info set, accumulated provenance that cannot prune a
+nightly-only source, and a stale or ungated exception.
 
 **Residual: the host dimension.** Both registered hosts are unix, so
 `#[cfg(not(unix))]` is compiled by no row at any cadence. Eighteen such sites
@@ -306,10 +309,12 @@ per-pull-request matrix does compile: `NIGHTLY_ONLY_SOURCES` names the whole
 files (`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope`
 binaries), while leg 3's reconciliation is file-granular and therefore records
 a partly-gated file as covered. The nightly `--all-features` row compiles both
-kinds, and the matrix records that cadence. The list prunes itself: an entry a per-pull-request row
-does compile is reported as stale, an entry whose file is gone is reported as
-stale, and the nightly job runs the reconciliation with `--require-complete`,
-which drops the allowance so a new uncovered file cannot be parked there.
+kinds, and the matrix records that cadence. An entry whose file is gone is
+reported as stale. There is no automatic source-to-feature attribution or
+per-pull-request pruning: neither accumulated dep-info nor a row's resolved
+feature set proves that the row compiled a particular source. The nightly job
+runs the reconciliation with `--require-complete`, which drops the allowance so
+a new uncovered file cannot be parked there.
 `--all-features` is also where a `#[cfg(all(feature = ..., feature = ...))]`
 combination is compiled.
 

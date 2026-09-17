@@ -806,6 +806,33 @@ class SchemaTests(unittest.TestCase):
             self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
             self.assertFalse(owned.is_docs_only([path]))
 
+    def test_configuration_closure_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/check_configuration_closure.py",
+            "scripts/test_check_configuration_closure.py",
+        }
+        rules = [
+            rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        ]
+        self.assertEqual({rule.prefix for rule in rules}, expected)
+        for rule in rules:
+            with self.subTest(path=rule.prefix):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+        for neighbor in (
+            "scripts/check_configuration_closure_extra.py",
+            "scripts/test_check_configuration_closure_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules))
+
     def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
         for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
             text = config_text() + (

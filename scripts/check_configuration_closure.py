@@ -227,30 +227,26 @@ class NightlyOnlySource:
     """A source whose only Clippy coverage is a nightly matrix row."""
 
     path: str
-    feature: str
     row: str
 
 
 # The exact residual. These sources sit behind solver features whose external
 # toolchains the repository does not provision per pull request, so the only
-# row that compiles them is nightly. The list is self-pruning: a file that a
-# per-pull-request row does compile is reported as stale, and `--require-complete`
-# (run by the nightly job) drops the allowance entirely, so a new uncovered file
-# cannot hide behind it.
+# row that compiles them is nightly. Source-to-feature attribution is reviewed
+# manually: accumulated dep-info cannot prove which registered row compiled a
+# source. `--require-complete` (run by the nightly job) drops the allowance
+# entirely, so a new uncovered file cannot hide behind it.
 NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
     NightlyOnlySource(
         path="crates/chelis-prove/src/z3_engine.rs",
-        feature="chelis-prove/z3",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_erf_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
 )
@@ -551,10 +547,8 @@ def compiled_rust_sources(
     Dep-info accumulates, and every cargo invocation writes it, not only a
     registered matrix row. A worktree where an unregistered configuration was
     once built therefore carries dep-info for it, and this reconciliation will
-    count those files as covered. The authoritative run is consequently the CI
-    one, where the cache prunes workspace-member artifacts before saving and
-    only the registered rows execute; locally this leg can be too generous,
-    never too strict.
+    count those files as covered. This union is completeness evidence only; it
+    carries no provenance that can prove which registered row compiled a file.
     """
     repo_root = repo_root.resolve()
     compiled: set[str] = set()
@@ -598,7 +592,13 @@ def check_every_source_is_compiled(
     nightly_only: Sequence[NightlyOnlySource] = NIGHTLY_ONLY_SOURCES,
     require_complete: bool = False,
 ) -> None:
-    """Leg 3: reconcile repository sources against rustc's own dep-info."""
+    """Leg 3: reconcile repository sources against rustc's own dep-info.
+
+    ``target_directories`` may contain accumulated artifacts from any Cargo
+    invocation, so those sources establish completeness but not row
+    provenance. Nightly-only source attribution is therefore not inferred
+    automatically from this union.
+    """
     labels = {run.label: run for run in CLIPPY_MATRIX}
     for source in nightly_only:
         if not (repo_root / source.path).is_file():
@@ -652,16 +652,6 @@ def check_every_source_is_compiled(
     allowed_nightly = (
         set() if require_complete else {source.path for source in nightly_only}
     )
-    if not require_complete:
-        stale = sorted(path for path in allowed_nightly if path in compiled)
-        if stale:
-            raise ConfigurationClosureFailure(
-                "these sources are recorded as nightly-only but a registered run "
-                "compiled them here: "
-                + ", ".join(stale)
-                + ". Delete their NIGHTLY_ONLY_SOURCES entries; the residual has shrunk."
-            )
-
     excepted = tuple(
         f"{exception.directory}/" for exception in exceptions if exception.sources is None
     )

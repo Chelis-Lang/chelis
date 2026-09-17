@@ -521,7 +521,9 @@ class SourceReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             CLOSURE.ConfigurationClosureFailure, "stale uncompiled-source exception"
         ):
-            CLOSURE.check_every_source_is_compiled((), REPO_ROOT, (exception,))
+            CLOSURE.check_every_source_is_compiled(
+                (), REPO_ROOT, (exception,), nightly_only=()
+            )
 
     def test_rejects_an_exception_whose_gate_is_missing(self) -> None:
         exception = CLOSURE.UncompiledException(
@@ -532,7 +534,9 @@ class SourceReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             CLOSURE.ConfigurationClosureFailure, "missing owning gate"
         ):
-            CLOSURE.check_every_source_is_compiled((), REPO_ROOT, (exception,))
+            CLOSURE.check_every_source_is_compiled(
+                (), REPO_ROOT, (exception,), nightly_only=()
+            )
 
     def test_live_nightly_only_inventory_is_well_formed(self) -> None:
         labels = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
@@ -541,35 +545,40 @@ class SourceReconciliationTests(unittest.TestCase):
             self.assertIn(source.row, labels, source.path)
             self.assertEqual(labels[source.row].cadence, CLOSURE.NIGHTLY, source.path)
 
-    def test_reports_a_nightly_only_entry_a_run_already_compiled(self) -> None:
-        # The inventory prunes itself: an entry the per-pull-request matrix
-        # covers is dead weight that would hide a later regression.
+    def test_nightly_inventory_cannot_assert_unverified_feature_attribution(self) -> None:
+        with self.assertRaises(TypeError):
+            CLOSURE.NightlyOnlySource(
+                path="crates/chelis-prove/src/z3_engine.rs",
+                row="all-features",
+                feature="chelis-prove/arb",
+            )
+
+    def test_accumulated_dep_info_does_not_prune_a_nightly_only_entry(self) -> None:
+        # A warm target includes dep-info from cargo invocations outside the
+        # registered Clippy rows. That evidence can establish completeness,
+        # but it cannot prove that the nightly-only inventory is stale.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
             (root / "src").mkdir()
-            (root / "src" / "compiled.rs").write_text("", encoding="utf-8")
+            (root / "src" / "nightly.rs").write_text("", encoding="utf-8")
             deps = root / "target" / "debug" / "deps"
             deps.mkdir(parents=True)
             (deps / "unit.d").write_text(
-                "target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8"
+                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
             )
             nightly = (
                 CLOSURE.NightlyOnlySource(
-                    path="src/compiled.rs",
-                    feature="pkg/feature",
+                    path="src/nightly.rs",
                     row="all-features",
                 ),
             )
-            with self.assertRaisesRegex(
-                CLOSURE.ConfigurationClosureFailure, "recorded as nightly-only"
-            ):
-                CLOSURE.check_every_source_is_compiled(
-                    (root / "target" / "debug",),
-                    root,
-                    exceptions=(),
-                    nightly_only=nightly,
-                )
+            CLOSURE.check_every_source_is_compiled(
+                (root / "target" / "debug",),
+                root,
+                exceptions=(),
+                nightly_only=nightly,
+            )
 
     def test_require_complete_drops_the_nightly_allowance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -586,7 +595,6 @@ class SourceReconciliationTests(unittest.TestCase):
             nightly = (
                 CLOSURE.NightlyOnlySource(
                     path="src/nightly.rs",
-                    feature="pkg/feature",
                     row="all-features",
                 ),
             )
@@ -613,7 +621,6 @@ class SourceReconciliationTests(unittest.TestCase):
         nightly = (
             CLOSURE.NightlyOnlySource(
                 path="crates/chelis-prove/src/z3_engine.rs",
-                feature="chelis-prove/z3",
                 row="default-features",
             ),
         )
@@ -628,7 +635,6 @@ class SourceReconciliationTests(unittest.TestCase):
         nightly = (
             CLOSURE.NightlyOnlySource(
                 path="crates/chelis-prove/src/gone.rs",
-                feature="chelis-prove/z3",
                 row="all-features",
             ),
         )
