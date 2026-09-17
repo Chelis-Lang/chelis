@@ -1983,7 +1983,7 @@ mod tests {
     fn hof_arg_arrow_keeps_parens() {
         // `(a -> b) -> c`: the function-typed argument must stay parenthesized.
         assert_eq!(
-            sig_type_str("module T\nsig f: (a -> b) -> c"),
+            sig_type_str("module T\nsig f[a, b, c]: (a -> b) -> c"),
             "(a -> b) -> c"
         );
     }
@@ -1991,12 +1991,12 @@ mod tests {
     #[test]
     fn hof_arg_arrow_format_is_idempotent() {
         // A second format pass over the issue reproducer must be stable.
-        let source = "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n";
+        let source = "module T\nsig f[a, b, c]: (a -> b) -> c\ndef f(g, x) = x\n";
         let once = format_source(source).expect("format once");
         let twice = format_source(&once).expect("format twice");
         assert_eq!(once, twice, "HOF sig formatting must be idempotent");
         assert!(
-            once.contains("sig f: (a -> b) -> c"),
+            once.contains("sig f[a, b, c]: (a -> b) -> c"),
             "grouping parens around the function-typed argument were dropped; got: {once}"
         );
     }
@@ -2004,7 +2004,10 @@ mod tests {
     #[test]
     fn curried_arrow_gets_no_spurious_parens() {
         // Plain curried `a -> b -> c` must NOT grow parens.
-        assert_eq!(sig_type_str("module T\nsig f: a -> b -> c"), "a -> b -> c");
+        assert_eq!(
+            sig_type_str("module T\nsig f[a, b, c]: a -> b -> c"),
+            "a -> b -> c"
+        );
     }
 
     #[test]
@@ -2012,7 +2015,7 @@ mod tests {
         // Right-position arrow parens are redundant; `a -> (b -> c)` is the
         // same type as `a -> b -> c` and canonicalizes to the bare form.
         assert_eq!(
-            sig_type_str("module T\nsig f: a -> (b -> c)"),
+            sig_type_str("module T\nsig f[a, b, c]: a -> (b -> c)"),
             "a -> b -> c"
         );
     }
@@ -2021,8 +2024,8 @@ mod tests {
     fn hof_arg_and_curried_are_distinct_asts() {
         // The two sources must parse to *different* ASTs — proof that the
         // grouping is semantically meaningful, not cosmetic.
-        let hof = sig_type_ast("module T\nsig f: (a -> b) -> c");
-        let curried = sig_type_ast("module T\nsig f: a -> b -> c");
+        let hof = sig_type_ast("module T\nsig f[a, b, c]: (a -> b) -> c");
+        let curried = sig_type_ast("module T\nsig f[a, b, c]: a -> b -> c");
         assert_ne!(
             hof, curried,
             "`(a -> b) -> c` and `a -> b -> c` must be distinct types"
@@ -2038,12 +2041,12 @@ mod tests {
     #[test]
     fn hof_arg_arrow_round_trips_through_parser() {
         // Format → reparse → format must be stable and arity-preserving.
-        let src = "module T\nsig f: (a -> b) -> c";
+        let src = "module T\nsig f[a, b, c]: (a -> b) -> c";
         let first = sig_type_str(src);
-        let reparsed = sig_type_str(&format!("module T\nsig f: {first}"));
+        let reparsed = sig_type_str(&format!("module T\nsig f[a, b, c]: {first}"));
         assert_eq!(first, reparsed, "arrow-arg sig must round-trip");
         // The reparsed AST must still be the one-argument HOF shape.
-        let ast = sig_type_ast(&format!("module T\nsig f: {first}"));
+        let ast = sig_type_ast(&format!("module T\nsig f[a, b, c]: {first}"));
         match ast {
             TypeExpr::Arrow(args, _, _) => {
                 assert_eq!(args.len(), 1, "must remain a 1-argument function type");
@@ -2063,7 +2066,7 @@ mod tests {
         // argument position of the outer arrow (needs parens); `e` is the
         // return.
         assert_eq!(
-            sig_type_str("module T\nsig f: (a -> b) -> (c -> d) -> e"),
+            sig_type_str("module T\nsig f[a, b, c, d, e]: (a -> b) -> (c -> d) -> e"),
             "(a -> b) -> (c -> d) -> e"
         );
     }
@@ -2072,10 +2075,10 @@ mod tests {
     fn nested_hof_arg_round_trips() {
         // `((a -> b) -> c) -> d`: a function-typed argument whose own argument
         // is a function. Both layers of grouping must survive.
-        let src = "module T\nsig f: ((a -> b) -> c) -> d";
+        let src = "module T\nsig f[a, b, c, d]: ((a -> b) -> c) -> d";
         assert_eq!(sig_type_str(src), "((a -> b) -> c) -> d");
         let once = sig_type_str(src);
-        let twice = sig_type_str(&format!("module T\nsig f: {once}"));
+        let twice = sig_type_str(&format!("module T\nsig f[a, b, c, d]: {once}"));
         assert_eq!(once, twice, "nested HOF arg must be idempotent");
     }
 

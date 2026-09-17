@@ -141,7 +141,7 @@ fn operand_one_source(declared: usize, reverse: bool) -> String {
         "add(w, shrink(x, [[1i64, shape(x, 0i32)]]))"
     };
     format!(
-        "def f(w: tensor[*, f32], x: tensor[n, f32]) -> tensor[{declared}, f32] =\n  \
+        "def f[n](w: tensor[*, f32], x: tensor[n, f32]) -> tensor[{declared}, f32] =\n  \
          {body}\n\
          out = f(\n  \
          to_tensor([10.0f32, 20.0f32, 30.0f32]),\n  \
@@ -191,7 +191,7 @@ fn an_agreeing_same_shape_result_claim_executes_exactly() {
 #[test]
 fn runtime_operand_disagreement_precedes_the_result_claim() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(w: tensor[*, f32], x: tensor[n, f32]) -> tensor[2, f32] =\n  \
+    let source = "def f[n](w: tensor[*, f32], x: tensor[n, f32]) -> tensor[2, f32] =\n  \
                   add(w, shrink(x, [[2i64, shape(x, 0i32)]]))\n\
                   out = f(\n  \
                   to_tensor([10.0f32, 20.0f32, 30.0f32]),\n  \
@@ -223,7 +223,7 @@ fn runtime_operand_disagreement_precedes_the_result_claim() {
 #[test]
 fn repeated_paths_to_one_candidate_produce_one_add_claim() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(x: tensor[n, f32]) -> tensor[2, f32] = {\n  \
+    let source = "def f[n](x: tensor[n, f32]) -> tensor[2, f32] = {\n  \
                   y = shrink(x, [[1i64, shape(x, 0i32)]])\n  \
                   add(y, y)\n\
                   }\n\
@@ -236,7 +236,7 @@ fn repeated_paths_to_one_candidate_produce_one_add_claim() {
 #[test]
 fn distinct_candidate_paths_do_not_create_source_order_attribution() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[2, f32] =\n  \
+    let source = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[2, f32] =\n  \
                   add(\n    \
                   shrink(x, [[1i64, shape(x, 0i32)]]),\n    \
                   shrink(y, [[1i64, shape(y, 0i32)]]),\n  \

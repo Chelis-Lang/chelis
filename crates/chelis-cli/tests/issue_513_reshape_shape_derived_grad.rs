@@ -42,7 +42,7 @@ use tempfile::{TempDir, tempdir};
 fn eval_scalar(forward_body: &str, input_literal: &str) -> f64 {
     let source = format!(
         "module Repro.Fwd\n\
-         sig f: tensor[n, f32] -> f32\n\
+         sig f[n]: tensor[n, f32] -> f32\n\
          def f(x) = {{\n{forward_body}\n}}\n\
          out = f(to_tensor([{input_literal}]))\n"
     );
@@ -79,7 +79,7 @@ fn eval_scalar(forward_body: &str, input_literal: &str) -> f64 {
 fn eval_grad(forward_body: &str, input_literal: &str) -> Vec<f64> {
     let source = format!(
         "module Repro.Grad\n\
-         sig f: tensor[n, f32] -> f32\n\
+         sig f[n]: tensor[n, f32] -> f32\n\
          def f(x) = {{\n{forward_body}\n}}\n\
          out = grad(f)(to_tensor([{input_literal}]))\n"
     );
@@ -263,7 +263,7 @@ fn compile_and_run(build_dir: &Path, stem: &str, driver_src: &str) -> String {
 #[test]
 fn issue_513_reshape_shape_derived_grad_c_backend_agrees() {
     let source = "module Repro.ReshapeBuild\n\
-sig f: tensor[n, f32] -> f32\n\
+sig f[n]: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
   k = cast(shape(x, cast(0, i32)), i64)\n\
   r = reshape(&x, [k, cast(1, i64)])\n\

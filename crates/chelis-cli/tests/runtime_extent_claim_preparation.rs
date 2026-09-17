@@ -192,7 +192,7 @@ fn cases() -> Vec<Case> {
             id,
             1378,
             &format!(
-                "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, {bound}]])\ndef main() = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n"
+                "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, {bound}]])\ndef main() = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n"
             ),
             None,
             Expected::Tensor(vec![2, 2], vec![2.0, 3.0, 5.0, 6.0]),
@@ -201,14 +201,14 @@ fn cases() -> Vec<Case> {
     add(
         "vmap.element_bound",
         1378,
-        "def g(x: tensor[n, f32]) -> tensor[m, f32] = { end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n shrink(x, [[0i64, end]]) }\nout = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n",
+        "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = { end = cast(tensor_to_scalar(sum(x, 0i32)), i64)\n shrink(x, [[0i64, end]]) }\nout = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n",
         None,
         Expected::Reject("batch_varying_extent"),
     );
     add(
         "wildcard.root",
         1397,
-        "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\ndef main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+        "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\ndef main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
         None,
         Expected::Tensor(vec![2], vec![2.0, 3.0]),
     );
@@ -1009,7 +1009,7 @@ fn singleton_broadcast_contract() {
         &mut fixtures,
         "broadcast.call",
         1619,
-        "def f(xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(to_tensor([5.0f32]), 0i32, shape(xs, 0i32)))",
+        "def f[n](xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(to_tensor([5.0f32]), 0i32, shape(xs, 0i32)))",
         "(tensor[d0, f32]) -> tensor[d0, f32]",
         vec![vector(3)],
         Expected::Tensor(vec![3], vec![5.0, 10.0, 15.0]),
@@ -1021,7 +1021,7 @@ fn singleton_broadcast_contract() {
             dims: vec![if good { 1 } else { 2 }],
             values: if good { vec![5.0] } else { vec![5.0, 6.0] },
         };
-        let def = "def f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
+        let def = "def f[n](b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
         for exported in [true, false] {
             fixtures.push(Case {
                 id: format!(
@@ -1207,7 +1207,7 @@ fn helper_signature_guard_order_contract() {
             &mut fixtures,
             &format!("helper_order.repeated.{x}.{z}"),
             1277,
-            "def g(b: tensor[f32], x: tensor[n, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\ndef f(b: tensor[f32], x: tensor[rows, f32], z: tensor[cols, f32]) -> tensor[f32] = {\n  _ = g(b, x)\n  _ = g(b, z)\n  b\n}",
+            "def g[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\ndef f(b: tensor[f32], x: tensor[rows, f32], z: tensor[cols, f32]) -> tensor[f32] = {\n  _ = g(b, x)\n  _ = g(b, z)\n  b\n}",
             "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[f32]",
             vec![seed.clone(), vector(x), vector(z)],
             expected,
@@ -1390,12 +1390,12 @@ fn producing_source_expression_contract(op: &str, divisor: i64) {
             ("helper", format!("def g() = {source}\n"), "g()".to_owned()),
             (
                 "checked_helper",
-                "def g(y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
                 format!("g({})", literal(&vector(n * 2))),
             ),
             (
                 "inferred_computed_helper",
-                "def g(y: tensor[n, f32]) = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                "def g[n](y: tensor[n, f32]) = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
                 format!("g({})", literal(&vector(n * 2))),
             ),
         ] {
@@ -1403,7 +1403,7 @@ fn producing_source_expression_contract(op: &str, divisor: i64) {
                 &mut cases,
                 &format!("static_reshape_expression.{op}.{kind}.x{n}"),
                 1686,
-                &format!("{helper}def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{op}(shape({operand}, 0i32), {divisor}i64), 2i64])"),
+                &format!("{helper}def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{op}(shape({operand}, 0i32), {divisor}i64), 2i64])"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![vector(4)],
                 if n == 2 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
@@ -1435,7 +1435,7 @@ fn remainder_reshape_claims_preserve_dynamic_target() {
             &mut cases,
             &format!("remainder_reshape_dynamic.x{n}"),
             1686,
-            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1467,7 +1467,7 @@ fn host_produced_reshape_targets_preserve_declared_claims() {
         ("list", "", "len(to_list(source))"),
         (
             "helper",
-            "def size(y: tensor[m, f32]) -> i64 = numel(y)\n",
+            "def size[m](y: tensor[m, f32]) -> i64 = numel(y)\n",
             "size(source)",
         ),
         (
@@ -1491,7 +1491,7 @@ fn host_produced_reshape_targets_preserve_declared_claims() {
                     &format!("host_target.{producer}.{wrapper}.x{n}"),
                     1686,
                     &format!(
-                        "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                        "{declarations}def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
                     ),
                     "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
                     vec![vector(n), vector(n * 2)],
@@ -1532,27 +1532,27 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             ),
             (
                 "scalar_capture_shadow",
-                "def g(source: i64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
+                "def g[n](source: i64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
                 "g(shape(source, 0i32), x)",
             ),
             (
                 "scalar_helper_alias",
-                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
+                "def extent[m](y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  reshape(x, [target(source), 2i64])\n}",
             ),
             (
                 "scalar_helper_alias_nested",
-                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
+                "def extent[m](y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  reshape(x, [bitand(target(source), 3i64), 2i64])\n}",
             ),
             (
                 "scalar_helper_alias_shadow",
-                "def extent(y: tensor[m, f32]) -> i64 = numel(y)\n",
+                "def extent[m](y: tensor[m, f32]) -> i64 = numel(y)\n",
                 "{\n  target = extent\n  extent = to_list(source)\n  reshape(x, [bitand(target(source), len(extent)), 2i64])\n}",
             ),
             (
                 "repeated_calls",
-                "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
+                "def g[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
                 "{\n  first = g(source, x)\n  second = g(source, x)\n  copy(first)\n}",
             ),
         ] {
@@ -1561,7 +1561,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
                 &format!("staged_source.{kind}.x{n}"),
                 1686,
                 &format!(
-                    "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                    "{declarations}def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
                 ),
                 "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
                 vec![vector(n), vector(n * 2)],
@@ -1576,7 +1576,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             &mut cases,
             &format!("staged_source.untaken_failure.x{n}"),
             1686,
-            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [if eq(numel(source), 2i64) then 2i64 else floor_div(numel(source), sub(numel(source), numel(source))), 2i64])",
+            "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [if eq(numel(source), 2i64) then 2i64 else floor_div(numel(source), sub(numel(source), numel(source))), 2i64])",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1589,7 +1589,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             &mut cases,
             &format!("staged_source.discarded.x{n}"),
             1686,
-            "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = {\n  ignored = g(source, x)\n  x\n}",
+            "def g[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = {\n  ignored = g(source, x)\n  x\n}",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d1, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1614,7 +1614,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             &format!("staged_source.{kind}"),
             1686,
             &format!(
-                "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{targets}])"
+                "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{targets}])"
             ),
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(3), vector(6)],
@@ -1656,7 +1656,7 @@ fn staged_sources_preserve_tuple_captures() {
                 &mut cases,
                 &format!("staged_source.{kind}.x{n}"),
                 1686,
-                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                &format!("def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![vector(n)],
                 if n == 4 {
@@ -1705,7 +1705,7 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
                 &mut cases,
                 &format!("staged_source.{kind}.x{n}"),
                 1686,
-                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                &format!("def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![input.clone()],
                 if n == 4 {
@@ -1746,7 +1746,7 @@ fn staged_sources_preserve_native_lists_and_host_literals() {
                 &mut cases,
                 &format!("staged_source.{kind}.x{n}"),
                 1686,
-                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                &format!("def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![vector(n)],
                 if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
@@ -1779,7 +1779,7 @@ fn staged_graph_segments_preserve_eager_sources() {
             &mut cases,
             &format!("staged_source.eager_unused.x{n}"),
             1686,
-            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n  unused = floor_div(shape(x, 0i32), sub(3i64, shape(source, 0i32)))\n  reshape(x, [bitand(numel(source), 3i64), 2i64])\n}",
+            "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n  unused = floor_div(shape(x, 0i32), sub(3i64, shape(source, 0i32)))\n  reshape(x, [bitand(numel(source), 3i64), 2i64])\n}",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1807,7 +1807,7 @@ fn staged_reshape_sources_preserve_signature_witnesses() {
             &mut cases,
             &format!("staged_source.signature_scope.x{n}"),
             1686,
-            "def g(source: tensor[rows, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(unread: tensor[rows, f32], source: tensor[m, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = copy(g(source, x))",
+            "def g[n](source: tensor[rows, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f[m, n](unread: tensor[rows, f32], source: tensor[m, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = copy(g(source, x))",
             // The checked type expresses the equality required by the nested
             // result. The original parameters must still supply two witnesses.
             "(tensor[rows, f32], tensor[rows, f32], tensor[d0, f32]) -> tensor[rows, 2, f32]",
@@ -1878,7 +1878,7 @@ fn staged_sources_preserve_handled_random_progress() {
                     &format!("staged_source.random.{kind}.seed{seed}.x{n}"),
                     1686,
                     &format!(
-                        "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
+                        "def g[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
                     ),
                     "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
                     vec![vector(n), vector(n * 2)],
@@ -1905,7 +1905,7 @@ fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
             &mut cases,
             &format!("remainder_hip_host.x{n}"),
             1686,
-            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1939,7 +1939,7 @@ fn staged_claims_preserve_hip_host_cli_and_api_execution() {
             &mut cases,
             &format!("staged_hip_host.x{n}"),
             1686,
-            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])",
+            "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(n * 2)],
             if n == 2 {
@@ -1969,7 +1969,7 @@ fn static_reshape_folding_preserves_declaring_input_contract() {
             &mut cases,
             &format!("static_reshape_source.x{n}"),
             1686,
-            "def f(unread: tensor[2, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(unread, 0i32), 4i64), 2i64])",
+            "def f[n](unread: tensor[2, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(unread, 0i32), 4i64), 2i64])",
             "(tensor[2, f32], tensor[d0, f32]) -> tensor[2, 2, f32]",
             vec![vector(n), vector(4)],
             if n == 2 {
@@ -2095,7 +2095,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
                 &mut routes,
                 &format!("complete_shape_list.{kind}.{wrapper}"),
                 1686,
-                &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, {second}, f32] = {body}"),
+                &format!("def f[n](x: tensor[n, f32]) -> tensor[{claim}, {second}, f32] = {body}"),
                 signature,
                 vec![vector(n)],
                 expected.clone(),
@@ -2119,7 +2119,7 @@ fn computed_claim_complete_shape_list_precedes_guards() {
             &mut routes,
             &format!("complete_shape_list.discarded.x{n}"),
             1686,
-            "def g(x: tensor[n, f32]) -> tensor[4, *, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), 4i64))])\ndef f(x: tensor[n, f32]) -> tensor[f32] = {\n  discarded = g(x)\n  scalar_to_tensor(9.0f32)\n}",
+            "def g[n](x: tensor[n, f32]) -> tensor[4, *, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), 4i64))])\ndef f[n](x: tensor[n, f32]) -> tensor[f32] = {\n  discarded = g(x)\n  scalar_to_tensor(9.0f32)\n}",
             "(tensor[d0, f32]) -> tensor[f32]",
             vec![vector(n)],
             if n == 4 {
@@ -2204,12 +2204,12 @@ fn computed_claim_result_graph_contract() {
             ),
             (
                 "helper",
-                format!("def g(x: tensor[n, f32]) = {reshape}\n"),
+                format!("def g[n](x: tensor[n, f32]) = {reshape}\n"),
                 "g(x)".to_owned(),
             ),
             (
                 "alias_helper",
-                format!("def g(x: tensor[n, f32]) = copy({reshape})\n"),
+                format!("def g[n](x: tensor[n, f32]) = copy({reshape})\n"),
                 "{\n  r = g(x)\n  alias = r\n  neg(neg(alias))\n}".to_owned(),
             ),
         ] {
@@ -2225,7 +2225,7 @@ fn computed_claim_result_graph_contract() {
                 &format!("result_graph.{kind}.{form}.{divisor}.x{n}"),
                 1686,
                 &format!(
-                    "{helper}def f(x: tensor[n, f32]) -> tensor[{claim}, {divisor}, f32] = {body}"
+                    "{helper}def f[n](x: tensor[n, f32]) -> tensor[{claim}, {divisor}, f32] = {body}"
                 ),
                 signature,
                 vec![vector(n)],
@@ -2256,7 +2256,7 @@ fn computed_claim_result_graph_contract() {
             &mut routes,
             &format!("result_graph.distinct_witnesses.{rows}.{cols}"),
             1686,
-            "def g(x: tensor[n, f32]) = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(unread: tensor[n, f32], x: tensor[m, f32]) -> tensor[n, 2, f32] = copy(g(x))",
+            "def g[n](x: tensor[n, f32]) = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f[n, m](unread: tensor[n, f32], x: tensor[m, f32]) -> tensor[n, 2, f32] = copy(g(x))",
             "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, 2, f32]",
             vec![vector(rows), vector(cols)],
             expected,
@@ -2275,7 +2275,7 @@ fn computed_claim_result_graph_contract() {
         &mut routes,
         "result_graph.untaken",
         1686,
-        "def bad(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(x: tensor[n, f32]) -> tensor[2, 2, f32] = if false then bad(x) else to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])",
+        "def bad[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = if false then bad(x) else to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])",
         "(tensor[d0, f32]) -> tensor[2, 2, f32]",
         vec![vector(6)],
         Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
@@ -2354,7 +2354,7 @@ fn omitted_extent_claim_contract() {
                     add(
                         &format!("omitted.reshape.{kind}.{form}.x{n}"),
                         1686,
-                        &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = {body}"),
+                        &format!("def f[n](x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = {body}"),
                         signature,
                         vec![vector(n)],
                         expected.clone(),
@@ -2362,12 +2362,12 @@ fn omitted_extent_claim_contract() {
                     );
                 }
                 let g = format!(
-                    "def g(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])"
+                    "def g[n](x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])"
                 );
                 add(
                     &format!("omitted.reshape.{kind}.nested.x{n}"),
                     1686,
-                    &format!("{g}\ndef f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = g(x)"),
+                    &format!("{g}\ndef f[n](x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = g(x)"),
                     signature,
                     vec![vector(n)],
                     expected.clone(),
@@ -2377,7 +2377,7 @@ fn omitted_extent_claim_contract() {
                     &format!("omitted.reshape.{kind}.discarded.x{n}"),
                     1686,
                     &format!(
-                        "{g}\ndef f(x: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(x)\n  x\n}}"
+                        "{g}\ndef f[n](x: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(x)\n  x\n}}"
                     ),
                     "(tensor[d0, f32]) -> tensor[d0, f32]",
                     vec![vector(n)],
@@ -2396,7 +2396,7 @@ fn omitted_extent_claim_contract() {
             add(
                 &format!("omitted.reshape.named.match.x{n}"),
                 1686,
-                "def f(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])",
+                "def f[n](x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])",
                 "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
                 vec![vector(n)],
                 Expected::Tensor(vec![n, 1], (1..=n).map(|v| v as f64).collect()),
@@ -2431,20 +2431,20 @@ fn omitted_extent_claim_contract() {
                     "() -> tensor[3, f32]",
                 );
             }
-            let g = "def g(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
+            let g = "def g[n](b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
             for (form, def, discarded) in [
                 ("shape", g.replace("def g(", "def f("), false),
                 (
                     "nested",
                     format!(
-                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = g(b, xs)"
+                        "{g}\ndef f[n](b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = g(b, xs)"
                     ),
                     false,
                 ),
                 (
                     "discarded",
                     format!(
-                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(b, xs)\n  xs\n}}"
+                        "{g}\ndef f[n](b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(b, xs)\n  xs\n}}"
                     ),
                     true,
                 ),
@@ -2496,7 +2496,7 @@ fn omitted_extent_claim_contract() {
         }
         for divisor in [1, 2] {
             let definition = format!(
-                "def g(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])\ndef h(x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\ndef f(a: tensor[left, f32], b: tensor[right, f32]) -> tensor[f32] = add(sum(sum(g(a), 1i32), 0i32), sum(sum(h(b), 1i32), 0i32))"
+                "def g[n](x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])\ndef h[n](x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\ndef f(a: tensor[left, f32], b: tensor[right, f32]) -> tensor[f32] = add(sum(sum(g(a), 1i32), 0i32), sum(sum(h(b), 1i32), 0i32))"
             );
             add(
                 &format!("omitted.separate_scopes.{divisor}"),
@@ -2584,7 +2584,7 @@ fn imported_checked_extent_contract() {
         for (family, library, arguments, expected) in [
             (
                 "staged",
-                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
+                "def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
                 literal(&vector(if good { 4 } else { 6 })),
                 if good {
                     Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
@@ -2594,7 +2594,7 @@ fn imported_checked_extent_contract() {
             ),
             (
                 "reshape",
-                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                "def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
                 literal(&vector(if good { 4 } else { 6 })),
                 if good {
                     Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
@@ -2618,7 +2618,7 @@ fn imported_checked_extent_contract() {
             ),
             (
                 "literal",
-                "def f(x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
+                "def f[n](x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
                 literal(&vector(if good { 4 } else { 5 })),
                 if good {
                     Expected::Tensor(vec![4], vec![7.0; 4])
@@ -2681,7 +2681,7 @@ fn checked_extent_transforms_contract() {
                 == "reshape"
             {
                 (
-                    "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                    "def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
                     "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                     vector(if good { 4 } else { 6 }),
                     if good {
@@ -2735,7 +2735,8 @@ fn checked_extent_transforms_contract() {
                     } else {
                         reduction.into()
                     };
-                    let extra = format!("\ndef loss(x: tensor[n, f32]) -> tensor[f32] = {body}\n");
+                    let extra =
+                        format!("\ndef loss[n](x: tensor[n, f32]) -> tensor[f32] = {body}\n");
                     let positive = if transform == "masked_grad" {
                         Expected::Tensor(input.dims.clone(), vec![0.0; input.values.len()])
                     } else {

@@ -1060,12 +1060,18 @@ def validate_normative_contract(
                 "Surf dtype-family bound production",
             ),
             (
-                "A bound belongs to one binder\nlist per declaration",
-                "Surf single bound binder list",
+                "A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and\n"
+                "`d-rank` name in the signature appears exactly once.",
+                "Surf complete declaration binder list",
             ),
             (
-                "A listed name **that declares a\nbound** must occur in the declared type.",
+                "A listed name **that declares\na bound** must occur in the declared type.",
                 "Surf occurrence rule is bounded-binder only",
+            ),
+            (
+                "One binder list owns each\ndeclaration: a standalone `sig` carries it, "
+                "and a matching `def` must\nnot carry a second list.",
+                "Surf single declaration binder-list owner",
             ),
         ),
         violations,

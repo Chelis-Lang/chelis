@@ -119,16 +119,15 @@ fn the_desugared_deep_carries_t_prim_and_is_rejected_at_both_deep_entry_points()
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a genuine lowercase type variable still quantifies, still
-/// scores 1.0, and still round-trips through the Deep ingress.
+/// DISPOSITION LOCK. An ordinary explicit lowercase binder still scores 1.0
+/// and round-trips through the Deep ingress.
 #[test]
-fn a_genuine_lowercase_name_still_scores_one_at_both_ingresses() {
+fn a_genuine_explicit_lowercase_binder_still_scores_one_at_both_ingresses() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     fs::write(
         root.join("poly.ch"),
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
     )
     .expect("write");
 
@@ -268,7 +267,7 @@ const DEFERRED: [&str; 2] = ["complex64", "int4"];
 fn scalar_tvar_deep(name: &str) -> String {
     format!(
         "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-         (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+         (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
          (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) (var {{}} x))))\n"
     )
 }
@@ -276,7 +275,7 @@ fn scalar_tvar_deep(name: &str) -> String {
 fn tensor_tvar_deep(name: &str) -> String {
     format!(
         "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-         (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+         (defsig {{}} f ({name}) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
          (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
          (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
     )

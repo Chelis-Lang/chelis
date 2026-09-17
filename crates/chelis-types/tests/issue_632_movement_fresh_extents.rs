@@ -5,7 +5,7 @@
 //! The pass-through was an annotation-level lie (`stride(&x, 2i64, 2i64)` on
 //! `tensor[batch, 4, f32]` stamped `batch` on an axis whose true extent
 //! is `ceil(batch/2)`) and falsely tripped the §4.4.1 return-dim rigidity
-//! rule on `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2i64)`
+//! rule on `sig f[n, u]: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2i64)`
 //! (the pass-through unified `u := n`). The identity cases — stride step
 //! 1, zero pad — MUST keep passing the symbol through (the
 //! `issue_513_symbolic_axis_adjoints` contract), mirroring the IR-side
@@ -146,7 +146,7 @@ fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
     expect_clean(
         r#"
 module Repro.SigStride
-sig f: tensor[n, f32] -> tensor[u, f32]
+sig f[n, u]: tensor[n, f32] -> tensor[u, f32]
 def f(x) = stride(x, cast(2, i64))
 "#,
         "sig-symbol direct-return stride",

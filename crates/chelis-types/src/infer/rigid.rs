@@ -1,13 +1,12 @@
 //! chelis#1486 / [04-INF-6]: authored type binders are rigid in the body.
 //!
-//! `spec/04-type-system.md` §3.1.3 makes an authored type variable, whether
-//! written in a binder list (`def f[a](x: a) -> a`) or introduced by §5.8.1's
-//! implicit quantification (`def f(x: a) -> a`), universally quantified and
-//! rigid within the declaration's body: the body must type-check for every
-//! admissible instantiation. A body constraint that identifies the binder with
-//! a concrete type, with another authored binder of the same signature, or
-//! with a type containing either is a type error at the declaration, and the
-//! declaration's scheme stays the declared signature.
+//! `spec/04-type-system.md` §3.1.3 makes every explicitly authored type
+//! variable universally quantified and rigid within the declaration's body:
+//! the body must type-check for every admissible instantiation. A body
+//! constraint that identifies the binder with a concrete type, with another
+//! authored binder of the same signature, or with a type containing either is
+//! a type error at the declaration, and the declaration's scheme stays the
+//! declared signature.
 //!
 //! This is the type-variable twin of §4.4's dimension rule, which
 //! [`super::app_shape_helpers::check_declared_dvars_rigid`] enforces; the two

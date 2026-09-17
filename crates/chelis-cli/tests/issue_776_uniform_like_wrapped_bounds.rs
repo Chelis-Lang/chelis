@@ -345,7 +345,7 @@ fn def_form_non_literal_bound_rejected_by_checker() {
     let path = dir.path().join("def.ch");
     write_file(
         &path,
-        "def draw(lo: f32, hi: f32, t: &tensor[n, f32]) -> tensor[n, f32] ! { Random } = \
+        "def draw[n](lo: f32, hi: f32, t: &tensor[n, f32]) -> tensor[n, f32] ! { Random } = \
          uniform_like(t, lo, hi)\n",
     );
     let out = Command::cargo_bin("chelis")

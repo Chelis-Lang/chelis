@@ -2008,7 +2008,9 @@ pub fn init_package(
     // and `chelis build` style gates pass.
     fs::write(
         root.join("src/main.ch"),
-        format!("module {main_module}\ndef main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"),
+        format!(
+            "module {main_module}\ndef main[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"
+        ),
     )?;
     Ok(())
 }
@@ -14411,7 +14413,7 @@ module_prefix = "My"
         );
         write(
             &root.join("src/main.ch"),
-            "module My.Main\ndef main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
+            "module My.Main\ndef main[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
         );
         // Create a lockfile (no deps other than the implicit chelis-std)
         let lock = ReefLock {

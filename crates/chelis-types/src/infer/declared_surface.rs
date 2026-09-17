@@ -208,16 +208,22 @@ pub(crate) fn resolve_declared_surface_in_session(
         let Some((DeepTag::Defsig, meta, children)) = stamped_parts(expr) else {
             continue;
         };
-        let name = symbol_name(&children[0]).expect("validated defsig name");
+        let Some((name_expr, binder_list, type_expr)) = defsig_parts(children) else {
+            continue;
+        };
+        let name = symbol_name(name_expr).expect("validated defsig name");
+        let Some(binders) = defsig_binder_names(binder_list, sink) else {
+            continue;
+        };
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::Defsig,
-            BinderMode::ImplicitGeneric,
+            BinderMode::ExplicitGeneric(&binders),
             &headers,
             &mut vg,
             sink,
         )
         .with_dtype_bounds(declaration_dtype_bounds(meta));
-        if let Ok(ty) = resolver.resolve(&children[1]) {
+        if let Ok(ty) = resolver.resolve(type_expr) {
             let type_names = resolver
                 .type_var_names()
                 .into_sorted()

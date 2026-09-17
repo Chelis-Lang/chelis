@@ -159,7 +159,7 @@ const FIVE_BY_FOUR: &str = "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0,
 
 fn symbolic_program(declared: &str, operand: &str) -> String {
     format!(
-        "def f(x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
          {operand}out = f(m)\n"
     )
 }

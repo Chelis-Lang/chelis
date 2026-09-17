@@ -1236,6 +1236,95 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     }))
 }
 
+/// Split canonical Deep `defsig` children. Monomorphic declarations have
+/// `(name, type)`; polymorphic declarations have `(name, binder-list, type)`.
+pub(super) fn defsig_parts(
+    children: &[deep::Expr],
+) -> Option<(&deep::Expr, Option<&deep::Expr>, &deep::Expr)> {
+    match children {
+        [name, ty] => Some((name, None, ty)),
+        [name, binders, ty] => Some((name, Some(binders), ty)),
+        _ => None,
+    }
+}
+
+fn binder_list_items(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match expr {
+        deep::Expr::BareList(items, _) => Some(items),
+        deep::Expr::List(list, _) if get_tag(list).is_none() => Some(&list.elements),
+        _ => None,
+    }
+}
+
+pub(super) fn valid_defsig_binder_names(
+    binder_list: Option<&deep::Expr>,
+) -> Option<UnordSet<String>> {
+    let Some(binder_list) = binder_list else {
+        return Some(UnordSet::new());
+    };
+    let items = binder_list_items(binder_list)?;
+    if items.is_empty() {
+        return None;
+    }
+    let mut names = UnordSet::new();
+    for item in items {
+        let name = symbol_name(item)?;
+        if !names.insert(name.to_string()) {
+            return None;
+        }
+    }
+    Some(names)
+}
+
+/// Decode one `defsig`'s explicit unkinded binder list. Absence is the empty
+/// set. Malformed or duplicate entries are rejected as one declaration error.
+pub(super) fn defsig_binder_names(
+    binder_list: Option<&deep::Expr>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<UnordSet<String>> {
+    let Some(binder_list) = binder_list else {
+        return Some(UnordSet::new());
+    };
+    let Some(items) = binder_list_items(binder_list) else {
+        errors.push(CheckError::new(
+            CheckErrorKind::MalformedForm,
+            "malformed `defsig` binder list: expected a nonempty structural list of distinct symbol names"
+                .to_string(),
+            vec![],
+        ));
+        return None;
+    };
+    if items.is_empty() {
+        errors.push(CheckError::new(
+            CheckErrorKind::MalformedForm,
+            "malformed `defsig` binder list: an empty list must be omitted".to_string(),
+            vec!["write the monomorphic two-child form `(defsig {} name type-expr)`".to_string()],
+        ));
+        return None;
+    }
+    let mut names = UnordSet::new();
+    for item in items {
+        let Some(name) = symbol_name(item) else {
+            errors.push(CheckError::new(
+                CheckErrorKind::MalformedForm,
+                "malformed `defsig` binder list: expected a nonempty structural list of distinct symbol names"
+                    .to_string(),
+                vec![],
+            ));
+            return None;
+        };
+        if !names.insert(name.to_string()) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DuplicateDefinition,
+                format!("duplicate `defsig` binder `{name}`"),
+                vec![format!("list `{name}` exactly once")],
+            ));
+            return None;
+        }
+    }
+    Some(names)
+}
+
 /// Decode a declaration node's `dtype_bounds` metadata into checker
 /// restrictions, reporting a malformed bound rather than dropping it.
 pub(super) fn declaration_dtype_bounds(
@@ -2056,18 +2145,19 @@ pub(super) fn collect_declarations(
             }
         }
         DeepTag::Defsig => {
-            // (defsig {dtype_bounds?} name type_expr)
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
+            // (defsig {dtype_bounds?} name [(binders...)] type_expr)
+            if let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids)
+                && let Some(name) = symbol_name(name_expr)
+                && let Some(binder_names) = defsig_binder_names(binder_list, errors)
             {
                 let dtype_bounds = declaration_dtype_bounds(meta);
                 let signature_level = subst.enter_level(vg);
                 let resolved = resolve_deep_type_with_bounds_and_dim_names(
-                    &kids[1],
+                    type_expr,
                     vg,
                     adt_reg,
                     TypeUseSite::Defsig,
-                    BinderMode::ImplicitGeneric,
+                    BinderMode::ExplicitGeneric(&binder_names),
                     dtype_bounds,
                     errors,
                 );
@@ -2085,12 +2175,10 @@ pub(super) fn collect_declarations(
                         // and type parameters. This is the only point where `n`,
                         // `m` and `t` are still associated with their variables.
                         env.record_declared_dim_names(name, resolved.dim_names);
-                        // chelis#1486 / [04-INF-6]: the type-name recording has a
-                        // second consumer. It covers authored binders, explicit
-                        // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
-                        // alike, so the post-body rigidity check can name `a`
-                        // rather than `t44`. An inference hole never reaches this
-                        // map ([04-INF-5]).
+                        // chelis#1486 / [04-INF-6]: the type-name recording
+                        // lets the post-body rigidity check name an explicitly
+                        // declared binder rather than an internal variable id.
+                        // An inference hole never reaches this map ([04-INF-5]).
                         env.record_declared_type_names(name, resolved.type_names);
                     }
                     (Ok(resolved), Err(witness)) => {

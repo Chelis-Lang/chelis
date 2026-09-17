@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 const LIBRARY: &str = "weights = with seed(17i64) { _ = print(\"initialize\")\n\
     to_tensor([3.0f32, 5.0f32]) }\n\
-    def total(weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n";
+    def total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n";
 
 // Reuse the owning public prepared-context harness, with a parameterized root.
 fn prepare(client: &str) -> PreparedEvalInContext {
@@ -208,7 +208,7 @@ fn invalid_live_shape_is_rejected_before_entering_the_host_body() {
 }
 
 const INTEGER_HOST: &str =
-    "def main(x: tensor[n, i32]) -> tensor[n, n, i32] = insert(x, 1, shape(x, 0))\n";
+    "def main[n](x: tensor[n, i32]) -> tensor[n, n, i32] = insert(x, 1, shape(x, 0))\n";
 
 #[test]
 fn shape_reading_host_preserves_declared_integer_values() {
@@ -269,8 +269,8 @@ fn fixed_control_host_keeps_its_existing_supplied_input_route() {
 #[test]
 fn prepared_library_shape_demand_preserves_repeated_and_changed_actuals() {
     let prepared = prepare_with_library(
-        "def total(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1, shape(x, 0))\n",
-        "import Probe.Values (total)\ndef main(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = total(x, y)\n",
+        "def total[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1, shape(x, 0))\n",
+        "import Probe.Values (total)\ndef main[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = total(x, y)\n",
     );
     for bits in [
         ["3f800000", "40000000"],

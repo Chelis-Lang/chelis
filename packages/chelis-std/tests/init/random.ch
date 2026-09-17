@@ -2,7 +2,7 @@ module Std.Tests.Init.Random
 import Std.Init.Random (normal_like)
 import Std.Test (assert_close, assert_close_tensor, assert_eq, assert_true)
 def abs_f32(x: f32) -> f32 = if lt(x, cast(0.0, f32)) then sub(cast(0.0, f32), x) else x
-def make_template(n: i64) -> tensor[n, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), n)))
+def make_template[n](n: i64) -> tensor[n, f32] = to_tensor(map(fn (i: i64) -> cast(0.0, f32), range(cast(0, i64), n)))
 def sample_mean[n](t: tensor[n, f32]) -> f32 = {
   xs = to_list(t)
   total = fold(fn (acc: f32, x: f32) -> add(acc, x), cast(0.0, f32), xs)

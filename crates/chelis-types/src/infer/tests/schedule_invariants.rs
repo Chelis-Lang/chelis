@@ -247,11 +247,12 @@ fn measure(program: &Program) -> Measured {
         else {
             panic!("a `defsig` for `{name}` has no generator declaration\n{source}");
         };
-        let header = if kids.get(1).is_some_and(deep_type_has_hole) {
-            Header::Holed
-        } else {
-            Header::Complete
-        };
+        let header =
+            if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_has_hole(type_expr)) {
+                Header::Holed
+            } else {
+                Header::Complete
+            };
         headers.insert(declared.name, header);
     }
     Measured {

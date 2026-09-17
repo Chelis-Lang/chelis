@@ -15,7 +15,7 @@ fn canonical_integer_names_survive_surf_to_deep_in_every_type_position() {
     for name in ["i8", "i16", "i32", "i64"] {
         let source = format!(
             "module P.M\nexport (f)\n\
-             sig f: tensor[n, {name}] -> tensor[n, {name}]\n\
+             sig f[n]: tensor[n, {name}] -> tensor[n, {name}]\n\
              def f(x: tensor[n, {name}]) -> tensor[n, {name}] = cast(x, {name})\n"
         );
         let deep = deep_of(&source);
@@ -60,7 +60,7 @@ fn canonical_parser_rejects_retired_integer_names_in_every_type_edge() {
 fn v018_migration_rewrites_retired_integer_names_without_touching_identifiers() {
     let source = "module P.M\nexport (int64_value, f)\n\
                   int64_value: int64 = 1i64\n\
-                  def f(x: tensor[n, int32]) -> int64 = cast(x.0, int64)\n";
+                  def f[n](x: tensor[n, int32]) -> int64 = cast(x.0, int64)\n";
     let migrated = migrate_source_v018(source).expect("legacy migration");
     assert!(migrated.contains("int64_value: i64"));
     assert!(migrated.contains("tensor[n, i32]"));

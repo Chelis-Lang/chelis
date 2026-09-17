@@ -128,8 +128,7 @@ fn malformed_heterogeneous_and_unresolved_nested_shapes_reject() {
 #[test]
 fn separate_signatures_preserve_computed_list_element_dtypes() {
     for dtype in ["i32", "i64", "f32", "f64"] {
-        let definitions =
-            "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\n";
+        let definitions = "sig make[n, p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\n";
         tensor(
             &format!("{definitions}out = make(cast(1, {dtype}))\n"),
             dtype,
@@ -151,13 +150,13 @@ fn separate_signatures_preserve_computed_list_element_dtypes() {
 #[test]
 fn separate_signature_calls_keep_declared_and_checked_binders_independent() {
     tensor(
-        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([add(x, cast(1, p))])\nfirst = make(1.0f64)\nout = make(1i64)\n",
+        "sig make[n, p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([add(x, cast(1, p))])\nfirst = make(1.0f64)\nout = make(1i64)\n",
         "i64",
         &[1],
         &[2.0],
     );
     tensor(
-        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\nfirst = make(1i64)\nout = make(1.0f64)\n",
+        "sig make[n, p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\nfirst = make(1i64)\nout = make(1.0f64)\n",
         "f64",
         &[0],
         &[],
@@ -184,7 +183,7 @@ fn separate_signatures_do_not_supply_unrelated_or_conflicting_dtypes() {
 
     let error = eval(EvalRequest {
         source_kind: SourceKind::Surf,
-        source: "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([x, true])\nout = make(1i64)\n".into(),
+        source: "sig make[n, p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([x, true])\nout = make(1i64)\n".into(),
         bindings: Default::default(),
     }).expect_err("a checked signature does not permit heterogeneous List elements");
     assert!(

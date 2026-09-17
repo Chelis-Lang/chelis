@@ -563,15 +563,17 @@ pub(crate) fn const_declared_numeric_type(exprs: &[Expr], name: &str) -> ConstNu
 
 /// The declared integer primitive type (i8/i16/i32/i64) of an
 /// in-module constant `name`, or `None` if it is not declared with an
-/// integer type. Reads the DECLARED return type from a sibling `(defsig
-/// name <type>)` (authoritative -- a typed `def a() -> i8 = 1` carries
-/// i8 in the defsig but the default i32 on the body literal), then the
-/// body literal's own type tag, following a const -> const reference chain
-/// transitively (depth-bounded) to the literal that carries the type tag.
+/// integer type. Reads the DECLARED return type from a sibling
+/// `(defsig {} name [<binders>] <type>)` (authoritative -- a typed
+/// `def a() -> i8 = 1` carries i8 in the defsig but the default i32 on the
+/// body literal), then the body literal's own type tag, following a
+/// const -> const reference chain transitively (depth-bounded) to the literal
+/// that carries the type tag.
 pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<String> {
-    /// The declared numeric prim of a sibling `(defsig name <type>)`, where
-    /// `<type>` is a bare `(t-prim {} P)` or a `(t-fn ... (t-prim {} P))`
-    /// whose LAST element is the return type.
+    /// The declared numeric prim of a sibling
+    /// `(defsig {} name [<binders>] <type>)`, where `<type>` is a bare
+    /// `(t-prim {} P)` or a `(t-fn ... (t-prim {} P))` whose LAST element is
+    /// the return type.
     fn defsig_prim(exprs: &[Expr], name: &str) -> Option<String> {
         fn prim_of_type(ty: &Expr) -> Option<String> {
             match tag(ty)? {
@@ -585,7 +587,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
                 if tag(expr) == Some(DeepTag::Defsig) {
                     let kids = children(expr);
                     if kids.first().and_then(symbol_text) == Some(name)
-                        && let Some(ty) = kids.get(1)
+                        && let Some(ty) = kids.last()
                         && let Some(prim) = prim_of_type(ty)
                     {
                         return Some(prim);

@@ -11,7 +11,7 @@
 //! Two spellings exist. `expand(to_tensor([1.5f32]), 0i32, 3i64)` gives the
 //! size as a literal and works on every lane today. `expand(to_tensor([1.5f32]),
 //! 0i32, shape(xs, 0i32))` reads the size off the operand and is the only one
-//! that expresses a RUNTIME extent, which is what a `sig f: tensor[n, f32]`
+//! that expresses a RUNTIME extent, which is what a `sig f[n]: tensor[n, f32]`
 //! signature and Coral's real call sites need. The diagnostic names the
 //! symbolic form for that reason. These tests require the literal, symbolic,
 //! and folded forms to execute with exact shapes and values on both lanes.
@@ -34,7 +34,7 @@ const LITERAL_SIZE: &str = "module Repro.Issue1506Literal\n\
 /// Size read off the consumer, under a symbolic signature. The singleton
 /// operand and the size source are different tensors.
 const SYMBOLIC_SIZE_DEF: &str = "module Repro.Issue1506Symbolic\n\
-     sig f: tensor[n, f32] -> tensor[n, bool]\n\
+     sig f[n]: tensor[n, f32] -> tensor[n, bool]\n\
      def f(xs) = gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))\n\
      out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 

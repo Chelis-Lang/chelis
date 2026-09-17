@@ -1,7 +1,7 @@
 //! chelis#1625: a sig-declared binder in a lambda-valued top-level binding
 //! must reject the same way the `def` spelling does.
 //!
-//! `sig recast: p -> p` followed by `recast = fn (v) -> cast(v, p)` desugared
+//! `sig recast[p]: p -> p` followed by `recast = fn (v) -> cast(v, p)` desugared
 //! the cast target as `(t-prim {} p)` instead of `(t-var {} p)`, so the
 //! [04-DTYPE-1] classifier in `chelis_deep::literal_source` (which keys on a
 //! `t-var` target) never fired. `chelis check` scored 1.0 with no errors at
@@ -23,8 +23,14 @@ use tempfile::tempdir;
 #[test]
 fn both_checker_apis_enforce_the_signature_binder() {
     for (source, accepted) in [
-        ("sig recast: p -> p\nrecast = fn (v) -> cast(v, p)", false),
-        ("sig recast: p -> p\nrecast = fn (v) -> cast(7, p)", false),
+        (
+            "sig recast[p]: p -> p\nrecast = fn (v) -> cast(v, p)",
+            false,
+        ),
+        (
+            "sig recast[p]: p -> p\nrecast = fn (v) -> cast(7, p)",
+            false,
+        ),
         (
             "sig recast[p: Float]: p -> p\nrecast = fn (v) -> cast(v, p)",
             true,
@@ -121,7 +127,7 @@ fn variable_source_cast_under_unbounded_sig_lambda_binder_is_rejected() {
     let (surf, deep) = check_both_ingresses(
         dir.path(),
         "Issue1625Variable",
-        "sig recast: p -> p\nrecast = fn (v) -> cast(v, p)\nout = recast(cast(7, i32))\n",
+        "sig recast[p]: p -> p\nrecast = fn (v) -> cast(v, p)\nout = recast(cast(7, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_ne!(
@@ -146,7 +152,7 @@ fn literal_source_cast_under_unbounded_sig_lambda_binder_is_rejected() {
     let (surf, deep) = check_both_ingresses(
         dir.path(),
         "Issue1625Literal",
-        "sig recast: p -> p\nrecast = fn (v) -> cast(7, p)\nout = recast(cast(7, i32))\n",
+        "sig recast[p]: p -> p\nrecast = fn (v) -> cast(7, p)\nout = recast(cast(7, i32))\n",
     );
     for (label, json) in [("surf", &surf), ("deep", &deep)] {
         assert_ne!(
@@ -226,7 +232,7 @@ fn a_same_named_bounded_binder_in_another_function_does_not_leak_into_the_unboun
         dir.path(),
         "Issue1625Scoping",
         "def helper[p: Int](value: p) -> p = cast(value, p)\n\
-         sig recast: p -> p\n\
+         sig recast[p]: p -> p\n\
          recast = fn (v) -> cast(v, p)\n\
          out = recast(cast(7, i32))\n\
          also = helper(cast(3, i32))\n",

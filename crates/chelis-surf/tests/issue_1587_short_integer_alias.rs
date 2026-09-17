@@ -17,7 +17,8 @@
 //! the second held trivially before because the formatter left the alias alone.
 //!
 //! `i8` and `i16` have no site anywhere in the tree, so their rows lock names
-//! the corpus does not otherwise exercise.
+//! the corpus does not otherwise exercise. Issue #1854 later made every
+//! declaration binder explicit; the ordinary-variable control uses `[a]`.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_source;
@@ -50,7 +51,7 @@ fn the_alias_maps_in_every_type_position() {
     // Signature, parameter annotation, tensor precision slot, and cast target.
     let deep = deep_of(
         "module P.M\nexport (main)\n\
-         sig scale: tensor[n, i64] -> tensor[n, i64]\n\
+         sig scale[n]: tensor[n, i64] -> tensor[n, i64]\n\
          def scale(t) = t\n\
          def ann(x: i32) -> i64 = cast(x, i64)\n\
          def main() -> i64 = ann(1i32)\n",
@@ -66,10 +67,8 @@ fn the_alias_maps_in_every_type_position() {
 }
 
 #[test]
-fn a_genuine_lowercase_name_still_quantifies() {
-    // The neighbour the mapping must not disturb: a non-primitive lowercase
-    // name in a sig is still an implicitly quantified type variable.
-    let deep = deep_of("module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n");
+fn a_genuine_explicit_lowercase_binder_still_quantifies() {
+    let deep = deep_of("module P.M\nexport (f)\nsig f[a]: a -> a\ndef f(x) = x\n");
     assert!(
         deep.contains("(t-var"),
         "`a` must stay a type variable: {deep}"
@@ -80,7 +79,7 @@ fn a_genuine_lowercase_name_still_quantifies() {
 fn the_canonical_formatter_rewrites_the_alias() {
     // #1592 made the names exercised by #1587 canonical Surf spellings.
     let source = "module P.M\nexport (f, g)\n\
-                  sig g: tensor[n, i64] -> tensor[n, i64]\n\
+                  sig g[n]: tensor[n, i64] -> tensor[n, i64]\n\
                   def g(t) = t\n\
                   def f(x: i32) -> i64 = cast(x, i64)\n";
     let formatted = format_source(source).expect("format");

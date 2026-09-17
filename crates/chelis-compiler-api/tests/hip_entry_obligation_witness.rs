@@ -44,7 +44,7 @@ fn witness(dag: &mut Dag, parameter: &str, input: NodeId, claims: Vec<ExtentClai
     )
 }
 
-/// `def f(x: tensor[n, f32], p: tensor[n, f32])`: `p`'s witness carries the
+/// `def f[n](x: tensor[n, f32], p: tensor[n, f32])`: `p`'s witness carries the
 /// repeated binder's equality and nothing reads its value.
 ///
 /// EVIDENTIARY STATUS: regression test. Measured red at `01c6e33a1`, where the

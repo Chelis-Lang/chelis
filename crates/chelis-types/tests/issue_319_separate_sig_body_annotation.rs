@@ -168,7 +168,7 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
 }
 
 const SEPARATE_SIG_SDPA: &str = "\
-sig sdpa[p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
+sig sdpa[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -182,7 +182,7 @@ def sdpa(q, k, v, scale) = {
 // separate `sig`). The ordinary annotation path already resolves its body
 // to tensor types.
 const INLINE_TYPED_SDPA: &str = "\
-def sdpa(q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {
+def sdpa[s, d](q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
   weights = softmax(mul(scores, scale), -1)

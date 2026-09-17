@@ -760,7 +760,7 @@ fn rt4_invariant_polymorphic_id_specialized_at_multiple_dtypes() {
     let src = dir.path().join("multi_specialize.ch");
     write_file(
         &src,
-        r#"sig poly_id: tensor[n, p] -> tensor[n, p]
+        r#"sig poly_id[n, p]: tensor[n, p] -> tensor[n, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
 def use_i32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)

@@ -1696,7 +1696,7 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
 /// interface value, so its class runs at entry.
 ///
 /// Measured on the shipped compiler with
-/// `def f(x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
+/// `def f[n](x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
 /// insert(b, 0, shape(y, 0)) }`, whose emitted C carries
 /// `numeric trap: domain in expand at i64` at the operation. Removing the arm
 /// would make the eval lane skip a site the C lane guards, which is the lane

@@ -107,7 +107,7 @@ fn an_invalid_stride_without_a_let_binding_names_the_stride() {
 fn a_symbolic_spatial_dimension_through_a_let_bound_expand_is_checker_legal() {
     let diagnostics = ir_diagnostics(
         "module Repro.Conv2dSymbolicSpatial\n\
-         def f(x: tensor[1, 3, h, 8, f32], k: tensor[4, 3, 3, 3, f32]) = {\n\
+         def f[h](x: tensor[1, 3, h, 8, f32], k: tensor[4, 3, 3, 3, f32]) = {\n\
            y = expand(x, 0i32, 2i64)\n\
            conv(&y, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n\
          }\n",

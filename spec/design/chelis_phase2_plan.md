@@ -187,7 +187,7 @@ resumable computations - complexity that is hard for both humans and LLMs.
 **Interaction with existing type system:**
 - Effects do NOT change HM inference - types are inferred first, effects inferred second
 - Effect annotations in Surf are optional:
-  `sig f: tensor[n, f32] -> tensor[n, f32] ! {Random}` is valid but never required
+  `sig f[n]: tensor[n, f32] -> tensor[n, f32] ! {Random}` is valid but never required
 - Effect annotations in Deep:
   - `t-fn` type expressions may carry `eff: (effects {} ...)`
   - checked `fn` nodes may carry inferred `effects: (effects {} ...)` for the effect

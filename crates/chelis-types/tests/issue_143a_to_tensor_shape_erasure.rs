@@ -85,7 +85,7 @@ fn to_tensor_mismatched_list_lengths_should_trip_dim_mismatch() {
     // chelis#143).
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {
@@ -111,7 +111,7 @@ fn parameter_ascription_with_shared_sig_dim_does_trip_dim_mismatch() {
     // bug above to tensor-builder shape erasure, not unify_dim.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller(a: &tensor[3, f32], b: &tensor[5, f32]) -> tensor[3, f32] =
   pair_id(a, b)
@@ -132,7 +132,7 @@ fn matched_to_tensor_lengths_does_not_trip_dim_mismatch_today() {
     // true post-fix; it's an invariant lock against over-corrections.)
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(x, y) = x
 def caller() -> tensor[3, f32] =
   {

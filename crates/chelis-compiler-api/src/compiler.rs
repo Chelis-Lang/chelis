@@ -7166,7 +7166,7 @@ mod tests {
                 "-> &tensor[f32] -> tensor[s, d, f32]",
             )
             .replace("scalar_to_tensor(sink)", "copy(sink)");
-        source.push_str("def entry(q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
+        source.push_str("def entry[s, d](q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
         let compiled = compile_source(SourceKind::Surf, &source).unwrap();
         let parameters = ["q", "k", "v", "scale", "mask", "sink"]
             .map(str::to_owned)

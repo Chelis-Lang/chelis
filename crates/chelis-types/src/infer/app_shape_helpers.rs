@@ -701,7 +701,7 @@ pub(super) fn check_declared_dvars_rigid(
 /// - the body leaves the dim var unbound (a clean, generalizable dim,
 ///   e.g. variable-fed `to_tensor`), or
 /// - the body resolves it to a **body-internal** concrete dim
-///   (`examples/hello_tensor.ch`: `def main() -> tensor[n, f32]` whose
+///   (`examples/hello_tensor.ch`: `def main[n]() -> tensor[n, f32]` whose
 ///   body builds a `tensor[3, f32]`); the registered scheme then
 ///   resolves to the produced dim.
 ///
@@ -718,7 +718,7 @@ pub(super) fn check_declared_dvars_rigid(
 /// Two return-only dim parameters collapsing with each other are
 /// tolerated (both are output-inferred; no caller-visible coupling).
 /// Known residual: coupling through a named symbolic dim
-/// (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
+/// (`def f[m](x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
 /// `m := Name("batch")`) is not flagged — `Dim::Name` unifies
 /// permissively by design (chelis#219) and no declared dim parameter
 /// participates.

@@ -139,7 +139,7 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
 /// chelis#521. Do not read this test as a broad §4.7.2 sourceless-size
 /// guarantee.
 const REPRO_BARE_SCALAR_REJECTS: &str = "module Repro.BareScalarRejects\n\
-def bad(x: tensor[3, f32], k: i32) -> tensor[k, f32] = {\n\
+def bad[k](x: tensor[3, f32], k: i32) -> tensor[k, f32] = {\n\
   scalar_t = scalar_to_tensor(cast(2.0, f32))\n\
   insert(scalar_t, cast(0, i32), k)\n\
 }\n\

@@ -138,7 +138,7 @@ const TYPED_CASES: &[(&str, &str)] = &[
     ("eff", "(t-fn {eff: (effects {})} (t-unit {}))"),
     (
         "dtype_bounds",
-        "(defsig {dtype_bounds: {p: float}} f (t-var {} p))",
+        "(defsig {dtype_bounds: {p: float}} f (p) (t-var {} p))",
     ),
     (
         "effects",

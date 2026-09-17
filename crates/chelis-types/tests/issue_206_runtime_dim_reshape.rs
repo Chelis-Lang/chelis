@@ -7,7 +7,7 @@
 //! From the issue's reproducer, a function declared as
 //!
 //! ```text
-//! sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+//! sig flatten_batch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 //! def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 //! ```
 //!
@@ -79,7 +79,7 @@ fn issue_206_flatten_batch_typechecks() {
 module Probe.Runtime
 export (flatten_batch)
 
-sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig flatten_batch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
@@ -99,7 +99,7 @@ fn issue_206_bias_broadcast_typechecks() {
 module Probe.Runtime
 export (bias_broadcast)
 
-sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
+sig bias_broadcast[n]: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
 def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, i32)))
 "#,
     );
@@ -119,10 +119,10 @@ fn issue_206_full_module_typechecks() {
 module Probe.Runtime
 export (bias_broadcast, flatten_batch)
 
-sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
+sig bias_broadcast[n]: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
 def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, i32)))
 
-sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig flatten_batch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
@@ -139,7 +139,7 @@ def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i6
 fn issue_206_two_symbolic_dims_propagate() {
     let errors = typecheck_surf(
         r#"
-sig flatten_two: &tensor[n, m, f32] -> tensor[n, m, f32]
+sig flatten_two[n, m]: &tensor[n, m, f32] -> tensor[n, m, f32]
 def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(shape(x, cast(1, i32)), i64)])
 "#,
     );
@@ -157,7 +157,7 @@ def flatten_two(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(shape(x
 fn issue_206_mixed_symbolic_and_literal_dim() {
     let errors = typecheck_surf(
         r#"
-sig with_literal: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig with_literal[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def with_literal(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
@@ -175,7 +175,7 @@ def with_literal(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64
 fn issue_206_all_literal_dims_still_work() {
     let errors = typecheck_surf(
         r#"
-sig fixed: &tensor[n, 4, f32] -> tensor[4, 4, f32]
+sig fixed[n]: &tensor[n, 4, f32] -> tensor[4, 4, f32]
 def fixed(x) = reshape(x, [cast(4, i64), cast(4, i64)])
 "#,
     );
@@ -205,7 +205,7 @@ def fixed(x) = reshape(x, [cast(4, i64), cast(4, i64)])
 fn issue_206_shape_of_other_tensor_does_not_propagate() {
     let errors = typecheck_surf(
         r#"
-sig cross_dim: &tensor[n, 4, f32] -> &tensor[m, 4, f32] -> tensor[n, 4, f32]
+sig cross_dim[n, m]: &tensor[n, 4, f32] -> &tensor[m, 4, f32] -> tensor[n, 4, f32]
 def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
@@ -240,7 +240,7 @@ def cross_dim(x, y) = reshape(x, [cast(shape(y, cast(0, i32)), i64), cast(4, i64
 fn issue_206_unrecognized_dim_expression_falls_back_to_wildcard() {
     let errors = typecheck_surf(
         r#"
-sig add_one_dim: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig add_one_dim[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, i32)), 1), i64), cast(4, i64)])
 "#,
     );
@@ -271,7 +271,7 @@ def add_one_dim(x) = reshape(x, [cast(add(shape(x, cast(0, i32)), 1), i64), cast
 fn issue_206_non_var_reshape_input_falls_back_safely() {
     let errors = typecheck_surf(
         r#"
-sig roundtrip: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig roundtrip[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def roundtrip(x) = reshape(reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)]), [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     );
@@ -321,7 +321,7 @@ def same_var(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 fn issue_206_propagated_def_appears_in_type_env() {
     let checked = typecheck_surf_program(
         r#"
-sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
+sig flatten_batch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, i32)), i64), cast(4, i64)])
 "#,
     )

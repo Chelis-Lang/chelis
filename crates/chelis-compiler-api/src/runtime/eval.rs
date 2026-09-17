@@ -109,7 +109,7 @@ fn let_result_binding_index(bind_list: &Expr, body: &Expr) -> Option<usize> {
 /// `diagonal` and the rest of `HOST_ONLY_BUILTINS` never become a `RiscOp`, so
 /// `expr_is_dag_lowerable` is false for a def that calls one and the DAG lane's
 /// literal-result claim (`lower.rs`'s `preserve_literal_result`) cannot reach
-/// them. Without this, `def d(x: tensor[n, 4, f32]) -> tensor[3, f32] =
+/// them. Without this, `def d[n](x: tensor[n, 4, f32]) -> tensor[3, f32] =
 /// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
 /// three-element declaration, on both lanes and with no diagnostic.
 #[derive(Clone)]
@@ -4537,7 +4537,7 @@ mod legacy_capture_order_tests {
     fn declaration_spread_formal_uses_actual_named_axis_route() {
         let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
         let library = checked_library(&format!(
-            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }}\ndef total(weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\ndef main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
+            "weights = with seed(17i64) {{ _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }}\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\ndef main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\ndef next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
         ));
         let tensors = UnordMap::new();
         let mut ctx = context(&library, &tensors);
@@ -4576,7 +4576,7 @@ mod legacy_capture_order_tests {
         let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
         let library = checked_library(&format!(
             "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\n\
-             def total(x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n\
+             def total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n\
              def main(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\n\
              def next_draw(x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(x, 0.0f32, 1.0f32)\n"
         ));
@@ -4634,7 +4634,7 @@ mod legacy_capture_order_tests {
     #[test]
     fn named_axis_caller_shadow_does_not_replace_a_declaration_capture() {
         let library = checked_library(
-            "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total(x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = (sum(x, seq), sum(weights, 0i32))\ndef main(weights: tensor[seq, f32]) = total(weights)\n",
+            "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = (sum(x, seq), sum(weights, 0i32))\ndef main(weights: tensor[seq, f32]) = total(weights)\n",
         );
         let tensors = UnordMap::new();
         for warm in [false, true] {

@@ -181,7 +181,7 @@ fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
 /// over-rejected by the #530 gate.
 #[test]
 fn issue_530_shape_sourced_size_still_lowers_clean() {
-    let src = "def g(b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, cast(0, i32)))\n\
+    let src = "def g[n, a](b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, cast(0, i32)))\n\
          xs = to_tensor([1.0, 2.0])\n\
          cs = to_tensor([10.0, 20.0, 30.0])\n\
          out = g(&xs, &cs)\n";

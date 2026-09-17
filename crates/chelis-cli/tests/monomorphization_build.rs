@@ -86,7 +86,7 @@ fn build_polymorphic_linear_call_site_compiles_with_gcc() {
     let src = dir.path().join("poly_linear_call.ch");
     write_file(
         &src,
-        r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+        r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def forward(x, w) = matmul(x, w)
 def call(x: &tensor[2, 3, f32], w: &tensor[3, 4, f32]) -> tensor[2, 4, f32] = forward(x, w)
 "#,
@@ -134,7 +134,7 @@ fn build_polymorphic_id_t_call_site_compiles_with_gcc() {
     let src = dir.path().join("poly_id_call.ch");
     write_file(
         &src,
-        r#"sig id_t: tensor[n, p] -> tensor[n, p]
+        r#"sig id_t[n, p]: tensor[n, p] -> tensor[n, p]
 def id_t(x) = x
 def call(x: tensor[3, f32]) -> tensor[3, f32] = id_t(x)
 "#,
@@ -187,7 +187,7 @@ fn build_must_reject(src: &str, name: &str, expected_in_stderr: &str) {
 
 #[test]
 fn build_rejects_polymorphic_matmul_at_int_call_site() {
-    let src = r#"sig my_linear[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+    let src = r#"sig my_linear[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def my_linear(x, w) = matmul(x, w)
 def use_int(x: &tensor[2, 3, i32], w: &tensor[3, 4, i32]) -> tensor[2, 4, i32] = my_linear(x, w)
 "#;
@@ -196,7 +196,7 @@ def use_int(x: &tensor[2, 3, i32], w: &tensor[3, 4, i32]) -> tensor[2, 4, i32] =
 
 #[test]
 fn build_rejects_polymorphic_softmax_at_int_call_site() {
-    let src = r#"sig wrap[p: Float]: &tensor[n, m, p] -> tensor[n, m, p]
+    let src = r#"sig wrap[n, m, p: Float]: &tensor[n, m, p] -> tensor[n, m, p]
 def wrap(x) = softmax(x, -1)
 def use_int(x: &tensor[3, 4, i32]) -> tensor[3, 4, i32] = wrap(x)
 "#;

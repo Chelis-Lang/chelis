@@ -130,7 +130,7 @@ fn surf_known_bad_programs_score_below_one() {
         (
             "issue_668_rank_divergent_elementwise",
             "module Repro.RankDivergent\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {\n\
                s = stride(x, 2i64)\n\
                e = insert(x, 0i32, 2i64)\n\

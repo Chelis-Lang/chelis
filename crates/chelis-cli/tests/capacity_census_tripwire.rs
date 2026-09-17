@@ -6196,7 +6196,7 @@ fn the_same_signature_without_a_bound_is_not_numeric_capacity() {
         "planted",
         "module Std.Planted\n\
          export (planted_pick)\n\
-         sig planted_pick: p -> p -> p\n\
+         sig planted_pick[p]: p -> p -> p\n\
          def planted_pick(a, b) = a\n",
     );
     assert!(

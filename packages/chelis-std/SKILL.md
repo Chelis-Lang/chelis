@@ -27,7 +27,7 @@ repository `AGENTS.md` plus the shared local skills in `agent-skills/`.
 
 Prefer this subset before trying broader planned language features:
 
-- Function definitions: `def f(x: tensor[n, f32]) -> tensor[n, f32] = ...`
+- Function definitions: `def f[n](x: tensor[n, f32]) -> tensor[n, f32] = ...`
 - Blocks with local bindings: `{ y = relu(x); softmax(y, 0) }`
 - Tensor types with explicit dimensions and precision: `tensor[f32]`,
   `tensor[n, f32]`, `tensor[batch, hidden, f32]`
@@ -64,17 +64,17 @@ def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
 ```
 
 ```chelis-surf
-def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
+def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] =
   softmax(relu(x), 0)
 ```
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
   add(x, y)
 ```
 
 ```chelis-surf
-def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
+def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] =
   {
     y = add(x, x)
     relu(y)
@@ -82,7 +82,7 @@ def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
 ```
 
 ```chelis-surf
-def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
+def classify[n](x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
   logits = x |> relu |> add(labels)
   loss =
     softmax(logits, 0)
@@ -94,12 +94,12 @@ def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
 ```
 
 ```chelis-surf
-def logistic_step(x: tensor[n, f32]) -> tensor[n, f32] =
+def logistic_step[n](x: tensor[n, f32]) -> tensor[n, f32] =
   sigmoid(x)
 ```
 
 ```chelis-surf
-def clamp_low(x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
+def clamp_low[n](x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
   max_elem(x, low)
 ```
 
@@ -118,7 +118,7 @@ type Activation =
   | Relu
   | Sigmoid
 
-def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
+def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
     | Sigmoid => sigmoid(x)

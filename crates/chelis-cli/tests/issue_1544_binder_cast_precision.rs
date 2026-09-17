@@ -95,7 +95,7 @@ fn assert_native(name: &str, source: &str, expected: &str) {
 const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
      bind.main\n\
      (export {} main)\n\
-     (defsig {dtype_bounds: {p: numeric}} addk (t-fn {} (t-var {} p) (t-var {} p)))\n\
+     (defsig {dtype_bounds: {p: numeric}} addk (p) (t-fn {} (t-var {} p) (t-var {} p)))\n\
      (def {} addk\n\
        (fn {} (params {} (x {type: (t-var {} p)}))\n\
          (app {} (var {} add) (var {} x)\n\
@@ -157,7 +157,7 @@ fn a_single_type_stamp_gives_one_answer_on_both_lanes() {
 const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n\
      bind.main\n\
      (export {} main)\n\
-     (defsig {dtype_bounds: {p: numeric}} addk\n\
+     (defsig {dtype_bounds: {p: numeric}} addk (p)\n\
        (t-fn {} (t-tensor {} (d-lit {} 1) (t-var {} p)) (t-tensor {} (d-lit {} 1) (t-var {} p))))\n\
      (def {} addk\n\
        (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 1) (t-var {} p))}))\n\

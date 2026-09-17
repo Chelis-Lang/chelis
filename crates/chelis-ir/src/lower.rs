@@ -4781,7 +4781,7 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
         }
         DeepTag::Defsig => {
             if let (Some(name), Some(ty)) =
-                (kids.first().and_then(symbol_name), kids.get(1).cloned())
+                (kids.first().and_then(symbol_name), kids.last().cloned())
             {
                 sigs.insert(name.to_string(), ty);
             }
@@ -21238,6 +21238,7 @@ mod tests {
             r#"
                 (defsig {}
                   jac_row
+                  (n)
                   (t-fn {}
                     (t-fn {}
                       (t-tensor {} (d-var {} n) (t-prim {} f32))
@@ -21349,6 +21350,7 @@ mod tests {
             r#"
                 (defsig {}
                   jac_row
+                  (n)
                   (t-fn {}
                     (t-fn {}
                       (t-tensor {} (d-var {} n) (t-prim {} f32))
@@ -21494,6 +21496,7 @@ mod tests {
             r#"
                 (defsig {}
                   jac_row
+                  (n)
                   (t-fn {}
                     (t-fn {}
                       (t-tensor {} (d-var {} n) (t-prim {} f32))
@@ -23435,16 +23438,16 @@ mod tests {
     #[test]
     fn rank_poly_def_lowers_through_concrete_caller() {
         // Deep form of:
-        //   def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
-        //   def use2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)
+        //   def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+        //   def use2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)
         let dag = parse_and_lower(
-            "(defsig {} relu_forward \
+            "(defsig {} relu_forward (r) \
                (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) \
                         (t-tensor {} (d-rank {} r) (t-prim {} f32)))) \
              (def {} relu_forward \
                (fn {} (params {} (x {type: (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))})) \
                   (app {} (var {} relu) (var {} x)))) \
-             (defsig {} use2d \
+             (defsig {} use2d (a b) \
                (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) \
                         (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32)))) \
              (def {} use2d \

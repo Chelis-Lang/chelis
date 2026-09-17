@@ -570,6 +570,31 @@ class SchemaTests(unittest.TestCase):
                 rule = by_path[path]
                 self.assertEqual(rule.disposition, "packages")
                 self.assertEqual(rule.packages, ("chelis-cli",))
+        explicit_binder_example_owners = {
+            "examples/checked_runtime_extents.ch": ("chelis-cli",),
+            "examples/dropout_staged_claim.ch": ("chelis-cli",),
+            "examples/illustrative/mlp.ch": ("chelis-surf",),
+            "examples/rank_poly_borrow.ch": ("chelis-cli",),
+        }
+        explicit_binder_example_rules = []
+        for path, packages in explicit_binder_example_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, packages)
+                explicit_binder_example_rules.append(rule)
+        for neighbor in (
+            "examples/checked_runtime_extents_extra.ch",
+            "examples/dropout_staged_claim_extra.ch",
+            "examples/illustrative/mlp_extra.ch",
+            "examples/rank_poly_borrow_extra.ch",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in explicit_binder_example_rules),
+                    f"{neighbor} inherited authority from an exact example rule",
+                )
         for path in (
             "scripts/builtin_atom_semantic_contracts.py",
             "scripts/capacity_census_wire_materialization.py",

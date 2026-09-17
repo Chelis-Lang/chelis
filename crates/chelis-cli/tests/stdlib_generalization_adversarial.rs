@@ -177,7 +177,7 @@ fn polymorphic_linear_rejects_integer_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_int.ch");
         let src = format!(
-            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
@@ -227,7 +227,7 @@ fn polymorphic_linear_accepts_float_call_site() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear_float.ch");
         let src = format!(
-            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
@@ -636,7 +636,7 @@ fn finding_4_workaround_sig_plus_bare_def_works() {
     let path = dir.path().join("a6_workaround.ch");
     write_file(
         &path,
-        r#"sig mm[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
+        r#"sig mm[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]
 def mm(x, y) = matmul(x, y)
 def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm(x, y)
 "#,
@@ -692,7 +692,7 @@ fn finding_5_multi_letter_dim_in_sig_accepts_concrete_caller() {
     // name and bare shadowing defs are now rejected at declaration time.
     write_file(
         &path,
-        r#"sig grab: &tensor[batch, p] -> &tensor[batch, p]
+        r#"sig grab[p]: &tensor[batch, p] -> &tensor[batch, p]
 def grab(x) = x
 def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
 "#,
@@ -714,7 +714,7 @@ fn finding_5_workaround_single_letter_dim_works() {
     let path = dir.path().join("single_letter.ch");
     write_file(
         &path,
-        r#"sig grab: &tensor[n, p] -> &tensor[n, p]
+        r#"sig grab[n, p]: &tensor[n, p] -> &tensor[n, p]
 def grab(x) = x
 def call(xs: &tensor[3, f32]) -> &tensor[3, f32] = grab(xs)
 "#,
@@ -743,7 +743,7 @@ fn polymorphic_sig_with_concrete_call_site_now_builds() {
     let path = dir.path().join("simple_poly_build.ch");
     write_file(
         &path,
-        r#"sig id_t: tensor[n, p] -> tensor[n, p]
+        r#"sig id_t[n, p]: tensor[n, p] -> tensor[n, p]
 def id_t(x) = x
 def call(x: tensor[3, f32]) -> tensor[3, f32] = id_t(x)
 "#,
@@ -834,7 +834,7 @@ fn rt3a_narrowing_still_surfaces_through_generalized_stdlib_shape() {
     let path = dir.path().join("narrow.ch");
     write_file(
         &path,
-        r#"sig add_t[p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
+        r#"sig add_t[n, p: Numeric]: &tensor[n, p] -> &tensor[n, p] -> tensor[n, p]
 def add_t(a, b) = add(a, b)
 def call(x: &tensor[3, f32], y: &tensor[3, bf16]) -> tensor[3, f32] = {
   z = add_t(x, y)

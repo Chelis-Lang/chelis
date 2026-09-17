@@ -1,7 +1,7 @@
 //! chelis#1593: an unsigned dtype spelling in a SCALAR type position must
 //! desugar to `(t-prim {} <name>)` so the type checker's
 //! `spec/04-type-system.md` §1.1.1 / §1.1.2 rejection fires, never to an
-//! implicitly quantified `(t-var {} <name>)`.
+//! an invented `(t-var {} <name>)`.
 //!
 //! `spec/04-type-system.md` §5.8.1 states the rule: the §1.1.2 unsigned
 //! spellings "are explicitly excluded so they reach the type-checker's §1.1.2
@@ -84,8 +84,8 @@ fn every_unsigned_name_in_a_scalar_parameter_and_return_reaches_the_rejection() 
     }
 }
 
-/// REGRESSION test. A standalone `sig` is the implicit-quantifier context
-/// §5.8.1's sentence names directly.
+/// REGRESSION test. A standalone `sig` must preserve the reserved spelling as
+/// a primitive-shaped use rather than inventing a binder.
 #[test]
 fn every_unsigned_name_in_a_sig_reaches_the_rejection() {
     for name in UNSIGNED {
@@ -146,7 +146,7 @@ fn every_unsigned_name_in_a_lambda_annotation_reaches_the_rejection() {
 fn the_tensor_precision_slot_still_emits_t_prim() {
     for name in UNSIGNED {
         let deep = deep_of(&format!(
-            "module P.M\nexport (f)\nsig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "module P.M\nexport (f)\nsig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x\n"
         ));
         assert_reaches_rejection(&deep, name, "a tensor precision slot");
@@ -165,14 +165,12 @@ fn a_cast_target_still_emits_t_prim() {
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a lowercase name that is NOT a reserved dtype spelling is still
-/// an implicitly quantified type variable per §5.8.1.
+/// DISPOSITION LOCK. The ordinary explicit-binder neighbour remains legal.
 #[test]
-fn a_genuine_lowercase_name_still_quantifies() {
+fn a_genuine_explicit_lowercase_binder_still_quantifies() {
     for source in [
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
-        "module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
+        "module P.M\nexport (f)\nsig f[a]: a -> a\ndef f(x) = x\n",
     ] {
         let deep = deep_of(source);
         assert!(
@@ -278,13 +276,13 @@ fn deep_of_source(source: &str) -> Vec<chelis_deep::Expr> {
 const RESERVED_TVAR_SCALAR: &str = "(module {surf_path: \"P.M\"}\n\
      p.m\n\
      (export {} f)\n\
-     (defsig {} f (t-fn {} (t-var {} NAME) (t-var {} NAME)))\n\
+     (defsig {} f (NAME) (t-fn {} (t-var {} NAME) (t-var {} NAME)))\n\
      (def {} f (fn {} (params {} (x {type: (t-var {} NAME)})) (var {} x))))";
 
 const RESERVED_TVAR_TENSOR: &str = "(module {surf_path: \"P.M\"}\n\
      p.m\n\
      (export {} f)\n\
-     (defsig {} f (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} NAME)) \
+     (defsig {} f (NAME) (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} NAME)) \
      (t-tensor {} (d-lit {} 3) (t-var {} NAME))))\n\
      (def {} f (fn {} (params {} x) (var {} x))))";
 

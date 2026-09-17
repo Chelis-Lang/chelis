@@ -224,7 +224,7 @@ def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0i64, 8i64)
 fn expand_shape_sourced_size_typechecks() {
     assert_clean(
         r#"
-def f(x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expand(&b, 0, shape(x, 0))
+def f[n](x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expand(&b, 0, shape(x, 0))
 "#,
         "expand with a shape()-sourced size",
     );
@@ -238,7 +238,7 @@ def f(x: tensor[n, 4, f32], b: tensor[1, 4, f32]) -> tensor[n, 4, f32] = expand(
 fn named_axis_expand_int64_size_typechecks() {
     assert_clean(
         r#"
-sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
+sig add_axis[rest]: &tensor[..rest, f32] -> tensor[..rest, one, f32]
 def add_axis(x) = insert(x, one, 1i64)
 "#,
         "named-axis expand with an i64 literal size",
@@ -249,7 +249,7 @@ def add_axis(x) = insert(x, one, 1i64)
 fn named_axis_expand_int32_size_rejected() {
     assert_rejected_with(
         r#"
-sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
+sig add_axis[rest]: &tensor[..rest, f32] -> tensor[..rest, one, f32]
 def add_axis(x) = insert(x, one, 1)
 "#,
         "i64",

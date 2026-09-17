@@ -46,6 +46,14 @@ pub enum ResugarError {
         actual: usize,
     },
 
+    #[error("Deep `{tag}` expects {first} or {second} children, found {actual}")]
+    AlternativeArity {
+        tag: &'static str,
+        first: usize,
+        second: usize,
+        actual: usize,
+    },
+
     #[error("Deep `{tag}` child {index} must be {expected}")]
     InvalidChild {
         tag: &'static str,
@@ -79,6 +87,9 @@ pub enum ResugarError {
     )]
     InvalidBinderLiteralAdoption { binder: String },
 
+    #[error("Deep `defsig` uses undeclared type, dimension, or rank variable `{name}`")]
+    UndeclaredDefsigBinder { name: String },
+
     #[error(
         "Deep property `{name}` carries `{key}` = {value:?}, which canonical Surf cannot represent without changing property provenance"
     )]
@@ -95,6 +106,51 @@ struct NodeRef<'a> {
     meta: &'a Metadata,
     children: &'a [DeepExpr],
     span: Span,
+}
+
+fn defsig_parts<'a>(node: &NodeRef<'a>) -> Result<(Vec<String>, &'a DeepExpr), ResugarError> {
+    let (binder_expr, type_expr) = match node.children {
+        [_name, type_expr] => (None, type_expr),
+        [_name, binders, type_expr] => (Some(binders), type_expr),
+        _ => {
+            return Err(ResugarError::AlternativeArity {
+                tag: node.tag.as_str(),
+                first: 2,
+                second: 3,
+                actual: node.children.len(),
+            });
+        }
+    };
+    let binders = binder_expr
+        .map(|binders| structural_name_list(binders, node.tag))
+        .transpose()?
+        .unwrap_or_default();
+    if binder_expr.is_some() && binders.is_empty() {
+        return Err(ResugarError::InvalidChild {
+            tag: node.tag.as_str(),
+            index: 1,
+            expected: "a nonempty structural list of distinct binder names",
+        });
+    }
+    let mut distinct = UnordSet::new();
+    for binder in &binders {
+        if !distinct.insert(binder.clone()) {
+            return Err(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "a list of distinct binder names",
+            });
+        }
+    }
+    let mut used = Vec::new();
+    collect_quantified_variables(type_expr, &mut used)?;
+    if let Some(name) = used
+        .into_iter()
+        .find(|name| !distinct.contains(name.as_str()))
+    {
+        return Err(ResugarError::UndeclaredDefsigBinder { name });
+    }
+    Ok((binders, type_expr))
 }
 
 /// Resugar one Deep expression to the shared Surf AST.
@@ -313,11 +369,24 @@ fn materialize_standalone_definition_signatures(exprs: Vec<DeepExpr>) -> Vec<Dee
             continue;
         }
 
+        let mut binders = Vec::new();
+        let _ = collect_quantified_variables(definition_type, &mut binders);
+        let mut children = vec![definition.children[0].clone()];
+        if !binders.is_empty() {
+            children.push(DeepExpr::BareList(
+                binders
+                    .into_iter()
+                    .map(|name| DeepExpr::Atom(chelis_deep::Atom::Name(name), definition.span))
+                    .collect(),
+                definition.span,
+            ));
+        }
+        children.push(definition_type.clone());
         let signature = DeepExpr::Node(
             Box::new(chelis_deep::node::Node::new(
                 DeepTag::Defsig,
                 Metadata::default(),
-                vec![definition.children[0].clone(), definition_type.clone()],
+                children,
             )),
             definition.span,
         );
@@ -358,14 +427,14 @@ fn strip_redundant_definition_types(
     let definition = node_ref(definition_expr).ok()?;
     if signature.tag != DeepTag::Defsig
         || definition.tag != DeepTag::Def
-        || signature.children.len() != 2
+        || !matches!(signature.children.len(), 2 | 3)
         || definition.children.len() != 2
         || atom_name(&signature.children[0]) != atom_name(&definition.children[0])
     {
         return None;
     }
 
-    let signature_type = &signature.children[1];
+    let signature_type = signature.children.last()?;
     let (definition_meta, mut changed) =
         strip_matching_type_metadata(definition.meta, signature_type);
 
@@ -895,7 +964,6 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
         let node = node_ref(&exprs[index])?;
         match node.tag {
             DeepTag::Defsig => {
-                exact(&node, 2)?;
                 let name = name_child(&node, 0)?.to_string();
                 if let Some(next) = exprs.get(index + 1)
                     && let Ok(definition) = node_ref(next)
@@ -906,15 +974,13 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                     index += 2;
                     continue;
                 }
-                // Only bounded binders are reconstructed: an unbounded name
-                // in a sig is implicitly quantified (§P4b), so listing it
-                // would add a binder list the author never wrote.
-                let type_binders = resugar_dtype_bound_binders(node.meta, &[])?;
+                let (declared_binders, signature_type) = defsig_parts(&node)?;
+                let type_binders = resugar_dtype_bound_binders(node.meta, &declared_binders)?;
                 declarations.push(Decl::Sig {
                     name,
                     type_binders,
-                    ty: resugar_type(&node.children[1])?,
-                    effects: resugar_effect_metadata(&node.children[1])?,
+                    ty: resugar_type(signature_type)?,
+                    effects: resugar_effect_metadata(signature_type)?,
                     span: node.span,
                 });
                 index += 1;
@@ -1022,7 +1088,10 @@ fn resugar_definition(
     exact(&definition, 2)?;
     let name = name_child(&definition, 0)?.to_string();
     let value_node = node_ref(&definition.children[1]).ok();
-    let signature_type = signature.map(|signature| &signature.children[1]);
+    let signature_type = signature
+        .map(|signature| defsig_parts(&signature))
+        .transpose()?
+        .map(|(_, type_expr)| type_expr);
     let definition_type = definition.meta.ty().map(|v| v.expression());
     if let (Some(signature_type), Some(definition_type)) = (signature_type, definition_type)
         && !same_deep_shape(signature_type, definition_type)
@@ -1052,15 +1121,11 @@ fn resugar_definition(
     // erase the parent relation that makes it representable in Surf.
     let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
     let dtype_bounds = decode_resugar_dtype_bounds(bound_source)?;
-    let mut declared_binders = Vec::new();
-    if let Some(declared_type) = declared_type {
-        collect_quantified_variables(declared_type, &mut declared_binders)?;
-    }
-    for (binder, _) in &dtype_bounds {
-        if !declared_binders.contains(binder) {
-            declared_binders.push(binder.clone());
-        }
-    }
+    let declared_binders = signature
+        .map(|signature| defsig_parts(&signature))
+        .transpose()?
+        .map(|(binders, _)| binders)
+        .unwrap_or_default();
     validate_binder_literal_adoption(&definition.children[1], &declared_binders, &dtype_bounds)?;
 
     if definition.meta.chelis_role().map(|v| v.value().as_str()) == Some("property") {
@@ -1074,7 +1139,6 @@ fn resugar_definition(
         let raw_params = node_ref(&function.children[0])?;
         let mut ret_ty = None;
         let mut effects = None;
-        let mut quantifiers = Vec::new();
         if let Some(declared_type) = declared_type {
             let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
@@ -1114,12 +1178,11 @@ fn resugar_definition(
             let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
             effects = resugar_effect_metadata(declared_type)?;
-            collect_quantified_variables(declared_type, &mut quantifiers)?;
         }
         // A def's bound rides on its `defsig`; the `def` node carries one only
         // when a standalone `sig` already owns the binders, which the checker
         // rejects (`spec/03-deep-syntax.md` §2.2).
-        let type_binders = resugar_dtype_bound_binders(bound_source, &quantifiers)?;
+        let type_binders = resugar_dtype_bound_binders(bound_source, &declared_binders)?;
         return Ok(Decl::FunDef {
             name,
             type_binders,
@@ -1541,8 +1604,16 @@ fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarErr
                     }
                 }
             }
-            Decl::Sig { name, ty, .. } => {
+            Decl::Sig {
+                name,
+                type_binders,
+                ty,
+                ..
+            } => {
                 require_name(name, "signature", is_lower_identifier)?;
+                for binder in type_binders {
+                    require_name(&binder.name, "function-quantifier", is_value_identifier)?;
+                }
                 validate_surface_type(ty)?;
             }
             Decl::Dim { names, .. } => {
@@ -3346,7 +3417,10 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             let name = name_child(&node, 0)?;
             if node.tag == DeepTag::TVar && name == "_" {
                 Ok(TypeExpr::Infer(node.span))
-            } else if node.tag == DeepTag::TVar && crate::desugar::is_reserved_dtype_name(name) {
+            } else if node.tag == DeepTag::TVar
+                && (crate::desugar::canonical_primitive_name(name).is_some()
+                    || crate::desugar::is_reserved_dtype_name(name))
+            {
                 // chelis#1593 round 1. Surf has no way to write "a type
                 // variable named `u8`": every spelling [04-DTYPE-1] rejects
                 // desugars to `t-prim`, whatever binder list surrounds it. So
@@ -3410,7 +3484,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
         DeepTag::TTensor => {
             at_least(&node, 1)?;
             let (precision, dimensions) = node.children.split_last().expect("nonempty checked");
-            reject_reserved_type_variable(precision)?;
+            reject_nonrebindable_type_variable(precision)?;
             let precision_span = precision.span();
             let precision = type_name(precision).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
@@ -3480,23 +3554,21 @@ fn resugar_dimension(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
     }
 }
 
-/// `(t-var {} <name>)` whose name is a dtype spelling `[04-DTYPE-1]` rejects has
-/// no Surf representation, so the decompiler fails closed on it (chelis#1593).
+/// `(t-var {} <name>)` whose name is an active primitive or a dtype spelling
+/// `[04-DTYPE-1]` rejects has no Surf representation, so the decompiler fails
+/// closed on it (chelis#1593, chelis#1854).
 ///
-/// Surf has no way to write "a type variable named `u8`": every rejected
-/// spelling desugars to `t-prim`, whatever binder list surrounds it. Printing
-/// `u8` anyway broke `spec/02-surf-syntax.md` §0.1's first law, because
-/// `resugar` gave `def f[u8](x: u8) -> u8 = x` and `desugar` maps that to
-/// `t-prim`, not back to the `t-var` it started from. §0.1 says a well-formed
-/// public Deep node HAS a Surf representation, so a node with none is not
-/// well-formed public Deep. Failing closed takes it out of the law's domain
-/// instead of leaving the law false, and matches chelis#1031's contract for an
-/// invalid surface identifier.
+/// Surf has no way to write "a type variable named `f32`" or "`u8`": active
+/// and rejected primitive spellings desugar to `t-prim`, whatever binder list
+/// surrounds them. Printing one anyway breaks `spec/02-surf-syntax.md` §0.1's
+/// first law because desugaring cannot recover the original `t-var`. A node
+/// with no Surf representation is not well-formed public Deep, so the
+/// decompiler fails closed as chelis#1031 requires.
 ///
 /// Both call sites are needed: `resugar_type` handles a scalar type position,
 /// and the `t-tensor` arm reads its precision child through `type_name` without
 /// going back through `resugar_type`.
-fn reject_reserved_type_variable(expr: &DeepExpr) -> Result<(), ResugarError> {
+fn reject_nonrebindable_type_variable(expr: &DeepExpr) -> Result<(), ResugarError> {
     let Ok(node) = node_ref(expr) else {
         return Ok(());
     };
@@ -3506,7 +3578,9 @@ fn reject_reserved_type_variable(expr: &DeepExpr) -> Result<(), ResugarError> {
     let Ok(name) = name_child(&node, 0) else {
         return Ok(());
     };
-    if crate::desugar::is_reserved_dtype_name(name) {
+    if crate::desugar::canonical_primitive_name(name).is_some()
+        || crate::desugar::is_reserved_dtype_name(name)
+    {
         return Err(ResugarError::InvalidSurfaceIdentifier {
             name: name.to_string(),
             role: "type variable",
@@ -3548,9 +3622,12 @@ fn resugar_dtype_bound_binders(
                 .map(|(_, family)| *family),
         })
         .collect();
-    for (binder, family) in bounds {
+    for (binder, _family) in bounds {
         if !binders.iter().any(|existing| existing.name == binder) {
-            binders.push(TypeBinder::bounded(binder, family));
+            return Err(ResugarError::InvalidSurfaceMetadata {
+                key: "dtype_bounds".to_string(),
+                expected: "keys listed in the explicit defsig binder list",
+            });
         }
     }
     Ok(binders)
@@ -3607,7 +3684,7 @@ fn collect_quantified_variables(
     names: &mut Vec<String>,
 ) -> Result<(), ResugarError> {
     if let Ok(node) = node_ref(expr) {
-        if matches!(node.tag, DeepTag::DVar | DeepTag::TVar) {
+        if matches!(node.tag, DeepTag::DVar | DeepTag::DRank | DeepTag::TVar) {
             exact(&node, 1)?;
             let name = name_child(&node, 0)?.to_string();
             if name != "_" && !names.contains(&name) {

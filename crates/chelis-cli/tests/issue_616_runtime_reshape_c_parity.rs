@@ -30,7 +30,7 @@ const WINDOW_BODY: &str = "\
 
 fn window_source(out_line: &str) -> String {
     format!(
-        "module Repro.RtWindow\nsig window: tensor[n, f32] -> tensor[1, m, f32]\ndef window(x) = {{\n{WINDOW_BODY}\n}}\n{out_line}\n"
+        "module Repro.RtWindow\nsig window[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef window(x) = {{\n{WINDOW_BODY}\n}}\n{out_line}\n"
     )
 }
 
@@ -192,7 +192,7 @@ fn issue_616_runtime_reshape_window_forward_eval_matches_c() {
 #[test]
 fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
     let source = format!(
-        "module Repro.RtWindowBare\nsig out: tensor[n, f32] -> tensor[1, m, f32]\ndef out(x) = {{\n{WINDOW_BODY}\n}}\n"
+        "module Repro.RtWindowBare\nsig out[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef out(x) = {{\n{WINDOW_BODY}\n}}\n"
     );
     let (_dir, build_dir) = build_c(&source, "rtwindowbare");
     let out_symbol = authored_c_symbol("out");
@@ -298,7 +298,7 @@ fn issue_616_runtime_reshape_negative_extent_errs_in_both_lanes() {
   reshape(x, [cast(1, i64), m])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
-        "module Repro.RtNegDim\nsig f: tensor[n, f32] -> tensor[1, m, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
+        "module Repro.RtNegDim\nsig f[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
     );
 
     let eval_out = run_eval(&source, "rtnegdim");

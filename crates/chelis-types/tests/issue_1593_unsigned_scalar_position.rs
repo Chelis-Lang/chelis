@@ -203,12 +203,13 @@ fn a_cast_target_still_carries_the_spec_diagnostic() {
 }
 
 /// DISPOSITION LOCK. Green in both states. The `tensor[...]` precision slot is
-/// the positive precedent this change copies.
+/// the positive precedent this change copies. Its dimension binder is explicit
+/// under chelis#1854.
 #[test]
 fn a_tensor_precision_slot_still_carries_the_spec_diagnostic() {
     for name in UNSIGNED {
         let messages = messages(&format!(
-            "module P.M\nexport (f)\nsig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "module P.M\nexport (f)\nsig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x\n"
         ));
         assert!(
@@ -222,14 +223,13 @@ fn a_tensor_precision_slot_still_carries_the_spec_diagnostic() {
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a lowercase name that is not a reserved dtype spelling is still
-/// an implicitly quantified type variable and the program still checks clean.
+/// DISPOSITION LOCK. An ordinary explicitly listed lowercase binder still
+/// checks clean.
 #[test]
-fn a_genuine_lowercase_name_still_quantifies_and_checks_clean() {
+fn a_genuine_explicit_lowercase_binder_still_checks_clean() {
     for source in [
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
-        "module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
+        "module P.M\nexport (f)\nsig f[a]: a -> a\ndef f(x) = x\n",
     ] {
         let messages = messages(source);
         assert!(
@@ -343,7 +343,7 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 "scalar",
                 format!(
                     "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-                     (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+                     (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
                      (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
                      (var {{}} x))))\n"
                 ),
@@ -352,7 +352,7 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 "tensor precision",
                 format!(
                     "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-                     (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+                     (defsig {{}} f ({name}) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
                      (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
                      (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
                 ),
@@ -382,7 +382,7 @@ fn an_ordinary_deep_type_variable_still_checks_clean() {
     for name in ["a", "p", "elem"] {
         let source = format!(
             "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-             (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+             (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
              (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
              (var {{}} x))))\n"
         );

@@ -7562,7 +7562,7 @@
   "chelis-types::issue_756_deep_type_resolution::documented_zero_parameter_symbolic_dimension_alias_is_accepted": 0.011,
   "chelis-types::issue_756_deep_type_resolution::enclosing_defsig_binder_is_legal_in_nested_ascription_metadata": 0.01,
   "chelis-types::issue_756_deep_type_resolution::explicit_deftype_type_dimension_and_rank_binders_are_accepted": 0.009,
-  "chelis-types::issue_756_deep_type_resolution::implicit_defsig_binders_and_legal_metadata_hole_are_accepted": 0.008,
+  "chelis-types::issue_756_deep_type_resolution::explicit_defsig_binders_and_legal_metadata_hole_are_accepted": 0.008,
   "chelis-types::issue_756_deep_type_resolution::independent_rhs_and_malformed_let_ascription_each_report_once": 0.009,
   "chelis-types::issue_756_deep_type_resolution::invalid_alias_body_does_not_make_its_declared_header_unknown_downstream": 0.01,
   "chelis-types::issue_756_deep_type_resolution::invalid_declaration_cannot_seed_a_reusable_context": 0.008,

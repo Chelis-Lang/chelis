@@ -28,8 +28,8 @@ use tempfile::tempdir;
 /// The nested helper every fixture shares. `g` resolves its declared result
 /// extent only at run time, so its checked result is `tensor[*, f32]`; `h`
 /// claims one extent for its parameter and its result.
-const NESTED_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n";
+const NESTED_HELPERS: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n";
 
 /// Check one source with `--show-inferred` and return `name -> display
 /// signature`. Requires score 1.0 with no errors: every fixture in this file
@@ -201,9 +201,9 @@ fn a_helper_result_absorbs_the_extent_without_absorbing_the_parameter() {
 fn a_literal_argument_of_the_same_application_keeps_its_extent_in_either_order() {
     let signatures = signatures(&format!(
         "{NESTED_HELPERS}\
-         def two(a: tensor[u, f32], b: tensor[u, f32]) -> tensor[u, f32] = add(a, b)\n\
-         def wild_then_lit(x: tensor[m, f32]) = two(g(x), to_tensor([1.0f32, 2.0f32]))\n\
-         def lit_then_wild(x: tensor[m, f32]) = two(to_tensor([1.0f32, 2.0f32]), g(x))\n"
+         def two[u](a: tensor[u, f32], b: tensor[u, f32]) -> tensor[u, f32] = add(a, b)\n\
+         def wild_then_lit[m](x: tensor[m, f32]) = two(g(x), to_tensor([1.0f32, 2.0f32]))\n\
+         def lit_then_wild[m](x: tensor[m, f32]) = two(to_tensor([1.0f32, 2.0f32]), g(x))\n"
     ));
     assert_eq!(
         signatures.get("wild_then_lit").map(String::as_str),
@@ -226,8 +226,8 @@ fn a_literal_argument_of_the_same_application_keeps_its_extent_in_either_order()
 fn a_named_dimension_another_argument_supplies_is_not_absorbed() {
     let signatures = signatures(&format!(
         "{NESTED_HELPERS}\
-         def two(a: tensor[u, f32], b: tensor[u, f32]) -> tensor[u, f32] = add(a, b)\n\
-         def keep(x: tensor[m, f32], y: tensor[m, f32]) = two(g(x), y)\n"
+         def two[u](a: tensor[u, f32], b: tensor[u, f32]) -> tensor[u, f32] = add(a, b)\n\
+         def keep[m](x: tensor[m, f32], y: tensor[m, f32]) = two(g(x), y)\n"
     ));
     assert_eq!(
         signatures.get("keep").map(String::as_str),
@@ -247,7 +247,7 @@ fn a_named_dimension_another_argument_supplies_is_not_absorbed() {
 fn an_enclosing_definitions_own_dimension_variable_is_not_absorbed() {
     let signatures = signatures(&format!(
         "{NESTED_HELPERS}\
-         def q(x: tensor[k, f32], y: tensor[k, f32]) -> tensor[k, f32] = add(x, h(g(y)))\n"
+         def q[k](x: tensor[k, f32], y: tensor[k, f32]) -> tensor[k, f32] = add(x, h(g(y)))\n"
     ));
     assert_eq!(
         signatures.get("q").map(String::as_str),
@@ -308,8 +308,8 @@ fn a_block_bound_root_absorbs_the_extent_too() {
 /// merely made programs run would fail here.
 #[test]
 fn a_refuted_claim_through_a_dim_variable_root_traps_on_both_lanes() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-        def both(a: tensor[k, f32], b: tensor[k, f32]) -> tensor[k, f32] = add(a, b)\n\
+    let source = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def both[k](a: tensor[k, f32], b: tensor[k, f32]) -> tensor[k, f32] = add(a, b)\n\
         def main() = both(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), \
         g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])))\n";
     let dir = tempdir().expect("tempdir");
@@ -386,8 +386,8 @@ fn a_refuted_claim_through_a_dim_variable_root_traps_on_both_lanes() {
 /// spellings read `main :: () -> tensor[d0, f32]` with empty eval stdout and no
 /// `int main(` in the emitted C. The lambda and monomorphic spellings below are
 /// the controls that were already correct at `f2238550d`.
-const POLY_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n";
+const POLY_HELPERS: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n";
 
 #[test]
 fn a_polymorphic_callee_argument_absorbs_through_its_alias_root() {
@@ -395,7 +395,7 @@ fn a_polymorphic_callee_argument_absorbs_through_its_alias_root() {
     // dimension spelled differently from the helper's.
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply2(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply2[p](v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def main() = apply2(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h)\n"
     ));
     assert_eq!(
@@ -412,7 +412,7 @@ fn a_polymorphic_callee_argument_absorbs_in_the_other_argument_order() {
     // the class in this order, which is why the absorbing site asks about both.
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
     ));
     assert_eq!(
@@ -430,7 +430,7 @@ fn a_polymorphic_callee_argument_absorbs_when_both_spell_the_same_dimension_name
     // same alias class and must reach the same answer.
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[k, f32]) -> tensor[k, f32], v: tensor[k, f32]) -> tensor[k, f32] = f(v)\n\
+         def apply1[k](f: (tensor[k, f32]) -> tensor[k, f32], v: tensor[k, f32]) -> tensor[k, f32] = f(v)\n\
          def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
     ));
     assert_eq!(
@@ -447,8 +447,8 @@ fn a_polymorphic_callee_argument_absorbs_when_both_spell_the_same_dimension_name
 #[test]
 fn a_lambda_in_the_function_position_still_absorbs() {
     let signatures = signatures(
-        "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+        "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def main() = apply1(fn (w) -> add(w, w), g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
     );
     assert_eq!(
@@ -467,9 +467,9 @@ fn a_lambda_in_the_function_position_still_absorbs() {
 #[test]
 fn a_monomorphic_function_argument_keeps_its_literal_extent() {
     let signatures = signatures(
-        "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
          def h3(y: tensor[2, f32]) -> tensor[2, f32] = add(y, y)\n\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def main() = apply1(h3, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
     );
     assert_eq!(
@@ -486,7 +486,7 @@ fn a_monomorphic_function_argument_keeps_its_literal_extent() {
 #[test]
 fn the_absorbing_site_under_grad_keeps_a_concrete_result() {
     let signatures = signatures(
-        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
          def main() = grad(h)(to_tensor([1.0f32, 2.0f32]))\n",
     );
@@ -507,7 +507,7 @@ fn the_absorbing_site_under_grad_keeps_a_concrete_result() {
 fn an_enclosing_binder_is_not_absorbed_through_an_aliasing_call() {
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, s)\n"
     ));
     assert_eq!(
@@ -525,7 +525,7 @@ fn an_enclosing_binder_is_not_absorbed_through_an_aliasing_call() {
 fn an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class() {
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def outer2(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, g(s))\n"
     ));
     assert_eq!(
@@ -561,7 +561,7 @@ fn an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class() {
 fn a_result_only_binder_is_absorbed_to_the_extent_it_met() {
     let signatures = signatures(&format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))\n\
          def direct(t: tensor[3, f32]) -> tensor[seq, f32] = h(g(t))\n\
          def bare(t: tensor[3, f32]) -> tensor[seq, f32] = g(t)\n"
@@ -588,7 +588,7 @@ fn a_result_only_binder_is_absorbed_to_the_extent_it_met() {
 fn a_parameter_bound_binder_still_has_no_value_at_a_root() {
     let source = format!(
         "{POLY_HELPERS}\
-         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
          def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, g(s))\n\
          def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
     );
@@ -637,17 +637,17 @@ fn a_three_member_alias_class_absorbs_in_every_argument_order() {
     let orderings = [
         (
             "first",
-            "def apply3(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+            "def apply3[p](v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
              def main() = apply3(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h, h2)\n",
         ),
         (
             "middle",
-            "def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+            "def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
              def main() = apply3(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2)\n",
         ),
         (
             "last",
-            "def apply3(f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+            "def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
              def main() = apply3(h, h2, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
         ),
     ];
@@ -675,7 +675,7 @@ fn a_three_member_alias_class_absorbs_in_every_argument_order() {
 
 /// A second polymorphic helper, so an application can hold two function
 /// arguments and put a third member in one alias class.
-const THIRD_HELPER: &str = "def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
+const THIRD_HELPER: &str = "def h2[k](z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
 
 /// Negative parity for the row above at the same class size: a binder a
 /// PARAMETER binds still pins a four-member class, so the absorption reaching
@@ -686,7 +686,7 @@ const THIRD_HELPER: &str = "def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z,
 fn a_four_member_binder_class_is_still_not_absorbed() {
     let signatures = signatures(&format!(
         "{POLY_HELPERS}{THIRD_HELPER}\
-         def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+         def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
          def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply3(h, g(s), h2)\n"
     ));
     assert_eq!(
@@ -706,7 +706,7 @@ fn a_four_member_binder_class_is_still_not_absorbed() {
 fn a_literal_claim_still_wins_in_a_four_member_class() {
     let signatures = signatures(&format!(
         "{POLY_HELPERS}{THIRD_HELPER}\
-         def apply4(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], w: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(add(v, w)))\n\
+         def apply4[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], w: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(add(v, w)))\n\
          def main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), to_tensor([1.0f32, 2.0f32]), h2)\n"
     ));
     assert_eq!(
@@ -728,7 +728,7 @@ fn a_literal_claim_still_wins_in_a_four_member_class() {
 fn a_three_member_result_only_binder_is_absorbed_on_both_lanes() {
     let source = format!(
         "{POLY_HELPERS}{THIRD_HELPER}\
-         def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+         def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
          def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply3(h, g(t), h2)\n\
          def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
     );
@@ -789,7 +789,7 @@ fn a_three_member_result_only_binder_is_absorbed_on_both_lanes() {
 fn a_nested_application_root_is_fenced_on_c() {
     let source = format!(
         "{POLY_HELPERS}\
-         def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
+         def pick[p](f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
          def main() = (pick(h))(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
     );
     let published = signatures(&source);
@@ -834,7 +834,7 @@ fn a_nested_application_root_is_fenced_on_c() {
 fn a_nested_application_with_concrete_result_is_fenced_on_c() {
     let source = format!(
         "{POLY_HELPERS}\
-         def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
+         def pick[p](f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
          def main() = (pick(h))(to_tensor([2.0f32, 3.0f32]))\n"
     );
     let published = signatures(&source);
@@ -877,8 +877,8 @@ fn a_nested_application_with_concrete_result_is_fenced_on_c() {
 fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() {
     let source = format!(
         "{POLY_HELPERS}{THIRD_HELPER}\
-         def g2(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[2i64, shape(x, 0i32)]])\n\
-         def apply4(f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\n\
+         def g2[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[2i64, shape(x, 0i32)]])\n\
+         def apply4[p](f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\n\
          def main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2, g2(to_tensor([7.0f32, 8.0f32, 9.0f32])))\n"
     );
     let published = signatures(&source);

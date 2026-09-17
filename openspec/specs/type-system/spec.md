@@ -225,7 +225,7 @@ name-trackable operations, rejecting positional shape-rewriters.
 
 #### Scenario: Named-axis reduction at any rank
 
-- **WHEN** `def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`
+- **WHEN** `def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`
 - **THEN** it reduces the named `seq` axis at any rank, computing the output shape symbolically
 
 #### Scenario: Positional rewriter in a rank-poly body is rejected

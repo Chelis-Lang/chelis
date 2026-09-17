@@ -66,7 +66,7 @@ fn reef_toml() -> String {
 /// explicit `&tensor` parameter, dim- and precision-polymorphic.
 const LIB: &str = "module Repro.Lib\n\
      export (nb)\n\
-     sig nb[p: Float]: &tensor[a, p] -> tensor[a, p]\n\
+     sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
      def nb(x) = relu(x)\n";
 
 /// grad #1 — explicitly borrows the differentiation target (`nb(&v)`).
@@ -173,7 +173,7 @@ fn issue_329_same_module_two_explicit_borrow_grads_check_clean() {
     write_file(
         &root.join("src/all.ch"),
         "module Repro.All\n\
-         sig nb[p: Float]: &tensor[a, p] -> tensor[a, p]\n\
+         sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
          def nb(x) = relu(x)\n\
          def shim_a(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, i32)))\n\
          def trig_a(v: tensor[3, f32]) -> tensor[3, f32] = grad(shim_a)(v)\n\
@@ -252,7 +252,7 @@ fn issue_329_owned_param_verb_grads_check_clean() {
         &root.join("src/lib.ch"),
         "module Repro.Lib\n\
          export (nb)\n\
-         sig nb[p: Float]: tensor[a, p] -> tensor[a, p]\n\
+         sig nb[a, p: Float]: tensor[a, p] -> tensor[a, p]\n\
          def nb(x) = relu(x)\n",
     );
     write_file(&root.join("src/da.ch"), &DA.replace("nb(&v)", "nb(v)"));
@@ -299,7 +299,7 @@ fn issue_329_explicit_and_auto_borrow_check_parity() {
 ///   d/dv sum(relu(v))        at [2, -1]    = [1, 0]
 ///   d/dv sum(relu(v)^2)      at [1, -2, 3] = 2·relu(v)·step(v) = [2, 0, 6]
 const EVAL_EXPLICIT: &str = "module Repro.Issue329Eval\n\
-     sig nb[p: Float]: &tensor[a, p] -> tensor[a, p]\n\
+     sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
      def nb(x) = relu(x)\n\
      def shim_a(v: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, i32)))\n\
      def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, i32)))\n\

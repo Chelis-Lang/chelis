@@ -176,7 +176,7 @@ fn a_partly_unified_pending_result_keeps_its_dims_monomorphic() {
     let source = format!(
         "module Issue1489GenPartial\n\
          {HELPER}\
-         def id_dim(x: tensor[d, 3, f32]) -> tensor[d, 3, f32] = x\n\
+         def id_dim[d](x: tensor[d, 3, f32]) -> tensor[d, 3, f32] = x\n\
          def probe(t: tensor[4, 3, f32]) -> tensor[100, 3, f32] =\n\
         \x20 apply_n(fn (v) -> {{ g = id_dim(copy(v))\n\
         \x20   g }}, t)\n"
@@ -204,7 +204,7 @@ fn a_rank_polymorphic_pending_result_keeps_its_rank_monomorphic() {
     let source = format!(
         "module Issue1489GenRank\n\
          {HELPER}\
-         def id_rank(x: tensor[..r, f32]) -> tensor[..r, f32] = x\n\
+         def id_rank[r](x: tensor[..r, f32]) -> tensor[..r, f32] = x\n\
          def probe(t: tensor[4, 3, f32]) -> tensor[4, 3, 7, f32] =\n\
         \x20 apply_n(fn (v) -> {{ g = id_rank(copy(v))\n\
         \x20   g }}, t)\n"

@@ -1638,7 +1638,7 @@ fn sig_plus_def_same_name_is_not_a_duplicate() {
     // shape (and an inline-annotated def desugars to exactly that pair),
     // so it must not be flagged. Only two `def`s for one name collide.
     check_ok(
-        "(defsig {} f (t-fn {} (t-var {} a) (t-var {} a)))
+        "(defsig {} f (a) (t-fn {} (t-var {} a) (t-var {} a)))
          (def {} f (fn {} (params {} x) (var {} x)))",
     );
 }

@@ -152,20 +152,16 @@ fn expect_one_active_float_error(json: &Value, dtype: &str, label: &str) {
 
 /// School.Nn.Linear.forward shape: matmul + add + expand. Accepts every
 /// FLOAT dtype (integer matmul is rejected per spec sec 5.7.2).
-/// Note: the test replicas use single-letter dim names (a, b, c)
-/// because the desugar treats only single-letter and explicit-
-/// quantifier names as d-vars; multi-letter names (batch, in_dim, ...)
-/// become d-name (concrete) inside a sig-only declaration. The
-/// production linear.ch sigs use single-letter dim names for the same
-/// reason; precision generalization works orthogonally via the shared
-/// p tvar in the sig's t-fn.
+/// The replicas list the single-letter dimension variables and precision
+/// variable explicitly. Multi-letter axis names remain concrete `d-name`
+/// values unless the signature lists them too.
 #[test]
 fn linear_forward_accepts_all_float_dtypes() {
     for dtype in FLOAT_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear.ch");
         let src = format!(
-            r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
   bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
@@ -199,8 +195,8 @@ fn embedding_forward_accepts_all_arithmetic_dtypes_for_table() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("embedding.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, i64] -> &tensor[c, d, p] -> tensor[a, b, d, p]
-def forward[a, b, c, d, p](ids, table) = gather(table, ids, 0)
+            r#"sig forward[a, b, c, d, p]: &tensor[a, b, i64] -> &tensor[c, d, p] -> tensor[a, b, d, p]
+def forward(ids, table) = gather(table, ids, 0)
 def call(ids: &tensor[1, 2, i64], table: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, table)
 "#
         );
@@ -250,8 +246,8 @@ fn metrics_accuracy_accepts_all_arithmetic_dtypes_for_logits() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("acc.ch");
         let src = format!(
-            r#"sig row_argmax: &tensor[piece, classes, p] -> i64
-def row_argmax[piece, classes, p](row: &tensor[piece, classes, p]) -> i64 = {{
+            r#"sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
+def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {{
   pair = sort(row, cast(1, i32))
   cast(0, i64)
 }}
@@ -340,7 +336,7 @@ fn test_assert_close_tensor_accepts_exactly_active_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
-            r#"sig assert_close_tensor[p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
+            r#"sig assert_close_tensor[n, p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, {dtype}), "label")
 "#
@@ -420,7 +416,7 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
-            r#"sig assert_shape: &tensor[..r, p] -> List[i64] -> string -> unit ! {{ Test }}
+            r#"sig assert_shape[r, p]: &tensor[..r, p] -> List[i64] -> string -> unit ! {{ Test }}
 def assert_shape(t, expected_shape, label) = ()
 def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, [cast(3, i64)], "label")
 "#
@@ -444,7 +440,7 @@ fn linear_forward_rejects_mismatched_input_weight_precision() {
     let path = dir.path().join("linear_mix.ch");
     write_file(
         &path,
-        r#"sig forward[p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+        r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {
   bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
@@ -468,8 +464,8 @@ fn embedding_forward_rejects_non_int64_ids() {
     let path = dir.path().join("embedding_neg.ch");
     write_file(
         &path,
-        r#"sig forward: &tensor[batch, seq, i64] -> &tensor[vocab, hidden, p] -> tensor[batch, seq, hidden, p]
-def forward[batch, seq, vocab, hidden, p](ids, table) = gather(table, ids, 0)
+        r#"sig forward[batch, seq, vocab, hidden, p]: &tensor[batch, seq, i64] -> &tensor[vocab, hidden, p] -> tensor[batch, seq, hidden, p]
+def forward(ids, table) = gather(table, ids, 0)
 def bad(ids: &tensor[1, 2, i32], table: &tensor[4, 3, f32]) -> tensor[1, 2, 3, f32] = forward(ids, table)
 "#,
     );
@@ -529,7 +525,7 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     let path = dir.path().join("assert_close_neg.ch");
     write_file(
         &path,
-        r#"sig assert_close_tensor[p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
+        r#"sig assert_close_tensor[n, p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,
@@ -563,7 +559,7 @@ fn f32_pinned_ops_reject_non_f32_at_sig_level() {
     let fixtures: &[(&str, &str)] = &[
         (
             "silu.forward",
-            "sig forward: &tensor[n, f32] -> tensor[n, f32]\n\
+            "sig forward[n]: &tensor[n, f32] -> tensor[n, f32]\n\
              def forward(x) = x\n\
              def bad(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = forward(xs)\n",
         ),

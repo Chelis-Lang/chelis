@@ -84,9 +84,9 @@ def package(root: Path, version: str, family: str, good: bool) -> None:
         f'[package]\nname="app"\nversion="0.1.0"\n[[dependencies]]\nname="mylib"\nversion="0.1.0"\ncompiler="={version}"\narchive_sha256=""\nshell_sha256=""\n[dependencies.source]\nkind="path"\npath="./mylib"\n'
     )
     definition = {
-        "reshape": "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+        "reshape": "def f[n](x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
         "unit": "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
-        "literal": "def f(x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
+        "literal": "def f[n](x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
     }[family]
     values = {
         "reshape": list(range(1, 5 if good else 7)),

@@ -321,11 +321,19 @@ fn a_reserved_parameter_site_reports_once_at_both_entries() {
 }
 
 #[test]
-fn no_clause_inline_tensor_precision_uses_implicit_signature_collection() {
-    let source = "def inspect(x: tensor[3, p]) -> tensor[3, p] = x";
+fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
+    let source = "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x";
     let program = surf_to_deep(source);
     for result in [check_ir_program(&program), check_typed_program(&program)] {
-        result.expect("the no-clause synthesized signature implicitly binds and links `p`");
+        let report = result.expect_err("an unlisted precision name is not a binder");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.message.contains("primitive") && error.message.contains("`p`")),
+            "{:?}",
+            report.errors
+        );
     }
 
     let explicit = surf_to_deep("def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x");
@@ -1255,8 +1263,8 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
 }
 
 #[test]
-fn signature_ownership_respects_implicit_fallback_and_explicit_authority() {
-    for (binders, accepted) in [("", true), ("[p]", true), ("[q]", false)] {
+fn signature_ownership_requires_explicit_authority() {
+    for (binders, accepted) in [("", false), ("[p]", true), ("[q]", false)] {
         let program = surf_to_deep(&format!(
             "def inspect{binders}(x: tensor[3, p]) -> i32 = 0i32"
         ));
@@ -1316,7 +1324,7 @@ fn a_printed_program_preserves_its_diagnostic_count() {
 
 #[test]
 fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
-    let program = surf_to_deep("def classify(x: (tensor[3, p], f8e4m3)) -> i32 = 0i32");
+    let program = surf_to_deep("def classify[p](x: (tensor[3, p], f8e4m3)) -> i32 = 0i32");
     for result in [check_ir_program(&program), check_typed_program(&program)] {
         let report = result.expect_err("the reserved site must reject");
         let reserved = report
@@ -1354,7 +1362,7 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
 fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
     for name in ["f8e4m3", "f8e5m2"] {
         let source = format!(
-            "(defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n\
+            "(defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n\
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
@@ -1463,11 +1471,11 @@ fn every_active_float_is_still_accepted() {
     }
 }
 
-/// DISPOSITION LOCK. An ordinary lowercase name still quantifies and still
+/// DISPOSITION LOCK. An ordinary explicitly listed lowercase binder still
 /// checks clean; the reserved-name routing must not widen to catch it.
 #[test]
 fn an_ordinary_type_variable_still_checks_clean() {
-    assert_accepted("def f(x: a) -> a = x");
+    assert_accepted("def f[a](x: a) -> a = x");
     assert_accepted("type ScalarAlias = f32\nvalue: ScalarAlias = 1.0");
     assert_accepted("type Holder = | Holder { value: f32 }");
 }

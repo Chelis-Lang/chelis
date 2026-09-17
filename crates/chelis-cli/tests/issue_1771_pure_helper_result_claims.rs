@@ -26,10 +26,10 @@ fn pure_helper_claims(native: bool) {
                 "[1.0f32, 2.0f32, 3.0f32]"
             };
             let source = format!(
-                "def cut(x: tensor[n, f32]) -> tensor[*, {result_prim}] = {body}\n\
-             def inner(x: tensor[n, f32]) -> tensor[*, {result_prim}] ! {{ IO }} = {{\n _ = print(\"producer-before\")\n value = cut(x)\n _ = print(\"producer-after\")\n value\n}}\n\
-             def two(x: tensor[n, f32]) -> tensor[2, {result_prim}] ! {{ IO }} = inner(x)\n\
-             def three(x: tensor[n, f32]) -> tensor[3, {result_prim}] ! {{ IO }} = inner(x)\n\
+                "def cut[n](x: tensor[n, f32]) -> tensor[*, {result_prim}] = {body}\n\
+             def inner[n](x: tensor[n, f32]) -> tensor[*, {result_prim}] ! {{ IO }} = {{\n _ = print(\"producer-before\")\n value = cut(x)\n _ = print(\"producer-after\")\n value\n}}\n\
+             def two[n](x: tensor[n, f32]) -> tensor[2, {result_prim}] ! {{ IO }} = inner(x)\n\
+             def three[n](x: tensor[n, f32]) -> tensor[3, {result_prim}] ! {{ IO }} = inner(x)\n\
              a = two(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
              b = three(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n\
              out = three(to_tensor({last}))\n"
@@ -88,10 +88,10 @@ fn helper_owned_claims(native: bool) {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let source = format!(
-                    "def cut(x: tensor[n, m, f32]) -> tensor[2, *, f32] = {body}\n\
-                 def forward(x: tensor[n, m, f32]) -> tensor[*, *, f32] = cut(x)\n\
-                 def erased(x: tensor[n, m, f32]) -> tensor[*, *, f32] ! {{ IO }} = {{\n _ = print(\"owned-before\")\n value = {invoked}(x)\n _ = print(\"owned-after\")\n value\n}}\n\
-                 def caller(x: tensor[n, m, f32]) -> tensor[*, 3, f32] ! {{ IO }} = erased(x)\n\
+                    "def cut[n, m](x: tensor[n, m, f32]) -> tensor[2, *, f32] = {body}\n\
+                 def forward[n, m](x: tensor[n, m, f32]) -> tensor[*, *, f32] = cut(x)\n\
+                 def erased[n, m](x: tensor[n, m, f32]) -> tensor[*, *, f32] ! {{ IO }} = {{\n _ = print(\"owned-before\")\n value = {invoked}(x)\n _ = print(\"owned-after\")\n value\n}}\n\
+                 def caller[n, m](x: tensor[n, m, f32]) -> tensor[*, 3, f32] ! {{ IO }} = erased(x)\n\
                  out = caller(to_tensor([{values}]))\n"
                 );
                 let (ok, output) = run(&source, native);
@@ -137,8 +137,8 @@ fn producer_precondition_order(native: bool) {
             ("[0i64, 127i64, 127i64, 127i64]", "element"),
         ] {
             let source = format!(
-                "def double(x: tensor[n, i8]) -> tensor[{callee_claim}, i8] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
-                 def caller(x: tensor[n, i8]) -> tensor[{caller_claim}, i8] ! {{ IO }} = {{\n _ = print(\"add-before\")\n value = double(x)\n _ = print(\"add-after\")\n value\n}}\n\
+                "def double[n](x: tensor[n, i8]) -> tensor[{callee_claim}, i8] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
+                 def caller[n](x: tensor[n, i8]) -> tensor[{caller_claim}, i8] ! {{ IO }} = {{\n _ = print(\"add-before\")\n value = double(x)\n _ = print(\"add-after\")\n value\n}}\n\
                  out = caller(cast(to_tensor({values}), i8))\n"
             );
             let (ok, output) = run(&source, native);
@@ -190,8 +190,8 @@ fn gradient_claims(native: bool) {
                 "[1.0f32, 2.0f32, 3.0f32, 4.0f32]"
             };
             let source = format!(
-                "def cut(x: tensor[n, f32]) -> tensor[2, f32] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
-                 def loss(x: tensor[n, f32]) -> tensor[f32] = {{\n value = cut(copy(x))\n {body}\n}}\n\
+                "def cut[n](x: tensor[n, f32]) -> tensor[2, f32] = {{\n shortened = shrink(x, [[1i64, shape(x, 0i32)]])\n add(shortened, shortened)\n}}\n\
+                 def loss[n](x: tensor[n, f32]) -> tensor[f32] = {{\n value = cut(copy(x))\n {body}\n}}\n\
                  out = grad(loss, wrt=x)(to_tensor({values}))\n"
             );
             let (ok, output) = run(&source, native);
@@ -230,8 +230,8 @@ fn cast_element_and_extent_order(native: bool) {
         ("[1.0f32, 2.5f32, 3.5f32, 4.5f32]", "element"),
     ] {
         let source = format!(
-            "def convert(x: tensor[n, f32]) -> tensor[*, i64] = cast(shrink(x, [[1i64, shape(x, 0i32)]]), i64)\n\
-             def claimed(x: tensor[n, f32]) -> tensor[3, i64] ! {{ IO }} = {{\n _ = print(\"cast-before\")\n value = convert(x)\n _ = print(\"cast-after\")\n value\n}}\n\
+            "def convert[n](x: tensor[n, f32]) -> tensor[*, i64] = cast(shrink(x, [[1i64, shape(x, 0i32)]]), i64)\n\
+             def claimed[n](x: tensor[n, f32]) -> tensor[3, i64] ! {{ IO }} = {{\n _ = print(\"cast-before\")\n value = convert(x)\n _ = print(\"cast-after\")\n value\n}}\n\
              out = claimed(to_tensor({values}))\n"
         );
         let (ok, output) = run(&source, native);

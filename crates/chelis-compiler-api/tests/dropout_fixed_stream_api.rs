@@ -387,7 +387,7 @@ fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
                 format!("reshape(x, [{target}, 2i64])")
             };
             let definition = format!(
-                "def loss(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}\n"
+                "def loss[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}\n"
             );
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("src")).unwrap();
@@ -499,7 +499,7 @@ fn host_only_random_source_does_not_cache_the_first_callers_seed() {
         }
     }
 
-    let definition = "def draw(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [numel(dropout(source, 0.0f32)), 2i64])";
+    let definition = "def draw[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [numel(dropout(source, 0.0f32)), 2i64])";
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
     std::fs::write(
@@ -577,7 +577,7 @@ fn bindings() -> BTreeMap<String, TensorValue> {
 
 #[test]
 fn staged_host_sources_interleave_input_ad_and_the_next_draw() {
-    let source = "def loss(x: tensor[a, b, f32]) -> tensor[f32] = sum(sum(dropout(x, 0.5f32), 0i32), 0i32)\ndef checked(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample(source: tensor[m, f32], x: tensor[n, f32]) = with seed(42i64) {\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
+    let source = "def loss[a, b](x: tensor[a, b, f32]) -> tensor[f32] = sum(sum(dropout(x, 0.5f32), 0i32), 0i32)\ndef checked[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample[m, n](source: tensor[m, f32], x: tensor[n, f32]) = with seed(42i64) {\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
     let prepared = prepare_eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: source.into(),
@@ -649,7 +649,7 @@ fn request(source: &str) -> EvalRequest {
 
 #[test]
 fn staged_ad_local_seed_controls_restore_before_the_following_host_cut() {
-    let source = "def loss(x: tensor[a, b, f32]) -> tensor[f32] = with seed(42i64) {\n identity = with seed(42i64) { x }\n sum(sum(dropout(identity, 0.5f32), 0i32), 0i32)\n}\ndef checked(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample() = with seed(42i64) {\n source = to_tensor(SOURCE)\n x = to_tensor(VALUES)\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
+    let source = "def loss[a, b](x: tensor[a, b, f32]) -> tensor[f32] = with seed(42i64) {\n identity = with seed(42i64) { x }\n sum(sum(dropout(identity, 0.5f32), 0i32), 0i32)\n}\ndef checked[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample() = with seed(42i64) {\n source = to_tensor(SOURCE)\n x = to_tensor(VALUES)\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
     for count in [2, 3, 2] {
         let values = |n| {
             format!(
@@ -717,8 +717,8 @@ fn tensor(result: &EvalResult, name: &str) -> Vec<f64> {
 // including retained dead draws and first-order replay.
 #[test]
 fn checked_extent_dropout_source_and_gradient_keep_computed_claims() {
-    let helper = "def checked(x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n";
-    let loss = "def loss(x: tensor[n, f32]) -> tensor[f32] = sum(sum(dropout(checked(x), 0.5f32), 0), 0)\n";
+    let helper = "def checked[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n";
+    let loss = "def loss[n](x: tensor[n, f32]) -> tensor[f32] = sum(sum(dropout(checked(x), 0.5f32), 0), 0)\n";
     for gradient in [false, true] {
         let body = if gradient {
             "grad(loss)(x)"
@@ -726,7 +726,7 @@ fn checked_extent_dropout_source_and_gradient_keep_computed_claims() {
             "dropout(checked(x), 0.5f32)"
         };
         let source = format!(
-            "{helper}{loss}def sample(x: tensor[n, f32]) = with seed(42i64) {{\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n {body}\n}}\n"
+            "{helper}{loss}def sample[n](x: tensor[n, f32]) = with seed(42i64) {{\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n {body}\n}}\n"
         );
         let prepared = prepare_eval(request(&source)).unwrap();
         for count in [32, 34, 32] {
@@ -832,7 +832,7 @@ fn checked_extent_dropout_context_cache_keeps_claims_and_fresh_replay() {
         "[package]\nname = \"extent_dropout_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
     )).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"),
-        "module Probe.Draw\nexport (draw, loss)\ndef checked(x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef draw(x: tensor[n, f32]) -> tensor[16, 2, f32] = dropout(checked(x), 0.5f32)\ndef loss(x: tensor[n, f32]) -> tensor[f32] = sum(sum(draw(x), 0), 0)\n"
+        "module Probe.Draw\nexport (draw, loss)\ndef checked[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef draw[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = dropout(checked(x), 0.5f32)\ndef loss[n](x: tensor[n, f32]) -> tensor[f32] = sum(sum(draw(x), 0), 0)\n"
     ).unwrap();
     let context = compile_reef_context(directory.path(), directory.path()).unwrap();
     let wire = context.encode().unwrap();
@@ -901,7 +901,7 @@ fn checked_extent_dropout_helper_keeps_result_claim_and_source_trap_order() {
             ),
         ] {
             let source = format!(
-                "def draw(x: tensor[n, f32]) -> tensor[16, 2, f32] = {body}\ndef sample(x: tensor[n, f32]) = with seed(42i64) {{ draw(x) }}\n"
+                "def draw[n](x: tensor[n, f32]) -> tensor[16, 2, f32] = {body}\ndef sample[n](x: tensor[n, f32]) = with seed(42i64) {{ draw(x) }}\n"
             );
             let prepared = prepare_eval(request(&source)).unwrap();
             for result in [

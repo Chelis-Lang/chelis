@@ -125,7 +125,7 @@ fn each_family_operation_requires_a_sufficient_authored_bound() {
 #[test]
 fn standalone_signatures_express_the_same_contract() {
     check(
-        "sig g: tensor[3, p] -> tensor[p]\ndef g(x) = mean(x, 0i32)\n",
+        "sig g[p]: tensor[3, p] -> tensor[p]\ndef g(x) = mean(x, 0i32)\n",
         false,
     );
     check(

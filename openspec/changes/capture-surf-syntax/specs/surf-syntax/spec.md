@@ -214,7 +214,7 @@ shape, and a `def` mentioning `..r` SHALL be restricted to name-trackable operat
 
 #### Scenario: Rank-generic identity function
 
-- **WHEN** a function is `def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`
+- **WHEN** a function is `def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`
 - **THEN** it type-checks at every rank because `relu` is shape-identity
 
 #### Scenario: Repeated spread name is a parse error
@@ -231,7 +231,7 @@ formatter and decompiler.
 
 #### Scenario: Inline annotations synthesize a defsig
 
-- **WHEN** a function is `def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)`
+- **WHEN** a function is `def add_vecs[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)`
 - **THEN** the desugarer emits a `defsig` in addition to the `def`
 
 #### Scenario: Parenthesized function argument is distinct from curried arrows
@@ -248,7 +248,7 @@ names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`,
 
 #### Scenario: Random effect annotation is accepted
 
-- **WHEN** a sig is `sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }`
+- **WHEN** a sig is `sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }`
 - **THEN** the parser accepts the effect suffix
 
 #### Scenario: Unknown effect name is rejected
@@ -256,23 +256,24 @@ names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`,
 - **WHEN** an effect suffix names an effect outside the built-in set, e.g. `! { Bogus }`
 - **THEN** the parser/checker rejects it
 
-### Requirement: Contextual precision polymorphism
+### Requirement: Explicit signature binders
 
-In a `sig`, any non-primitive lowercase name in a tensor precision slot SHALL be an implicit
-`forall`-quantified type variable (`t-var`); in a `def`, a precision name SHALL be promoted
-to `t-var` only if it appears in the def's `[..]` clause, otherwise it SHALL surface an
-`UnsupportedTensorPrecision` diagnostic. The `[..]` clause SHALL override the case-split so a
-quantified PascalCase name is a type variable.
+Every type, dimension, and rank variable in a `sig` SHALL appear exactly once in that
+signature's complete `[..]` binder list. A non-primitive name in a tensor precision slot
+SHALL become `t-var` only when listed; an unlisted spelling remains a primitive request and
+SHALL be rejected by the closed primitive resolver. The `[..]` clause SHALL override the
+case-split so a listed PascalCase name is a type variable. A matching `def` SHALL NOT carry
+a second binder list.
 
-#### Scenario: Sig precision name is an implicit type variable
+#### Scenario: Sig precision name is an explicit type variable
 
-- **WHEN** a sig is `sig poly_id: tensor[d, p] -> tensor[d, p]`
-- **THEN** `p` is an implicitly quantified precision variable instantiated fresh per call site
+- **WHEN** a sig is `sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]`
+- **THEN** `d` and `p` are explicitly quantified variables instantiated fresh per call site
 
 #### Scenario: Unbound def precision name is rejected
 
 - **WHEN** a def is `def f[a, b](x: tensor[3, p]) = ...` with `p` absent from `[a, b]`
-- **THEN** the checker reports `UnsupportedTensorPrecision`
+- **THEN** the shared primitive resolver rejects `p` as unknown and suggests the nearest active dtype
 
 ### Requirement: Blocks and sequencing
 
@@ -412,7 +413,7 @@ spellings in type positions and literal suffixes. Normal ingress SHALL reject
 the retired v0.18 spellings `int8`, `int16`, `int32`, and `int64`; the explicit
 v0.18 migration SHALL rewrite those spellings only where they denote dtypes or
 cast targets and SHALL preserve unrelated identifiers and string contents.
-Retired spellings SHALL NOT become implicit type variables.
+Retired spellings SHALL NOT be rebound as explicit type variables.
 
 #### Scenario: Canonical source uses i64
 

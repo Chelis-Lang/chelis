@@ -47,13 +47,13 @@ fn decision(src: &str, name: &str) -> Result<bool, String> {
 
 #[test]
 fn a_pure_tensor_def_is_a_kernel() {
-    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n";
+    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n";
     assert_eq!(decision(src, "f"), Ok(true));
 }
 
 #[test]
 fn an_io_effect_row_is_host() {
-    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = {\n  _ = print(x)\n  x\n}\n";
+    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = {\n  _ = print(x)\n  x\n}\n";
     assert_eq!(decision(src, "f"), Ok(false));
 }
 

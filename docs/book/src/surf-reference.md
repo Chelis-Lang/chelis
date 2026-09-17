@@ -37,13 +37,13 @@ Type annotations on parameters and the return are optional; the compiler infers 
 leave off. The return arrow is `->`.
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
 The body can be a `{ ... }` block of bindings ending in a result expression:
 
 ```chelis-surf
-def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] = {
+def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] = {
   y = add(x, x)
   relu(y)
 }
@@ -227,7 +227,7 @@ type Activation =
   | Relu
   | Sigmoid
 
-def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
+def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
     | Sigmoid => sigmoid(x)

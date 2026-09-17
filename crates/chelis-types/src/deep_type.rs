@@ -131,8 +131,10 @@ pub(crate) enum BinderMode<'a> {
     /// A nominal declaration whose parameter kinds were fixed before any
     /// declaration body was resolved.
     ExplicitKinds(&'a UnordMap<String, NominalParamKind>),
-    /// A `defsig` implicitly quantifies each named type/dimension/rank variable.
-    ImplicitGeneric,
+    /// A `defsig` may use only names in its explicit binder list. The list is
+    /// unkinded: position determines whether one spelling denotes a type,
+    /// dimension, or rank variable.
+    ExplicitGeneric(&'a UnordSet<String>),
     /// Metadata emitted by a checked compiler pass may carry generated names.
     TrustedCompilerMetadata,
 }
@@ -564,10 +566,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                         .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
                     return Err(report_witness(self.errors, diagnostic));
                 }
-                Err(self.type_error(format!(
-                    "unknown primitive type `{name}` in {}",
-                    self.use_site.label()
-                )))
+                let nearest = nearest_active_dtype(name);
+                Err(self.type_error_with_suggestions(
+                    format!(
+                        "unknown primitive type `{name}` in {}",
+                        self.use_site.label()
+                    ),
+                    vec![format!(
+                        "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
+                    )],
+                ))
             }
             Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
@@ -645,6 +653,17 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .diagnostic_location()
                 .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
             return Err(report_witness(self.errors, diagnostic));
+        }
+        if Prim::parse_name(name).is_some_and(|prim| prim.is_admissible_active()) {
+            return Err(self.type_error_with_suggestions(
+                format!(
+                    "active primitive `{name}` cannot be rebound as a type variable in {}",
+                    self.use_site.label()
+                ),
+                vec![format!(
+                    "write `(t-prim {{}} {name})` and remove `{name}` from the `defsig` binder list"
+                )],
+            ));
         }
         if matches!(
             self.binder_mode,
@@ -743,7 +762,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             BinderMode::ClosedInput => false,
             BinderMode::Lexical(names, _) => names.contains(name),
             BinderMode::ExplicitKinds(kinds) => kinds.contains_key(name),
-            BinderMode::ImplicitGeneric | BinderMode::TrustedCompilerMetadata => true,
+            BinderMode::ExplicitGeneric(names) => names.contains(name),
+            BinderMode::TrustedCompilerMetadata => true,
         }
     }
 
@@ -859,12 +879,52 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     fn type_error(&mut self, message: String) -> ErrorWitness {
-        let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+        self.type_error_with_suggestions(message, vec![])
+    }
+
+    fn type_error_with_suggestions(
+        &mut self,
+        message: String,
+        suggestions: Vec<String>,
+    ) -> ErrorWitness {
+        let error = CheckError::new(CheckErrorKind::TypeMismatch, message, suggestions);
         let error = self
             .diagnostic_location()
             .map_or(error.clone(), |location| location.attach(error));
         report_witness(self.errors, error)
     }
+}
+
+const ACTIVE_DTYPE_NAMES: &[&str] = &[
+    "f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64", "bool",
+];
+
+fn nearest_active_dtype(name: &str) -> &'static str {
+    match name {
+        "float" | "float32" | "fp32" => "f32",
+        "double" | "float64" | "fp64" => "f64",
+        "half" | "float16" | "fp16" => "f16",
+        _ => ACTIVE_DTYPE_NAMES
+            .iter()
+            .copied()
+            .min_by_key(|candidate| edit_distance(name.as_bytes(), candidate.as_bytes()))
+            .expect("active dtype vocabulary is nonempty"),
+    }
+}
+
+fn edit_distance(left: &[u8], right: &[u8]) -> usize {
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_byte) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_byte) in right.iter().enumerate() {
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + usize::from(left_byte != right_byte));
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 // ---------------------------------------------------------------------------

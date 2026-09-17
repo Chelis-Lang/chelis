@@ -124,7 +124,7 @@ def helper(a) -> tensor[9, 8, f32] = matmul(a, a)
 fn authored_bare_type_hole_does_not_disable_shape_obligation() {
     let errors = diagnostics(
         r#"
-sig helper: t -> tensor[9, 8, f32]
+sig helper[t]: t -> tensor[9, 8, f32]
 def helper(a) = matmul(a, a)
 "#,
     );

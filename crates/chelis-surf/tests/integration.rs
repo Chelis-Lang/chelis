@@ -343,7 +343,7 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
 // must preserve.
 #[test]
 fn hof_argument_sig_desugars_to_nested_t_fn() {
-    let hof = surf_parse("sig f: (a -> b) -> c").unwrap();
+    let hof = surf_parse("sig f[a, b, c]: (a -> b) -> c").unwrap();
     let hof_text = print_canonical(&desugar_program(&hof));
     assert!(
         hof_text.contains("(t-fn {} (t-fn {} (t-var {} a) (t-var {} b)) (t-var {} c))"),
@@ -351,7 +351,7 @@ fn hof_argument_sig_desugars_to_nested_t_fn() {
     );
     deep_parse_strict(&hof_text).expect("HOF sig Deep validates");
 
-    let curried = surf_parse("sig f: a -> b -> c").unwrap();
+    let curried = surf_parse("sig f[a, b, c]: a -> b -> c").unwrap();
     let curried_text = print_canonical(&desugar_program(&curried));
     assert!(
         curried_text.contains("(t-fn {} (t-var {} a) (t-var {} b) (t-var {} c))"),

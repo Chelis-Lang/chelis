@@ -529,7 +529,7 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
 #[test]
 fn host_only_definitions_do_not_fabricate_graph_observations() {
     let source = r#"
-def filled(x: tensor[n, f32]) -> tensor[n, f32] =
+def filled[n](x: tensor[n, f32]) -> tensor[n, f32] =
   expand(to_tensor([3.0f32]), 0, cast(shape(&x, 0), i64))
 "#;
     let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
@@ -601,7 +601,7 @@ def derivative(x: tensor[2, f32]) -> tensor[2, f32] = {
 #[test]
 fn specialization_records_both_named_and_actual_dimension_types() {
     let source = r#"
-def loss(x: tensor[n, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
+def loss[n](x: tensor[n, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
 def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
 "#;
     let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();

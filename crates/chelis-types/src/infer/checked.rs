@@ -14,6 +14,265 @@ pub(super) struct DeclaredSigMetadata {
     pub(super) dtype_bounds: UnordMap<String, chelis_deep::DtypeFamily>,
 }
 
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+pub(super) struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>,
+}
+
+impl<'a> AnnotationResolutionContext<'a> {
+    pub(super) fn root(declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+        }
+    }
+
+    pub(super) fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+}
+
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
+
+    match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        DeepTag::Module => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
+
+        // Declarations.
+        DeepTag::Def => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Defsig => match (index, _arity) {
+            (0, _) => Binder,
+            (1, 3) => Syntax,
+            _ => Type,
+        },
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                Syntax
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Defdim => Binder,
+
+        // Expressions and their structural helper positions.
+        DeepTag::Fn => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::App
+        | DeepTag::If
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::Par
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Copy
+        | DeepTag::Borrow
+        | DeepTag::Unquote
+        | DeepTag::Splice => RuntimeExpr,
+        DeepTag::HandleEffect => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Let => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Match => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Arm => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Var | DeepTag::Lit => Syntax,
+        DeepTag::Record => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Access => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Pipe => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::TupleGet => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::RecordUpdate => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        DeepTag::PatVar => Binder,
+        DeepTag::PatLit => Syntax,
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::PatTuple => ExplicitInferenceBypass,
+        DeepTag::PatWild => Syntax,
+        DeepTag::PatAs => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank => Type,
+
+        // Transform-specific selector/type positions.
+        DeepTag::Grad | DeepTag::Vmap => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Cast => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        DeepTag::Params => Binder,
+        DeepTag::Bind => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Kv => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+    }
+}
+
 /// One checker operation's typed inference result. The product is private,
 /// session-local, and never serialized: annotation consumes it immediately
 /// after the owning inference traversal completes.
@@ -1828,85 +2087,14 @@ pub(crate) fn run_finalization_mutation_case(
 pub(super) fn collect_declared_sig_metadata<'a>(
     exprs: impl IntoIterator<Item = &'a deep::Expr>,
 ) -> UnordMap<String, DeclaredSigMetadata> {
-    let exprs = exprs.into_iter().collect::<Vec<_>>();
     let mut map: UnordMap<String, DeclaredSigMetadata> = UnordMap::new();
-    for expr in &exprs {
-        collect_defsig_param_types(expr, &mut map);
-    }
     for expr in exprs {
-        extend_declared_sig_binders_from_def_params(expr, &mut map);
+        collect_defsig_param_types(expr, &mut map);
     }
     map
 }
 
-/// Merge declaration-owned binders preserved by an explicit generic `def`
-/// into the matching standalone signature's scope. Surf suppresses the
-/// synthesized `defsig` when a same-name explicit `sig` exists; in that case
-/// the `def f[piece](x: tensor[piece, ...])` parameter syntax is the only Deep
-/// node that still distinguishes the bound `d-var piece` from an ordinary
-/// closed annotation. Restricting this merge to names that already own a
-/// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
-pub(super) fn extend_declared_sig_binders_from_def_params(
-    expr: &deep::Expr,
-    map: &mut UnordMap<String, DeclaredSigMetadata>,
-) {
-    stack_guard!("extend_declared_sig_binders_from_def_params", expr);
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return;
-    };
-    if tag == DeepTag::Module {
-        for child in kids.iter().skip(1) {
-            extend_declared_sig_binders_from_def_params(child, map);
-        }
-        return;
-    }
-    if tag != DeepTag::Def {
-        return;
-    }
-    let (Some(name), Some(fn_expr)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
-        return;
-    };
-    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(fn_expr) else {
-        return;
-    };
-    let Some(params) = fn_kids.first() else {
-        return;
-    };
-    let Some(metadata) = map.get_mut(name) else {
-        return;
-    };
-    let params = match params {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
-            children(params_list)
-        }
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => return,
-    };
-    for param in params {
-        let type_expr = match param {
-            deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|v| v.expression()),
-            deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
-                let deep::Expr::Map(meta, _) = meta else {
-                    return None;
-                };
-                meta.ty().map(|v| v.expression())
-            }),
-            deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
-                let deep::Expr::Map(meta, _) = meta else {
-                    return None;
-                };
-                meta.ty().map(|v| v.expression())
-            }),
-            _ => None,
-        };
-        if let Some(type_expr) = type_expr {
-            metadata.binders.merge(deep_type_binder_names(type_expr));
-        }
-    }
-}
-
-/// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
+/// Recursively collect `(defsig name [(binders...)] (t-fn arg-exprs... ret))` entries,
 /// descending through `(module ...)` wrappers. Only the leading
 /// argument type expressions are stored (the trailing return type is
 /// dropped). A re-declared name keeps the first sig seen.
@@ -1932,10 +2120,10 @@ pub(super) fn collect_defsig_param_types(
             }
         }
         DeepTag::Defsig => {
-            let Some(name) = kids.first().and_then(symbol_name) else {
+            let Some((name_expr, binder_list, fn_expr)) = defsig_parts(kids) else {
                 return;
             };
-            let Some(fn_expr) = kids.get(1) else {
+            let Some(name) = symbol_name(name_expr) else {
                 return;
             };
             let Some((DeepTag::TFn, _, fn_kids)) = stamped_parts(fn_expr) else {
@@ -1946,10 +2134,13 @@ pub(super) fn collect_defsig_param_types(
             }
             // All but the trailing return type are parameter types.
             let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
+            let Some(binders) = valid_defsig_binder_names(binder_list) else {
+                return;
+            };
             map.entry(name.to_string())
                 .or_insert_with(|| DeclaredSigMetadata {
                     param_types: param_type_exprs,
-                    binders: deep_type_binder_names(&kids[1]),
+                    binders,
                     dtype_bounds: chelis_deep::decode_dtype_bounds(meta).into_iter().collect(),
                 });
         }
@@ -2157,7 +2348,6 @@ fn outstanding_local_ascription_claims(
     }
     Some(claims)
 }
-
 /// Result of running type inference on a program.
 #[derive(Debug)]
 pub struct InferResult {

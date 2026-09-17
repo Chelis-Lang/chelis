@@ -1,6 +1,6 @@
 module Std.Init.Random
 export (normal_like)
-sig normal_like[p: Float]: &tensor[..r, p] -> p -> p -> tensor[..r, p] ! { Random }
+sig normal_like[r, p: Float]: &tensor[..r, p] -> p -> p -> tensor[..r, p] ! { Random }
 def normal_like(template, mean, std) = {
   _ = validate_normal_params(mean, std)
   u1 = uniform_like(template, 1e-7, 1.0)
@@ -19,4 +19,4 @@ def validate_normal_params[p: Float](mean: p, std: p) -> bool = validate_domain(
 -- Invalid maps to integer 2, so the checked bool cast traps Domain before Random; valid maps to 0. Avoiding a source `if` keeps validation in pathwise AD's forward graph.
 def validate_domain(valid: bool) -> bool = cast(mul(sub(cast(1, i64), cast(valid, i64)), cast(2, i64)), bool)
 def finite_float[p: Float](value: p) -> bool = not(or(neq(value, value), or(eq(value, div(cast(1.0, p), cast(0.0, p))), eq(value, div(cast(-1.0, p), cast(0.0, p))))))
-def tensor_shape[p](template: &tensor[..r, p], axis: i32, limit: i32, out: List[i64]) -> List[i64] = if gte(axis, limit) then out else tensor_shape(template, add(axis, cast(1, i32)), limit, append(out, shape(template, axis)))
+def tensor_shape[r, p](template: &tensor[..r, p], axis: i32, limit: i32, out: List[i64]) -> List[i64] = if gte(axis, limit) then out else tensor_shape(template, add(axis, cast(1, i32)), limit, append(out, shape(template, axis)))

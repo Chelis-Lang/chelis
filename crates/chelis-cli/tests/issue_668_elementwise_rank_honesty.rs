@@ -83,7 +83,7 @@ fn check_deep(source: &str) -> (std::process::ExitStatus, Value) {
 fn rank_divergent_source(rhs: &str) -> String {
     format!(
         "module Repro.RankDivergent\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = insert(x, 0i32, 2i64)\n\
@@ -291,8 +291,8 @@ fn matching_inline_identity_chain_still_checks() {
 #[test]
 fn a_lexically_shadowed_floor_div_parameter_keeps_its_declared_type() {
     let source = "module Repro.ShadowedIdentity\n\
-def lift(x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
-def apply(floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]) -> tensor[2, n, f32] = {\n\
+def lift[n](x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
+def apply[n](floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]) -> tensor[2, n, f32] = {\n\
   s = stride(x, 2i64)\n\
   e = insert(x, 0i32, 2i64)\n\
   add(floor_div(s), e)\n\
@@ -392,7 +392,7 @@ fn authored_deep_type_metadata_cannot_override_the_inferred_rank() {
 #[test]
 fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
     let source = "module Repro.Rebind\n\
-                  def f(x: tensor[n, f32]) = {\n\
+                  def f[n](x: tensor[n, f32]) = {\n\
                     a = stride(x, 2i64)\n\
                     a = relu(insert(x, 0i32, 2i64))\n\
                     b = insert(x, 0i32, 2i64)\n\
@@ -421,7 +421,7 @@ fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
 #[test]
 fn rebinding_to_a_derivable_rank_still_rejects_a_genuine_mismatch() {
     let source = "module Repro.RebindNegative\n\
-                  def f(x: tensor[n, f32]) = {\n\
+                  def f[n](x: tensor[n, f32]) = {\n\
                     a = insert(x, 0i32, 2i64)\n\
                     a = stride(x, 2i64)\n\
                     b = insert(x, 0i32, 2i64)\n\
@@ -478,7 +478,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
     let program = |input: &str| {
         format!(
             "module Repro.Issue668Loud\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {{\n\
                e = expand(x, 0i32, 3i64)\n\
                s = stride(e, 1i64)\n\

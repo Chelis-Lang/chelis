@@ -38,7 +38,7 @@ fn package(formal: bool, body: &str, failing: bool) -> tempfile::TempDir {
     } else {
         ("x", "(tensor[..pre, ..post, f32], tensor[f32])")
     };
-    std::fs::write(dir.path().join("src/captures.ch"), format!("module Probe.Captures\nexport (total)\nbaseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total({param}: &tensor[..pre, seq, ..post, f32]) -> {result} = {body}\n")).unwrap();
+    std::fs::write(dir.path().join("src/captures.ch"), format!("module Probe.Captures\nexport (total)\nbaseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total[pre, post]({param}: &tensor[..pre, seq, ..post, f32]) -> {result} = {body}\n")).unwrap();
     let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
     std::fs::write(dir.path().join("src/client.ch"), format!("module Probe.Client\nimport Probe.Captures (total)\ndef entry(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\nalias = entry\ndef main() = alias(to_tensor([7.0f32, 11.0f32]))\nout = main()\n")).unwrap();
     for file in ["src/captures.ch", "src/client.ch"] {

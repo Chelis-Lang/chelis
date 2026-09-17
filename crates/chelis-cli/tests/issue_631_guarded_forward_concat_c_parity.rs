@@ -22,7 +22,7 @@ use tempfile::{TempDir, tempdir};
 /// The chelis#616 avgpool oracle's forward program, verbatim from the
 /// chelis#631 report: window 2, stride 2, runtime window count `m`,
 /// behind an `if`/`fail` kernel-length guard.
-const AVGPOOL: &str = "sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
+const AVGPOOL: &str = "sig avgpool1d[n, m]: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
   n = cast(shape(x, cast(0, i32)), i64)\n\
   if gt(cast(2, i64), n) then fail(\"kernel exceeds input length\") else {\n\
@@ -224,7 +224,7 @@ fn issue_631_guarded_forward_avgpool_matches_c_at_n6() {
 #[test]
 fn issue_631_data_dependent_fail_branch_aborts_in_c() {
     let source = "module Repro.FailClean\n\
-sig f: tensor[n, f32] -> tensor[n, f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[n, f32]\n\
 def f(x) = {\n\
   total = tensor_to_scalar(sum(x, cast(0, i32)))\n\
   if gt(total, cast(0.0, f32)) then fail(\"positive sum\") else neg(x)\n\

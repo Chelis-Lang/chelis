@@ -105,7 +105,7 @@ use common::{authored_c_symbol, gcc_available, link_generated};
 /// symbolic signature, consumed by a composite elementwise lowering that
 /// still synthesizes anonymous-extent constants.
 const RUNTIME_BOUND_SHRINK_SIGMOID: &str = "module Repro.M1\n\
-sig f: tensor[n, f32] -> tensor[u, f32]\n\
+sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
 k = shape(x, cast(0, i32))\n  \
 z = cast((k - k), i64)\n  \
@@ -117,7 +117,7 @@ out = f(to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32), cast(4.0, f3
 /// The original #1482 spelling. Chelis#1313's structural ReLU identity no
 /// longer synthesizes a tensor zero, so this exact program now executes.
 const RUNTIME_BOUND_SHRINK_RELU: &str = "module Repro.M1\n\
-sig f: tensor[n, f32] -> tensor[u, f32]\n\
+sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
 def f(x) = {\n  \
 k = shape(x, cast(0, i32))\n  \
 z = cast((k - k), i64)\n  \
@@ -130,7 +130,7 @@ out = f(to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32), cast(4.0, f3
 /// `main` and must keep building: its zero fill carries the declared
 /// dimension `n`, not an anonymous extent.
 const SYMBOLIC_RELU: &str = "module Probe.SymRelu\n\
-sig f: tensor[n, f32] -> tensor[n, f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[n, f32]\n\
 def f(x) = relu(x)\n\
 out = f(to_tensor([cast(1.0, f32), cast(-2.0, f32)]))\n";
 
@@ -159,13 +159,13 @@ out = empty(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
 /// carries it, so the entry guard cannot see it and the claim has to be
 /// checked at the operation that makes it.
 const LOCAL_NON_UNIT_SOURCE: &str = "module Repro.ExpandLocalRefuted\n\
-sig f: tensor[n, f32] -> tensor[3, f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[3, f32]\n\
 def f(x) = expand(shrink(&x, [[0i64, sub(shape(&x, 0), 1i64)]]), 0, 3i64)\n\
 out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
 
 /// The same shape over an operand the shrink leaves at extent 1.
 const LOCAL_UNIT_SOURCE: &str = "module Repro.ExpandLocalSatisfied\n\
-sig f: tensor[n, f32] -> tensor[3, f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[3, f32]\n\
 def f(x) = expand(shrink(&x, [[0i64, sub(shape(&x, 0), 2i64)]]), 0, 3i64)\n\
 out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
 
@@ -174,7 +174,7 @@ out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
 /// Both claims land on the same (operand node, axis) key with the same claim,
 /// canonical and operation, so one emitted guard satisfies both.
 const TWO_EXPANDS_OVER_ONE_OPERAND: &str = "module Repro.TwoExpands\n\
-sig f: tensor[n, f32] -> tensor[f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[f32]\n\
 def f(x) = {\n  \
 s = shrink(x, [[0i64, sub(shape(x, 0), 2i64)]])\n  \
 a = expand(s, 0, 5i64)\n  \
@@ -185,7 +185,7 @@ out = f(to_tensor([7.0f32, 9.0f32, 11.0f32]))\n";
 
 /// The same program shrunk to two elements, which refutes the shared claim.
 const TWO_EXPANDS_REFUTED: &str = "module Repro.TwoExpandsRefuted\n\
-sig f: tensor[n, f32] -> tensor[f32]\n\
+sig f[n]: tensor[n, f32] -> tensor[f32]\n\
 def f(x) = {\n  \
 s = shrink(x, [[0i64, sub(shape(x, 0), 1i64)]])\n  \
 a = expand(s, 0, 5i64)\n  \
@@ -203,7 +203,7 @@ def bad(x: tensor[2, 4, f32]) -> tensor[2, 3, f32] = expand(&x, 1, 3i64)\n";
 /// non-unit extent a type error and sends every other spelling to the runtime
 /// extent guard.
 const RUNTIME_NON_UNIT_SOURCE: &str = "module Repro.ExpandRuntimeNonUnit\n\
-sig broadcast: tensor[n, f32] -> tensor[3, f32]\n\
+sig broadcast[n]: tensor[n, f32] -> tensor[3, f32]\n\
 def broadcast(x) = expand(&x, 0, 3i64)\n\
 out = broadcast(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
 
@@ -211,7 +211,7 @@ out = broadcast(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
 /// the control that says the guard fires on the disagreement rather than on
 /// the symbolic spelling.
 const RUNTIME_UNIT_SOURCE: &str = "module Repro.ExpandRuntimeUnit\n\
-sig broadcast: tensor[n, f32] -> tensor[3, f32]\n\
+sig broadcast[n]: tensor[n, f32] -> tensor[3, f32]\n\
 def broadcast(x) = expand(&x, 0, 3i64)\n\
 out = broadcast(to_tensor([cast(5.0, f32)]))\n";
 
@@ -611,7 +611,7 @@ fn vmap_ordinary_shape_preserves_the_nested_gradient_claim() {
             "[2.0f32, 7.0f32, 11.0f32]"
         };
         let source = format!(
-            "def claim(x: tensor[n, f32]) -> tensor[2, f32] = shrink(x, [[0i64, shape(x, 0)]])\ndef loss(x: tensor[{extent}, f32]) -> f32 = cast(shape(claim(x), 0), f32)\nout = vmap(grad(loss))(to_tensor([{row}, {row}]))\n"
+            "def claim[n](x: tensor[n, f32]) -> tensor[2, f32] = shrink(x, [[0i64, shape(x, 0)]])\ndef loss(x: tensor[{extent}, f32]) -> f32 = cast(shape(claim(x), 0), f32)\nout = vmap(grad(loss))(to_tensor([{row}, {row}]))\n"
         );
         let path = fixture(&dir, &format!("nested_shape_{extent}.ch"), &source);
         let output = Command::cargo_bin("chelis")
@@ -691,7 +691,7 @@ fn guard_order_source(claim: u32, trap_first: bool) -> String {
         (widen, trap)
     };
     format!(
-        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
+        "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
          x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32])\n\
          xb = to_tensor([1.0f32, 2.0f32])\n\
          seed = sum(to_tensor([1.0f32]), 0)\n\
@@ -1285,8 +1285,8 @@ fn effect_order_source(claim: u32, effect_first: bool) -> String {
         (widen, effect)
     };
     format!(
-        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
-         def run(x: tensor[n, f32]) -> tensor[{claim}, f32] ! {{ IO }} = {{\n\
+        "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
+         def run[n](x: tensor[n, f32]) -> tensor[{claim}, f32] ! {{ IO }} = {{\n\
          \x20 seed = sum(to_tensor([1.0f32]), 0)\n\
          \x20 {first}\n\
          \x20 {second}\n\
@@ -2479,7 +2479,7 @@ fn node_target_source(claim: &str, factor: u32) -> String {
     let second = if factor == 2 { "2i64" } else { "1i64" };
     let second_ty = if factor == 2 { "2" } else { "1" };
     format!(
-        "def f(x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
+        "def f[n](x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
          reshape(x, [floor_div(shape(x, 0), {factor}i64), {second}])\n\
          out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
     )
@@ -2931,7 +2931,7 @@ fn issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c() {
 /// the rank-RAISING form is `insert`, the axis carrier is `0i32` and the size
 /// carrier is i64.
 const EXPAND_OVER_STRIDE: &str = "module Repro.ExpandOverStride\n\
-     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     sig f[n, m, u]: tensor[n, f32] -> tensor[m, u, f32]\n\
      def f(x) = insert(stride(x, 2i64), 0i32, shape(x, 0i32))\n\
      out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
 
@@ -2939,7 +2939,7 @@ const EXPAND_OVER_STRIDE: &str = "module Repro.ExpandOverStride\n\
 /// `insert`, which is the variant chelis#665's own comment records: the
 /// reshape's axis 0 is the strided extent under a second spelling.
 const RESHAPE_OVER_STRIDE: &str = "module Repro.ReshapeOverStride\n\
-     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     sig f[n, m, u]: tensor[n, f32] -> tensor[m, u, f32]\n\
      def f(x) = reshape(stride(x, 2i64), [shape(stride(x, 2i64), 0i32), 1i64])\n\
      out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
 
@@ -2948,7 +2948,7 @@ const RESHAPE_OVER_STRIDE: &str = "module Repro.ReshapeOverStride\n\
 /// (its output axis is a literal), which is what the negative twin below
 /// holds fixed.
 const EXPAND_OVER_RUNTIME_SHRINK: &str = "module Repro.ExpandOverRuntimeShrink\n\
-     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     sig f[n, m, u]: tensor[n, f32] -> tensor[m, u, f32]\n\
      def f(x) = insert(shrink(x, [[0i64, sub(shape(x, 0i32), 2i64)]]), 0i32, shape(x, 0i32))\n\
      out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
 
@@ -3072,7 +3072,7 @@ fn an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_
 fn a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "module Repro.ExpandOverStaticShrink\n\
-         sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+         sig f[n, m, u]: tensor[n, f32] -> tensor[m, u, f32]\n\
          def f(x) = insert(shrink(x, [[0i64, 4i64]]), 0i32, shape(x, 0i32))\n\
          out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
     let (ok, out) = eval_result(&dir, "static_shrink_eval.ch", source);
@@ -3119,23 +3119,23 @@ fn a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent() {
 
 /// The issue's program in current Surf.
 const UNIFORM_OVER_INLINED_PARAMETER: &str = "module Repro.UniformInline\n\
-     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def noise[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
      def main() = with seed(42i64) { add(noise(insert(scalar_to_tensor(1.0f32), 0i32, 3i64)), \
      noise(insert(scalar_to_tensor(2.0f32), 0i32, 3i64))) }\n";
 
 /// The same inlined parameter over an operand whose extent an OPERATION
 /// computes rather than a literal, still in a nullary kernel.
 const UNIFORM_OVER_INLINED_STRIDE: &str = "module Repro.UniformInlineStride\n\
-     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def noise[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
      def main() = with seed(42i64) { noise(stride(insert(scalar_to_tensor(1.0f32), 0i32, 6i64), \
      2i64)) }\n";
 
 /// The same shape reached through an exported def and a value binding, so the
 /// kernel has a `Load` while the inlined parameter's dim still does not.
 const UNIFORM_OVER_EXPORTED_STRIDE: &str = "module Repro.UniformExportedStride\n\
-     sig g: tensor[n, f32] -> tensor[m, f32]\n\
+     sig g[n, m]: tensor[n, f32] -> tensor[m, f32]\n\
      def g(x) = stride(x, 2i64)\n\
-     def noise(x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def noise[k](x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
      out = with seed(42i64) { noise(g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))) }\n";
 
 /// Build, link, run and evaluate one nullary-kernel program, and assert that
@@ -3368,7 +3368,7 @@ fn a_shape_derived_bound_keeps_its_declared_result_dimension_on_c() {
 /// which no input carries.
 fn load_and_op_output_class_source(len: usize) -> String {
     format!(
-        "def f(x: tensor[n, f32], p: tensor[n, f32], y: tensor[k, f32]) -> tensor[n, f32] = \
+        "def f[n, k](x: tensor[n, f32], p: tensor[n, f32], y: tensor[k, f32]) -> tensor[n, f32] = \
          shrink(y, [[1i64, shape(y, 0i32)]])\n\
          out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), {})\n",
         vector_literal(len)
@@ -3415,7 +3415,7 @@ fn load_and_op_output_members_share_one_guarded_class_on_eval() {
 /// member as the canonical witness. `x`'s two axes both declare `n`.
 fn two_op_output_class_source(n: usize, side: usize) -> String {
     format!(
-        "def f(x: tensor[n, n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
+        "def f[n, a, b](x: tensor[n, n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
          shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]])\n\
          out = f({}, {})\n",
         ones_literal(n),
@@ -3499,7 +3499,7 @@ fn two_op_output_members_guard_against_the_canonical_member_on_c() {
 /// spliced call shape produces both verdicts.
 fn splice_f_of_n_n_source(start: usize, side: usize) -> String {
     format!(
-        "def f(x: tensor[n, n, f32], y: tensor[n, n, f32]) -> tensor[n, n, f32] = \
+        "def f[n](x: tensor[n, n, f32], y: tensor[n, n, f32]) -> tensor[n, n, f32] = \
          shrink(add(x, y), [[{start}i64, shape(x, 0i32)], [{start}i64, shape(x, 1i32)]])\n\
          a = {}\n\
          out = f(a, a)\n",
@@ -3593,7 +3593,7 @@ fn unbound_binder_class_source(rows: usize, cols: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "def f(x: tensor[n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
+        "def f[n, a, b](x: tensor[n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
          shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]])\n\
          out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([{values}]))\n"
     )
@@ -3674,7 +3674,7 @@ fn repeated_free_result_name_source(rows: usize, cols: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "def f(x: tensor[r, c, f32]) -> tensor[n, n, f32] = \
+        "def f[r, c, n](x: tensor[r, c, f32]) -> tensor[n, n, f32] = \
          shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])\n\
          out = f(to_tensor([{values}]))\n"
     )
@@ -3742,9 +3742,9 @@ fn nested_named_result_source(len: usize, declared: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[{declared}, f32] = \
+        "def f[n, r](w: tensor[n, f32], x: tensor[r, f32]) -> tensor[{declared}, f32] = \
          shrink(x, [[1i64, shape(x, 0i32)]])\n\
-         def g(y: tensor[s, f32]) -> tensor[k, f32] = f(to_tensor([1.0f32, 2.0f32]), y)\n\
+         def g[s, k](y: tensor[s, f32]) -> tensor[k, f32] = f(to_tensor([1.0f32, 2.0f32]), y)\n\
          out = g(to_tensor([{values}]))\n"
     )
 }
@@ -3873,9 +3873,9 @@ fn a_nested_named_result_claim_is_enforced_through_its_resolved_binder() {
 #[test]
 fn a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+    let source = "def f[n, r](w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
                   shrink(x, [[1i64, shape(x, 0i32)]])\n\
-                  def g(y: tensor[s, f32], z: tensor[t, f32]) -> tensor[k, f32] = f(z, y)\n\
+                  def g[s, t, k](y: tensor[s, f32], z: tensor[t, f32]) -> tensor[k, f32] = f(z, y)\n\
                   out = g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), \
                   to_tensor([1.0f32, 2.0f32]))\n";
     let (ok, out) = eval_result(&dir, "nested_runtime_declarer.ch", source);
@@ -3910,9 +3910,9 @@ fn a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker()
 #[test]
 fn a_nested_param_bound_result_claim_is_refused_by_the_checker() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+    let source = "def f[n, r](w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
                   shrink(x, [[1i64, shape(x, 0i32)]])\n\
-                  def g(y: tensor[m, f32]) -> tensor[m, f32] = \
+                  def g[m](y: tensor[m, f32]) -> tensor[m, f32] = \
                   f(to_tensor([1.0f32, 2.0f32]), y)\n\
                   out = g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
     let (ok, out) = eval_result(&dir, "nested_param_result.ch", source);
@@ -4023,7 +4023,7 @@ fn an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c()
 #[test]
 fn a_result_name_no_parameter_declares_is_not_stamped_as_a_claim() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(y: tensor[k, f32]) -> tensor[m, f32] = shrink(y, [[1i64, shape(y, 0i32)]])\n\
+    let source = "def f[k, m](y: tensor[k, f32]) -> tensor[m, f32] = shrink(y, [[1i64, shape(y, 0i32)]])\n\
                   out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
     let path = fixture(&dir, "free_result_name.ch", source);
     let checked = Command::cargo_bin("chelis")
@@ -4424,7 +4424,7 @@ fn a_non_zero_pad_extent_is_guarded_on_both_lanes() {
     // mismatch the guard still owes. Round 1's verification measured this
     // reachable, correcting a comment that had called it unreachable, and a
     // filter added for parity would silence exactly this row.
-    let zero = "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
+    let zero = "def f[s](x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
                 pad(x, [[sub(shape(y, 0i32), shape(y, 0i32)), \
                 sub(shape(y, 0i32), shape(y, 0i32))]], 0.0f32)\n\
                 out = f(to_tensor([]), to_tensor([1.0f32, 2.0f32]))\n";
@@ -4458,7 +4458,7 @@ fn a_non_zero_pad_extent_is_guarded_on_both_lanes() {
 /// claim the signature makes about the result.
 fn unread_declaring_parameter_source(len: usize) -> String {
     format!(
-        "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+        "def f[n, r](w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
          shrink(x, [[1i64, shape(x, 0i32)]])\n\
          out = f(to_tensor([1.0f32, 2.0f32]), {})\n",
         vector_literal(len)
@@ -4848,7 +4848,7 @@ fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() 
 /// on every computed size.
 fn arith_size_source(claim: &str, factor: u32) -> String {
     format!(
-        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = \
+        "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = \
          insert(b, 0, mul(shape(x, 0), {factor}i64))\n\
          seed = sum(to_tensor([1.0f32]), 0)\n\
          xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
@@ -4991,7 +4991,7 @@ fn polymorphic_named_root_source(x_extent: usize, y_extent: usize) -> String {
     };
     format!(
         "module Repro.PolymorphicNamedRoot\n\
-         def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(b, 0i32, shape(y, 0i32))\n\
+         def f[n, m](b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(b, 0i32, shape(y, 0i32))\n\
          def main() = f(scalar_to_tensor(7.0f32), to_tensor([{}]), to_tensor([{}]))\n",
         list(x_extent),
         list(y_extent)
@@ -5011,7 +5011,7 @@ fn polymorphic_foreign_root_source(x_extent: usize, y_extent: usize) -> String {
     };
     format!(
         "module Repro.PolymorphicForeignRoot\n\
-         def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1i32, shape(x, 0i32))\n\
+         def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1i32, shape(x, 0i32))\n\
          def main() = f(to_tensor([{}]), to_tensor([{}]))\n",
         list(x_extent),
         list(y_extent)
@@ -5049,7 +5049,7 @@ fn abi_promised_entailment_source(a_prim: &str, a_arg: &str, b_extent: usize) ->
     };
     format!(
         "module Repro.AbiPromisedEntailment\n\
-         def g(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def f(a: tensor[4, {a_prim}], b: tensor[rows, f32]) -> tensor[4, f32] = g({a_arg}, b)\n\
          out = f(to_tensor([{}]), to_tensor([{}]))\n",
         list(4, a_prim),
@@ -5470,7 +5470,7 @@ const COMPILE_TIME_RECORD_PROJECTION: &str = "module Repro.StaticRecord\n\
 /// lambda the issue quotes (`|> fn (p) -> cast(p, i64)`) is now a parse
 /// error; `|> cast(i64)` is what the parser and the formatter produce.
 const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
-     sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+     sig broadcast_rows[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
      def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = \
      { a_dim = x |> shape(cast(0, i32)) |> cast(i64)\n\
      expand(b, cast(0, i32), a_dim) }\n\
@@ -5481,7 +5481,7 @@ const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
 /// replacement the fix makes is the shape read under test; a call written
 /// inline would also be piped, and a bare-name pipe stage at a call site
 /// still loses its shape source at lowering (chelis#1791, out of scope here).
-const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
      def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
      a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
      expand(b, cast(0, i32), a_dim)\n\
@@ -5494,7 +5494,7 @@ const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32]
 /// the upstream value's class, so a runtime scalar stays sourceless through
 /// however many stages.
 const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
-     sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+     sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
      def f(x: tensor[a, f32], k: i32) = { a_dim = k |> cast(i64)\n\
      expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
 
@@ -6136,7 +6136,7 @@ fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+    let source = "def f[n](b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   expand(b, 0, mul(shape(x, 0), 2i64))\n\
                   xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
                   out = f(to_tensor([7.0f32]), xs)\n";
@@ -6155,7 +6155,7 @@ fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c() {
 #[test]
 fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+    let source = "def f[n](b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   expand(b, 0, mul(shape(x, 0), 2i64))\n\
                   xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
                   out = f(to_tensor([7.0f32]), xs)\n";
@@ -6195,7 +6195,7 @@ fn every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval() {
     ];
     for (index, (size, extent, agrees)) in rows.iter().enumerate() {
         let source = format!(
-            "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
+            "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              xs = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
              out = f(seed, xs)\n"
@@ -6231,7 +6231,7 @@ fn every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval() {
 #[test]
 fn arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+    let source = "def f[n, m](b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(b, 0, add(shape(x, 0), shape(y, 0)))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
@@ -6266,7 +6266,7 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
     let dir = tempfile::tempdir().expect("tempdir");
     let source = |k: &str| {
         format!(
-            "def f(b: tensor[f32], x: tensor[n, f32], k: i64) -> tensor[n, f32] = \
+            "def f[n](b: tensor[f32], x: tensor[n, f32], k: i64) -> tensor[n, f32] = \
              insert(b, 0, add(shape(x, 0), k))\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
@@ -6298,8 +6298,8 @@ fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval
 #[test]
 fn a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def g(x: tensor[n, f32]) -> i64 = shape(x, 0)\n\
-                  def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+    let source = "def g[n](x: tensor[n, f32]) -> i64 = shape(x, 0)\n\
+                  def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   insert(b, 0, add(shape(x, 0), g(x)))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
@@ -6328,7 +6328,7 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
         ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)"),
     ] {
         let source = format!(
-            "def f(b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, {size})\n\
+            "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, {size})\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              out = f(seed, 3i64)\n"
         );
@@ -6353,7 +6353,7 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
 #[test]
 fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, k)\n\
+    let source = "def f[m](b: tensor[f32], k: i64) -> tensor[m, f32] = insert(b, 0, k)\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   out = f(seed, 3i64)\n";
     let (ok, out) = eval_result(&dir, "bare_scalar.ch", source);
@@ -6389,7 +6389,7 @@ fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
 #[test]
 fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+    let source = "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   insert(b, 0, sub(shape(x, 0), 5i64))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   xs = to_tensor([1.0f32, 2.0f32])\n\
@@ -6419,7 +6419,7 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+    let source = "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
                   insert(b, 0, sub(shape(x, 0), 5i64))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   xs = to_tensor([1.0f32, 2.0f32])\n\
@@ -6454,7 +6454,7 @@ fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[m, f32] = \
+    let source = "def f[n, m](b: tensor[f32], x: tensor[n, f32]) -> tensor[m, f32] = \
                   insert(b, 0, sub(shape(x, 0), 5i64))\n\
                   seed = sum(to_tensor([1.0f32]), 0)\n\
                   xs = to_tensor([1.0f32, 2.0f32])\n\
@@ -6495,7 +6495,7 @@ fn checked_arithmetic_operators_reach_the_same_guard_on_c() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = |size: &str| {
         format!(
-            "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
+            "def f[n](b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
              seed = sum(to_tensor([1.0f32]), 0)\n\
              xs = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
              out = f(seed, xs)\n"
@@ -6705,7 +6705,7 @@ fn a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes() {
         ),
         (
             "bystander_free_result",
-            "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, m, f32]\n",
+            "sig f[m]: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, m, f32]\n",
             "expand(mask, 1i32, cast(shape(features, cast(1, i32)), i64))",
             "out = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])",
         ),
@@ -6784,7 +6784,7 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
 /// says it will be.
 fn pass_through_op_computed_source(w_len: usize, declared: &str) -> String {
     format!(
-        "def f(w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
+        "def f[n, r, s](w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
          tensor[{declared}, f32] = \
          add(shrink(x, [[1i64, shape(x, 0i32)]]), shrink(y, [[1i64, shape(y, 0i32)]]))\n\
          out = f({}, {}, {})\n",
@@ -6933,7 +6933,7 @@ fn an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer() {
     // elements to two.
     let source = |operand_len: usize| {
         format!(
-            "def f(w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
+            "def f[n, r, s](w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
              tensor[n, f32] = \
              add(shrink(x, [[1i64, shape(x, 0i32)]]), shrink(y, [[1i64, shape(y, 0i32)]]))\n\
              def main() -> tensor[2, f32] = f({}, {}, {})\n",
@@ -7004,7 +7004,7 @@ fn concat_symbolic_root_source(claim: &str) -> String {
     let row = "[1.0f32, 2.0f32, 3.0f32]";
     let rows = [row; 4].join(", ");
     format!(
-        "def probe(v: tensor[n, 3, f32]) -> tensor[{claim}, 3, f32] = concat([v, v], 0i32)\n\
+        "def probe[n](v: tensor[n, 3, f32]) -> tensor[{claim}, 3, f32] = concat([v, v], 0i32)\n\
          def main() -> tensor[{claim}, 3, f32] = probe(to_tensor([{rows}]))\n"
     )
 }
@@ -7081,7 +7081,7 @@ fn a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lan
 /// axis the `pad` leaves alone. Two rows of three, widened only on axis 1.
 fn zero_padded_identity_axis_source(claim: &str) -> String {
     format!(
-        "def f(x: tensor[rows, cols, f32], y: tensor[s, f32]) -> tensor[{claim}, 6, f32] = \
+        "def f[s](x: tensor[rows, cols, f32], y: tensor[s, f32]) -> tensor[{claim}, 6, f32] = \
          pad(x, [[0i64, 0i64], [shape(y, 0i32), 1i64]], 0.0f32)\n\
          def main() -> tensor[{claim}, 6, f32] = \
          f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), \
@@ -7192,7 +7192,7 @@ fn an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes()
 /// through an inlined root rather than a value binding.
 fn pad_inlined_root_source(claim: &str) -> String {
     format!(
-        "def f(x: tensor[n, f32]) -> tensor[{claim}, f32] = pad(x, [[1i64, 0i64]], 0.0f32)\n\
+        "def f[n](x: tensor[n, f32]) -> tensor[{claim}, f32] = pad(x, [[1i64, 0i64]], 0.0f32)\n\
          def main() -> tensor[{claim}, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
     )
 }
@@ -7248,7 +7248,7 @@ fn a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes() {
 /// `x` is joined to itself, so the body produces six.
 fn resolved_named_claim_source(w: &str, root: &str) -> String {
     format!(
-        "def g(w: tensor[n, f32], x: tensor[rows, f32]) -> tensor[n, f32] = concat([x, x], 0i32)\n\
+        "def g[n](w: tensor[n, f32], x: tensor[rows, f32]) -> tensor[n, f32] = concat([x, x], 0i32)\n\
          def main() -> tensor[{root}, f32] = \
          g(to_tensor([{w}]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
     )
@@ -7549,7 +7549,7 @@ fn the_host_path_concat_claim_still_names_concat_on_both_lanes() {
     let row = "[1.0f32, 2.0f32, 3.0f32]";
     let rows = [row; 4].join(", ");
     let source = format!(
-        "def probe(v: tensor[n, 3, f32]) -> tensor[100, 3, f32] = concat([v, v], 0i32)\n\
+        "def probe[n](v: tensor[n, 3, f32]) -> tensor[100, 3, f32] = concat([v, v], 0i32)\n\
          m = to_tensor([{rows}])\n\
          out = probe(m)\n"
     );
@@ -7613,7 +7613,7 @@ fn a_caller_transported_result_label_survives_the_op_computed_stamp() {
         format!(
             "def narrow[d](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = \
              shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def caller(g: tensor[fixed, f32], y: tensor[r, f32]) -> tensor[fixed, f32] = \
+             def caller[r](g: tensor[fixed, f32], y: tensor[r, f32]) -> tensor[fixed, f32] = \
              narrow(y, g)\n\
              out = caller({}, {})\n",
             vector_literal(gain),
@@ -7678,7 +7678,7 @@ fn a_caller_transported_result_label_survives_the_op_computed_stamp() {
 /// declared result extent. Three elements padded by two then one is six.
 fn runtime_pad_before_source(claim: &str) -> String {
     format!(
-        "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[{claim}, f32] = \
+        "def f[s](x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[{claim}, f32] = \
          pad(x, [[shape(y, 0i32), 1i64]], 0.0f32)\n\
          out = f({}, {})\n",
         vector_literal(3),
@@ -7774,7 +7774,7 @@ fn a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard() {
 
     // The runtime bound on the other side of the padding.
     let after = format!(
-        "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
+        "def f[s](x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
          pad(x, [[1i64, shape(y, 0i32)]], 0.0f32)\n\
          out = f({}, {})\n",
         vector_literal(3),
@@ -7795,7 +7795,7 @@ fn a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard() {
     // The NAMED claim over the same runtime-bound pad, declared by a parameter
     // the body never reads.
     let named = format!(
-        "def f(w: tensor[n, f32], x: tensor[rows, f32], y: tensor[s, f32]) -> \
+        "def f[n, s](w: tensor[n, f32], x: tensor[rows, f32], y: tensor[s, f32]) -> \
          tensor[n, f32] = pad(x, [[shape(y, 0i32), 1i64]], 0.0f32)\n\
          out = f({}, {}, {})\n",
         vector_literal(2),
@@ -7832,7 +7832,7 @@ fn a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = |claim: &str| {
         format!(
-            "def f(x: tensor[rows, 3, f32], y: tensor[s, f32]) -> \
+            "def f[s](x: tensor[rows, 3, f32], y: tensor[s, f32]) -> \
              tensor[rows, {claim}, f32] = \
              pad(x, [[0i64, 0i64], [shape(y, 0i32), 1i64]], 0.0f32)\n\
              out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), {})\n",
@@ -7880,8 +7880,8 @@ fn a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens() {
 /// tensor[d0, f32]`: a root with no ABI, which both lanes dropped in silence.
 /// `spec/04-type-system.md` section 3.2 now makes that variable denote the
 /// extent it met.
-const NESTED_HELPER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+const NESTED_HELPER_ROOT: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
      def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
 
 /// The rendering both lanes owe. `g` keeps the last two of three elements and
@@ -7947,9 +7947,9 @@ fn a_nested_helper_claim_sizes_a_root_on_c() {
 /// application itself minted left that root free, the result kept a quantified
 /// dimension, and the root was dropped exactly as in the row above. The
 /// absorption reaches the class rather than the one variable.
-const POLYMORPHIC_HELPER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
-     def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+const POLYMORPHIC_HELPER_ROOT: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
      def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
 
 /// Receipt for corpus row `root.dim_variable.polymorphic_argument.eval`.
@@ -8019,9 +8019,9 @@ fn a_polymorphic_argument_claim_sizes_a_root_on_c() {
 /// `def bare(t: tensor[3, f32]) -> tensor[seq, f32] = g(t)` to
 /// `tensor[*, f32]` on both lanes, so retaining the name here would make the
 /// answer depend on how many calls the extent crossed.
-const RESULT_ONLY_BINDER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
-     def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+const RESULT_ONLY_BINDER_ROOT: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def apply1[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
      def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))\n\
      def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
@@ -8091,9 +8091,9 @@ fn a_result_only_binder_claim_sizes_a_root_on_c() {
 /// section 4.7.3 forbids a verdict that turns on the spelling, so the receipt
 /// asserts the three orderings render IDENTICALLY rather than asserting each
 /// one separately.
-const THREE_MEMBER_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
-     def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
+const THREE_MEMBER_HELPERS: &str = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def h2[k](z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
 
 /// The runtime-extent argument first, in the middle, and last. Every other
 /// token is identical, so the three differ only in argument order.
@@ -8103,7 +8103,7 @@ fn three_member_orderings() -> [(&'static str, String); 3] {
             "first",
             format!(
                 "{THREE_MEMBER_HELPERS}\
-                 def apply3(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def apply3[p](v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
                  def main() = apply3(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h, h2)\n"
             ),
         ),
@@ -8111,7 +8111,7 @@ fn three_member_orderings() -> [(&'static str, String); 3] {
             "middle",
             format!(
                 "{THREE_MEMBER_HELPERS}\
-                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
                  def main() = apply3(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2)\n"
             ),
         ),
@@ -8119,7 +8119,7 @@ fn three_member_orderings() -> [(&'static str, String); 3] {
             "last",
             format!(
                 "{THREE_MEMBER_HELPERS}\
-                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def apply3[p](f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
                  def main() = apply3(h, h2, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
             ),
         ),
@@ -8213,7 +8213,7 @@ fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
 /// The size is read from an in-scope tensor, so it IS materializable: this
 /// program is the one a bare-name stage broke for no reason.
 const PIPED_SHAPE_SOURCED_EXPAND: &str = "module Repro.PipeShape\n\
-sig f: tensor[a, f32] -> tensor[a, f32]\n\
+sig f[a]: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
@@ -8223,7 +8223,7 @@ out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 /// The same program with the `expand` applied instead of piped, which always
 /// worked. It is the control that says the defect was the notation.
 const DIRECT_SHAPE_SOURCED_EXPAND: &str = "module Repro.DirectShape\n\
-sig f: tensor[a, f32] -> tensor[a, f32]\n\
+sig f[a]: tensor[a, f32] -> tensor[a, f32]\n\
 def f(x: tensor[a, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
@@ -8233,7 +8233,7 @@ out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 /// `sum` downstream of the same stage: the second witness that made this a
 /// class rather than one builtin's bug.
 const PIPED_SUM_AFTER_A_BARE_STAGE: &str = "module Repro.PipeSum\n\
-sig f: tensor[a, f32] -> tensor[f32]\n\
+sig f[a]: tensor[a, f32] -> tensor[f32]\n\
 def f(x: tensor[a, f32]) = [0.25f32] |> to_tensor |> sum(0)\n\
 out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
@@ -8325,7 +8325,7 @@ fn a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs() {
 /// The issue's reproducer A. `g`'s `expand` reads its size from `g`'s own
 /// parameter, so the extent is materializable in either spelling.
 const BARE_STAGE_AT_A_CALL_SITE: &str = "module Repro.PipeCallSite\n\
-sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+sig g[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 expand(b, cast(0, i32), a_dim)\n\
@@ -8335,7 +8335,7 @@ out = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> g(to_tensor([0.25f32]))\n";
 /// The same call written with `to_tensor` applied, which always built. The
 /// bare-name stage is the whole difference.
 const APPLIED_STAGE_AT_A_CALL_SITE: &str = "module Repro.AppliedCallSite\n\
-sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+sig g[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 expand(b, cast(0, i32), a_dim)\n\
@@ -8344,7 +8344,7 @@ out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
 
 /// The direct spelling `chelis lint --fix` rewrites INTO the pipe form.
 const DIRECT_CALL_FOR_LINT_FIX: &str = "module Repro.LintFixCallSite\n\
-sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+sig g[a]: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
 def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
 a_dim = cast(shape(x, cast(0, i32)), i64)\n  \
 expand(b, cast(0, i32), a_dim)\n\
@@ -8494,7 +8494,7 @@ fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
 /// The issue's reproducer B, whose size is a cast over a bare `i32`
 /// parameter and so has no tensor shape source.
 const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
-sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 [0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
@@ -8502,7 +8502,7 @@ a_dim = k |> cast(i64)\n  \
 
 /// The same program with the `expand` written directly.
 const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
-sig f: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
+sig f[a]: tensor[a, f32] -> i32 -> tensor[a, f32]\n\
 def f(x: tensor[a, f32], k: i32) = {\n  \
 a_dim = k |> cast(i64)\n  \
 expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
@@ -8982,7 +8982,7 @@ fn grad_named_claim_source(width: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
          insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def h(x: tensor[{width}, f32]) -> tensor[f32] = \
          sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
@@ -9003,7 +9003,7 @@ fn grad_live_forward_source(width: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
          insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def h(x: tensor[{width}, f32]) -> tensor[f32] = \
          sum(exp(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))), 0i32)\n\
@@ -9021,7 +9021,7 @@ fn grad_op_computed_source(width: usize) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "sig f: tensor[n, f32] -> tensor[2, f32]\n\
+        "sig f[n]: tensor[n, f32] -> tensor[2, f32]\n\
          def f(x) = shrink(&x, [[1i64, shape(&x, 0)]])\n\
          def h(x: tensor[{width}, f32]) -> tensor[f32] = sum(f(x), 0i32)\n\
          def main() = grad(h)(to_tensor([{operand}]))\n"
@@ -9206,7 +9206,7 @@ fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
         "the batched cotangent is unchanged: {out}"
     );
 
-    let refuted = "sig f: tensor[n, f32] -> tensor[2, f32]\n\
+    let refuted = "sig f[n]: tensor[n, f32] -> tensor[2, f32]\n\
                    def f(x) = shrink(&x, [[1i64, shape(&x, 0)]])\n\
                    def h(x: tensor[4, f32]) -> tensor[f32] = sum(f(x), 0i32)\n\
                    def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
@@ -9220,11 +9220,12 @@ fn vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval() {
     );
 }
 
-/// The exact 290-byte chelis#1932 source recovered from PR #1912 round 3.
+/// The chelis#1932 source recovered from PR #1912 round 3, migrated only by
+/// making its formerly implicit `n` and `m` binders explicit.
 ///
-/// SHA-256:
+/// Original SHA-256 before the explicit-binder migration:
 /// `30ca8685500d97796027d2b592eac2d8f59862c9ceebd6cb9845bbc24f966fd4`.
-const ISSUE_1932_EXACT_SOURCE: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+const ISSUE_1932_EXACT_SOURCE: &str = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
 def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
 def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
 
@@ -9249,12 +9250,12 @@ fn issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes() 
 
     let agreeing_zero =
         ISSUE_1932_EXACT_SOURCE.replace("[1.0f32, 2.0f32, 3.0f32]", "[1.0f32, 2.0f32]");
-    let agreeing_nonzero = "def f(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n\
+    let agreeing_nonzero = "def f[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = mul(x, x)\n\
          def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32])), 0i32)\n\
          def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
     let no_witness = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
          def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
-    let reordered_callable = "def f(y: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+    let reordered_callable = "def f[m, n](y: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
          def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(to_tensor([1.0f32, 2.0f32, 3.0f32]), x), 0i32)\n\
          def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
     let direct_grad = ISSUE_1932_EXACT_SOURCE.replace(
@@ -9371,7 +9372,7 @@ fn a_multi_target_grad_over_the_same_claim_is_still_lane_divergent() {
         gcc_available(),
         "gradient receipts require compiling and executing C"
     );
-    let source = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+    let source = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
                   def h(x: tensor[2, f32], z: tensor[2, f32]) -> tensor[f32] = \
                   sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
@@ -9440,7 +9441,7 @@ fn independent_grad_claim_source(
         (format!("mul({left}, a)"), format!("mul({right}, b)"))
     };
     format!(
-        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, {size})\n{declaration}def h(a: tensor[2, f32], b: tensor[{width}, f32]) -> tensor[f32] = add(sum({left}, 0i32), sum({right}, 0i32))\ndef main() = grad(h, wrt=(b, a))({}, {})\n",
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, {size})\n{declaration}def h(a: tensor[2, f32], b: tensor[{width}, f32]) -> tensor[f32] = add(sum({left}, 0i32), sum({right}, 0i32))\ndef main() = grad(h, wrt=(b, a))({}, {})\n",
         vector_literal(2),
         vector_literal(width)
     )
@@ -9590,7 +9591,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
         gcc_available(),
         "gradient receipts require compiling and executing C"
     );
-    let callee = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+    let callee = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n";
     let record = "type Params =\n  | Params { w: tensor[2, f32], b: tensor[2, f32] }\n";
     let cases = [
@@ -9662,7 +9663,7 @@ fn an_aggregate_typed_wrt_is_still_lane_divergent() {
 /// gradient reconstruction, including unused and zero cotangents.
 #[test]
 fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
-    let source = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+    let source = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                   insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
                   def h(s: f32, x: tensor[2, f32]) -> tensor[f32] = \
                   mul(sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), \
@@ -9695,7 +9696,7 @@ fn a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c() {
 
     // The rank-0 tensor control: same body, `wrt` typed `tensor[f32]`, traps.
     // This is what says the variable is the `wrt`'s type and not its rank.
-    let rank0 = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+    let rank0 = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
                  insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
                  def h(s: tensor[f32], x: tensor[2, f32]) -> tensor[f32] = \
                  mul(sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), s)\n\
@@ -9793,7 +9794,7 @@ fn scalar_gradient_roots_keep_target_order_and_public_leaf_types() {
         assert!(ok, "{out}");
         assert_eq!(out, expected);
     }
-    let aggregate = "type Params =\n | Params { w: tensor[2, f32], b: f32, unused: tensor[2, f32] }\ndef f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\ndef h(s: f32, p: Params) -> tensor[f32] = add(sum(mul(f(copy(p.w), to_tensor([1.0f32, 2.0f32])), p.w), 0i32), mul(scalar_to_tensor(p.b), scalar_to_tensor(s)))\ndef main() = grad(h, wrt=(p, s, p))(3.0f32, Params { w: to_tensor([1.0f32, 2.0f32]), b: 5.0f32, unused: to_tensor([8.0f32, 9.0f32]) })\n";
+    let aggregate = "type Params =\n | Params { w: tensor[2, f32], b: f32, unused: tensor[2, f32] }\ndef f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\ndef h(s: f32, p: Params) -> tensor[f32] = add(sum(mul(f(copy(p.w), to_tensor([1.0f32, 2.0f32])), p.w), 0i32), mul(scalar_to_tensor(p.b), scalar_to_tensor(s)))\ndef main() = grad(h, wrt=(p, s, p))(3.0f32, Params { w: to_tensor([1.0f32, 2.0f32]), b: 5.0f32, unused: to_tensor([8.0f32, 9.0f32]) })\n";
     let group =
         "Params(tensor(shape=[2], data=[7.0, 7.0]), 3.0, tensor(shape=[2], data=[0.0, 0.0]))";
     let expected = format!("main.0 = {group}\nmain.1 = 5.0\nmain.2 = {group}\n");

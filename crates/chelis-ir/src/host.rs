@@ -16310,7 +16310,7 @@ fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &st
         let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let (Some(candidate), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        let (Some(candidate), Some(signature)) = (kids.first().and_then(symbol_name), kids.last())
         else {
             continue;
         };
@@ -18760,7 +18760,7 @@ fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
             continue;
         };
         let Some(ret) = kids
-            .get(1)
+            .last()
             .and_then(as_list)
             .filter(|tfn| tag(tfn) == Some(DeepTag::TFn))
             .and_then(|tfn| children(tfn).last().cloned())
@@ -18866,11 +18866,11 @@ mod tests {
     #[test]
     fn literal_result_claim_transfer_requires_a_pure_called_helper() {
         let checked = surf_check(
-            "def pure(x: tensor[n, f32]) -> tensor[2, f32] = \
+            "def pure[n](x: tensor[n, f32]) -> tensor[2, f32] = \
                  shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def random(x: tensor[n, f32]) -> tensor[2, f32] = \
+             def random[n](x: tensor[n, f32]) -> tensor[2, f32] = \
                  dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
-             def caller(x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
+             def caller[n](x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
         );
         let session = HostLoweringSession::new(&checked);
         assert!(top_level_fn_transfers_literal_result_claims(
@@ -19489,7 +19489,7 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
     fn named_execution_plan_keeps_authored_unused_interface_obligations() {
         let checked = surf_check(
             r#"
-def main(x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
+def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
   dropout(x, 0.5f32)
 }
 "#,
@@ -20385,7 +20385,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
     #[test]
     fn mono_interning_identity_is_the_definitions_own_name() {
         let checked = parse_and_check(
-            "(defsig {} Demo.depth (t-fn {} (t-var {} a) (t-prim {} i32)))\n\
+            "(defsig {} Demo.depth (a) (t-fn {} (t-var {} a) (t-prim {} i32)))\n\
              (def {} Demo.depth\n\
                (fn {} (params {} (x {type: (t-var {} a)}))\n\
                  (lit {type: (t-prim {} i32)} 1)))\n",
@@ -20492,11 +20492,11 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     fn authored_signature_classifier_requires_exact_or_unambiguous_name() {
         let checked = parse_and_check(
             r#"
-                (defsig {} Left.identity
+                (defsig {} Left.identity (a)
                   (t-fn {} (t-var {} a) (t-var {} a)))
                 (def {} Left.identity
                   (fn {} (params {} (x {type: (t-var {} a)})) (var {} x)))
-                (defsig {} Right.identity
+                (defsig {} Right.identity (b)
                   (t-fn {} (t-var {} b) (t-var {} b)))
                 (def {} Right.identity
                   (fn {} (params {} (x {type: (t-var {} b)})) (var {} x)))
@@ -21215,6 +21215,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             r#"
                 (defsig {}
                   jac_row
+                  (n)
                   (t-fn {}
                     (t-fn {}
                       (t-tensor {} (d-var {} n) (t-prim {} f32))

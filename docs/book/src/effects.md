@@ -20,7 +20,7 @@ A signature or a `def` carries its effect set as a `! { ... }` suffix. The annot
 optional; the checker infers the set and verifies any annotation you supply.
 
 ```chelis-surf-fragment
-sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
+sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
 ```
 
 In Deep the effect set is `eff` metadata on the function type:

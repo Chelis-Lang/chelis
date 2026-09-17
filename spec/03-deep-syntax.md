@@ -349,7 +349,7 @@ using it forges module identity through the name stem
 | Tag | Form | Semantics |
 |---|---|---|
 | `def` | `(def {} name expr)` | Value/function binding |
-| `defsig` | `(defsig {} name type-expr)` | Type signature (precedes `def`) |
+| `defsig` | `(defsig {} name [(binder...)] type-expr)` | Type signature with an optional nonempty explicit binder list (precedes `def`) |
 | `deftype` | `(deftype {} name (type-params...) variant...)` | ADT declaration |
 | `typealias` | `(typealias {} name (type-params...) type-expr)` | Transparent type alias |
 | `variant` | `(variant {} Name field...)` | Sum type constructor (fields optional) |
@@ -369,12 +369,17 @@ records whose bodies remain in the supplying artifact. Those records are not
 an authored check unit, use the linker's reserved-name/provenance channel, and
 cannot be produced by source-level `defsig` syntax.
 
-A `defsig` may carry `dtype_bounds` metadata restricting its implicitly
-bound type variables to a dtype family (`spec/04-type-system.md` §5.9
+A polymorphic `defsig` carries a structural list of distinct symbol
+names between its declaration name and type expression. A monomorphic
+`defsig` omits that child. The list is unkinded: each use site determines
+whether a listed name is a `t-var`, `d-var`, or `d-rank`; a name absent
+from the list is undeclared. A `defsig` may carry `dtype_bounds`
+metadata restricting its explicitly bound type variables to a dtype
+family (`spec/04-type-system.md` §5.9
 [04-DTYPE-2]):
 
 ```lisp
-(defsig {dtype_bounds: {p: int}} arange
+(defsig {dtype_bounds: {p: int}} arange (n p)
   (t-fn {} (t-var {} p) (t-var {} p)
     (t-tensor {} (d-var {} n) (t-var {} p))))
 ```
@@ -385,11 +390,10 @@ effect names are. An unknown family name or a value that is not a family
 name violates the metadata shape contract [03-META-1]. A key naming a
 variable the declaration does not bind, or a key naming a `d-var` or
 `d-rank`, is a type-resolution error. Bounds ride in
-metadata for the same reason an opaque invariant does: a `defsig` *child*
-node would change its fixed two-child shape and grow the closed tag
-vocabulary. A `def` does not carry this key: the declaration's signature
-owns its binders, so `dtype_bounds` on a `def` is a declaration error
-whose diagnostic names the signature.
+metadata because the family qualifies one listed binder rather than
+forming part of the signature type. A `def` does not carry this key:
+the declaration's signature owns its binders, so `dtype_bounds` on a
+`def` is a declaration error whose diagnostic names the signature.
 
 `deftype` may carry `opaque: true` metadata:
 
@@ -517,13 +521,19 @@ environment or a cached compiler context. Resolution is fail-closed:
   do not add a spurious `unknown nominal` cascade.
 - `t-var`, `d-var`, and `d-rank` introduce no binding by themselves. A name is
   legal only when the surrounding resolution context supplies it: the
-  explicit parameter list of a `deftype`/`typealias`, the implicit-generic
-  binder set of one `defsig`, or trusted compiler-generated metadata. The
+  explicit parameter list of a `deftype`/`typealias`, the explicit binder
+  list of one `defsig`, or trusted compiler-generated metadata. The
   special `(t-var {} _)` form is an inference hole only at a use site that
   explicitly admits holes; it is not a way to leave a declaration field or
   alias body unresolved.
-- A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
-  first occurrence and reuses that binding throughout the signature. Its
+- A `defsig` binds exactly the distinct names in its structural binder list
+  and reuses each binding throughout the signature. A `t-var`, `d-var`, or
+  `d-rank` whose name is absent from that list is a type-resolution error.
+  An unbounded listed name may be unused and remains a vacuous universal
+  quantifier; a `dtype_bounds` key must name a listed `t-var` that occurs in
+  the signature.
+  Active, reserved, retired, and deferred primitive spellings cannot be
+  rebound as `t-var` names. Its
   `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
   the bound restricts every occurrence of that name, and a bounded name used
   in a dimension or rank position is an error. A

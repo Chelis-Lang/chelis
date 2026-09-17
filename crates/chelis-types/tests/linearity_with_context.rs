@@ -482,7 +482,7 @@ fn library_tensor_carrying_adt_borrow_is_accepted_with_context() {
 type BatchNormParams[n] =
   | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }
 
-sig lib_borrow_params: &BatchNormParams[n] -> bool
+sig lib_borrow_params[n]: &BatchNormParams[n] -> bool
 def lib_borrow_params(p) = true
 "#;
     let new_src = r#"
@@ -526,7 +526,7 @@ type Inner[n] =
 type Outer[n] =
   | Outer { inner: Inner[n] }
 
-sig borrow_outer: &Outer[n] -> bool
+sig borrow_outer[n]: &Outer[n] -> bool
 def borrow_outer(o) = true
 def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
 "#;
@@ -585,7 +585,7 @@ type Carrier[n] =
 type Outer[n] =
   | Outer { inner: Carrier[n] }
 
-sig borrow_outer: &Outer[n] -> bool
+sig borrow_outer[n]: &Outer[n] -> bool
 def borrow_outer(o) = true
 def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
 "#;

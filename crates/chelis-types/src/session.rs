@@ -150,8 +150,9 @@ mod rejected_signature_resolution_tests {
         let chelis_deep::Expr::Node(declaration, _) = &program[0] else {
             panic!("a declaration is a stamped node");
         };
-        let ty = &declaration.children_slice()[1];
+        let ty = declaration.children_slice().last().expect("defsig type");
         let headers = TypeResolutionEnv::default();
+        let binders = chelis_unord::UnordSet::new();
         let mut variables = VarGen::default();
         let mut errors = Vec::new();
         let result = {
@@ -160,7 +161,7 @@ mod rejected_signature_resolution_tests {
             };
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::Defsig,
-                BinderMode::ImplicitGeneric,
+                BinderMode::ExplicitGeneric(&binders),
                 &headers,
                 &mut variables,
                 &mut sink,

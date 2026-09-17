@@ -2054,7 +2054,7 @@ The second review round, and an audit of every normative sentence this change
 adds to the three chapters, found three more places where the new prose was
 broader than the decided rule. §P4c required every listed name to occur in its
 declared type, where [04-DTYPE-2] and the checker require it only of a bounded
-one - `sig f[zz]: p -> p` checks clean. §P4c also implied that listing an
+one - `sig f[zz]: i32 -> i32` checks clean. §P4c also implied that listing an
 unbounded name does nothing, when a listed multi-letter dimension name resolves
 to a dimension variable where an unlisted one is a concrete symbolic axis.
 [04-DTYPE-2] promised that both bound failures name "the required family and

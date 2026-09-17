@@ -935,6 +935,22 @@ mod tests {
     }
 
     #[test]
+    fn defsig_binder_list_is_structural_and_type_stays_in_the_last_slot() {
+        let binders = RawExpr::List(vec![raw_sym("a")], sp());
+        let tvar = RawExpr::List(vec![raw_sym("t-var"), empty_map(), raw_sym("a")], sp());
+        let input = vec![RawExpr::List(
+            vec![raw_sym("defsig"), empty_map(), raw_sym("f"), binders, tvar],
+            sp(),
+        )];
+        let result = stamp_to_typed(input).expect("explicit defsig binder list stamps");
+        let Expr::Node(node, _) = &result[0] else {
+            panic!("defsig stamps as a node");
+        };
+        assert!(matches!(node.children_slice()[1], Expr::BareList(..)));
+        assert!(matches!(node.children_slice()[2], Expr::Node(..)));
+    }
+
+    #[test]
     fn declaration_type_parameter_lists_are_structural_binders() {
         // (deftype {} Option (a) (variant {} None))
         let input = vec![RawExpr::List(

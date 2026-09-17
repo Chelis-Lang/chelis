@@ -155,7 +155,7 @@ fn negative_extent_remains_a_static_type_error() {
 /// `insert_def_body_wrong_rank_names_the_callee` pins.
 #[test]
 fn shape_sourced_insert_rejects_wrong_rank_ascription() {
-    let source = "def bad(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n\
+    let source = "def bad[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n\
         \x20 step1: tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, i32)))\n\
         \x20 step1\n\
         }\n";
@@ -178,7 +178,7 @@ fn shape_sourced_insert_rejects_wrong_rank_ascription() {
 /// program at all.
 #[test]
 fn insert_def_body_wrong_rank_names_the_callee() {
-    let source = "def bad(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, i32)))\n";
+    let source = "def bad[c, a, h, w](g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, i32)))\n";
     let report = check(source);
     let joined = errors(&report).join("\n");
     assert!(
@@ -189,7 +189,7 @@ fn insert_def_body_wrong_rank_names_the_callee() {
 
 #[test]
 fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
-    let source = "def f(b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = insert(b, 0, k)\n\
+    let source = "def f[k](b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = insert(b, 0, k)\n\
         out = f(scalar_to_tensor(2.0f32), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     let report = check(source);
     assert!(errors(&report).is_empty(), "{report}");
@@ -257,7 +257,7 @@ fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
 
 #[test]
 fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
-    let extent = check("def bad(b: tensor[f32], k: i64) -> tensor[k, f32] = insert(b, 0, k)\n");
+    let extent = check("def bad[k](b: tensor[f32], k: i64) -> tensor[k, f32] = insert(b, 0, k)\n");
     let extent_errors = errors(&extent).join("\n");
     assert!(!extent_errors.contains("Form-3"), "{extent_errors}");
     assert!(!extent_errors.contains("cast(N, i32)"), "{extent_errors}");
@@ -317,7 +317,7 @@ fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
 /// shared-axis construction.
 #[test]
 fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0)]])\n\
+    let source = "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0)]])\n\
         def main() = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
     let report = check(source);
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
@@ -426,7 +426,7 @@ fn build_c(path: &Path, out_dir: &Path) -> std::process::Output {
 /// `int main(`, so the program links to an object-only exit 0.
 #[test]
 fn a_runtime_extent_nullary_root_executes_identically_on_both_lanes() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+    let source = "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
         def main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     let report = check(source);
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
@@ -501,7 +501,7 @@ fn a_runtime_extent_nullary_root_executes_identically_on_both_lanes() {
 #[test]
 fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
     let shrink_to_last_two =
-        "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n";
+        "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n";
 
     let tuple_source = format!(
         "{shrink_to_last_two}def main() = (g(to_tensor([1.0f32, 2.0f32, 3.0f32])), 7.0f32)\n"
@@ -558,8 +558,8 @@ fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
 /// names this test.
 #[test]
 fn a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-        def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+    let source = "def g[n, k](x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def h[k](y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
         def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
     let (evaluated, compiled) = run_both_lanes(source, "dim_variable_root");
     assert_eq!(
@@ -635,8 +635,8 @@ fn run_both_lanes(source: &str, stem: &str) -> (String, String) {
 /// this row closes, so this is a regression test rather than a disposition lock.
 #[test]
 fn a_refuted_claim_under_a_runtime_extent_root_traps_on_both_lanes() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-        def bad(p: tensor[k, f32], q: tensor[k, f32]) -> tensor[j, f32] = shrink(add(p, q), [[0i64, shape(p, 0i32)]])\n\
+    let source = "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def bad[k, j](p: tensor[k, f32], q: tensor[k, f32]) -> tensor[j, f32] = shrink(add(p, q), [[0i64, shape(p, 0i32)]])\n\
         def main() = bad(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     let report = check(source);
     assert_eq!(
@@ -692,7 +692,7 @@ fn a_refuted_claim_under_a_runtime_extent_root_traps_on_both_lanes() {
 
 #[test]
 fn vmap_rejects_element_derived_extent_at_public_checker() {
-    let named = "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
+    let named = "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = {\n\
         \x20 end = cast(tensor_to_scalar(sum(x, cast(0, i32))), i64)\n\
         \x20 shrink(x, [[0i64, end]])\n\
         }\n\
@@ -735,9 +735,9 @@ fn vmap_rejects_element_derived_extent_at_public_checker() {
 
 #[test]
 fn vmap_rejects_helper_result_derived_from_tensor_elements() {
-    let source = "def data_end(x: tensor[n, f32]) -> i64 = \
+    let source = "def data_end[n](x: tensor[n, f32]) -> i64 = \
         cast(tensor_to_scalar(sum(x, cast(0, i32))), i64)\n\
-        def g(x: tensor[n, f32]) -> tensor[m, f32] = \
+        def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = \
         shrink(x, [[0i64, data_end(x)]])\n\
         out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
     let report = check(source);
@@ -752,14 +752,14 @@ fn vmap_rejects_helper_result_derived_from_tensor_elements() {
 
 #[test]
 fn vmap_accepts_shape_and_shared_scalar_extent_sources() {
-    let shape_source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = \
+    let shape_source = "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = \
         shrink(x, [[0i64, shape(x, 0)]])\n\
         out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
     let shape_report = check(shape_source);
     assert_eq!(shape_report["score"].as_f64(), Some(1.0), "{shape_report}");
     assert!(errors(&shape_report).is_empty(), "{shape_report}");
 
-    let scalar_source = "def g(x: tensor[n, f32], end: i64) -> tensor[m, f32] = \
+    let scalar_source = "def g[n, m](x: tensor[n, f32], end: i64) -> tensor[m, f32] = \
         shrink(x, [[0i64, end]])\n\
         out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), 2i64)\n";
     let scalar_report = check(scalar_source);

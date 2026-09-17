@@ -9,7 +9,7 @@ currently records these as testable requirements with negative parity.
 
 - Introduce a `surf-syntax` capability recording the Surf grammar, desugaring shapes, and
   the normative parse/type rules attached to each surface form.
-- Capture the value/type case-split overrides, contextual precision polymorphism, rank
+- Capture the value/type case-split overrides, explicit declaration binders, rank
   variables, literal defaults and suffixes, contextual tensor-literal inference, and the
   opaque-type / invariant surface.
 - Capture the parse-error and type-error cases (non-associative chaining, integer `/`,

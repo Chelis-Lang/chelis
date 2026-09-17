@@ -727,7 +727,7 @@ fn checked_scalar_call_slots_restore_the_exact_literal_type() {
 
 #[test]
 fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery() {
-    let source = "sig guarded: tensor[n, f32] -> tensor[n, f32]\n\
+    let source = "sig guarded[n]: tensor[n, f32] -> tensor[n, f32]\n\
                   def guarded(x) = {\n\
                     n = cast(shape(x, cast(0, i32)), i64)\n\
                     if gt(cast(1, i64), n) then fail(\"empty\") else x\n\
@@ -800,7 +800,7 @@ fn checked_nominal_dimension_provenance_rejects_a_different_name() {
 #[test]
 fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
     let mut front = front(
-        "sig paired: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
+        "sig paired[n]: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
          def paired(x, y) = {\n\
            size = cast(shape(y, cast(0, i32)), i64)\n\
            if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
@@ -1321,7 +1321,7 @@ fn a_dag_copy_after_store_move_is_rejected() {
 #[test]
 fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
     let front = front(
-        "def guarded(x: tensor[n, f32]) -> tensor[n, f32] ! { IO } = { _ = print(\"entered\")\n x }\nout = guarded(to_tensor([1.0f32, 2.0f32]))\n",
+        "def guarded[n](x: tensor[n, f32]) -> tensor[n, f32] ! { IO } = { _ = print(\"entered\")\n x }\nout = guarded(to_tensor([1.0f32, 2.0f32]))\n",
     );
     let mut host = front.host.clone();
     let function = host

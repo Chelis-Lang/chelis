@@ -67,7 +67,7 @@ fn issue_207_check_exits_nonzero_on_type_mismatch() {
     let src = "module Probe.Mismatch\n\
                export (mismatch)\n\
                \n\
-               sig mismatch: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
+               sig mismatch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
                def mismatch(x) = cast(0, f32)\n";
     let tmp = write_tempfile("issue207-tm-", src);
     let (code, stdout) = run_check_capture(tmp.path());
@@ -205,7 +205,7 @@ fn issue_207_invariant_holds_across_error_categories() {
         (
             "tm",
             "module Probe.Mismatch\n\
-             sig mismatch: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
+             sig mismatch[n]: &tensor[n, 4, f32] -> tensor[n, 4, f32]\n\
              def mismatch(x) = cast(0, f32)\n",
             "TypeMismatch",
         ),

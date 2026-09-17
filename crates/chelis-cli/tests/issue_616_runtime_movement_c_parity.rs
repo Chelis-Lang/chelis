@@ -159,7 +159,7 @@ fn gcc(
 fn issue_616_runtime_shrink_stride_forward_eval_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let source = format!(
-        "module Repro.RtChain\nsig f: tensor[n, f32] -> tensor[2, f32]\ndef f(x) = {{\n{CHAIN_ANCHORED_BODY}\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.RtChain\nsig f[n]: tensor[n, f32] -> tensor[2, f32]\ndef f(x) = {{\n{CHAIN_ANCHORED_BODY}\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
     );
 
@@ -193,7 +193,7 @@ fn issue_616_runtime_shrink_stride_forward_eval_matches_c() {
 #[test]
 fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
     let source = format!(
-        "module Repro.RtShrink\nsig out: tensor[n, f32] -> tensor[u, f32]\ndef out(x) = {{\n{SHRINK_BODY}\n}}\n"
+        "module Repro.RtShrink\nsig out[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef out(x) = {{\n{SHRINK_BODY}\n}}\n"
     );
     let (_dir, build_dir) = build_c(&source, "rtshrink");
     let out_symbol = authored_c_symbol("out");
@@ -280,7 +280,7 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
   extent = cast(sub(cast(shape(x, cast(0, i32)), i64), cast(1, i64)), i64)\n\
   stride(shrink(x, [[cast(1, i64), extent]]), cast(2, i64))";
     let source = format!(
-        "module Repro.RtDegenerate\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.RtDegenerate\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
     );
 
@@ -315,7 +315,7 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
 fn issue_632_literal_stride_under_sig_symbols_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let source = format!(
-        "module Repro.LitStrideSig\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, i64))\nout = f(to_tensor([{}]))\n",
+        "module Repro.LitStrideSig\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, i64))\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
     );
 
@@ -392,7 +392,7 @@ out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
 #[test]
 fn issue_616_multi_axis_runtime_pad_matches_c() {
     let source = "module Repro.MatPad\n\
-sig f: tensor[rows, 3, f32] -> tensor[u, 5, f32]\n\
+sig f[u]: tensor[rows, 3, f32] -> tensor[u, 5, f32]\n\
 def f(x) = {\n\
   k = cast(shape(x, cast(0, i32)), i64)\n\
   pad(x, [[cast(0, i64), k], [cast(1, i64), cast(1, i64)]], cast(0.0, f32))\n\
@@ -504,7 +504,7 @@ fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
   shrink(x, [[cast(0, i64), k]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
-        "module Repro.RtZeroSize\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
+        "module Repro.RtZeroSize\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
     );
 
     let eval_out = run_eval(&source, "rtzero");
@@ -546,7 +546,7 @@ fn issue_616_runtime_shrink_overshoot_errs_in_both_lanes() {
   shrink(x, [[cast(1, i64), extent]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
-        "module Repro.RtOvershoot\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
+        "module Repro.RtOvershoot\nsig f[n, u]: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
     );
 
     let eval_out = run_eval(&source, "rtover");
@@ -576,7 +576,7 @@ fn checked_movement_expansion_guards_preserve_expand_and_insert_identity() {
     for (op, result_shape) in [("expand", "3"), ("insert", "3, 1")] {
         for (size, valid) in [(4, true), (3, false)] {
             let source = format!(
-                "module Repro.MovementIdentity\nsig f: tensor[1, f32] -> tensor[n, f32] -> tensor[{result_shape}, f32]\ndef f(x, y) = {{\n  small = shrink(y, [[0i64, sub(shape(y, 0i32), 1i64)]])\n  {op}(x, 0i32, shape(small, 0i32))\n}}\nout = f(to_tensor([1.0f32]), to_tensor([{}]))\n",
+                "module Repro.MovementIdentity\nsig f[n]: tensor[1, f32] -> tensor[n, f32] -> tensor[{result_shape}, f32]\ndef f(x, y) = {{\n  small = shrink(y, [[0i64, sub(shape(y, 0i32), 1i64)]])\n  {op}(x, 0i32, shape(small, 0i32))\n}}\nout = f(to_tensor([1.0f32]), to_tensor([{}]))\n",
                 vec!["1.0f32"; size].join(", ")
             );
             let stem = format!("movement_{op}_{size}");

@@ -81,7 +81,7 @@ fn let_ascription_with_sig_dim_name_typechecks_when_dim_matches() {
     // consistent with that. No error expected.
     let errors = typecheck_surf(
         r#"
-sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
+sig pair_id[n]: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]
 def pair_id(a: &tensor[n, f32], b: &tensor[n, f32]) -> tensor[n, f32] =
   {
     x: &tensor[n, f32] = a
@@ -148,7 +148,7 @@ fn dim_name_is_a_label_not_a_capture() {
     // change the semantics without trip-wiring this test.
     let errors = typecheck_surf(
         r#"
-def caller(a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
+def caller[n, m](a: &tensor[n, f32], b: &tensor[m, f32]) -> &tensor[n, f32] =
   {
     x: &tensor[n, f32] = a
     y: &tensor[n, f32] = b

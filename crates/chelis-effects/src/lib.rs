@@ -1037,10 +1037,11 @@ fn validate_unhandled_random_roots(
     }
 }
 
-/// Extract the effect set declared on a `(defsig name t-fn-with-eff-meta)` expression.
+/// Extract the effect set declared on a
+/// `(defsig name [(binders...)] t-fn-with-eff-meta)` expression.
 /// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
 fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
-    // defsig has form: (defsig {} name t-fn-expr)
+    // The type is last in both canonical defsig forms.
     let kids = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -1051,7 +1052,7 @@ fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
         | ExprCarrier::MetadataExpression(_)
         | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    let t_fn = kids.get(1)?;
+    let t_fn = kids.last()?;
     let meta = match t_fn.carrier() {
         ExprCarrier::DecodedNode(DeepTag::TFn, metadata, _) => metadata,
         ExprCarrier::DecodedNode(_, _, _)

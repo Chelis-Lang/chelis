@@ -93,7 +93,7 @@ fn baseline_wsc_blocker_reproducer_errors_without_unbound_wrapping() {
     let path = dir.path().join("wsc_blocker.ch");
     write_file(
         &path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mismatch(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
@@ -171,7 +171,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     let baseline_path = dir.path().join("baseline.ch");
     write_file(
         &baseline_path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)\n",
     );
@@ -204,7 +204,7 @@ fn unbound_wrapper_into_polymorphic_downstream_reports_only_unbound() {
     let attack_path = dir.path().join("attack.ch");
     write_file(
         &attack_path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
          poly_id(nonexistent_function(x))\n",
@@ -260,7 +260,7 @@ fn unbound_wrapper_into_concrete_downstream_still_surfaces_real_mismatch() {
     let path = dir.path().join("concrete_attack.ch");
     write_file(
         &path,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n\
          def force_f64(y: tensor[3, f64]) -> tensor[3, f64] = y\n\
          def use_mix(x: tensor[3, i32]) -> tensor[3, f32] = \
@@ -306,7 +306,7 @@ fn unbound_function_in_polymorphic_body_no_longer_masks_return_mismatch() {
     let path = dir.path().join("body_error.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, f32]\n\
+        "sig f[d, p]: tensor[d, p] -> tensor[d, f32]\n\
          def f(x) = nonexistent_function(x)\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -394,33 +394,32 @@ fn unbound_precision_name_in_let_now_rejected() {
 }
 
 #[test]
-fn no_clause_precision_in_def_param_is_implicitly_bound() {
-    // Surf P4b applies WS-A5 implicit collection to the complete
-    // synthesized signature, including inline parameter types. The
-    // parameter and result therefore share one implicit `weirdname`
-    // binder. F3 still rejects unbound precision names in value-local
-    // annotations, where no synthesized signature owns them.
+fn explicit_unusual_precision_in_def_param_is_bound() {
+    // Surf P4b applies the complete explicit list to the synthesized
+    // signature, including inline parameter types. The parameter and result
+    // therefore share one `weirdname` binder. F3 still rejects unbound
+    // precision names in value-local annotations.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("implicit_p_in_def.ch");
     write_file(
         &path,
-        "def f(x: tensor[3, weirdname]) -> tensor[3, weirdname] = x\n",
+        "def f[weirdname](x: tensor[3, weirdname]) -> tensor[3, weirdname] = x\n",
     );
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().cloned().unwrap_or_default();
-    assert!(errors.is_empty(), "implicit binder must check: {json:#?}");
+    assert!(errors.is_empty(), "explicit binder must check: {json:#?}");
     assert_eq!(json["score"].as_f64(), Some(1.0), "{json:#?}");
 }
 
 #[test]
 fn baseline_two_independent_precision_tvars_accepted() {
-    // Two distinct precision variables in a sig: this is well-formed
-    // per spec (each is implicitly quantified independently).
+    // Two distinct precision variables in a sig are explicitly quantified
+    // independently.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("two_tvars.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, q] -> tensor[d, p]\n\
+        "sig f[d, p, q]: tensor[d, p] -> tensor[d, q] -> tensor[d, p]\n\
          def f(a, b) = a\n\
          def use_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
@@ -442,7 +441,7 @@ fn baseline_same_precision_tvar_reused_rejects_mismatch() {
     let path = dir.path().join("same_tvar.ch");
     write_file(
         &path,
-        "sig f: tensor[d, p] -> tensor[d, p] -> tensor[d, p]\n\
+        "sig f[d, p]: tensor[d, p] -> tensor[d, p] -> tensor[d, p]\n\
          def f(a, b) = a\n\
          def break_it(x: tensor[3, f32], y: tensor[3, i32]) \
          -> tensor[3, f32] = f(x, y)\n",
@@ -469,7 +468,7 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
     let path = dir.path().join("concrete_in_sig.ch");
     write_file(
         &path,
-        "sig f: tensor[d, f32] -> tensor[d, f32]\n\
+        "sig f[d]: tensor[d, f32] -> tensor[d, f32]\n\
          def f(x) = x\n\
          def break_it(x: tensor[3, i32]) -> tensor[3, i32] = f(x)\n",
     );
@@ -490,13 +489,13 @@ fn baseline_concrete_primitive_in_sig_stays_concrete() {
 #[test]
 fn baseline_unsigned_alias_in_precision_rejected_with_diagnostic() {
     // Spec 1.1.2 unsigned aliases are explicitly excluded from the
-    // implicit quantifier collection so they reach the type-checker
-    // 1.1.2 rejection path, not get silently absorbed as a quantifier.
+    // binder admission so they reach the type-checker 1.1.2 rejection path,
+    // not get silently absorbed as a quantifier.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("unsigned_alias.ch");
     write_file(
         &path,
-        "sig f: tensor[d, u8] -> tensor[d, u8]\n\
+        "sig f[d]: tensor[d, u8] -> tensor[d, u8]\n\
          def f(x) = x\n",
     );
     let errors = run_json_check(&path)["errors"]
@@ -538,7 +537,7 @@ fn polymorphic_sig_no_call_now_skips_emit_silently(target: &str, dir_name: &str)
     fs::create_dir_all(&out).unwrap();
     write_file(
         &src,
-        "sig poly_id: tensor[d, p] -> tensor[d, p]\n\
+        "sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]\n\
          def poly_id(x) = x\n",
     );
     let result = run_build(&src, target, &out);
@@ -581,7 +580,7 @@ fn polymorphic_sig_with_concrete_call_now_builds(target: &str, dir_name: &str) {
     fs::create_dir_all(&out).unwrap();
     write_file(
         &src,
-        "sig poly_id: tensor[n, p] -> tensor[n, p]\n\
+        "sig poly_id[n, p]: tensor[n, p] -> tensor[n, p]\n\
          def poly_id(x) = x\n\
          def call(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)\n",
     );

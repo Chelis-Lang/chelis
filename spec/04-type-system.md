@@ -839,9 +839,9 @@ A signature's type expression can carry two kinds of variable. A wildcard,
 `(t-var {} _)` or its dimension and rank spellings, is an inference hole
 (`spec/03-deep-syntax.md` §2.5); the desugarer synthesizes one for every
 omitted parameter or result annotation of a `def` that carries at least one
-annotation (`spec/02-surf-syntax.md` §5.2). A named type variable is a
-binder: it is listed in the declaration's binder list, or §5.8.1 quantifies
-it implicitly. The two are different objects and the checker treats them
+annotation (`spec/02-surf-syntax.md` §5.2). A named type, dimension, or
+rank variable is a binder only when listed in the declaration's explicit
+binder list. The two are different objects and the checker treats them
 differently.
 
 > **[04-INF-5]** A wildcard slot in a declaration's signature, whether
@@ -860,9 +860,8 @@ differently.
 > reference is typed at the member's provisional monomorphic type, as
 > [04-INF-2] provides for a recursive call.
 
-> **[04-INF-6]** An authored type variable of a declaration's signature,
-> whether listed in its binder list or introduced by §5.8.1's implicit
-> quantification, is a universally quantified binder and is rigid within the
+> **[04-INF-6]** An authored type, dimension, or rank variable listed in a
+> declaration's binder list is universally quantified and rigid within the
 > declaration's body: the body SHALL type-check for every admissible
 > instantiation of the binder. A body constraint that identifies an authored
 > binder with a concrete type, with another authored binder of the same
@@ -1172,7 +1171,7 @@ Functions can be generic over dimensions using dimension variables:
 ;; In Surf:
 ;; def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32]
 
-(defsig {} transpose
+(defsig {} transpose (a b)
   (t-fn {}
     (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
     (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
@@ -1219,7 +1218,7 @@ legitimate:
   unknown), or
 - the body resolves it to a **body-internal** concrete dimension; the
   registered scheme then resolves to the produced dim. This is the
-  `examples/hello_tensor.ch` shape: `def main() -> tensor[n, f32]`
+  `examples/hello_tensor.ch` shape: `def main[n]() -> tensor[n, f32]`
   whose body builds a `tensor[3, f32]`.
 
 What the body must **not** do is couple the promised-independent output
@@ -1242,7 +1241,7 @@ dimension to the caller-visible input world. Both of the following are
 ;; TYPE ERROR: the return-only dim parameter m collapses with the
 ;; param-position dim parameter n.
 
-;; def make() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
 ;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
@@ -1251,13 +1250,13 @@ Three deliberate boundaries of this rule:
 
 - a body-internal concrete pin whose literal does *not* occur in any
   declared parameter position is tolerated even when the def has
-  parameters (`def f(x: tensor[2, f32]) -> tensor[k, f32] =
+  parameters (`def f[k](x: tensor[2, f32]) -> tensor[k, f32] =
   to_tensor([1.0, 2.0, 3.0])` is accepted with `k := 3`) — the guard
   compares resolved dimensions, not provenance, so a body-internal
   literal that happens to *equal* a parameter dim is conservatively
   rejected, and one that differs is conservatively accepted;
 - coupling through a *named* symbolic dim
-  (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
+  (`def f[m](x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
   `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
   design and no declared dim parameter participates.
   (When a param-position declared dim parameter *also* resolves to the
@@ -1329,7 +1328,7 @@ rank-uniform-list guarantee above is unaffected.
 
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
-;; def make_mixed() -> List[tensor[k, f32]] = {
+;; def make_mixed[k]() -> List[tensor[k, f32]] = {
 ;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 ;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
 ;;                  [cast(3.0, f32), cast(4.0, f32)]])
@@ -1337,7 +1336,7 @@ rank-uniform-list guarantee above is unaffected.
 ;; }
 
 ;; CORRECT: flatten the rank-2 element to rank-1 first
-;; def make_uniform() -> List[tensor[k, f32]] = {
+;; def make_uniform[k]() -> List[tensor[k, f32]] = {
 ;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 ;;   b_flat = reshape(
 ;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
@@ -1437,7 +1436,7 @@ symbolically.
 
 ```chelis
 ;; reduce the named `seq` axis, keep everything else by name:
-;; def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+;; def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ;;   tensor[batch, seq, hidden] -> tensor[batch, hidden]
 ;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
 ```
@@ -1494,9 +1493,9 @@ dimension name rather than an integer. Two call forms are admitted:
 
 ```chelis
 ;; insert a trailing named axis (the new axis goes after every existing axis):
-;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
+;; def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
 ;; insert immediately BEFORE an existing named anchor (4-arg form):
-;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
+;; def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
 ;;   = insert(x, c, 5, seq)
 ```
 
@@ -2184,7 +2183,7 @@ A typical generalized signature has the shape:
 
 ```scheme
 ;; Std.Tensor.add : forall p. tensor[D, p] -> tensor[D, p] -> tensor[D, p]
-(defsig {} add
+(defsig {} add (d p)
   (t-fn {}
     (t-tensor {} (d-var {} d) (t-var {} p))
     (t-tensor {} (d-var {} d) (t-var {} p))
@@ -2207,11 +2206,10 @@ coverage: every public tensor op must be usable at every dtype in §1.1 that
 its §5.4 row admits. A stdlib op that fails for a §5.4-admissible dtype is a
 spec compliance bug, not a documentation bug.
 
-#### 5.8.1 Contextual Precision Desugar (WS-A5)
+#### 5.8.1 Explicit Signature Binders
 
-The Surf surface admits precision polymorphism in user-written sigs by
-treating identifiers in the precision slot of a `tensor[...]` type
-contextually:
+The Surf surface admits precision polymorphism in user-written signatures
+through the declaration's explicit `[..]` binder list:
 
 > In a sig with quantified type variables, names appearing in the
 > precision slot of a `tensor[...]` type that match the sig's quantifier
@@ -2224,17 +2222,20 @@ contextually:
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
-Quantifiers in a sig are **implicit**: any lowercase, non-primitive,
-non-`spec/04-type-system.md` §1.1.2-unsigned identifier that appears in
-the sig's type expression is treated as a `forall`-quantified type
-variable. The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`,
-`uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded so they
-reach the type-checker's §1.1.2 rejection path with a precise
-diagnostic, not silently absorbed as quantifiers. A dtype spelling that
-[04-DTYPE-1] rejects names no type variable in any type position: an
-explicit quantifier list does not rebind it, and it reaches that
-rejection wherever it appears, on the Deep carrier as well as the Surf
-one.
+No occurrence introduces a binder. Every `t-var`, `d-var`, and `d-rank`
+name in a signature appears in its explicit list. An unlisted lowercase
+name in a scalar or precision type position remains a primitive-name
+request and is rejected as unknown, with a nearest-active-dtype
+suggestion; an unlisted dimension or rank variable is rejected as
+undeclared. This is a structural rule, not a dtype-shaped-name heuristic.
+The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`, `uint8`,
+`uint16`, `uint32`, `uint64`) and every other spelling [04-DTYPE-1]
+rejects name no type variable in any type position: a binder list does
+not rebind one, and the same rejection applies on Surf and Deep.
+An unbounded name may be listed without occurring in the signature; it is a
+vacuous universal quantifier and canonical round-tripping preserves it. A
+dtype-family-bounded binder must occur in the declared type (§5.9), so bounds
+cannot be used as inert metadata.
 
 The internal type representation carries this through `TensorPrec`:
 

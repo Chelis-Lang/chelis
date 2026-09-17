@@ -265,7 +265,7 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
     ("duplicate extension", '(def {custom: 1, custom: 2} f (lit {} 1))', "custom"),
     ("duplicate producer span extension", '(def {span_future: 1, span_future: 2} f (lit {} 1))', "span_future"),
     ("duplicate annotation", '(def {span: "a", span: "b"} f (lit {} 1))', "span"),
-    ("wrong bound family", '(defsig {dtype_bounds: {p: signed}} f (t-var {} p))', "dtype_bounds"),
+    ("wrong bound family", '(defsig {dtype_bounds: {p: signed}} f (p) (t-var {} p))', "dtype_bounds"),
     ("incomplete dimension group", '(defdim {surf_dim_group_size: 2} n)', "surf_dim_group_size"),
 ]
 METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
@@ -273,7 +273,7 @@ METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
     ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} i32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
     ("matching path and opaque span", '(module {surf_path: "M.Path", span: ""} m.path (def {} f (lit {} 1)))'),
     ("extensions and preserved provenance", '(def {source: (macro_name {surf_future: 1, span: 2} original_name), custom: {inner: (lit {span: "id"} 2)}, span_future: (a b)} f (lit {} 1))'),
-    ("dtype binder named like metadata", '(defsig {dtype_bounds: {span: float}} f (t-fn {} (t-var {} span) (t-var {} span))) (def {} f (fn {} (params {} (x {type: (t-var {} span)})) (var {} x)))'),
+    ("dtype binder named like metadata", '(defsig {dtype_bounds: {span: float}} f (span) (t-fn {} (t-var {} span) (t-var {} span))) (def {} f (fn {} (params {} (x {type: (t-var {} span)})) (var {} x)))'),
     ("canonical differentiation name", '(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} mul) (var {} x) (var {} x)))) (def {} g (grad {wrt: (var {} x)} (var {} f) (lit {} 0)))'),
 ]
 

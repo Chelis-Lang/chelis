@@ -268,7 +268,7 @@ fn one_reserved_parameter_site_produces_one_cli_error() {
 #[test]
 fn no_clause_inline_precision_accepts_and_explicit_clauses_remain_authoritative() {
     for source in [
-        "def inspect(x: tensor[3, p]) -> tensor[3, p] = x\n",
+        "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
         "def inspect[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
     ] {
         let (success, report, _) = check(source);

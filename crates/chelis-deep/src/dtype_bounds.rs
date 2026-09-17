@@ -3,8 +3,8 @@
 //! `spec/04-type-system.md` §5.9 [04-DTYPE-2] lets a declaration's type
 //! binder name one dtype family; `spec/03-deep-syntax.md` §1.1 and §2.2
 //! carry that bound in the `dtype_bounds` metadata key rather than in a
-//! child node, because a `defsig` child would change its fixed two-child
-//! shape and grow the closed 62-tag vocabulary. This module owns the
+//! child node: the bound qualifies a name in the `defsig`'s explicit binder
+//! list rather than forming part of the signature type. This module owns the
 //! encoding so the desugarer, the resugarer, and the type resolver cannot
 //! drift on the spelling.
 
@@ -108,10 +108,10 @@ mod tests {
     }
     #[test]
     fn absent_and_present_bounds_decode_without_a_fallback() {
-        assert!(decode_dtype_bounds(&metadata("(defsig {} f (t-var {} p))")).is_empty());
+        assert!(decode_dtype_bounds(&metadata("(defsig {} f (p) (t-var {} p))")).is_empty());
         assert_eq!(
             decode_dtype_bounds(&metadata(
-                "(defsig {dtype_bounds: {a: float, b: int, c: numeric}} f (t-var {} a))"
+                "(defsig {dtype_bounds: {a: float, b: int, c: numeric}} f (a b c) (t-var {} a))"
             )),
             vec![
                 ("a".into(), DtypeFamily::Float),
@@ -126,7 +126,7 @@ mod tests {
             "{p: \"float\"}",
             "{p: float, p: int}",
         ] {
-            let source = format!("(defsig {{dtype_bounds: {value}}} f (t-var {{}} p))");
+            let source = format!("(defsig {{dtype_bounds: {value}}} f (p) (t-var {{}} p))");
             assert!(
                 crate::parser::parse_str(&source)
                     .unwrap_err()

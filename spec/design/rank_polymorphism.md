@@ -13,7 +13,7 @@ What landed vs. the plan below, with two deliberate divergences:
 
 - **Surface syntax is `..r`, introduced *contextually*** (like a sig dim
   variable) — there is **no `[..r]` quantifier**. Write
-  `def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`.
+  `def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`.
   The plan's `def f[..r](...)` examples below predate this decision; the
   contextual form is the shipped surface.
 - **Identity tier is shipped and sound.** `..r` lexer/parser (Tier-3 adjacency
@@ -94,7 +94,7 @@ Tier-3 sidesteps both: a spread is **name-preserving** (it binds to the actual
 named dims it covers), and a shape is the alternating form `Rank? (Name Rank?)*`
 where each interior split is fixed by a **named anchor** — so unification stays
 **unitary** (locate each unique named anchor in the operand; bind the spreads
-between). A named-axis reduction (`def reduce_seq(x: &tensor[..pre, seq, ..post,
+between). A named-axis reduction (`def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post,
 f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`) reduces the named anchor and
 carries the surviving named axes through; multi-axis reduction composes
 single-axis reductions. The §4.2 soundness boundary is preserved by the

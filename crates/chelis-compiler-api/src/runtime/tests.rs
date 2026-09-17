@@ -629,7 +629,7 @@ fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &st
 fn unbounded_sig_declared_cast_target_is_rejected_at_check_time() {
     expect_unbounded_cast_target_rejection(
         r#"
-sig recast_int: p_int -> List[p_int] -> p_int
+sig recast_int[p_int]: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
 i16_value = recast_int(cast(257, i16), [cast(0, i16)])
 "#,

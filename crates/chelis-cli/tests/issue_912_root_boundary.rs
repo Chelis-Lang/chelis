@@ -287,7 +287,7 @@ fn unused_import_package(entry_body: &str) -> (tempfile::TempDir, std::path::Pat
     std::fs::write(
         root.join("mylib/src/shapes.ch"),
         "module Mylib.Shapes\nexport (scale)\n\n\
-         def scale(a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)\n",
+         def scale[k](a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)\n",
     )
     .unwrap();
 

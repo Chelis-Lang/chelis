@@ -1861,7 +1861,7 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
             continue;
         };
         signed.insert(name.to_string());
-        if kids.get(1).is_some_and(deep_type_contains_hole) {
+        if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_contains_hole(type_expr)) {
             holed.insert(name.to_string());
         }
     }

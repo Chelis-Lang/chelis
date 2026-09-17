@@ -196,7 +196,7 @@ fn fix4_dvar_names_shared() {
     // Declare a function requiring same dim 'a' in both args.
     // Call with tensor[batch,f32] and tensor[seq,f32] — should fail.
     check_err(
-        "(defsig {} myfn \
+        "(defsig {} myfn (a) \
            (t-fn {} \
              (t-tensor {} (d-var {} a) (t-prim {} f32)) \
              (t-tensor {} (d-var {} a) (t-prim {} f32)) \
@@ -736,9 +736,9 @@ fn pad_sequences_to_mismatched_width_through_shared_sig_dim_is_rejected() {
     // sig declares the same dim variable `d` on both parameters.
     // Different literal widths (8 vs 5) must collide on `d`.
     let decls = chelis_surf::parser::parse_str(
-        "sig demo_unify: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
+        "sig demo_unify[s, d, p]: &tensor[s, d, p] -> &tensor[s, d, p] -> tensor[s, d, p]\n\
          def demo_unify(a, b) = a\n\
-         def test_mismatch() -> tensor[s, d, f32] = {\n\
+         def test_mismatch[s, d]() -> tensor[s, d, f32] = {\n\
            q = pad_sequences_to([[cast(0.0, f32)]], cast(8, i64), cast(0.0, f32))\n\
            k = pad_sequences_to([[cast(0.0, f32)]], cast(5, i64), cast(0.0, f32))\n\
            demo_unify(q, k)\n\

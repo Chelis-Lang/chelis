@@ -702,7 +702,7 @@ mod tests {
     fn deep_accepts_rank_polymorphic_borrow_annotation() {
         // `&tensor[..r, f32]` desugars to `(t-ref {} (t-tensor {} (d-rank {} r) ...))`.
         // Both `t-ref` and `d-rank` must be in the vocabulary.
-        let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
+        let source = "(defsig {} f (r) (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
     }
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn surf_accepts_arrow_return_types() {
-        let source = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
+        let source = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
         validate_surf(source).expect("validator should accept arrow return types");
     }
 
@@ -1269,10 +1269,10 @@ mod tests {
     #[test]
     fn deep_admits_a_map_valued_metadata_key() {
         for source in [
-            "(defsig {dtype_bounds: {p: int}} arange (t-fn {} (t-var {} p) (t-var {} p)))\n",
-            "(defsig {dtype_bounds: {p: float, q: numeric}} f (t-fn {} (t-var {} p) (t-var {} q)))\n",
+            "(defsig {dtype_bounds: {p: int}} arange (p) (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {p: float, q: numeric}} f (p q) (t-fn {} (t-var {} p) (t-var {} q)))\n",
             // The empty map is a legal value, as it is a legal node meta.
-            "(defsig {dtype_bounds: {}} f (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))\n",
         ] {
             validate_deep(source)
                 .unwrap_or_else(|e| panic!("map-valued metadata must validate: {source}\n{e}"));
@@ -1288,7 +1288,7 @@ mod tests {
     fn surf_grammar_admits_the_dtype_family_binder_list() {
         use pest::Parser;
         for source in [
-            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig arange[n, p: Int]: p -> p -> tensor[n, p]\n",
             "sig total[p: Numeric]: p -> p -> p\n",
             "def only_floats[p: Float](x: p) -> p = x\n",
             "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
@@ -1322,7 +1322,7 @@ mod tests {
         for (key, source) in [
             (
                 "dtype_bounds",
-                "(defsig {dtype_bounds: {p: float}} f (t-var {} p))",
+                "(defsig {dtype_bounds: {p: float}} f (p) (t-var {} p))",
             ),
             (
                 "chelis_role",
@@ -1336,7 +1336,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
         }
         // The no-hyphen rule that keeps Deep symbols portable still holds.
-        validate_deep("(defsig {has-hyphen: x} f (t-var {} p))\n")
+        validate_deep("(defsig {has-hyphen: x} f (p) (t-var {} p))\n")
             .expect_err("a hyphenated metadata key must still be rejected");
     }
 

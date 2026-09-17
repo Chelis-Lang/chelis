@@ -413,7 +413,7 @@ crate boundary is `Result<ResolvedDeepType, ErrorWitness>`:
   serde-skipped runtime field in the per-check ADT-registry clone, separate
   from the validated definition/alias maps;
 - binder modes are closed input, explicit `deftype`/`typealias` parameters,
-  implicit-generic `defsig` parameters, and trusted compiler-generated
+  complete explicit `defsig` binder lists, and trusted compiler-generated
   metadata. Only actual binders or explicitly legal inference holes mint
   type/dimension/rank variables;
 - declaration headers are precollected before bodies, preserving legal self
@@ -1680,7 +1680,7 @@ verdicts, `chelis check`):
 
 | program | verdict |
 |---|---|
-| `add(s, g(e))` with `def g(y: tensor[a, b, f32]) -> tensor[a, b, f32] = y` | `DimensionMismatch: tensor rank mismatch: 1 dims vs 2 dims`, score 0.9415 |
+| `add(s, g(e))` with `def g[a, b](y: tensor[a, b, f32]) -> tensor[a, b, f32] = y` | `DimensionMismatch: tensor rank mismatch: 1 dims vs 2 dims`, score 0.9415 |
 | `add(sum(x, 0i32), x)` for `x: tensor[n, f32]` | `DimensionMismatch: tensor rank mismatch: 0 dims vs 1 dims`, score 0.9429 |
 | `add(1.5f32, to_tensor([1.0f32, 2.0f32, 3.0f32]))`; likewise `max_elem` | `TypeMismatch: type mismatch: f32 vs tensor[3, f32]`, score 0.96 |
 | `where(gt(x, 0.0f32), x, y)` with `y` rank 2 | `TypeMismatch` from `where`'s own procedural rule, score 0.9765; on the f5ec5ca63 build the PP5 validator adds a second `DimensionMismatch` for the same call |
@@ -1749,7 +1749,7 @@ are the same `e` meeting lowering's; neither is two operands the checker failed
 to compare.
 
 *Evidence* (both binaries agree unless a cell says otherwise; `sig` is the R1
-reproducer's spelling, all others use `def f(x: tensor[n, f32])`; `eval`
+reproducer's spelling, all others use `def f[n](x: tensor[n, f32])`; `eval`
 verdicts are identical on both):
 
 | program | `chelis check --show-inferred` | `chelis eval` |
@@ -2230,7 +2230,7 @@ first two commands and the mutation receipt; the remainder is PR B's and the
 two owners'. The checker half of [#668] is then a statement about unification,
 and the runtime half about the guards.
 
-### PP6. Schedule and header honesty ([#1486], [#1487], [#1485]; closes [#1134])
+### PP6. Schedule and header honesty ([#1486], [#1487], [#1485]; closes [#1134], follow-up [#1854])
 
 **Opened 2026-09-03; delivered by PRs [#1542] and [#1551].** PR [#1457] delivered
 [04-INF-4] and recorded three defects as ratcheted residue. They share one
@@ -2239,6 +2239,23 @@ before that declaration's own body has been checked, or fails to see that a
 reference will run while a value is being initialized. Each was confirmed
 from the code and, where the prebuilt binary predating [#1457] could reach
 it, by execution; the PP6 pull request body carries the probe transcript.
+
+**[#1854] explicit-binder follow-up (2026-09-17).** The original PP6 design
+preserved occurrence-based `defsig` binders because [04-INF-6] needed to make
+both explicit and implicit variables rigid. That choice is superseded by the
+numbered-spec decision in `spec/02` P4b, `spec/03` §2.2/§2.5.1, and `spec/04`
+§3.1.3/§5.8.1: a declaration's binder list is complete. Surf carries that
+complete list on its `defsig`; the resolver admits only listed `t-var`,
+`d-var`, and `d-rank` uses. Unlisted scalar/precision names remain `t-prim`,
+and unlisted variable nodes reject. Canonical Deep adds a structural
+binder-list child only for a polymorphic `defsig`; the two-child form is
+monomorphic. The implementation
+slice removes both implicit Surf collectors and the checker scan that rebuilt
+binders from type occurrences, makes resugaring preserve and validate the
+explicit list, migrates every accepted source/Deep fixture, and adds paired
+ingress plus CLI negatives for unknown dtype aliases and undeclared
+type/dimension/rank variables. No typo regex or compatibility admission path
+is part of the design.
 
 - [#1486], a compiled wrong answer. `def f(n: i32) = add(1, n)` desugars
   to a `defsig` whose result slot is `(t-var {} _)`
@@ -2265,7 +2282,8 @@ it, by execution; the PP6 pull request body carries the probe transcript.
   while the same reader after an anchor function rejects with
   `TypeMismatch`. The issue's diagnosis is exact. Its second half is the
   same mechanism through an authored binder: `def f[a](x: a) -> a =
-  add(x, 1)` and the implicit `def f(x: a) -> a = add(x, v)` both check
+  add(x, 1)` and the formerly implicit, now explicit
+  `def f[a](x: a) -> a = add(x, v)` both check
   clean, the body instance of `a` is bound to `i32`, and the registered
   scheme is the narrowed `(i32) -> i32`; the only rigidity check today is
   `check_declared_dvars_rigid`, for dimensions. Measured: a reader after the
@@ -2315,7 +2333,7 @@ carry the language rules; this section only implements them.
   body-determined signature wherever the reference sits. The alternative
   considered, one monomorphic variable shared by header, body, and readers,
   was rejected because a hole that the body resolves to a type mentioning
-  the declaration's own binders (`def f(x: tensor[n, f32]) = x`) would tie
+  the declaration's own binders (`def f[n](x: tensor[n, f32]) = x`) would tie
   the body instance of `n` to an outer-level variable and make the function
   monomorphic in `n` for the whole unit, a regression on a common partial
   header. [04-INF-5] instead keeps today's post-body scheme and forbids
@@ -2368,8 +2386,7 @@ it is honest**, where a complete or authored-binder header is honest by
    type it was narrowed to, in the shape of `check_declared_dvars_rigid`.
    The resolver already keys binder names to variables for dimensions
    (`record_declared_dim_names`); the same recording is added for type
-   binders so implicit binders (`def f(x: a) -> a`, no binder list) are
-   covered as well as `DeclaredSigMetadata.binders`. The registered scheme
+   binders listed by `DeclaredSigMetadata.binders`. The registered scheme
    is unchanged when the check passes, since an unnarrowed instance
    generalizes back to the declared signature.
 2. *Hole edge.* The schedule gains one edge kind: an item is inferred after
@@ -2431,10 +2448,12 @@ it is honest**, where a complete or authored-binder header is honest by
    `check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier`
    (`crates/chelis-cli/tests/issue_1134_forward_reference_cli.rs`) gains the
    reader-first layout at `check`, `eval`, and `build`. New regressions:
-   `def f[a](x: a) -> a = add(x, 1)` and `def f(x: a) -> a = add(x, 1)`
-   reject at the declaration with no reader present, a binder collapse
-   `def g[a, b](x: a, y: b) -> a = y` rejects, and `def id(x: a) -> a = x`,
-   `def k(x: a) = x`, and a bounded `[p: Float]` body written with
+   `def f[a](x: a) -> a = add(x, 1)` rejects at the declaration with no
+   reader present, while the unlisted spelling rejects earlier as an unknown
+   type name; a binder collapse
+   `def g[a, b](x: a, y: b) -> a = y` rejects, and
+   `def id[a](x: a) -> a = x`, `def k[a](x: a) = x`, and a bounded
+   `[p: Float]` body written with
    `cast(0.0, p)` stay accepted. `schedule_invariants.rs`'s generator
    declares whether a function's signature has a hole, `reference()` emits
    the hole edge for every reader position, and a named regression pins
@@ -3946,7 +3965,7 @@ is also separate.
 | PP5 (partial) | [#668]; unification is the one rank authority for elementwise tensor operands, at both ingresses, and the identity-rank side channel that ran beside it on `check_ir_program` only is deleted (D8 PR A). The claim covers the operations the PP5 oracle spells, not an enumerated registry; see PP5. The tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. The residue is routed: [#597] (the runtime lanes execute `expand` as the unit-extent broadcast the language assigns, with §2.4.1's guard, which S2b landed), [#1512] (reductions over a genuinely unresolved operand), and [#1506] (comparison scalar rewrite, PR B); the row stays partial until the acceptance list in PP5 holds |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
-| PP6 | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), and [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses) are delivered with the shared-graph, schedule, paired-ingress, and CLI oracles |
+| PP6 | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), and [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses) are delivered with the shared-graph, schedule, paired-ingress, and CLI oracles. [#1854] is the explicit-binder follow-up: Surf and Deep declarations carry complete binder lists and undeclared type/dimension/rank variables reject |
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. PP9 closes the separately owned pass-set axis; the unswept guarded-arm inventory remains outside PP7's claim |
 | [#1134] forward-reference parity | both checker ingresses reject eager forward values, accept backward values from value initializers and function bodies where allowed, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference and every [04-INF-7] eager value cycle identically; the schedule's order invariants are asserted directly |
 | PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
@@ -3967,7 +3986,7 @@ is also separate.
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
 | 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule infers an eager value before any function that legally reads it, using only reference edges over the hoist order so a program without such a read keeps its previous grouped order. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
 | 10 | whether a wildcard slot in a signature is a polymorphic binder, and what a reference sees before the declaration's body is inferred | DECIDED 2026-09-03: a hole, never quantified; every reference is typed at the body-determined signature wherever it sits, so readers of a hole-signature function are scheduled after its body in every region. A shared monomorphic hole was rejected because it makes a partial header monomorphic in its own dimension binders | [04-INF-5] + PP6 |
-| 11 | whether a body may narrow an authored type binder | DECIDED 2026-09-03: no; the user confirmed the rigid rule and accepted the ten-site stdlib migration (`cast(lit, p)` plus bundle regeneration) that it costs. Explicit and implicit binders are rigid in the body, as dimension parameters already are under §4.4; the scheme is the declared signature. Ten stdlib declarations that narrow a bounded binder with an unsuffixed literal migrate to `cast(literal, p)` | [04-INF-6] + PP6 |
+| 11 | whether a body may narrow an authored type binder | DECIDED 2026-09-03: no; the user confirmed the rigid rule and accepted the ten-site stdlib migration (`cast(lit, p)` plus bundle regeneration) that it costs. Explicit binders are rigid in the body, as dimension parameters already are under §4.4; the scheme is the declared signature. Ten stdlib declarations that narrow a bounded binder with an unsuffixed literal migrate to `cast(literal, p)`. The 2026-09-17 [#1854] decision removed implicit binders rather than weakening rigidity | [04-INF-6] + PP6 |
 | 12 | which references inside a top-level value's initializer are eager for cycle detection | DECIDED 2026-09-03: all of them, lambda bodies included, transitively through every referenced top-level declaration, with an applied value required like a read one. The argument-position refinement was rejected as unsound for stored and returned closures; the over-rejection is accepted and is already the detector's treatment of a bare function reference | [04-INF-7] + PP6 |
 | 13 | whether one checker entry may check a program the other does not, when the difference is which admitted carrier represents it | DECIDED 2026-09-03: no. Verdict is independent of entry and of carrier. Normalizing at the one non-normalizing entry is rejected as the mechanism because three of the seven probed divergences live outside every checker entry (`prune.rs` before the check, `tier_b_lower.rs` and `count_invariant_opaque_deep` after it); the reader, not the entry, is the unit that must be total. A carrier a reader cannot decode is diagnosed, never observed as empty | [04-TOT-5] + PP7 |
 | 14 | whether the seven comparison identities admit a scalar beside a tensor ([#1506]) | DECIDED 2026-09-03: no; the checker rejects and the spec wins. `[05-OP-36]` ("Mixed surfaces ... are type errors"), `spec/05` §1.2, and `spec/04` §4.2-§4.3 already decide it, and `add`/`max_elem` reject the same pair today, the `spec/05` §2.1 prose above `[05-OP-40]` naming their scalar form "the rank-zero instance of the tensor rule, not scalar/tensor broadcasting". The rewrite at `infer/app.rs:457-506` goes; the three accepting `issue5_cmp_broadcast_both_forms` rows and `coral_comparison_ops_broadcast_tensor_scalar` become negative controls; scalar-scalar and same-shape tensor-tensor forms stay; the diagnostic names `[05-OP-36]` and the explicit `expand(to_tensor([c]), axis, shape(x, axis))` spelling. ALTERNATIVE, not taken and requiring the user's explicit choice: amend `[05-OP-36]` to admit one active-numeric scalar beside one tensor of the same dtype, comparing every element against the scalar and returning `tensor[D, bool]`. Its cost: it contradicts §1.2's "hard rule" and §4.2's rationale; it must explain why comparison broadcasts when `add`, `max_elem`, and `[05-OP-17..19]` do not, or extend them too; it leaves a rank-0 tensor beside a tensor undecided; the evaluator already implements it, so the runtime cost is nil; and Coral depends on the accepting behaviour today (`coral_prerequisites.rs:315`), so the rejection has a downstream migration cost that the alternative avoids. Sequencing under the decision taken: the explicit spelling executes as an insertion on every lane until [#597] closes (Slice B2a item b2.5 for C, Slice B2h for eval), so PR B of PP5 D8 lands after both or states the gap | PP5 D4/D8 + `[05-OP-36]` |
@@ -3978,6 +3997,7 @@ is also separate.
 | 19 | whether an eager value may initialize through a function or nested lambda that reaches a later non-function value | DECIDED 2026-09-04: no. Every non-function value in the initiating value's [04-INF-7] eager-reference set is compared with the initiating value's source position; an acyclic later member is `UnboundVariable`, while a return to the origin is `CycleDetected`. Dependency-ordering whole initializers was rejected because top-level effects and traps make it observably different from eval's demand forcing; the implementation follows PP6 B/C and reuses their single graph | [04-INF-8] + [#1339] frontier section |
 | 20 | which of the two checker pass sets is correct, and whether one shared driver replaces the two inference functions | DECIDED 2026-09-08 and IMPLEMENTED 2026-09-16: union plus dispositions. All four entries run the spec-required surviving checks through `validate_semantic_program`; `report_initialization_errors` lives there, `chelis_deep::validate` is deleted as a duplicate, and stamped input is preserved rather than normalized. [05-OP-51] owns convolution's static-versus-runtime domain split. Five backend-capability restrictions (termination, symbolic conv metadata, `mean` and `layer_norm` axis concreteness, and conv's literal-operand demand) relocate to [#730]. Both drivers use declaration-local external-input prebinding under [04-INF-4] and defsig-less function-header prebinding under [04-INF-2]/[04-INF-3]; body metadata never publishes an eager value. Union alone and union plus normalization remain rejected by the measured contract and carrier failures | [04-TOT-5] + PP9 |
 | 21 | whether a borrow's target type is decided at the borrow arm or after def-level resolution, and whether the #256 deferred classification survives [04-INF-6] ([#1589]) | DECIDED by `spec/04` §8.2, which already states it: the inner "must be — or must ultimately resolve to — a tensor or a tensor-carrying value", and classification is deferred when it is not yet known. No language decision is open. The reading that a borrow is decided where it is written is REFUTED by execution: disabling `validate_deferred_borrow_vars` makes `def use_it[a](seed: a) -> bool = { v = seed  consume_any(&v) }` score 1.00 with no errors, reopening the #256 round-2 unsoundness, and turns all three of the suite's deferred-path tests red, so the validator is live code and its two acceptance tests were merely relabelled by [#1542]. The issue's original premise that an inferred parameter "rejects at the borrow arm" is also wrong: measured, the borrow arm defers, the validator resolves it `sound=true`, and the 0.80 `InvalidBorrow` comes from linearity's `check_borrow_arg`, which failed closed because `expr_type` returns `None` for a `(var ..)` node whose parameter annotation is a synthesized hole. The repair reads the resolved `&T` the annotate pass already stamps on the `borrow` node. Rows C/E/F/G of the [#1589] header matrix become accepted regression rows; rows I/J/K stay rejected as locks on the validator's reject branch; §8.2's `relu` example is corrected, because unresolved dimension variables never reach the deferral | `spec/04` §8.2 + PP6 residue |
+| 22 | whether a `defsig` occurrence may introduce a type, dimension, or rank binder | DECIDED 2026-09-17 for [#1854]: no. Surf's `[..]` list and Deep's structural `defsig` binder-list child are the only authored declaration-binder sources. Unlisted variable nodes reject; unknown scalar/precision names remain primitive requests and receive an unknown-dtype diagnostic with a nearest active spelling. The regex/alias heuristic alternative is rejected because it leaves an open typo class | spec/02 P4b + spec/03 §2.2/§2.5.1 + spec/04 §3.1.3/§5.8.1 + PP6 |
 
 ## Contract summary
 
