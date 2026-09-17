@@ -95,13 +95,16 @@ fn build_to_c(source: &str, name: &str) -> String {
     fs::read_to_string(&c_path).expect("read generated c")
 }
 
-/// Return the injective C symbol emitted for an authored Chelis definition.
+/// Return the C symbol emitted for an authored Chelis definition.
 ///
-/// Authored names never borrow their source spelling: each UTF-8 byte is
-/// encoded under the `chelis_fn_` namespace. Keep all sparse-summary oracle
-/// lookups on that emitted identity so a source-spelled decoy cannot satisfy a
-/// positive or negative assertion.
-fn authored_c_symbol(source_name: &str) -> String {
+/// Ordinary authored names never borrow their source spelling: each UTF-8 byte
+/// is encoded under the `chelis_fn_` namespace. Source-level `main` is the
+/// exact exception: the C emitter qualifies it with the generated program
+/// symbol so it cannot collide with the observation entry point.
+fn emitted_function_symbol(program_symbol: &str, source_name: &str) -> String {
+    if source_name == "main" {
+        return format!("{program_symbol}__main");
+    }
     let mut symbol = String::from("chelis_fn_");
     for byte in source_name.bytes() {
         symbol.push_str(&format!("{byte:02x}"));
@@ -109,12 +112,18 @@ fn authored_c_symbol(source_name: &str) -> String {
     symbol
 }
 
-fn owned_body_symbol(source_name: &str) -> String {
-    format!("{}__chelis_owned_body", authored_c_symbol(source_name))
+fn owned_body_symbol(program_symbol: &str, source_name: &str) -> String {
+    format!(
+        "{}__chelis_owned_body",
+        emitted_function_symbol(program_symbol, source_name)
+    )
 }
 
-fn tensor_helper_prefix(source_name: &str) -> String {
-    format!("static void {}__tensor_", authored_c_symbol(source_name))
+fn tensor_helper_prefix(program_symbol: &str, source_name: &str) -> String {
+    format!(
+        "static void {}__tensor_",
+        emitted_function_symbol(program_symbol, source_name)
+    )
 }
 
 /// Slice the generated C between the start of a `chelis_tensor* <fn>(`
@@ -125,12 +134,12 @@ fn tensor_helper_prefix(source_name: &str) -> String {
 /// Returns the substring from the `chelis_tensor* <fn>(` definition
 /// header up to the matching closing `}`. Panics if the function
 /// definition is not present in `c`.
-fn function_body(c: &str, source_name: &str) -> String {
+fn function_body(c: &str, program_symbol: &str, source_name: &str) -> String {
     // Phase 2 gives every externally callable owned-formal function a
     // borrowing artifact adapter plus a consuming implementation body. Sparse
     // lowering belongs to the latter; inspecting the adapter would only test
     // its required retain-and-forward boundary.
-    let function = owned_body_symbol(source_name);
+    let function = owned_body_symbol(program_symbol, source_name);
     let needle = format!("chelis_tensor* {function}(");
     // Find the definition: the prototype ends with `;`, the
     // definition with `{`. Scan candidate positions.
@@ -218,8 +227,8 @@ fn body_contains_tensor_helper_call(body: &str) -> bool {
 /// `true` when the caller body forwards to a sibling host function
 /// via `__result = <callee>(...);` — the C call-site fallback used
 /// when no function-level summary is registered.
-fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
-    body.contains(&format!("= {}(", owned_body_symbol(callee)))
+fn body_contains_host_function_call(body: &str, program_symbol: &str, callee: &str) -> bool {
+    body.contains(&format!("= {}(", owned_body_symbol(program_symbol, callee)))
 }
 
 // =========================================================================
@@ -228,13 +237,16 @@ fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
 
 #[test]
 fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
+    let program = "sparse_gather_user_def";
     let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
                   def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
+                  -> tensor[64, 128, f32] = my_g(table, indices)\n\
+                  def main(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
-    let c = build_to_c(source, "sparse_gather_user_def");
+    let c = build_to_c(source, program);
 
-    let f_body = function_body(&c, "f");
+    let f_body = function_body(&c, program, "f");
     assert!(
         body_contains_inline_gather_loop(&f_body),
         "user-def wrapper `f` MUST recover the inline sparse-gather loop \
@@ -251,7 +263,7 @@ fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
     // its body is a single gather (its `HostTensorSpecialization` is
     // SparseGather, so `assign_tensor_call` inlines the loop instead
     // of calling its own tensor helper).
-    let my_g_body = function_body(&c, "my_g");
+    let my_g_body = function_body(&c, program, "my_g");
     assert!(
         body_contains_inline_gather_loop(&my_g_body),
         "inner def `my_g` MUST inline the sparse-gather loop via its \
@@ -263,14 +275,22 @@ fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
     // `cross_function_specialization.md`: the helper body is still
     // available even when callsites bypass it.
     assert!(
-        c.contains(&tensor_helper_prefix("my_g")),
+        c.contains(&tensor_helper_prefix(program, "my_g")),
         "generated tensor helper `my_g__tensor_*` MUST still be emitted \
          for debug/non-summary callers; not found in generated C"
+    );
+
+    let main_body = function_body(&c, program, "main");
+    assert!(
+        body_contains_inline_gather_loop(&main_body),
+        "source-level `main` MUST resolve through its module-qualified emitted \
+         symbol and recover the inline sparse-gather loop. Body:\n{main_body}"
     );
 }
 
 #[test]
 fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
+    let program = "sparse_scatter_add_pentaop";
     // ScatterAdd has no surface form (it is only produced by AD
     // adjoint of `gather`), so this fixture cannot drive it through
     // the surface `def` path today. Instead we lock the negative
@@ -295,8 +315,8 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
                   def f(base: tensor[10, 4, f32], bin_ids: tensor[64, i64], \
                   updates: tensor[64, 4, f32]) -> tensor[10, 4, f32] = \
                   my_sa(base, bin_ids, updates)\n";
-    let c = build_to_c(source, "sparse_scatter_add_pentaop");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
 
     // The host-lane `scatter(..., "add")` pentaop is the generic
     // path: no inline sparse-add loop, no tensor-lane ScatterAdd
@@ -307,7 +327,7 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
          must NOT register a tensor-lane ScatterAdd summary. Body:\n{f_body}"
     );
     assert!(
-        body_contains_host_function_call(&f_body, "my_sa"),
+        body_contains_host_function_call(&f_body, program, "my_sa"),
         "wrapper `f` must fall back to a host function call to `my_sa`; \
          body:\n{f_body}"
     );
@@ -315,14 +335,15 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
 
 #[test]
 fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
+    let program = "sparse_scatter_replace_user_def";
     let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
                   def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
-    let c = build_to_c(source, "sparse_scatter_replace_user_def");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
 
     assert!(
         body_contains_inline_scatter_replace_loop(&f_body),
@@ -341,7 +362,7 @@ fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
          accumulation (which would be ScatterAdd). Body:\n{f_body}"
     );
 
-    let my_sr_body = function_body(&c, "my_sr");
+    let my_sr_body = function_body(&c, program, "my_sr");
     assert!(
         body_contains_inline_scatter_replace_loop(&my_sr_body),
         "inner def `my_sr` MUST inline the scatter-replace loop via \
@@ -349,7 +370,7 @@ fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
     );
 
     assert!(
-        c.contains(&tensor_helper_prefix("my_sr")),
+        c.contains(&tensor_helper_prefix(program, "my_sr")),
         "generated tensor helper `my_sr__tensor_*` MUST still be emitted \
          for debug/non-summary callers"
     );
@@ -357,16 +378,17 @@ fn user_def_scatter_replace_helper_emits_inline_sparse_scatter_replace_loop() {
 
 #[test]
 fn nested_user_def_gather_wrapper_chain_emits_inline_sparse_gather_loop() {
+    let program = "sparse_gather_nested_user_def";
     let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
                   def wrap_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n\
                   def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = wrap_g(table, indices)\n";
-    let c = build_to_c(source, "sparse_gather_nested_user_def");
+    let c = build_to_c(source, program);
 
-    let f_body = function_body(&c, "f");
-    let wrap_body = function_body(&c, "wrap_g");
+    let f_body = function_body(&c, program, "f");
+    let wrap_body = function_body(&c, program, "wrap_g");
     assert!(
         body_contains_inline_gather_loop(&f_body),
         "two-level nested wrapper `f` MUST recover the inline \
@@ -383,13 +405,14 @@ fn nested_user_def_gather_wrapper_chain_emits_inline_sparse_gather_loop() {
         "nested wrapper `f` MUST NOT fall back to helper marshaling"
     );
     assert!(
-        !body_contains_host_function_call(&f_body, "wrap_g"),
+        !body_contains_host_function_call(&f_body, program, "wrap_g"),
         "nested wrapper `f` MUST NOT fall back to a host call to `wrap_g`"
     );
 }
 
 #[test]
 fn nested_user_def_scatter_replace_wrapper_chain_emits_inline_loop() {
+    let program = "sparse_scatter_replace_nested_user_def";
     let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
@@ -399,16 +422,16 @@ fn nested_user_def_scatter_replace_wrapper_chain_emits_inline_loop() {
                   def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   wrap_sr(table, indices, updates)\n";
-    let c = build_to_c(source, "sparse_scatter_replace_nested_user_def");
+    let c = build_to_c(source, program);
 
-    let f_body = function_body(&c, "f");
+    let f_body = function_body(&c, program, "f");
     assert!(
         body_contains_inline_scatter_replace_loop(&f_body),
         "two-level nested wrapper `f` MUST recover the inline \
          scatter-replace loop. Body:\n{f_body}"
     );
     assert!(
-        !body_contains_host_function_call(&f_body, "wrap_sr"),
+        !body_contains_host_function_call(&f_body, program, "wrap_sr"),
         "nested wrapper `f` MUST NOT fall back to a host call to `wrap_sr`"
     );
 }
@@ -419,6 +442,7 @@ fn nested_user_def_scatter_replace_wrapper_chain_emits_inline_loop() {
 
 #[test]
 fn rejected_helper_with_extra_op_after_sparse_falls_back_to_host_call() {
+    let program = "sparse_reject_extra_op";
     // Helper post-processes the gather result with an elementwise
     // add. The helper DAG root is `add`, not `gather`, so the
     // summarizer rejects (root op is not Gather/ScatterAdd/Scatter).
@@ -428,8 +452,8 @@ fn rejected_helper_with_extra_op_after_sparse_falls_back_to_host_call() {
                   def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   bad(table, indices, zero)\n";
-    let c = build_to_c(source, "sparse_reject_extra_op");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
 
     // No false-positive summary: the caller body must NOT inline
     // the sparse-gather loop.
@@ -440,7 +464,7 @@ fn rejected_helper_with_extra_op_after_sparse_falls_back_to_host_call() {
     );
     // Fallback observed: the caller emits a host call to `bad`.
     assert!(
-        body_contains_host_function_call(&f_body, "bad"),
+        body_contains_host_function_call(&f_body, program, "bad"),
         "rejected helper's caller MUST fall back to a host function call \
          to the unspecialized helper. Body:\n{f_body}"
     );
@@ -448,6 +472,7 @@ fn rejected_helper_with_extra_op_after_sparse_falls_back_to_host_call() {
 
 #[test]
 fn rejected_helper_with_intermediate_op_on_operand_falls_back() {
+    let program = "sparse_reject_non_load_operand";
     // Helper inserts an `add` on the values operand before the
     // gather. The Gather node's first input is `add(table, zero)`,
     // not a direct `Load`, so the summarizer rejects (operand is
@@ -458,8 +483,8 @@ fn rejected_helper_with_intermediate_op_on_operand_falls_back() {
                   def f(table: tensor[1000, 128, f32], zero: tensor[1000, 128, f32], \
                   indices: tensor[64, i64]) -> tensor[64, 128, f32] = \
                   bad(table, zero, indices)\n";
-    let c = build_to_c(source, "sparse_reject_non_load_operand");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
 
     assert!(
         !body_contains_inline_gather_loop(&f_body),
@@ -467,7 +492,7 @@ fn rejected_helper_with_intermediate_op_on_operand_falls_back() {
          register a summary on the caller. Body:\n{f_body}"
     );
     assert!(
-        body_contains_host_function_call(&f_body, "bad"),
+        body_contains_host_function_call(&f_body, program, "bad"),
         "rejected helper's caller MUST fall back to a host call. \
          Body:\n{f_body}"
     );
@@ -475,6 +500,7 @@ fn rejected_helper_with_intermediate_op_on_operand_falls_back() {
 
 #[test]
 fn rejected_helper_with_two_branches_falls_back() {
+    let program = "sparse_reject_multiple_return_paths";
     // Helper body returns one of two gather results based on a
     // boolean. The host-lane lowering produces an `If` HostExpr, not
     // a single tensor-helper call, so no `TensorCall { helper, ... }`
@@ -488,11 +514,11 @@ fn rejected_helper_with_two_branches_falls_back() {
                   def f(flag: bool, table: tensor[1000, 128, f32], \
                   ind_a: tensor[64, i64], ind_b: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = bad(flag, table, ind_a, ind_b)\n";
-    let c = build_to_c(source, "sparse_reject_multiple_return_paths");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
 
     assert!(
-        body_contains_host_function_call(&f_body, "bad"),
+        body_contains_host_function_call(&f_body, program, "bad"),
         "rejected helper with multiple return paths MUST cause its \
          caller to emit a host call to `bad`. Body:\n{f_body}"
     );
@@ -567,6 +593,7 @@ fn rejected_top_level_gather_with_wildcard_dim_falls_back() {
 
 #[test]
 fn rejected_scatter_replace_with_extra_op_falls_back() {
+    let program = "sparse_reject_sr_extra_op";
     let source = "def bad(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32], zero: tensor[3, 2, f32]) \
                   -> tensor[3, 2, f32] = \
@@ -574,15 +601,15 @@ fn rejected_scatter_replace_with_extra_op_falls_back() {
                   def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32], zero: tensor[3, 2, f32]) \
                   -> tensor[3, 2, f32] = bad(table, indices, updates, zero)\n";
-    let c = build_to_c(source, "sparse_reject_sr_extra_op");
-    let f_body = function_body(&c, "f");
+    let c = build_to_c(source, program);
+    let f_body = function_body(&c, program, "f");
     assert!(
         !body_contains_inline_scatter_replace_loop(&f_body),
         "rejected scatter-replace helper MUST NOT register a summary. \
          Body:\n{f_body}"
     );
     assert!(
-        body_contains_host_function_call(&f_body, "bad"),
+        body_contains_host_function_call(&f_body, program, "bad"),
         "rejected scatter-replace helper's caller MUST fall back to a \
          host call. Body:\n{f_body}"
     );
@@ -616,12 +643,13 @@ fn checked_sparse_host_helpers_execute_nontrailing_exact_integer_domains() {
             ],
         ),
     ] {
+        let program = "checked_sparse_host_source";
         let source = format!(
             "def inner(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = {op}\ndef outer(base: tensor[2,3,i64], indices: tensor[2,i64], updates: tensor[2,2,i64]) -> tensor[{result_shape},i64] = inner(base,indices,updates)\nbase: tensor[2,3,i64] = reshape(to_tensor([9007199254740993i64,9007199254740994i64,9007199254740995i64,9007199254740996i64,9007199254740997i64,9007199254740998i64]),[2i64,3i64])\nindices: tensor[2,i64] = to_tensor([2i64,2i64])\nupdates: tensor[2,2,i64] = reshape(to_tensor([9007199254741001i64,9007199254741002i64,9007199254741003i64,9007199254741004i64]),[2i64,2i64])\nresult = outer(base,indices,updates)\n"
         );
         let source = chelis_surf::format::format_source(&source).unwrap();
-        let c = build_to_c(&source, "checked_sparse_host_source");
-        let body = function_body(&c, "outer");
+        let c = build_to_c(&source, program);
+        let body = function_body(&c, program, "outer");
         assert!(body_contains_checked_sparse_loop(
             &body,
             if op.starts_with("gather") {
