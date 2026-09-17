@@ -591,7 +591,7 @@ pub(super) fn infer_let(
                         }
                         Ok(()) => {}
                         Err(e) => {
-                            errors.push(CheckError::new(
+                            let mut diagnostic = CheckError::new(
                                 check_error_kind_from_type_error_kind(&e.kind),
                                 format!(
                                     "let-binding `{name}` ascription does not match RHS: {}",
@@ -601,7 +601,14 @@ pub(super) fn infer_let(
                                     "Declared type for `{name}` is {declared_ty}; \
                                      RHS inferred to {expr_ty}"
                                 )],
-                            ));
+                            );
+                            if let Some(location) =
+                                TypeDiagnosticLocation::from_expr(declared_ty_expr)
+                                    .or_else(|| TypeDiagnosticLocation::from_expr(rhs_expr))
+                            {
+                                diagnostic = location.attach(diagnostic);
+                            }
+                            errors.push(diagnostic);
                         }
                     }
                     // On unify failure, bind `name` to the declared

@@ -743,7 +743,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Err(witness) => propagate(&witness),
         };
         if let Err(error) = unify(&result, &declared, subst) {
-            errors.push(CheckError::new(
+            let mut diagnostic = CheckError::new(
                 check_error_kind_from_type_error_kind(&error.kind),
                 format!(
                     "expression ascription does not match value: {}",
@@ -752,7 +752,13 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 vec![format!(
                     "Declared expression type is {declared}; inferred value type is {result}"
                 )],
-            ));
+            );
+            if let Some(location) = TypeDiagnosticLocation::from_expr(authored_type.expression())
+                .or_else(|| TypeDiagnosticLocation::from_expr(expr))
+            {
+                diagnostic = location.attach(diagnostic);
+            }
+            errors.push(diagnostic);
         }
         declared
     } else {

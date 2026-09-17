@@ -4,8 +4,8 @@
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
-use chelis_types::check_ir_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
+use chelis_types::{check_ir_program, check_typed_program};
 
 /// Parse → desugar → macro-expand → type-check, returning the full
 /// CheckError structs for inspection.
@@ -17,6 +17,54 @@ fn check_errors(source: &str) -> Vec<CheckError> {
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(rep) => rep.errors,
+    }
+}
+
+fn check_errors_at_both_ingresses(source: &str) -> Vec<(&'static str, Vec<CheckError>)> {
+    let decls = parse_str(source).expect("surf parse");
+    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
+        .expect("macro expand")
+        .into_exprs();
+    [
+        ("normalized IR", check_ir_program(&exprs)),
+        ("typed Deep", check_typed_program(&exprs)),
+    ]
+    .into_iter()
+    .map(|(ingress, result)| {
+        (
+            ingress,
+            match result {
+                Ok(_) => Vec::new(),
+                Err(report) => report.errors,
+            },
+        )
+    })
+    .collect()
+}
+
+fn assert_one_located_ascription_mismatch(source: &str, message_fragment: &str) {
+    for (ingress, errors) in check_errors_at_both_ingresses(source) {
+        let mismatches = errors
+            .iter()
+            .filter(|error| {
+                matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                    && error.message.contains(message_fragment)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "{ingress} must report one ascription mismatch: {errors:?}"
+        );
+        let error = mismatches[0];
+        assert!(
+            error.span_offset.is_some(),
+            "{ingress} ascription mismatch must carry span_offset: {error:?}"
+        );
+        assert!(
+            error.span_id.is_some(),
+            "{ingress} ascription mismatch must carry span_id: {error:?}"
+        );
     }
 }
 
@@ -345,5 +393,21 @@ def bad() -> f32 = nonexistent_var
         e.span_offset.unwrap() > 0,
         "span_offset should be non-zero; got: {}",
         e.span_offset.unwrap()
+    );
+}
+
+#[test]
+fn expression_ascription_mismatch_has_source_location_at_both_ingresses() {
+    assert_one_located_ascription_mismatch(
+        "def f(x: f32) -> i32 = (x : i32)\n",
+        "expression ascription does not match value",
+    );
+}
+
+#[test]
+fn let_ascription_mismatch_has_source_location_at_both_ingresses() {
+    assert_one_located_ascription_mismatch(
+        "def g(x: f32) -> i32 = {\n  y: i32 = x\n  y\n}\n",
+        "let-binding `y` ascription does not match RHS",
     );
 }
