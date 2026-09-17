@@ -619,6 +619,7 @@
         "grad_pruning_preserves_a_dead_except_for_trap_local_site",
         "host_evaluation_kernel_carries_the_same_local_ascription_site",
         "inferred_metadata_does_not_create_a_local_ascription_site",
+        "inserted_output_axis_and_observed_source_axis_are_independently_exact",
         "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
         "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
         "ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
@@ -630,7 +631,7 @@
         "untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
         "vmap_shifts_the_local_claim_and_initializer_axis_together"
       ],
-      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; selected runtime branches enforce their site, untaken runtime branches do not, inferred metadata creates no site, and malformed roles fail closed."
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inserted output axes remain distinct from their observed source axes, selected runtime branches enforce their site, untaken runtime branches do not, inferred metadata creates no site, and malformed roles fail closed."
     },
     {
       "phase": "b",
