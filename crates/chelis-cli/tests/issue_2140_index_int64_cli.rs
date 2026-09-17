@@ -75,7 +75,7 @@ fn direct_index_rejects_every_other_integer_width_in_cli() {
 }
 
 #[test]
-fn direct_index_rejects_non_integer_primitives_in_cli() {
+fn direct_index_rejects_active_non_integer_primitives_in_cli() {
     for index_type in ["f16", "bf16", "f32", "f64", "bool", "string"] {
         let source = format!("def pick(xs: List[i64], i: {index_type}) -> i64 = index(xs, i)\n");
         assert_index_type_rejected(index_type, &source, index_type);
