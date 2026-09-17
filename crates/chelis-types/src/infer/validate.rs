@@ -89,15 +89,19 @@ pub(super) fn validate_semantic_program(
 /// unshadowed top-level function declaration; local wrapper closures remain
 /// on their separately tested path. `grad` keeps its existing
 /// direct-inline-lambda path. `vmap` admits inline or locally bound lambdas
-/// only when every parameter is explicitly typed: otherwise the inference
-/// order can bind an untyped parameter to the unsliced operand. This keeps the
-/// checker from certifying a program whose evaluator could select a different
-/// callable or whose vmap parameter could have the wrong rank (#1887, #1952,
-/// #1954, #2109).
+/// only when every parameter has explicit structure on each path where the
+/// transform inserts an axis; an inference hole on such a path is still
+/// untyped. Otherwise the inference order can bind a parameter to the unsliced
+/// operand. This keeps the checker from certifying a program whose evaluator
+/// could select a different callable or whose vmap parameter could have the
+/// wrong rank (#1887, #1952, #1954, #2109).
 ///
 /// The walk is lexical rather than type-directed.  A local `loss` with the
 /// same function type as a top-level `loss` is exactly the #1954 hazard, so
 /// looking only at `Type::Fn` would recreate the silent global fallback.  The
+/// local values retain only the structural provenance this fence needs through
+/// transparent `let`, tuple, and tuple-projection flow; each binder replaces
+/// the previous value so lexical order and shadowing stay explicit. The
 /// normative transformation semantics remain in spec/06; the release
 /// supported-fragment document records this temporary admission fence.
 fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
@@ -117,33 +121,32 @@ fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut Diagnosti
 
 #[derive(Clone, Default)]
 struct CoreTransformScope {
-    local_names: UnordSet<String>,
-    direct_function_aliases: UnordSet<String>,
-    untyped_vmap_lambdas: UnordSet<String>,
+    local_values: UnordMap<String, CoreTransformValue>,
 }
 
 impl CoreTransformScope {
-    fn bind_local(&mut self, name: String, binding: CoreTransformBinding) {
-        self.direct_function_aliases.remove(&name);
-        self.untyped_vmap_lambdas.remove(&name);
-        match binding {
-            CoreTransformBinding::Ordinary => {}
-            CoreTransformBinding::TopLevelFunctionAlias => {
-                self.direct_function_aliases.insert(name.clone());
-            }
-            CoreTransformBinding::UntypedVmapLambda => {
-                self.untyped_vmap_lambdas.insert(name.clone());
-            }
-        }
-        self.local_names.insert(name);
+    fn bind_local(&mut self, name: String, value: CoreTransformValue) {
+        self.local_values.insert(name, value);
     }
 }
 
-#[derive(Clone, Copy)]
-enum CoreTransformBinding {
+#[derive(Clone, Default)]
+enum CoreTransformValue {
+    #[default]
     Ordinary,
     TopLevelFunctionAlias,
     UntypedVmapLambda,
+    Tuple(Vec<CoreTransformValue>),
+}
+
+impl CoreTransformValue {
+    fn aliases_top_level_function(&self) -> bool {
+        matches!(self, Self::TopLevelFunctionAlias)
+    }
+
+    fn is_untyped_vmap_lambda(&self) -> bool {
+        matches!(self, Self::UntypedVmapLambda)
+    }
 }
 
 fn collect_top_level_function_names(exprs: &[deep::Expr]) -> UnordSet<String> {
@@ -226,7 +229,7 @@ fn walk_core_transform_targets(
             {
                 for param in params {
                     if let Some(name) = param_name_for_refs(param) {
-                        scoped.bind_local(name, CoreTransformBinding::Ordinary);
+                        scoped.bind_local(name, CoreTransformValue::Ordinary);
                     }
                 }
             }
@@ -267,18 +270,17 @@ fn walk_core_transform_targets(
             }
             let mut scoped = lexical_scope.clone();
             if let Some(name) = bind_children.first().and_then(symbol_name) {
-                let binding =
-                    bind_children
-                        .get(1)
-                        .map_or(CoreTransformBinding::Ordinary, |value| {
-                            classify_local_transform_binding(
-                                value,
-                                top_level_functions,
-                                module_function_aliases,
-                                lexical_scope,
-                            )
-                        });
-                scoped.bind_local(name.to_string(), binding);
+                let value = bind_children
+                    .get(1)
+                    .map_or(CoreTransformValue::Ordinary, |value| {
+                        classify_core_transform_value(
+                            value,
+                            top_level_functions,
+                            module_function_aliases,
+                            lexical_scope,
+                        )
+                    });
+                scoped.bind_local(name.to_string(), value);
             }
             if let Some(body) = children.get(1) {
                 walk_core_transform_targets(
@@ -314,7 +316,7 @@ fn walk_core_transform_targets(
                 let mut scoped = lexical_scope.clone();
                 if let Some(pattern) = arm_children.first() {
                     for name in pattern_names_for_signature(pattern).to_sorted() {
-                        scoped.bind_local(name.clone(), CoreTransformBinding::Ordinary);
+                        scoped.bind_local(name.clone(), CoreTransformValue::Ordinary);
                     }
                 }
                 for child in arm_children.iter().skip(1) {
@@ -374,62 +376,169 @@ fn direct_module_function_alias(
     })
 }
 
-fn direct_unshadowed_top_level_function(
-    expr: &deep::Expr,
-    top_level_functions: &UnordSet<String>,
-    module_function_aliases: &UnordSet<String>,
-    lexical_scope: &CoreTransformScope,
-) -> bool {
-    stamped_parts(expr).is_some_and(|(tag, _, children)| {
-        tag == DeepTag::Var
-            && children.first().and_then(symbol_name).is_some_and(|name| {
-                (top_level_functions.contains(name) && !lexical_scope.local_names.contains(name))
-                    || (module_function_aliases.contains(name)
-                        && !lexical_scope.local_names.contains(name))
-                    || lexical_scope.direct_function_aliases.contains(name)
-            })
-    })
-}
-
-fn classify_local_transform_binding(
+/// Preserve the transform-relevant identity of a local value through the
+/// transparent forms produced by Surf block and tuple-destructuring lowering.
+///
+/// This deliberately is not general value inference: applications, branches,
+/// records, and arbitrary computation collapse to `Ordinary`. The fence only
+/// needs to retain a callable already known to be unsupported while it flows
+/// through lexical aliases or a statically selected tuple component.
+fn classify_core_transform_value(
     value: &deep::Expr,
     top_level_functions: &UnordSet<String>,
     module_function_aliases: &UnordSet<String>,
     lexical_scope: &CoreTransformScope,
-) -> CoreTransformBinding {
-    if direct_unshadowed_top_level_function(
+) -> CoreTransformValue {
+    stack_guard!(
+        "classify_core_transform_value",
         value,
-        top_level_functions,
-        module_function_aliases,
-        lexical_scope,
-    ) {
-        CoreTransformBinding::TopLevelFunctionAlias
-    } else if inline_vmap_has_untyped_parameter(Some(value))
-        || direct_untyped_vmap_lambda_alias(value, lexical_scope)
-    {
-        CoreTransformBinding::UntypedVmapLambda
-    } else {
-        CoreTransformBinding::Ordinary
+        CoreTransformValue::Ordinary
+    );
+    if let deep::Expr::MetaExpr(meta, _) = value {
+        return classify_core_transform_value(
+            &meta.expr,
+            top_level_functions,
+            module_function_aliases,
+            lexical_scope,
+        );
+    }
+    let Some((tag, _, children)) = stamped_parts(value) else {
+        return CoreTransformValue::Ordinary;
+    };
+    match tag {
+        DeepTag::Fn if vmap_lambda_has_untyped_parameter(Some(value)) => {
+            CoreTransformValue::UntypedVmapLambda
+        }
+        DeepTag::Var => {
+            let Some(name) = children.first().and_then(symbol_name) else {
+                return CoreTransformValue::Ordinary;
+            };
+            lexical_scope
+                .local_values
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if top_level_functions.contains(name) || module_function_aliases.contains(name)
+                    {
+                        CoreTransformValue::TopLevelFunctionAlias
+                    } else {
+                        CoreTransformValue::Ordinary
+                    }
+                })
+        }
+        DeepTag::Tuple => CoreTransformValue::Tuple(
+            children
+                .iter()
+                .map(|child| {
+                    classify_core_transform_value(
+                        child,
+                        top_level_functions,
+                        module_function_aliases,
+                        lexical_scope,
+                    )
+                })
+                .collect(),
+        ),
+        DeepTag::TupleGet => {
+            let (Some(tuple), Some(index)) =
+                (children.first(), children.get(1).and_then(tuple_get_index))
+            else {
+                return CoreTransformValue::Ordinary;
+            };
+            let CoreTransformValue::Tuple(elements) = classify_core_transform_value(
+                tuple,
+                top_level_functions,
+                module_function_aliases,
+                lexical_scope,
+            ) else {
+                return CoreTransformValue::Ordinary;
+            };
+            elements.get(index).cloned().unwrap_or_default()
+        }
+        DeepTag::Let => {
+            let Some((DeepTag::Bind, _, bind_children)) = children.first().and_then(stamped_parts)
+            else {
+                return CoreTransformValue::Ordinary;
+            };
+            let (Some(name), Some(bound_value), Some(body)) = (
+                bind_children.first().and_then(symbol_name),
+                bind_children.get(1),
+                children.get(1),
+            ) else {
+                return CoreTransformValue::Ordinary;
+            };
+            let bound_value = classify_core_transform_value(
+                bound_value,
+                top_level_functions,
+                module_function_aliases,
+                lexical_scope,
+            );
+            let mut scoped = lexical_scope.clone();
+            scoped.bind_local(name.to_string(), bound_value);
+            classify_core_transform_value(
+                body,
+                top_level_functions,
+                module_function_aliases,
+                &scoped,
+            )
+        }
+        _ => CoreTransformValue::Ordinary,
     }
 }
 
-fn direct_untyped_vmap_lambda_alias(expr: &deep::Expr, lexical_scope: &CoreTransformScope) -> bool {
-    stamped_parts(expr).is_some_and(|(tag, _, children)| {
-        tag == DeepTag::Var
-            && children
-                .first()
-                .and_then(symbol_name)
-                .is_some_and(|name| lexical_scope.untyped_vmap_lambdas.contains(name))
-    })
+/// Does a parameter annotation leave a type/rank hole on a path whose
+/// structure `vmap_transform_param_type` must rewrite?
+///
+/// This mirrors that transform's structural recursion: a whole inference
+/// hole, or one reached through a reference or tuple element, can still bind
+/// to the unsliced operand because `vmap` has no constructor at which to
+/// insert the batch axis. A rank inference hole has the same problem inside a
+/// tensor. Named type variables remain owned by the ordinary binder/resolver
+/// rules rather than receiving a duplicate fragment diagnostic.
+///
+/// Tensor dimension and precision holes are different. The tensor constructor
+/// and fixed number of dimension slots are already known, so `vmap` inserts
+/// the batch axis before those holes bind; dtype is preserved rather than
+/// transformed. Named rank binders remain owned by ordinary binder rules.
+/// Nominal and function types are shared, non-mapped values, so the transform
+/// does not recurse into their arguments.
+fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr) -> bool {
+    stack_guard!("vmap_parameter_type_has_unmapped_hole", ty, true);
+    if let deep::Expr::MetaExpr(meta, _) = ty {
+        return vmap_parameter_type_has_unmapped_hole(&meta.expr);
+    }
+    let Some((tag, _, children)) = stamped_parts(ty) else {
+        return false;
+    };
+    match tag {
+        DeepTag::TVar => {
+            matches!(children, [name] if symbol_name(name) == Some("_"))
+        }
+        DeepTag::TRef => children
+            .first()
+            .is_some_and(vmap_parameter_type_has_unmapped_hole),
+        DeepTag::TTuple => children.iter().any(vmap_parameter_type_has_unmapped_hole),
+        DeepTag::TTensor => children.split_last().is_some_and(|(_, dimensions)| {
+            dimensions.iter().any(|dimension| {
+                matches!(
+                    stamped_parts(dimension),
+                    Some((DeepTag::DRank, _, rank_children))
+                        if matches!(rank_children, [name]
+                            if symbol_name(name) == Some("_"))
+                )
+            })
+        }),
+        _ => false,
+    }
 }
 
 /// An inline or locally bound `vmap` lambda is safe on the release fragment
-/// when every parameter type is explicit. `infer_vmap` can then transform
-/// those types by inserting the mapped axis before the eventual application
-/// unifies them with the operands. Without an annotation, the lambda is
-/// inferred first and can instead bind to the unsliced operand (#1887,
-/// #2109).
-fn inline_vmap_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
+/// when every parameter has explicit transform-relevant type structure.
+/// `infer_vmap` can then insert the mapped axis before the eventual application
+/// unifies remaining dimension or precision variables with the operands.
+/// Without an annotation, or with an unmapped type/rank hole, the lambda can
+/// instead bind to the unsliced operand (#1887, #2109).
+fn vmap_lambda_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
     let Some((DeepTag::Fn, _, children)) = target.and_then(stamped_parts) else {
         return false;
     };
@@ -438,7 +547,10 @@ fn inline_vmap_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
     };
     params
         .iter()
-        .any(|param| !matches!(param_name_and_inline_type(param), Some((_, Some(_)))))
+        .any(|param| match param_name_and_inline_type(param) {
+            Some((_, Some(ty))) => vmap_parameter_type_has_unmapped_hole(&ty),
+            _ => true,
+        })
 }
 
 fn validate_core_transform_target(
@@ -456,14 +568,21 @@ fn validate_core_transform_target(
             .flatten()
     });
     let shadows_top_level = name.is_some_and(|name| {
-        top_level_functions.contains(name) && lexical_scope.local_names.contains(name)
+        top_level_functions.contains(name) && lexical_scope.local_values.contains_key(name)
     });
     let aliases_top_level_function = name.is_some_and(|name| {
-        lexical_scope.direct_function_aliases.contains(name)
+        lexical_scope
+            .local_values
+            .get(name)
+            .is_some_and(CoreTransformValue::aliases_top_level_function)
             || module_function_aliases.contains(name)
     });
-    let aliases_untyped_vmap_lambda =
-        name.is_some_and(|name| lexical_scope.untyped_vmap_lambdas.contains(name));
+    let aliases_untyped_vmap_lambda = name.is_some_and(|name| {
+        lexical_scope
+            .local_values
+            .get(name)
+            .is_some_and(CoreTransformValue::is_untyped_vmap_lambda)
+    });
 
     let requires_fence = match tag {
         // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
@@ -475,7 +594,7 @@ fn validate_core_transform_target(
         // the pre-transform function type, so they remain supported.
         // Aliases get the same direct-name fence as `grad`.
         DeepTag::Vmap => {
-            inline_vmap_has_untyped_parameter(target)
+            vmap_lambda_has_untyped_parameter(target)
                 || aliases_untyped_vmap_lambda
                 || shadows_top_level
                 || aliases_top_level_function
@@ -497,11 +616,11 @@ fn validate_core_transform_target(
             "the core transform fragment rejects this `{transform}` target: local aliases \
              and shadowing bindings must be direct, unshadowed top-level function \
              declarations, and inline or locally bound `vmap` parameters must be \
-             explicitly typed (chelis#1887, #1952, #1954, #2109)"
+             explicit on every mapped type path (chelis#1887, #1952, #1954, #2109)"
         ),
         vec![
             format!("Define a top-level function and write `{transform}(that_function)`."),
-            "For an inline or locally bound `vmap` lambda, give every parameter an explicit type."
+            "For an inline or locally bound `vmap` lambda, give every mapped parameter path an explicit type and rank."
                 .to_string(),
             "The rejected callable form is outside the Chelis 0.19 core fragment.".to_string(),
         ],
@@ -1873,6 +1992,113 @@ pub(super) fn totality_violation_error(traces: &[String]) -> CheckError {
         ),
         vec![],
     )
+}
+
+#[cfg(test)]
+mod core_transform_fragment_tests {
+    use super::*;
+
+    fn deep_type(source: &str) -> deep::Expr {
+        let mut parsed = chelis_deep::parser::parse_str(source).expect("canonical Deep type");
+        assert_eq!(parsed.len(), 1, "one Deep type expression");
+        parsed.remove(0)
+    }
+
+    #[test]
+    fn vmap_parameter_holes_follow_only_transform_relevant_type_structure() {
+        let cases = [
+            ("whole type hole", "(t-var {} _)", true),
+            ("authored bare type variable", "(t-var {} a)", false),
+            ("reference inner type hole", "(t-ref {} (t-var {} _))", true),
+            (
+                "tuple element type hole",
+                "(t-tuple {} (t-prim {} i32) (t-var {} _))",
+                true,
+            ),
+            (
+                "tensor rank hole",
+                "(t-tensor {} (d-rank {} _) (t-prim {} f32))",
+                true,
+            ),
+            (
+                "tensor dimension hole",
+                "(t-tensor {} (d-var {} _) (t-prim {} f32))",
+                false,
+            ),
+            (
+                "tensor precision hole",
+                "(t-tensor {} (d-lit {} 4) (t-var {} _))",
+                false,
+            ),
+            (
+                "named tensor rank binder",
+                "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+                false,
+            ),
+            (
+                "shared nominal type hole",
+                "(t-adt {} List (t-var {} _))",
+                false,
+            ),
+            (
+                "shared function type hole",
+                "(t-fn {} (t-var {} _) (t-unit {}))",
+                false,
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            assert_eq!(
+                vmap_parameter_type_has_unmapped_hole(&deep_type(source)),
+                expected,
+                "{name}: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries() {
+        let bare_type_variable = "out = vmap(fn (v: a) -> v)(to_tensor([[1.0f32]]))\n";
+        let declarations =
+            chelis_surf::parser::parse_str(bare_type_variable).expect("bare type variable parses");
+        let program = chelis_surf::desugar::desugar_program(&declarations);
+        let result = crate::infer_program(&program);
+        assert!(
+            result.errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::TypeMismatch)
+                    && error.message.contains("undeclared type variable `a`")
+            }),
+            "Surf bare type variables remain owned by type resolution: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("core transform fragment")),
+            "the vmap fence must not steal an undeclared type variable: {:?}",
+            result.errors
+        );
+
+        let precision_hole = "out = vmap(fn (v: tensor[4, _]) -> v)(to_tensor([[1.0f32]]))\n";
+        assert!(
+            chelis_surf::parser::parse_str(precision_hole).is_err(),
+            "Surf requires a named tensor precision"
+        );
+
+        let rank_hole = "out = vmap(fn (v: tensor[.._, f32]) -> v)(to_tensor([[1.0f32]]))\n";
+        assert!(
+            chelis_surf::parser::parse_str(rank_hole).is_err(),
+            "Surf requires a named rank spread"
+        );
+
+        let dimension_hole = "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+             vmap(fn (v: tensor[_, 3, f32]) -> sum(v, 0i32))(t)\n";
+        assert!(
+            chelis_surf::parser::parse_str(dimension_hole).is_err(),
+            "Surf dimension `_` must be rejected before desugaring"
+        );
+    }
 }
 
 #[cfg(test)]

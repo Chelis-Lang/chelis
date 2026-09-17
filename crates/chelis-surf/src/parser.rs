@@ -3300,6 +3300,14 @@ impl Parser {
             let tok = self.advance();
             return Ok(TypeExpr::Named(n.to_string(), tok.span));
         }
+        if *self.peek() == TokenKind::Underscore {
+            let tok = self.advance();
+            return Err(ParseError::Expected {
+                expected: "a tensor dimension (`*` for a dynamic extent), a named rank spread, or a precision type name".into(),
+                found: "inference hole `_`".into(),
+                offset: tok.span.offset,
+            });
+        }
         self.parse_type_atom()
     }
 
@@ -5126,6 +5134,24 @@ mod tests {
             },
             _ => panic!("expected typed let"),
         }
+    }
+
+    #[test]
+    fn tensor_inference_hole_spellings_are_rejected_at_parse_time() {
+        for source in [
+            "x: tensor[_, 4, f32] = x",
+            "x: tensor[4, _] = x",
+            "x: tensor[.._, f32] = x",
+        ] {
+            assert!(
+                parse_str(source).is_err(),
+                "tensor inference-hole spelling must not reach desugaring: {source}"
+            );
+        }
+        assert!(
+            parse_str("x: tensor[*, 4, f32] = x").is_ok(),
+            "`*` remains the explicit dynamic-dimension spelling"
+        );
     }
 
     // chelis#258 / rank polymorphism Tier-2: `..r` rank-variable spread.
