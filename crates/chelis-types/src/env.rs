@@ -730,7 +730,15 @@ impl Env {
             let fresh_dv = var_gen.fresh_dvar();
             dvar_mapping.push((dv, fresh_dv));
             subst.insert_dim(dv, Dim::Var(fresh_dv));
-            inference_subst.copy_dimension_label(dv, fresh_dv);
+            if let Some(axis) = inference_subst.mapped_axis(dv) {
+                // The renaming substitution must recognize the old identity
+                // while rewriting the scheme body, and the active inference
+                // substitution must recognize the fresh identity afterward.
+                subst.mark_mapped_axis(dv, axis);
+                inference_subst.mark_mapped_axis(fresh_dv, axis);
+            } else {
+                inference_subst.copy_dimension_label(dv, fresh_dv);
+            }
         }
         for &rv in &scheme.rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
@@ -1457,6 +1465,43 @@ mod tests {
         assert!(
             fresh.iter().all(|f| !scheme.dvars.contains(f)),
             "every mapped-to variable must be fresh, got {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn mapped_axis_metadata_follows_the_fresh_scheme_dimension() {
+        let quantified = DimVar(9);
+        let quantified_rank = RankVar(10);
+        let scheme = Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![quantified],
+            rvars: vec![quantified_rank],
+            body: Type::Tensor(
+                vec![Dim::Rank(quantified_rank), Dim::Var(quantified)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        };
+        let env = Env::new();
+        let inference_subst = Subst::new();
+        inference_subst.mark_mapped_axis(quantified, 1);
+        let mut var_gen = VarGen::default();
+        let (instantiated, _, mapping) =
+            env.instantiate_scheme(&scheme, &mut var_gen, &inference_subst);
+        let fresh = mapping[0].1;
+
+        assert_eq!(inference_subst.mapped_axis(fresh), Some(1));
+        let Type::Tensor(dims, _) = instantiated else {
+            panic!("mapped scheme body must remain a tensor")
+        };
+        assert!(
+            dims.contains(&Dim::Var(fresh)),
+            "the instantiated body must carry the fresh mapped identity: {dims:?}"
+        );
+        assert!(
+            !dims.contains(&Dim::Var(quantified)),
+            "the quantified mapped identity must not escape instantiation: {dims:?}"
         );
     }
 

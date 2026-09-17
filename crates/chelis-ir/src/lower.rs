@@ -2333,7 +2333,7 @@ pub(crate) fn try_lower_staged_host_region(
             }
         }
         // A staged host region's inputs are the partition's, not an author's.
-        ctx.prepare_parameter_witnesses(&names, &types, None, false);
+        ctx.prepare_parameter_witnesses(&names, &types, None, None, false);
         ctx.binding_witnesses.clear();
         // Do not infer equality between repeated spellings in the machine-built
         // parameter list above. The returned result type is nevertheless the
@@ -2455,7 +2455,13 @@ fn lower_subexpr_program_inner_impl(
         );
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
-    ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None, authored_signature);
+    ctx.prepare_parameter_witnesses(
+        &parameter_names,
+        &parameter_types,
+        None,
+        None,
+        authored_signature,
+    );
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
@@ -2799,6 +2805,22 @@ enum DimSlot {
     Other,
 }
 
+const INTERNAL_RANK_AXIS_BINDER_PREFIX: &str = "\0rank-axis:";
+
+fn rank_axis_binder_key(rank: &str, axis: usize) -> String {
+    format!("{INTERNAL_RANK_AXIS_BINDER_PREFIX}{rank}:{axis}")
+}
+
+fn extent_binder_label(binder: &str) -> String {
+    let Some(rest) = binder.strip_prefix(INTERNAL_RANK_AXIS_BINDER_PREFIX) else {
+        return binder.to_owned();
+    };
+    let Some((rank, axis)) = rest.rsplit_once(':') else {
+        return binder.to_owned();
+    };
+    format!("{rank}[{axis}]")
+}
+
 /// Strip a leading `(t-ref {} ...)` wrapper and classify a raw tensor-type
 /// formal's dim slots in order (Spread/Named/Other), excluding the trailing
 /// precision child. Returns `None` when the expr is not a `(t-tensor ...)` type
@@ -2838,6 +2860,106 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
             })
             .collect(),
     )
+}
+
+/// Recover the authored binder identity, if any, for every realized parameter
+/// axis.
+///
+/// A rank spread contributes axes after monomorphization, but those axes did
+/// not spell independent dimension binders in the authored signature. Give
+/// them activation-local identities derived from the authored rank binder and
+/// positional axis instead of importing caller-side names. Otherwise a view
+/// such as `tensor[fixed]` substituted through `tensor[..rest]` becomes an
+/// equality with an unrelated explicit `fixed` binder on a sibling parameter
+/// (chelis#1889). Reusing the internal identity across two parameters that
+/// explicitly share `..rest` still enforces one runtime witness per axis.
+fn authored_tensor_dim_binders(
+    expr: &Expr,
+    rank_substitutions: &UnordMap<String, Vec<DimInfo>>,
+    realized_rank: usize,
+) -> Result<Vec<Option<String>>, String> {
+    let Some(slots) = tensor_formal_dim_slots(expr) else {
+        return Ok(vec![None; realized_rank]);
+    };
+    let fixed = slots
+        .iter()
+        .filter(|slot| !matches!(slot, DimSlot::Spread(_)))
+        .count();
+    let known_spread_axes = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            DimSlot::Spread(name) => rank_substitutions.get(name).map(Vec::len),
+            _ => None,
+        })
+        .sum::<usize>();
+    let missing_spreads = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            DimSlot::Spread(name) if !rank_substitutions.contains_key(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let inferred_missing_width = match missing_spreads.len() {
+        0 => None,
+        1 if fixed + known_spread_axes <= realized_rank => {
+            Some(realized_rank - fixed - known_spread_axes)
+        }
+        _ => {
+            return Err(format!(
+                "could not recover authored binder provenance for rank \
+                 {realized_rank}: unresolved rank spreads {missing_spreads:?}"
+            ));
+        }
+    };
+
+    let mut binders = Vec::with_capacity(realized_rank);
+    for slot in slots {
+        match slot {
+            DimSlot::Spread(name) => {
+                let width = rank_substitutions
+                    .get(&name)
+                    .map(Vec::len)
+                    .or(inferred_missing_width)
+                    .ok_or_else(|| {
+                        format!("rank spread `{name}` has no realized parameter width")
+                    })?;
+                binders
+                    .extend((0..width).map(|axis| Some(rank_axis_binder_key(name.as_str(), axis))));
+            }
+            DimSlot::Named(name) | DimSlot::DimVar(name) if !name.is_empty() && name != "*" => {
+                binders.push(Some(name));
+            }
+            DimSlot::Named(_) | DimSlot::DimVar(_) => binders.push(None),
+            DimSlot::Other => binders.push(None),
+        }
+    }
+    if binders.len() != realized_rank {
+        return Err(format!(
+            "authored binder provenance has {} axes for a realized rank-{realized_rank} parameter",
+            binders.len()
+        ));
+    }
+    Ok(binders)
+}
+
+fn authored_tensor_claim_type(
+    expr: &Expr,
+    actualized: &TensorType,
+    rank_substitutions: &UnordMap<String, Vec<DimInfo>>,
+) -> Result<TensorType, String> {
+    let binders = authored_tensor_dim_binders(expr, rank_substitutions, actualized.dims.len())?;
+    Ok(TensorType {
+        dims: actualized
+            .dims
+            .iter()
+            .zip(binders)
+            .map(|(dim, binder)| match binder {
+                Some(binder) => DimInfo::Named(binder, None),
+                None => dim.clone(),
+            })
+            .collect(),
+        precision: actualized.precision,
+    })
 }
 
 fn tensor_dim_substitutions(
@@ -3408,6 +3530,75 @@ fn tensor_rank_substitutions(
         }
     }
     subst
+}
+
+/// Bind rank spreads through the callable expression used for shape
+/// actualization, then alias those bindings onto the authored signature's
+/// alpha-renamed spread identities.
+///
+/// Imported/checked declarations may spell the same parameter contract with
+/// different generated rank-variable names in the callable expression and its
+/// preserved authored signature. The expression retains the named anchor
+/// needed to split an actual shape; the signature retains the binder identity
+/// that owns runtime extent obligations. Pairing spreads by their structural
+/// slot keeps both representations actualized without treating caller labels
+/// as authored binders.
+fn activation_rank_substitutions(
+    actualization_formals: &[Option<Expr>],
+    authored_formals: &[Option<Expr>],
+    actual_args: &[TensorType],
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+) -> UnordMap<String, Vec<DimInfo>> {
+    let mut substitutions =
+        tensor_rank_substitutions(actualization_formals, actual_args, dim_axis_positions);
+    for (actualization, authored) in actualization_formals.iter().zip(authored_formals) {
+        let (Some(actualization), Some(authored)) = (actualization, authored) else {
+            continue;
+        };
+        let Some(actualization_slots) = tensor_formal_dim_slots(actualization) else {
+            continue;
+        };
+        let Some(authored_slots) = tensor_formal_dim_slots(authored) else {
+            continue;
+        };
+        let actualization_spreads = actualization_slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let authored_spreads = authored_slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DimSlot::Spread(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if actualization_spreads.len() != authored_spreads.len() {
+            continue;
+        }
+        for (actualization_name, authored_name) in
+            actualization_spreads.into_iter().zip(authored_spreads)
+        {
+            let Some(run) = substitutions.get(&actualization_name).cloned() else {
+                continue;
+            };
+            match substitutions.entry(authored_name) {
+                chelis_unord::Entry::Occupied(existing) => {
+                    debug_assert_eq!(
+                        existing.get(),
+                        &run,
+                        "alpha-renamed authored rank binder resolved to two distinct shapes",
+                    );
+                }
+                chelis_unord::Entry::Vacant(slot) => {
+                    slot.insert(run);
+                }
+            }
+        }
+    }
+    substitutions
 }
 
 /// Bind each rank-var spread in a (possibly anchored, Tier-3) tensor-type
@@ -5974,6 +6165,12 @@ struct ResolvedFunction {
     signature: Option<std::sync::Arc<Expr>>,
 }
 
+struct VectorizedParameterInstantiation {
+    parameter_types: Vec<TensorType>,
+    rank_substitutions: UnordMap<String, Vec<DimInfo>>,
+    dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
+}
+
 impl std::ops::Deref for ResolvedFunction {
     type Target = Expr;
     fn deref(&self) -> &Expr {
@@ -5982,6 +6179,22 @@ impl std::ops::Deref for ResolvedFunction {
 }
 
 impl ResolvedFunction {
+    /// The authored parameter contract for this callable.
+    ///
+    /// A checked function expression may carry caller-specialized metadata
+    /// whose axis names describe that particular view. Runtime entry
+    /// witnesses must instead come from the authored signature: only it can
+    /// assert that two parameter axes share one binder. Rank variables are
+    /// actualized later for the current call, without importing a caller-side
+    /// result label as a new signature equality.
+    fn parameter_type(&self, index: usize) -> Option<&Expr> {
+        self.signature
+            .as_deref()
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.get(index)).flatten())
+            .or_else(|| extract_param_type(&self.expression, index))
+    }
+
     fn result_type(&self) -> Option<&Expr> {
         self.signature
             .as_deref()
@@ -7704,7 +7917,7 @@ impl<'program> LowerCtx<'program> {
                 let required = self.required_extent_for_claim(dim)?;
                 let label = match dim {
                     DimInfo::Lit(n) => n.to_string(),
-                    DimInfo::Named(name, _) => name.clone(),
+                    DimInfo::Named(name, _) => extent_binder_label(name),
                 };
                 let required = if matches!(dim, DimInfo::Named(_, _)) {
                     self.capture_result_claim(required, label.clone(), axis)
@@ -10003,6 +10216,11 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
+        let authored_param_type_exprs = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
         let prec_subst_for_params = self.prec_substitutions.clone();
         let rank_subst_for_params = self.rank_substitutions.clone();
         let param_types: Vec<TensorType> = param_type_exprs
@@ -10023,9 +10241,9 @@ impl<'program> LowerCtx<'program> {
                 None => Self::default_type(),
             })
             .collect();
-        let witness_param_types = param_types.clone();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
+        let mut authored_formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
         // Prepare every actual in caller scope, in written order. Installing
         // a formal early can change the value or static fact of a later actual.
@@ -10038,11 +10256,15 @@ impl<'program> LowerCtx<'program> {
                 (static_size, callable, value)
             })
             .collect::<Vec<_>>();
-        for (((name, (static_size, callable, value)), param_ty), formal_expr) in param_names
+        for (
+            (((name, (static_size, callable, value)), param_ty), formal_expr),
+            authored_formal_expr,
+        ) in param_names
             .iter()
             .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
+            .zip(authored_param_type_exprs.iter())
         {
             // Preserve a caller-known integer through the inlined parameter
             // name. This is required by the [05-OP-35] wrappers: their public
@@ -10092,6 +10314,7 @@ impl<'program> LowerCtx<'program> {
                 {
                     formal_types.push(param_ty);
                     formal_type_exprs.push(formal_expr.clone());
+                    authored_formal_type_exprs.push(authored_formal_expr.clone());
                     actual_types.push(actual_ty);
                 }
                 self.bindings.insert(name.clone(), arg_id);
@@ -10151,8 +10374,12 @@ impl<'program> LowerCtx<'program> {
         // dim vector, so the inlined rank-poly body resolves its `..r`
         // tensors to concrete ranks before any backend sees them. The
         // rank analogue of the `prec_substitutions.extend(...)` above.
-        let rank_subst =
-            tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
+        let rank_subst = activation_rank_substitutions(
+            &formal_type_exprs,
+            &authored_formal_type_exprs,
+            &actual_types,
+            &self.dim_axis_positions,
+        );
         self.rank_substitutions.merge(rank_subst);
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
         // UNROLLING. Depth accounting installs *here*, after argument
@@ -10203,24 +10430,66 @@ impl<'program> LowerCtx<'program> {
         // this particular application: the latter may refine a named axis for
         // a following query, but must not replace an authored named claim with
         // a literal (chelis#1782/#1889).
+        let authored_result_claim = fn_expr.signature.is_some();
         let declared_result = fn_expr
             .result_type()
             .map(|expr| {
-                Self::type_from_type_expr_with_subst(
+                let actualized = Self::type_from_type_expr_with_subst(
                     expr,
                     &self.prec_substitutions,
                     &self.rank_substitutions,
-                )
+                );
+                if authored_result_claim {
+                    authored_tensor_claim_type(expr, &actualized, &self.rank_substitutions)
+                        .unwrap_or_else(|message| {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "runtime result-extent construction lost its authored binder \
+                                     provenance: {message}"
+                                ),
+                                None,
+                                call_span.clone(),
+                            )
+                        })
+                } else {
+                    actualized
+                }
             })
             .unwrap_or_else(|| expected_return_ty.clone());
-        self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span, true);
+        let witness_param_types = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                fn_expr
+                    .parameter_type(index)
+                    .map(|expr| {
+                        Self::formal_param_type_for_call(
+                            expr,
+                            &self.prec_substitutions,
+                            &self.rank_substitutions,
+                        )
+                    })
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect::<Vec<_>>();
+        let witness_param_type_exprs = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(
+            &param_names,
+            &witness_param_types,
+            Some(&witness_param_type_exprs),
+            call_span,
+            true,
+        );
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let authored_result_claim = fn_expr.signature.is_some();
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
             self.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
         });
@@ -10298,12 +10567,64 @@ impl<'program> LowerCtx<'program> {
         let saved_signature = self.signature_witnesses.clone();
         let saved_activation = self.activation_witnesses.clone();
         let saved_authored = self.signature_is_authored;
+        let saved_rank_substitutions = self.rank_substitutions.clone();
+        let saved_dim_axis_positions = self.dim_axis_positions.clone();
         let start = self.invocation_witnesses.len();
-        let formal_types = params
+        let authored_formal_type_exprs = params
             .iter()
             .enumerate()
-            .map(|(index, name)| {
-                extract_param_type(function, index)
+            .map(|(index, _)| function.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        let actualization_formal_type_exprs = params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| extract_param_type(function, index).cloned())
+            .collect::<Vec<_>>();
+        let bound_parameters = params
+            .iter()
+            .zip(
+                actualization_formal_type_exprs
+                    .iter()
+                    .zip(authored_formal_type_exprs.iter()),
+            )
+            .filter_map(|(name, (actualization, authored))| {
+                let actual = self
+                    .bindings
+                    .get(name)
+                    .and_then(LoweredValue::as_single_node)
+                    .and_then(|id| self.dag.get(id))
+                    .map(|node| node.output_type.clone())?;
+                Some((actualization.clone(), authored.clone(), actual))
+            })
+            .collect::<Vec<_>>();
+        let bound_actualization_formals = bound_parameters
+            .iter()
+            .map(|(actualization, _, _)| actualization.clone())
+            .collect::<Vec<_>>();
+        let bound_authored_formals = bound_parameters
+            .iter()
+            .map(|(_, authored, _)| authored.clone())
+            .collect::<Vec<_>>();
+        let bound_actual_types = bound_parameters
+            .into_iter()
+            .map(|(_, _, actual)| actual)
+            .collect::<Vec<_>>();
+        self.dim_axis_positions.merge(tensor_dim_axis_positions(
+            &bound_actualization_formals,
+            &bound_actual_types,
+        ));
+        self.rank_substitutions.merge(activation_rank_substitutions(
+            &bound_actualization_formals,
+            &bound_authored_formals,
+            &bound_actual_types,
+            &self.dim_axis_positions,
+        ));
+        let formal_types = params
+            .iter()
+            .zip(authored_formal_type_exprs.iter())
+            .map(|(name, formal)| {
+                formal
+                    .as_ref()
                     .map(|ty| {
                         Self::formal_param_type_for_call(
                             ty,
@@ -10321,15 +10642,37 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect::<Vec<_>>();
-        self.prepare_parameter_witnesses(params, &formal_types, self.current_span_id.clone(), true);
+        self.prepare_parameter_witnesses(
+            params,
+            &formal_types,
+            Some(&authored_formal_type_exprs),
+            self.current_span_id.clone(),
+            true,
+        );
+        let authored_result_claim = function.signature.is_some();
         let claim = function.result_type().map(|ty| {
-            Self::type_from_type_expr_with_subst(
+            let actualized = Self::type_from_type_expr_with_subst(
                 ty,
                 &self.prec_substitutions,
                 &self.rank_substitutions,
-            )
+            );
+            if authored_result_claim {
+                authored_tensor_claim_type(ty, &actualized, &self.rank_substitutions)
+                    .unwrap_or_else(|message| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "runtime result-extent construction lost its authored binder \
+                                 provenance: {message}"
+                            ),
+                            None,
+                            self.current_span_id.clone(),
+                        )
+                    })
+            } else {
+                actualized
+            }
         });
-        let result = self.lower_expr_with_claim(body, claim.as_ref(), function.signature.is_some());
+        let result = self.lower_expr_with_claim(body, claim.as_ref(), authored_result_claim);
         if let Some(claim) = &claim {
             self.preserve_declared_result(&result, claim, None);
         }
@@ -10339,6 +10682,8 @@ impl<'program> LowerCtx<'program> {
         self.signature_witnesses = saved_signature;
         self.activation_witnesses = saved_activation;
         self.signature_is_authored = saved_authored;
+        self.rank_substitutions = saved_rank_substitutions;
+        self.dim_axis_positions = saved_dim_axis_positions;
         result
     }
 
@@ -10388,6 +10733,72 @@ impl<'program> LowerCtx<'program> {
         result
     }
 
+    /// Instantiate a vectorized callable's authored parameter shapes from the
+    /// shapes each body invocation receives.
+    ///
+    /// The actual argument still includes `vmap`'s mapped axis, while the
+    /// callable body does not. Remove that axis before binding authored rank
+    /// spreads, then carry the resulting substitution into the transformed
+    /// lowering context. This preserves the exact split around named anchors
+    /// such as `[..pre, seq, ..post]`; reconstructing from the collapsed
+    /// formal `TensorType` loses both spread widths.
+    fn vectorized_parameter_instantiation(
+        &self,
+        function: &ResolvedFunction,
+        parameter_count: usize,
+        actual_types: &[TensorType],
+        axis: usize,
+    ) -> VectorizedParameterInstantiation {
+        let authored_formal_type_exprs = (0..parameter_count)
+            .map(|index| function.parameter_type(index).cloned())
+            .collect::<Vec<_>>();
+        let actualization_formal_type_exprs = (0..parameter_count)
+            .map(|index| extract_param_type(function, index).cloned())
+            .collect::<Vec<_>>();
+        let invocation_types = actual_types
+            .iter()
+            .map(|actual| {
+                let mut invocation = actual.clone();
+                if axis < invocation.dims.len() {
+                    invocation.dims.remove(axis);
+                }
+                invocation
+            })
+            .collect::<Vec<_>>();
+        let mut dim_axis_positions = self.dim_axis_positions.clone();
+        dim_axis_positions.merge(tensor_dim_axis_positions(
+            &actualization_formal_type_exprs,
+            &invocation_types,
+        ));
+        let mut rank_substitutions = self.rank_substitutions.clone();
+        rank_substitutions.merge(activation_rank_substitutions(
+            &actualization_formal_type_exprs,
+            &authored_formal_type_exprs,
+            &invocation_types,
+            &dim_axis_positions,
+        ));
+        let parameter_types = authored_formal_type_exprs
+            .iter()
+            .map(|formal| {
+                formal
+                    .as_ref()
+                    .map(|expr| {
+                        Self::formal_param_type_for_call(
+                            expr,
+                            &self.prec_substitutions,
+                            &rank_substitutions,
+                        )
+                    })
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        VectorizedParameterInstantiation {
+            parameter_types,
+            rank_substitutions,
+            dim_axis_positions,
+        }
+    }
+
     fn lower_vmap_callable_app(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -10401,6 +10812,58 @@ impl<'program> LowerCtx<'program> {
             .map(|arg| self.lower_expr_node(arg, "vmap arguments"))
             .collect();
         self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span)
+    }
+
+    fn restore_vmapped_entry_witness_axes(
+        &mut self,
+        source: &Dag,
+        remap: &UnordMap<NodeId, NodeId>,
+        param_names: &[String],
+        actual_args: &[NodeId],
+        mapped_axis: usize,
+    ) {
+        let actuals = param_names
+            .iter()
+            .zip(actual_args.iter().copied())
+            .collect::<UnordMap<_, _>>();
+        for source_node in source.nodes() {
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter,
+                axis: RtAxis::Lit(canonical_axis),
+                ..
+            } = &source_node.op
+            else {
+                continue;
+            };
+            let Ok(canonical_axis) = usize::try_from(*canonical_axis) else {
+                continue;
+            };
+            let Some(unbatched_axis) = canonical_axis.checked_sub(1) else {
+                continue;
+            };
+            let authored_axis = unbatched_axis + usize::from(unbatched_axis >= mapped_axis);
+            let Some(actual) = actuals.get(parameter).copied() else {
+                continue;
+            };
+            let Some(remapped) = remap.get(&source_node.id).copied() else {
+                continue;
+            };
+            let Some(node) = self.dag.node_mut(remapped) else {
+                continue;
+            };
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                axis,
+                ..
+            } = &mut node.op
+            else {
+                continue;
+            };
+            node.inputs[0] = actual;
+            *axis =
+                RtAxis::Lit(i32::try_from(authored_axis).expect("vmap parameter axis fits i32"));
+        }
     }
 
     fn lower_vmap_callable_with_nodes(
@@ -10417,23 +10880,6 @@ impl<'program> LowerCtx<'program> {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
-        let prec_subst_for_params = self.prec_substitutions.clone();
-        let rank_subst_for_params = self.rank_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
-            })
-            .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
             .map(|id| {
@@ -10443,6 +10889,16 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
+        let VectorizedParameterInstantiation {
+            parameter_types: param_types,
+            rank_substitutions: vectorized_rank_substitutions,
+            dim_axis_positions: vectorized_dim_axis_positions,
+        } = self.vectorized_parameter_instantiation(
+            fn_expr,
+            param_names.len(),
+            &actual_types,
+            axis,
+        );
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
         // Actual argument types with the vmap `axis` permuted to the front
@@ -10496,6 +10952,8 @@ impl<'program> LowerCtx<'program> {
                 .map(|trace| trace.child(crate::lowering_trace::ContextKind::Vmap));
         }
         subctx.allow_host_list_ad_rewrites = true;
+        subctx.rank_substitutions = vectorized_rank_substitutions;
+        subctx.dim_axis_positions = vectorized_dim_axis_positions;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -10594,6 +11052,13 @@ impl<'program> LowerCtx<'program> {
                     body.span_id().map(ToOwned::to_owned),
                 )
             });
+        self.restore_vmapped_entry_witness_axes(
+            &specialized_vmapped,
+            &remap,
+            &param_names,
+            actual_args,
+            axis,
+        );
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
@@ -10673,23 +11138,6 @@ impl<'program> LowerCtx<'program> {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
-        let prec_subst_for_params = self.prec_substitutions.clone();
-        let rank_subst_for_params = self.rank_substitutions.clone();
-        let param_types: Vec<TensorType> = param_names
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                extract_param_type(fn_expr, index)
-                    .map(|expr| {
-                        Self::type_from_type_expr_with_subst(
-                            expr,
-                            &prec_subst_for_params,
-                            &rank_subst_for_params,
-                        )
-                    })
-                    .unwrap_or_else(Self::default_type)
-            })
-            .collect();
         let actual_types: Vec<TensorType> = actual_args
             .iter()
             .map(|id| {
@@ -10699,6 +11147,16 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect();
+        let VectorizedParameterInstantiation {
+            parameter_types: param_types,
+            rank_substitutions: vectorized_rank_substitutions,
+            dim_axis_positions: vectorized_dim_axis_positions,
+        } = self.vectorized_parameter_instantiation(
+            fn_expr,
+            param_names.len(),
+            &actual_types,
+            axis,
+        );
 
         let mut canonical_args = Vec::with_capacity(actual_args.len());
         let mut batch_dim = None;
@@ -10744,6 +11202,8 @@ impl<'program> LowerCtx<'program> {
                 .map(|trace| trace.child(crate::lowering_trace::ContextKind::VmapGradient));
         }
         subctx.allow_host_list_ad_rewrites = true;
+        subctx.rank_substitutions = vectorized_rank_substitutions;
+        subctx.dim_axis_positions = vectorized_dim_axis_positions;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap(grad)'s parameters carry the call's span.
         subctx.current_span_id = self.current_span_id.clone();
@@ -10843,6 +11303,7 @@ impl<'program> LowerCtx<'program> {
         let remap = self
             .splice_dag(&vmapped, &arg_map)
             .unwrap_or_else(|message| invalid_mapping(format!("splice failed: {message}")));
+        self.restore_vmapped_entry_witness_axes(&vmapped, &remap, &param_names, actual_args, axis);
         let mapped_root = |old: NodeId| {
             root_map
                 .get(&old)
@@ -14670,6 +15131,7 @@ impl<'program> LowerCtx<'program> {
         &mut self,
         params: &[String],
         formal_types: &[TensorType],
+        formal_type_exprs: Option<&[Option<Expr>]>,
         span: Option<String>,
         authored_signature: bool,
     ) {
@@ -14678,7 +15140,7 @@ impl<'program> LowerCtx<'program> {
         self.activation_witnesses.clear();
         self.signature_is_authored = authored_signature;
         self.local_unit_refinements.clear();
-        for (name, formal_type) in params.iter().zip(formal_types) {
+        for (index, (name, formal_type)) in params.iter().zip(formal_types).enumerate() {
             let Some(input) = self
                 .bindings
                 .get(name)
@@ -14693,6 +15155,30 @@ impl<'program> LowerCtx<'program> {
                 .output_type
                 .dims
                 .len();
+            let authored_binders = match formal_type_exprs
+                .and_then(|types| types.get(index))
+                .and_then(Option::as_ref)
+            {
+                Some(expr) => authored_tensor_dim_binders(expr, &self.rank_substitutions, rank)
+                    .unwrap_or_else(|message| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "runtime extent witness construction for parameter `{name}` \
+                                 lost its authored binder provenance: {message}"
+                            ),
+                            None,
+                            span.clone(),
+                        )
+                    }),
+                None => (0..rank)
+                    .map(|axis| match formal_type.dims.get(axis) {
+                        Some(DimInfo::Named(binder, _)) if !binder.is_empty() && binder != "*" => {
+                            Some(binder.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            };
             let mut witnesses = Vec::new();
             for axis in 0..rank {
                 let witness = self.dag.add_node(
@@ -14710,10 +15196,7 @@ impl<'program> LowerCtx<'program> {
                     },
                     span.clone(),
                 );
-                if let Some(DimInfo::Named(binder, _)) = formal_type.dims.get(axis)
-                    && !binder.is_empty()
-                    && binder != "*"
-                {
+                if let Some(binder) = authored_binders.get(axis).and_then(Option::as_ref) {
                     match self
                         .signature_witnesses
                         .iter()
@@ -14735,9 +15218,12 @@ impl<'program> LowerCtx<'program> {
                         // synthesized multi-root kernel took `batch` and `seq`
                         // off the several definitions that produced its captured
                         // roots and trapped a correct program.
-                        Some(declared) if authored_signature => {
-                            self.add_named_extent_claim(witness, declared, binder.clone(), true)
-                        }
+                        Some(declared) if authored_signature => self.add_named_extent_claim(
+                            witness,
+                            declared,
+                            extent_binder_label(binder),
+                            true,
+                        ),
                         // The binder is already declared in this activation and
                         // the list is machine-built: record nothing and leave
                         // the first declaration standing.
@@ -14888,9 +15374,9 @@ impl<'program> LowerCtx<'program> {
     /// materializing a constant; a named claim needs the node itself, because
     /// its diagnostic reads the declaring parameter and axis off it.
     fn signature_witness(&self, binder: &str) -> Option<NodeId> {
-        self.signature_witnesses
-            .iter()
-            .find_map(|(name, witness)| (name == binder).then_some(*witness))
+        self.signature_witnesses.iter().find_map(|(name, witness)| {
+            (name == binder || extent_binder_label(name) == binder).then_some(*witness)
+        })
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -15300,7 +15786,7 @@ impl<'program> LowerCtx<'program> {
             None => "the signature".to_owned(),
         };
         let claim = match binder {
-            Some(binder) => format!("`{binder}` = {claimed}"),
+            Some(binder) => format!("`{}` = {claimed}", extent_binder_label(binder)),
             None => claimed.to_string(),
         };
         raise_fatal_lowering_error(
@@ -15632,7 +16118,7 @@ impl<'program> LowerCtx<'program> {
             self.add_named_extent_claim(
                 owner,
                 requirement,
-                binder.to_owned(),
+                extent_binder_label(binder),
                 requirement_declares,
             );
         }
@@ -16679,7 +17165,7 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         };
-        let (params, formal_types): (Vec<_>, Vec<_>) = params
+        let params_and_types = params
             .iter()
             .filter_map(param_name_and_type_expr)
             .filter_map(|(name, ty)| {
@@ -16692,10 +17178,28 @@ impl<'program> LowerCtx<'program> {
                     ),
                     None => self.dag.get(input).expect("parameter").output_type.clone(),
                 };
-                Some((name, formal))
+                Some((name, formal, ty.cloned()))
             })
-            .unzip();
-        self.prepare_parameter_witnesses(&params, &formal_types, call_span, true);
+            .collect::<Vec<_>>();
+        let params = params_and_types
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<Vec<_>>();
+        let formal_types = params_and_types
+            .iter()
+            .map(|(_, formal, _)| formal.clone())
+            .collect::<Vec<_>>();
+        let formal_type_exprs = params_and_types
+            .into_iter()
+            .map(|(_, _, ty)| ty)
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(
+            &params,
+            &formal_types,
+            Some(&formal_type_exprs),
+            call_span,
+            true,
+        );
         let result =
             self.lower_expr_with_claim(&elems[3], declared_result.as_ref(), authored_result_claim);
         if let Some(ty) = &declared_result {
@@ -17044,14 +17548,12 @@ impl<'program> LowerCtx<'program> {
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
-        let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+        let stamped_out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
-            self.dag
-                .get(then_node)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type)
+            Self::default_type()
         };
+        let out_ty = self.actualized_runtime_if_output_type(then_node, else_node, &stamped_out_ty);
         if !out_ty.precision.is_float() {
             return self.lower_unrepresentable("if", elems);
         }
@@ -17503,6 +18005,98 @@ impl<'program> LowerCtx<'program> {
             span_expr.map(Expr::span),
             span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
         )
+    }
+
+    /// Choose the tensor type for a dynamic `if` from the branch producers
+    /// that the current activation actually lowered.
+    ///
+    /// The stamped `if` result describes the authored callable. Inside an
+    /// instantiated rank-polymorphic callable that annotation can still
+    /// contain unsplit rank spreads even though both branch nodes already
+    /// carry the caller's realized rank. Reusing the annotation for the mask
+    /// arithmetic therefore builds a malformed graph. The branch producers
+    /// are the structural authority at this point.
+    ///
+    /// `fail(...)` is the one exception: bottom lowers as an input-less
+    /// scalar or anonymous `Const` placeholder and obtains its shape from the
+    /// sibling below. When exactly one branch is such a placeholder, use the
+    /// sibling's type. Two ordinary producers must agree in rank, dtype, and
+    /// all statically-known extents; a checked program reaching a disagreement
+    /// is an internal lowering error and must fail loudly.
+    fn actualized_runtime_if_output_type(
+        &self,
+        then_node: NodeId,
+        else_node: NodeId,
+        stamped_out_ty: &TensorType,
+    ) -> TensorType {
+        let Some(then_branch) = self.dag.get(then_node) else {
+            raise_fatal_lowering_error(
+                "dynamic `if` then-branch has no lowered producer",
+                None,
+                self.current_span_id.clone(),
+            );
+        };
+        let Some(else_branch) = self.dag.get(else_node) else {
+            raise_fatal_lowering_error(
+                "dynamic `if` else-branch has no lowered producer",
+                None,
+                self.current_span_id.clone(),
+            );
+        };
+        let then_ty = &then_branch.output_type;
+        let else_ty = &else_branch.output_type;
+        let then_placeholder = Self::is_runtime_if_bottom_placeholder(then_branch);
+        let else_placeholder = Self::is_runtime_if_bottom_placeholder(else_branch);
+
+        match (then_placeholder, else_placeholder) {
+            (true, false) => return else_ty.clone(),
+            (false, true) => return then_ty.clone(),
+            (true, true) if Self::runtime_if_types_compatible(then_ty, else_ty) => {
+                return then_ty.clone();
+            }
+            (true, true) => return stamped_out_ty.clone(),
+            (false, false) => {}
+        }
+
+        if !Self::runtime_if_types_compatible(then_ty, else_ty) {
+            raise_fatal_lowering_error(
+                format!(
+                    "checked dynamic `if` branches lowered to incompatible tensor types: \
+                     then {then_ty:?}, else {else_ty:?}"
+                ),
+                None,
+                self.current_span_id.clone(),
+            );
+        }
+        then_ty.clone()
+    }
+
+    fn is_runtime_if_bottom_placeholder(node: &crate::dag::DagNode) -> bool {
+        matches!(node.op, RiscOp::Const { .. })
+            && node.inputs.is_empty()
+            && node.shape_deps.is_empty()
+            && (node.output_type.dims.is_empty()
+                || node
+                    .output_type
+                    .dims
+                    .iter()
+                    .any(|dim| matches!(dim, DimInfo::Named(name, None) if name.is_empty())))
+    }
+
+    fn runtime_if_types_compatible(left: &TensorType, right: &TensorType) -> bool {
+        left.precision == right.precision
+            && left.dims.len() == right.dims.len()
+            && left
+                .dims
+                .iter()
+                .zip(&right.dims)
+                .all(|(left, right)| match (left, right) {
+                    (DimInfo::Lit(left), DimInfo::Lit(right)) => left == right,
+                    (DimInfo::Named(_, Some(left)), DimInfo::Named(_, Some(right)))
+                    | (DimInfo::Named(_, Some(left)), DimInfo::Lit(right))
+                    | (DimInfo::Lit(left), DimInfo::Named(_, Some(right))) => left == right,
+                    (DimInfo::Named(_, None), _) | (_, DimInfo::Named(_, None)) => true,
+                })
     }
 
     fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
@@ -18794,6 +19388,132 @@ mod tests {
              source={} placeholder={}",
             shape_source.0,
             placeholder.id.0
+        );
+    }
+
+    #[test]
+    fn runtime_if_uses_actualized_branch_rank_instead_of_stamped_spreads() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let actual_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+                DimInfo::Lit(1),
+            ],
+            precision: Prim::F32,
+        };
+        let then_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+        let else_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+        let stale_stamped_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("seq".into(), None),
+                DimInfo::Named("post".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+
+        assert_eq!(
+            ctx.actualized_runtime_if_output_type(then_node, else_node, &stale_stamped_ty),
+            actual_ty
+        );
+    }
+
+    #[test]
+    fn runtime_if_uses_concrete_sibling_type_for_bottom_placeholder() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let placeholder = ctx.dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let actual_ty = TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let sibling = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            actual_ty.clone(),
+            None,
+        );
+
+        assert_eq!(
+            ctx.actualized_runtime_if_output_type(placeholder, sibling, &TensorType::scalar_f32()),
+            actual_ty
+        );
+    }
+
+    #[test]
+    fn runtime_if_rejects_incompatible_non_placeholder_branch_types() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let then_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let else_node = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ctx.actualized_runtime_if_output_type(
+                then_node,
+                else_node,
+                &TensorType::scalar_f32(),
+            );
+        }))
+        .expect_err("incompatible checked branch producers must fail loudly");
+        let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() else {
+            panic!("incompatible branch producers must raise a lowering diagnostic");
+        };
+        let message = diagnostic.to_string();
+        assert!(
+            message.contains("checked dynamic `if` branches lowered to incompatible tensor types")
         );
     }
 

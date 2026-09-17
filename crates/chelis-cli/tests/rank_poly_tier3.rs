@@ -724,6 +724,262 @@ fn named_expand_under_grad_and_vmap_evals_and_matches_backend() {
     assert_eval_agrees_with_backend(source, "named_expand_grad_vmap", &backend);
 }
 
+/// chelis#1889: direct `vmap` must instantiate both authored rank spreads
+/// from the unbatched argument shape before lowering the transformed body.
+/// The batch axis is not part of either spread.
+#[test]
+fn direct_vmap_actualizes_two_spread_signature_and_matches_backend() {
+    let source = "def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32] = insert(x, c, 2i64, seq)\n\
+         def apply(x: &tensor[batch, left, seq, right, f32]) -> tensor[batch, left, c, seq, right, f32] = vmap(widen)(x)\n\
+         out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]))\n";
+    assert_clean(
+        &check_json(source),
+        "direct vmap over a two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "direct_vmap_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(name, _, _)| name == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![2, 2, 2, 3, 1], "backend shape ({backend})");
+    let expected = [
+        1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 7.0, 8.0, 9.0,
+        10.0, 11.0, 12.0, 10.0, 11.0, 12.0,
+    ];
+    for (index, expected) in expected.iter().enumerate() {
+        assert!(
+            (out.2[index] - expected).abs() < 1e-6,
+            "out[{index}]: backend {} != {expected} ({backend})",
+            out.2[index]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "direct_vmap_two_spreads", &backend);
+}
+
+/// chelis#1889: the mapped axis is a transform boundary, not a fixed anchor
+/// inside either authored spread. At axis 1 it can split the realized `pre`
+/// run, so checking must remove it before actualizing the callee row.
+#[test]
+fn nonzero_axis_vmap_actualizes_two_spread_signature_and_matches_backend() {
+    let source = "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(identity, axis=1)(x)\n\
+         x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
+         out = apply(x)\n";
+    assert_clean(
+        &check_json(source),
+        "axis-1 vmap over a two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "nonzero_axis_vmap_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(name, _, _)| name == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![3, 2, 1, 3, 1], "backend shape ({backend})");
+    assert_eq!(
+        out.2,
+        (1..=18).map(f64::from).collect::<Vec<_>>(),
+        "backend values ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "nonzero_axis_vmap_two_spreads", &backend);
+}
+
+/// The AD twin uses the same transformed parameter row. A constant scalar
+/// result makes the expected cotangent exactly zero while still requiring the
+/// complete two-spread input shape to survive axis-1 `vmap`.
+#[test]
+fn nonzero_axis_vmap_grad_actualizes_two_spread_signature_and_matches_backend() {
+    let source = "def constant_loss(x: &tensor[..pre, seq, ..post, f32]) -> f32 = 0.0f32\n\
+         def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(grad(constant_loss), axis=1)(x)\n\
+         x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
+         out = apply(x)\n";
+    assert_clean(
+        &check_json(source),
+        "axis-1 vmap(grad) over a two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "nonzero_axis_vmap_grad_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(name, _, _)| name == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![3, 2, 1, 3, 1], "backend shape ({backend})");
+    assert!(
+        out.2.iter().all(|value| value.abs() < 1e-6),
+        "constant loss must produce an exact zero cotangent ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "nonzero_axis_vmap_grad_two_spreads", &backend);
+}
+
+/// A dynamic branch's stamped result still contains authored rank spreads.
+/// Vmap must use the branch values' already-actualized type for the blend,
+/// preserve the shared scalar as a broadcast input, and produce the selected
+/// branch at both canonical and nonzero mapped axes.
+#[test]
+fn vmap_dynamic_branch_uses_actualized_two_spread_result_type() {
+    let source = "def choose_pair(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32], choose: bool) -> tensor[..pre, seq, ..post, f32] = if choose then add(x, y) else mul(x, y)\n\
+         def apply0(x: &tensor[batch, left, seq, right, f32], y: &tensor[batch, left, seq, right, f32], choose: bool) -> tensor[batch, left, seq, right, f32] = vmap(choose_pair)(x, y, choose)\n\
+         def apply2(x: &tensor[left, seq, batch, right, f32], y: &tensor[left, seq, batch, right, f32], choose: bool) -> tensor[left, seq, batch, right, f32] = vmap(choose_pair, axis=2)(x, y, choose)\n\
+         x: tensor[1, 2, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), [1i64, 2i64, 3i64, 1i64])\n\
+         y: tensor[1, 2, 3, 1, f32] = reshape(to_tensor([10.0f32, 20.0f32, 30.0f32, 40.0f32, 50.0f32, 60.0f32]), [1i64, 2i64, 3i64, 1i64])\n\
+         summed = apply0(x, y, true)\n\
+         multiplied = apply2(x, y, false)\n";
+    assert_clean(
+        &check_json(source),
+        "dynamic branch over an actualized two-spread signature checks clean",
+    );
+    let backend = build_compile_run(source, "vmap_dynamic_branch_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let summed = tensors
+        .iter()
+        .find(|(name, _, _)| name == "summed")
+        .unwrap_or_else(|| panic!("backend output missing `summed`: {backend}"));
+    assert_eq!(summed.1, vec![1, 2, 3, 1], "summed shape ({backend})");
+    assert_eq!(
+        summed.2,
+        vec![11.0, 22.0, 33.0, 44.0, 55.0, 66.0],
+        "summed values ({backend})"
+    );
+    let multiplied = tensors
+        .iter()
+        .find(|(name, _, _)| name == "multiplied")
+        .unwrap_or_else(|| panic!("backend output missing `multiplied`: {backend}"));
+    assert_eq!(
+        multiplied.1,
+        vec![1, 2, 3, 1],
+        "multiplied shape ({backend})"
+    );
+    assert_eq!(
+        multiplied.2,
+        vec![10.0, 40.0, 90.0, 160.0, 250.0, 360.0],
+        "multiplied values ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "vmap_dynamic_branch_two_spreads", &backend);
+}
+
+/// A mapped axis is outside the authored row at every legal insertion
+/// position, including positions before, inside, and after the realized
+/// spreads. This matrix keeps the repair structural rather than tied to the
+/// reviewer's axis-1 witness, and runs one compiled program so every lowering
+/// and generated-C permutation is observed without paying for five builds.
+#[test]
+fn every_legal_vmap_axis_matches_eval_and_generated_c() {
+    let values = (1..=18)
+        .map(|value| format!("{value}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut source =
+        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n"
+            .to_owned();
+    for axis in 0..=4 {
+        let mut dims = vec!["left", "inner", "seq", "right"];
+        dims.insert(axis, "batch");
+        let dims = dims.join(", ");
+        let mut shape = vec![3, 1, 3, 1];
+        shape.insert(axis, 2);
+        let shape = shape
+            .into_iter()
+            .map(|extent| format!("{extent}i64"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let transform = if axis == 0 {
+            "vmap(identity)".to_owned()
+        } else {
+            format!("vmap(identity, axis={axis})")
+        };
+        source.push_str(&format!(
+            "def apply_{axis}(x: &tensor[{dims}, f32]) -> tensor[{dims}, f32] = {transform}(x)\n\
+             x_{axis}: tensor[{dims}, f32] = reshape(to_tensor([{values}]), [{shape}])\n\
+             out_{axis} = apply_{axis}(x_{axis})\n"
+        ));
+    }
+
+    assert_clean(
+        &check_json(&source),
+        "every legal vmap axis excludes its batch from authored spreads",
+    );
+    let backend = build_compile_run(&source, "every_legal_vmap_axis_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    for axis in 0..=4 {
+        let name = format!("out_{axis}");
+        let out = tensors
+            .iter()
+            .find(|(found, _, _)| found == &name)
+            .unwrap_or_else(|| panic!("backend output missing `{name}`: {backend}"));
+        let mut shape = vec![3, 1, 3, 1];
+        shape.insert(axis, 2);
+        assert_eq!(out.1, shape, "axis-{axis} backend shape ({backend})");
+        assert_eq!(
+            out.2,
+            (1..=18).map(f64::from).collect::<Vec<_>>(),
+            "axis-{axis} backend values ({backend})"
+        );
+    }
+    assert_eval_agrees_with_backend(&source, "every_legal_vmap_axis_two_spreads", &backend);
+}
+
+/// Stored transforms must retain the private mapped-axis identity through
+/// scheme freshening. The unequal neighboring extents also keep generated C's
+/// canonicalizing permutations observable.
+#[test]
+fn stored_vmap_preserves_nonzero_two_spread_axis_across_all_lanes() {
+    let source = "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         mapped = vmap(identity, axis=1)\n\
+         def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = mapped(x)\n\
+         x: tensor[3, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32]), [3i64, 2i64, 1i64, 3i64, 1i64])\n\
+         out = apply(x)\n";
+    assert_clean(
+        &check_json(source),
+        "stored nonzero-axis vmap over two spreads checks clean",
+    );
+    let backend = build_compile_run(source, "stored_nonzero_vmap_two_spreads");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(name, _, _)| name == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(out.1, vec![3, 2, 1, 3, 1], "backend shape ({backend})");
+    assert_eq!(
+        out.2,
+        (1..=18).map(f64::from).collect::<Vec<_>>(),
+        "backend values ({backend})"
+    );
+    assert_eval_agrees_with_backend(source, "stored_nonzero_vmap_two_spreads", &backend);
+}
+
+/// An outer transform shifts the stored inner mapped-axis identity instead of
+/// colliding with it. Named-def host lowering does not support this nested
+/// transform form yet, so execution remains owned by the IR vmap suite.
+#[test]
+fn nested_vmap_shifts_stored_nonzero_two_spread_axis_at_check() {
+    let json = check_json(
+        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         mapped = vmap(identity, axis=1)\n\
+         def nested_apply(x: &tensor[outer, left, batch, inner, seq, right, f32]) -> tensor[outer, left, batch, inner, seq, right, f32] = vmap(mapped)(x)\n",
+    );
+    assert_clean(
+        &json,
+        "nested vmap shifts a stored nonzero mapped axis around two spreads",
+    );
+}
+
+/// Bounds are measured against the callable's unbatched rank even while that
+/// rank is represented by authored spreads. Axis 4 is the legal trailing
+/// insertion covered above; axis 5 must retain the ordinary exact diagnostic.
+#[test]
+fn rank_spread_vmap_axis_out_of_bounds_uses_unbatched_rank() {
+    let json = check_json(
+        "def identity(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = copy(x)\n\
+         def apply(x: &tensor[left, batch, inner, seq, right, f32]) -> tensor[left, batch, inner, seq, right, f32] = vmap(identity, axis=5)(x)\n",
+    );
+    assert_rejected_with(
+        &json,
+        "vmap axis 5 is out of bounds for rank 4 tensor",
+        "rank-spread vmap out-of-bounds axis",
+    );
+}
+
 /// The anchored 4-arg sig survives `chelis fmt` (round-trip + idempotence +
 /// re-checks clean), mirroring the reduction round-trip invariant.
 #[test]

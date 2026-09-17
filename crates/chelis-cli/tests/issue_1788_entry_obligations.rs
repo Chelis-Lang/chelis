@@ -107,6 +107,24 @@ fn mixed_helpers_accept_independent_binders() {
     );
 }
 
+#[test]
+fn direct_vmap_two_spread_entry_enforces_shared_witnesses() {
+    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+         def apply(x: &tensor[batch, *, seq, *, f32], y: &tensor[batch, *, seq, *, f32]) -> tensor[batch, *, seq, *, f32] = vmap(combine)(x, y)\n\
+         out = apply(to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]]], [[[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]]]), to_tensor([[[[1.0f32], [2.0f32], [3.0f32]], [[4.0f32], [5.0f32], [6.0f32]], [[7.0f32], [8.0f32], [9.0f32]], [[10.0f32], [11.0f32], [12.0f32]]], [[[13.0f32], [14.0f32], [15.0f32]], [[16.0f32], [17.0f32], [18.0f32]], [[19.0f32], [20.0f32], [21.0f32]], [[22.0f32], [23.0f32], [24.0f32]]]]))\n";
+    check_both(source, "extent `pre[0]`: x axis 1 = 2, y axis 1 = 4", false);
+}
+
+#[test]
+fn nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses() {
+    let source = "def combine(x: &tensor[..pre, seq, ..post, f32], y: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, seq, ..post, f32] = add(x, y)\n\
+         def apply(x: &tensor[*, batch, *, seq, *, f32], y: &tensor[*, batch, *, seq, *, f32]) -> tensor[*, batch, *, seq, *, f32] = vmap(combine, axis=1)(x, y)\n\
+         x: tensor[2, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32]), [2i64, 2i64, 1i64, 3i64, 1i64])\n\
+         y: tensor[4, 2, 1, 3, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32, 13.0f32, 14.0f32, 15.0f32, 16.0f32, 17.0f32, 18.0f32, 19.0f32, 20.0f32, 21.0f32, 22.0f32, 23.0f32, 24.0f32]), [4i64, 2i64, 1i64, 3i64, 1i64])\n\
+         out = apply(x, y)\n";
+    check_both(source, "extent `pre[0]`: x axis 0 = 2, y axis 0 = 4", false);
+}
+
 fn higher_order_source(second_skip: usize) -> String {
     format!(
         "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\ndef h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\ndef h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\ndef g2(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[{second_skip}i64, shape(x, 0i32)]])\ndef apply4(f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\ndef main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2, g2(to_tensor([7.0f32, 8.0f32, 9.0f32])))\n"

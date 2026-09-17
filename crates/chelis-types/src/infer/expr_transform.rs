@@ -435,12 +435,30 @@ pub(super) fn infer_vmap(
 
     match resolved {
         Type::Fn(args, ret) => {
-            let batch_dim = Dim::Var(vg.fresh_dvar());
+            let batch_var = vg.fresh_dvar();
+            subst.mark_mapped_axis(batch_var, axis);
+            let mut mapped_axis_renaming = UnordMap::new();
             let args = args
                 .iter()
-                .map(|arg| vmap_transform_param_type(arg, axis, &batch_dim))
+                .map(|arg| {
+                    vmap_transform_param_type(
+                        arg,
+                        axis,
+                        batch_var,
+                        vg,
+                        subst,
+                        &mut mapped_axis_renaming,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>();
-            let ret = vmap_transform_result_type(&ret, axis, &batch_dim);
+            let ret = vmap_transform_result_type(
+                &ret,
+                axis,
+                batch_var,
+                vg,
+                subst,
+                &mut mapped_axis_renaming,
+            );
 
             match (args, ret) {
                 (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
@@ -468,30 +486,87 @@ pub(super) fn infer_vmap(
     }
 }
 
+fn vmap_transform_dims(
+    dims: &[Dim],
+    axis: usize,
+    batch_var: DimVar,
+    vg: &mut VarGen,
+    subst: &Subst,
+    mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
+) -> Result<Vec<Dim>, String> {
+    let has_rank_spread = dims.iter().any(|dim| matches!(dim, Dim::Rank(_)));
+    if !has_rank_spread && axis > dims.len() {
+        return Err(format!(
+            "vmap axis {axis} is out of bounds for rank {} tensor",
+            dims.len()
+        ));
+    }
+
+    let mut transformed = dims
+        .iter()
+        .map(|dim| {
+            let Dim::Var(var) = dim else {
+                return dim.clone();
+            };
+            let Some(existing_axis) = subst.mapped_axis(*var) else {
+                return dim.clone();
+            };
+            let fresh = *mapped_axis_renaming.entry(*var).or_insert_with(|| {
+                let fresh = vg.fresh_dvar();
+                let shifted = existing_axis + usize::from(existing_axis >= axis);
+                subst.mark_mapped_axis(fresh, shifted);
+                fresh
+            });
+            Dim::Var(fresh)
+        })
+        .collect::<Vec<_>>();
+
+    let batch = Dim::Var(batch_var);
+    if has_rank_spread {
+        // A rank-spread token has no physical width. Storage order cannot
+        // express an insertion inside it, so retain the explicit axis
+        // annotation and let row unification place the boundary.
+        transformed.push(batch);
+    } else {
+        transformed.insert(axis, batch);
+    }
+    Ok(transformed)
+}
+
 pub(super) fn vmap_transform_param_type(
     ty: &Type,
     axis: usize,
-    batch_dim: &Dim,
+    batch_var: DimVar,
+    vg: &mut VarGen,
+    subst: &Subst,
+    mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
         Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_param_type(
-            inner, axis, batch_dim,
+            inner,
+            axis,
+            batch_var,
+            vg,
+            subst,
+            mapped_axis_renaming,
         )?))),
         Type::Tensor(dims, precision) => {
-            if axis > dims.len() {
-                return Err(format!(
-                    "vmap axis {axis} is out of bounds for rank {} tensor",
-                    dims.len()
-                ));
-            }
-            let mut dims = dims.clone();
-            dims.insert(axis, batch_dim.clone());
+            let dims = vmap_transform_dims(dims, axis, batch_var, vg, subst, mapped_axis_renaming)?;
             Ok(Type::Tensor(dims, precision.clone()))
         }
         Type::Tuple(elements) => Ok(Type::Tuple(
             elements
                 .iter()
-                .map(|element| vmap_transform_param_type(element, axis, batch_dim))
+                .map(|element| {
+                    vmap_transform_param_type(
+                        element,
+                        axis,
+                        batch_var,
+                        vg,
+                        subst,
+                        mapped_axis_renaming,
+                    )
+                })
                 .collect::<Result<_, _>>()?,
         )),
         other => Ok(other.clone()),
@@ -501,31 +576,41 @@ pub(super) fn vmap_transform_param_type(
 pub(super) fn vmap_transform_result_type(
     ty: &Type,
     axis: usize,
-    batch_dim: &Dim,
+    batch_var: DimVar,
+    vg: &mut VarGen,
+    subst: &Subst,
+    mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
         Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_result_type(
-            inner, axis, batch_dim,
+            inner,
+            axis,
+            batch_var,
+            vg,
+            subst,
+            mapped_axis_renaming,
         )?))),
         Type::Prim(precision) => Ok(Type::Tensor(
-            vec![batch_dim.clone()],
+            vec![Dim::Var(batch_var)],
             TensorPrec::Concrete(*precision),
         )),
         Type::Tensor(dims, precision) => {
-            if axis > dims.len() {
-                return Err(format!(
-                    "vmap axis {axis} is out of bounds for rank {} tensor",
-                    dims.len()
-                ));
-            }
-            let mut dims = dims.clone();
-            dims.insert(axis, batch_dim.clone());
+            let dims = vmap_transform_dims(dims, axis, batch_var, vg, subst, mapped_axis_renaming)?;
             Ok(Type::Tensor(dims, precision.clone()))
         }
         Type::Tuple(elements) => Ok(Type::Tuple(
             elements
                 .iter()
-                .map(|element| vmap_transform_result_type(element, axis, batch_dim))
+                .map(|element| {
+                    vmap_transform_result_type(
+                        element,
+                        axis,
+                        batch_var,
+                        vg,
+                        subst,
+                        mapped_axis_renaming,
+                    )
+                })
                 .collect::<Result<_, _>>()?,
         )),
         other => Ok(other.clone()),

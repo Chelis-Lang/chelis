@@ -1407,6 +1407,43 @@ impl CEmitter {
                         };
                         *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
                     }
+                } else if matches!(node.op, RiscOp::Permute { .. }) {
+                    // A permutation preserves extents but not their positions.
+                    // The generic same-rank pass-through arm below copies the
+                    // first input's dimensions positionally, which silently
+                    // undoes every non-identity permutation as soon as one
+                    // output axis is anonymous. Resolve each anonymous output
+                    // axis through the IR's structural axis-source mapping;
+                    // explicitly named axes already carry their destination
+                    // identity and stay untouched.
+                    let sources = chelis_ir::output_axis_sources(&out, id);
+                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
+                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
+                            continue;
+                        }
+                        if let DimInfo::Named(_, Some(required)) = dim {
+                            *dim = DimInfo::Lit(*required);
+                            continue;
+                        }
+                        let observed = match sources.get(axis) {
+                            Some(chelis_ir::AxisSource::InputAxis {
+                                input,
+                                axis: RtAxis::Lit(source_axis),
+                            }) => node
+                                .inputs
+                                .get(*input)
+                                .and_then(|input| out.get(*input))
+                                .and_then(|input| {
+                                    input
+                                        .output_type
+                                        .dims
+                                        .get(usize::try_from(*source_axis).ok()?)
+                                })
+                                .cloned(),
+                            _ => None,
+                        };
+                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
+                    }
                 } else if let RiscOp::Gather { axis } = &node.op
                     && node.inputs.len() == 2
                     && let (Some(values), Some(indices)) =
