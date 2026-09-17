@@ -5327,8 +5327,11 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
         .args(["build", path.to_str().unwrap(), "--target", "hip"])
         .assert()
         .failure()
+        // Inherited CI unblock: the PR base and current main still expected
+        // the pre-949b376e7 wording after production adopted this precise
+        // lowering diagnostic.
         .stderr(predicate::str::contains(
-            "IR builtin `layer_norm` requires a concrete normalized axis extent",
+            "layer_norm requires a concrete extent for axis 1 in IR lowering",
         ));
 }
 
@@ -8185,37 +8188,278 @@ fn eval_vmap_returns_per_element_results() {
         ));
 }
 
-/// The core transform fragment admits direct top-level declarations and typed
-/// inline `vmap` lambdas. These controls retain those supported forms while
-/// the adjacent negative cases fence dynamic callable targets before
-/// evaluation.
+/// The core transform fragment admits direct top-level declarations and
+/// inline or local `vmap` lambdas whose mapped type structure is explicit.
+/// These controls retain those supported forms, including aliases and
+/// shadowing within the typed local fragment, while the adjacent negative
+/// cases fence underconstrained callable targets before evaluation.
 #[test]
 fn check_accepts_supported_core_transform_targets() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("direct_transform_targets.ch");
+    let surf_path = dir.path().join("direct_transform_targets.ch");
+    let deep_path = dir.path().join("direct_transform_targets.dp");
     write_file(
-        &path,
+        &surf_path,
         "def loss(x: f32) -> f32 = mul(x, x)\n\
          def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
          gradient = grad(loss)\n\
          mapped = vmap(reduce)\n\
          def inline(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = \
-         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n",
+         vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n\
+         def local(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           vmap(mapped)(t)\n\
+         }\n\
+         def local_alias(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           alias = mapped\n\
+           vmap(alias)(t)\n\
+         }\n\
+         def typed_shadow(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+           mapped = fn (v) -> sum(v, 0i32)\n\
+           first = mapped(copy(t))\n\
+           mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+           vmap(mapped)(t)\n\
+         }\n",
     );
 
-    let json = run_json_check(&path);
-    assert_eq!(json["score"].as_f64(), Some(1.0), "{json}");
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["deep", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, deep).expect("write desugared Deep program");
+
+    for path in [&surf_path, &deep_path] {
+        let json = run_json_check(path);
+        assert_eq!(json["score"].as_f64(), Some(1.0), "{path:?}: {json}");
+        assert!(
+            json["errors"].as_array().is_some_and(Vec::is_empty),
+            "{path:?}: {json}"
+        );
+    }
+
+    let flow_controls = [
+        (
+            "vmap_typed_tuple_component",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               (mapped, keep) = (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_unrelated_untyped_tuple_sibling",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               (ordinary, mapped) = (\n\
+                 fn (v) -> sum(v, 0i32),\n\
+                 fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               )\n\
+               first = ordinary(copy(t))\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_destructuring_shadow",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               first = mapped(copy(t))\n\
+               (mapped, keep) = (\n\
+                 fn (v: tensor[4, 3, f32]) -> sum(v, 0i32),\n\
+                 0i32\n\
+               )\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_block_forwarded_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               alias = {\n\
+                 forwarded = mapped\n\
+                 forwarded\n\
+               }\n\
+               vmap(alias)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_local_binding_ascription",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped: tensor[4, 3, f32] -> tensor[3, f32] = \
+                 fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_alias_after_module_alias_shadow",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_concrete_nested_tuple_parameter",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(fn (pair: (tensor[4, 3, f32], tensor[4, 3, f32])) -> \
+                 sum(pair.1, 0i32))((copy(t), t))\n",
+        ),
+        (
+            "vmap_concrete_nested_ref_parameter",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v: &tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+        ),
+        (
+            "vmap_symbolic_tensor_dimension",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(fn (v: tensor[*, 3, f32]) -> sum(v, 0i32))(t)\n",
+        ),
+        (
+            "vmap_match_pattern_shadow",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               first = mapped(copy(t))\n\
+               match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)) with {\n\
+                 | mapped => vmap(mapped)(t)\n\
+               }\n\
+             }\n",
+        ),
+        (
+            "vmap_typed_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32) with {\n\
+                 | (mapped, _) => vmap(mapped)(t)\n\
+               }\n",
+        ),
+        (
+            "vmap_typed_nested_match_sibling_isolation",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (\n\
+                 fn (v) -> sum(v, 0i32),\n\
+                 (0i32, fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))\n\
+               ) with {\n\
+                 | (ordinary, (_, mapped)) => {\n\
+                   first = ordinary(copy(t))\n\
+                   vmap(mapped)(t)\n\
+                 }\n\
+               }\n",
+        ),
+        (
+            "vmap_typed_match_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)) with {\n\
+                 | mapped => vmap(mapped)(t)\n\
+               }\n",
+        ),
+        (
+            "non_vmap_block_forwarded_tuple_consumer",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               (mapped, keep) = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               alias = {\n\
+                 forwarded = mapped\n\
+                 forwarded\n\
+               }\n\
+               alias(t)\n\
+             }\n",
+        ),
+    ];
+
+    for (stem, source) in flow_controls {
+        let surf_path = dir.path().join(format!("{stem}.ch"));
+        let deep_path = dir.path().join(format!("{stem}.dp"));
+        write_file(&surf_path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        fs::write(&deep_path, deep).expect("write desugared Deep control");
+
+        for path in [&surf_path, &deep_path] {
+            let json = run_json_check(path);
+            assert_eq!(
+                json["score"].as_f64(),
+                Some(1.0),
+                "{stem} ({path:?}) must remain in the supported fragment: {json}"
+            );
+            assert!(
+                json["errors"].as_array().is_some_and(Vec::is_empty),
+                "{stem} ({path:?}) must not inherit unrelated provenance: {json}"
+            );
+        }
+    }
+
+    let mut multi_module_deep = Vec::new();
+    for (stem, source) in [
+        (
+            "alpha_transform_name",
+            "module Alpha\n\
+             def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n",
+        ),
+        (
+            "beta_local_shadow",
+            "module Beta\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               reduce = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(reduce)(t)\n\
+             }\n",
+        ),
+    ] {
+        let path = dir.path().join(format!("{stem}.ch"));
+        write_file(&path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        multi_module_deep.extend(deep);
+        multi_module_deep.push(b'\n');
+    }
+    let multi_module_path = dir.path().join("module_scoped_transform_names.dp");
+    fs::write(&multi_module_path, multi_module_deep).expect("write combined module Deep");
+    let json = run_json_check(&multi_module_path);
+    assert_eq!(
+        json["score"].as_f64(),
+        Some(1.0),
+        "an unrelated module's function name must not taint a local lambda: {json}"
+    );
     assert!(
         json["errors"].as_array().is_some_and(Vec::is_empty),
-        "{json}"
+        "module-scoped transform provenance must remain isolated: {json}"
     );
 }
 
-/// #1887, #1952, and #1954: local aliases, shadowing local lambdas, and
-/// untyped inline `vmap` lambdas can be accepted with a false transform
-/// contract. They are outside the documented core fragment until their
-/// independent semantics land, so `check` must reject each form loudly rather
-/// than let a later lane choose a different callable or rank.
+/// #1887, #1952, #1954, and #2109: local aliases, shadowing local lambdas,
+/// and untyped inline or locally bound `vmap` lambdas can be accepted with a
+/// false transform contract. They are outside the documented core fragment
+/// until their independent semantics land, so `check` must reject each form
+/// loudly rather than let a later lane choose a different callable or rank.
 #[test]
 fn check_fences_non_direct_transform_targets() {
     let cases = [
@@ -8263,6 +8507,111 @@ fn check_fences_non_direct_transform_targets() {
             "vmap",
         ),
         (
+            "vmap_untyped_local_lambda_false_result",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_local_lambda_correct_result",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_local_lambda_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_wildcard_inline_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(fn (v: _) -> sum(v, 0i32))(t)\n",
+            "vmap",
+        ),
+        (
+            "vmap_wildcard_local_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v: _) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_wildcard_local_lambda_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v: _) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_nested_tuple_type_hole_inline",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(fn (pair: (tensor[4, 3, f32], _)) -> \
+                 sum(pair.1, 0i32))((copy(t), t))\n",
+            "vmap",
+        ),
+        (
+            "vmap_nested_ref_type_hole_local_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v: &_) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_tuple_destructure",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               (mapped, keep) = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_tuple_sibling",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               (typed, mapped) = (\n\
+                 fn (v: tensor[4, 3, f32]) -> sum(v, 0i32),\n\
+                 fn (v) -> sum(v, 0i32)\n\
+               )\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_block_forwarded_alias",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = {\n\
+                 forwarded = mapped\n\
+                 forwarded\n\
+               }\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_alias_survives_typed_shadow",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
             "vmap_local_alias",
             "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
              def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
@@ -8279,6 +8628,70 @@ fn check_fences_non_direct_transform_targets() {
                mapped = g\n\
                vmap(mapped)(t)\n\
              }\n",
+            "vmap",
+        ),
+        (
+            "vmap_direct_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             out = vmap(mapped)\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_shadow_of_module_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = mapped\n\
+               vmap(alias)(t)\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_direct_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | mapped => vmap(mapped)(t)\n\
+               }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               match pair with {\n\
+                 | (mapped, _) => vmap(mapped)(t)\n\
+               }\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_nested_tuple_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = ((0i32, fn (v) -> sum(v, 0i32)), 1i32)\n\
+               match pair with {\n\
+                 | ((_, mapped), _) => vmap(mapped)(t)\n\
+               }\n\
+             }\n",
+            "vmap",
+        ),
+        (
+            "vmap_untyped_as_match_binding",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | whole @ mapped => vmap(whole)(t)\n\
+               }\n",
+            "vmap",
+        ),
+        (
+            "vmap_module_alias_match_binding",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             mapped = reduce\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               match mapped with {\n\
+                 | alias => vmap(alias)(t)\n\
+               }\n",
             "vmap",
         ),
     ];
@@ -8305,16 +8718,327 @@ fn check_fences_non_direct_transform_targets() {
                 json["score"].as_f64().is_some_and(|score| score < 1.0),
                 "{stem} ({path:?}) must not receive a perfect check score: {json}"
             );
-            assert!(
-                json["errors"].as_array().is_some_and(|errors| {
-                    errors.iter().any(|error| {
-                        error["message"].as_str().is_some_and(|message| {
+            let errors = json["errors"].as_array().expect("errors array");
+            let owned_fence_errors = errors
+                .iter()
+                .filter(|error| {
+                    error["kind"] == "TypeMismatch"
+                        && error["message"].as_str().is_some_and(|message| {
                             message.contains("core transform fragment")
                                 && message.contains(transform)
                         })
+                })
+                .count();
+            assert_eq!(
+                owned_fence_errors, 1,
+                "{stem} ({path:?}) must carry exactly one owned core-transform fence diagnostic: {json}"
+            );
+        }
+    }
+}
+
+/// The launch-core fence evaluates forwarded callable values structurally at
+/// every module/local binding, match-result, and direct-target boundary. These
+/// rows keep the end-to-end classifier honest rather than testing only the
+/// assigned alias shape that first exposed #2109.
+#[test]
+fn check_tracks_core_transform_values_across_forwarding_results() {
+    let cases = [
+        (
+            "direct_tuple_projection_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               vmap(pair.0)(t)\n\
+             }\n",
+            true,
+        ),
+        (
+            "inline_tuple_projection_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap((fn (v) -> sum(v, 0i32), 0i32).0)(t)\n",
+            true,
+        ),
+        (
+            "transparent_let_target_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap({\n\
+                 mapped = fn (v) -> sum(v, 0i32)\n\
+                 mapped\n\
+               })(t)\n",
+            true,
+        ),
+        (
+            "transparent_block_target_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(do {\n\
+                 0i32;\n\
+                 fn (v) -> sum(v, 0i32)\n\
+               })(t)\n",
+            true,
+        ),
+        (
+            "as_bound_tuple_projection_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               pair = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               match pair with {\n\
+                 | whole @ (mapped, _) => vmap(whole.0)(t)\n\
+               }\n\
+             }\n",
+            true,
+        ),
+        (
+            "direct_match_result_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | mapped => mapped\n\
+               })(t)\n",
+            true,
+        ),
+        (
+            "local_match_result_untyped",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = match (fn (v) -> sum(v, 0i32)) with {\n\
+                 | forwarded => forwarded\n\
+               }\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            true,
+        ),
+        (
+            "nested_match_result_all_untyped",
+            "def probe(flag: bool, t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               carrier = match flag with {\n\
+                 | true => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+                 | false => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+               }\n\
+               vmap((carrier.0).0)(t)\n\
+             }\n",
+            true,
+        ),
+        (
+            "module_tuple_projection_alias",
+            "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+             pair = (reduce, 0i32)\n\
+             mapped = pair.0\n\
+             out = vmap(mapped)\n",
+            true,
+        ),
+        (
+            "direct_tuple_projection_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               pair = (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32)\n\
+               vmap(pair.0)(t)\n\
+             }\n",
+            false,
+        ),
+        (
+            "inline_tuple_projection_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap((fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32).0)(t)\n",
+            false,
+        ),
+        (
+            "transparent_let_target_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap({\n\
+                 mapped = fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+                 mapped\n\
+               })(t)\n",
+            false,
+        ),
+        (
+            "transparent_block_target_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(do {\n\
+                 0i32;\n\
+                 fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)\n\
+               })(t)\n",
+            false,
+        ),
+        (
+            "as_bound_tuple_projection_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               pair = (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32)\n\
+               match pair with {\n\
+                 | whole @ (mapped, _) => vmap(whole.0)(t)\n\
+               }\n\
+             }\n",
+            false,
+        ),
+        (
+            "direct_match_result_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)) with {\n\
+                 | mapped => mapped\n\
+               })(t)\n",
+            false,
+        ),
+        (
+            "local_match_result_typed",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               mapped = match (fn (v: tensor[4, 3, f32]) -> sum(v, 0i32)) with {\n\
+                 | forwarded => forwarded\n\
+               }\n\
+               vmap(mapped)(t)\n\
+             }\n",
+            false,
+        ),
+        (
+            "nested_match_result_constrained_by_typed_arm",
+            "def probe(flag: bool, t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] = {\n\
+               carrier = match flag with {\n\
+                 | true => ((fn (v) -> sum(v, 0i32), 0i32), 1i32)\n\
+                 | false => ((fn (v: tensor[4, 3, f32]) -> sum(v, 0i32), 0i32), 1i32)\n\
+               }\n\
+               vmap((carrier.0).0)(t)\n\
+             }\n",
+            false,
+        ),
+        (
+            "module_tuple_projection_typed_lambda",
+            "pair = (\n\
+               fn (v: tensor[4, 3, f32]) -> sum(v, 0i32),\n\
+               0i32\n\
+             )\n\
+             mapped = pair.0\n\
+             def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(mapped)(t)\n",
+            false,
+        ),
+    ];
+
+    let dir = tempdir().expect("tempdir");
+    for (stem, source, must_fence) in cases {
+        let surf_path = dir.path().join(format!("{stem}.ch"));
+        let deep_path = dir.path().join(format!("{stem}.dp"));
+        write_file(&surf_path, source);
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        fs::write(&deep_path, deep).expect("write desugared Deep forwarding case");
+
+        for path in [&surf_path, &deep_path] {
+            let json = run_json_check(path);
+            let errors = json["errors"].as_array().expect("errors array");
+            let owned_fence_errors = errors
+                .iter()
+                .filter(|error| {
+                    error["kind"] == "TypeMismatch"
+                        && error["message"].as_str().is_some_and(|message| {
+                            message.contains("core transform fragment") && message.contains("vmap")
+                        })
+                })
+                .count();
+            if must_fence {
+                assert!(
+                    json["score"].as_f64().is_some_and(|score| score < 1.0),
+                    "{stem} ({path:?}) must not receive a perfect score: {json}"
+                );
+                assert_eq!(
+                    owned_fence_errors, 1,
+                    "{stem} ({path:?}) needs exactly one owned vmap fence: {json}"
+                );
+            } else {
+                assert_eq!(
+                    json["score"].as_f64(),
+                    Some(1.0),
+                    "{stem} ({path:?}) must remain supported: {json}"
+                );
+                assert!(
+                    errors.is_empty(),
+                    "{stem} ({path:?}) must not inherit fence provenance: {json}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn check_classifies_generated_deep_tensor_holes_by_mapped_structure() {
+    let dir = tempdir().expect("tempdir");
+    let cases = [
+        (
+            "dimension_hole",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(fn (v: tensor[d, 3, f32]) -> sum(v, 0i32))(t)\n",
+            "(d-var {} d)",
+            "(d-var {} _)",
+            false,
+        ),
+        (
+            "precision_hole",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+               vmap(fn (v: tensor[4, 3, f32]) -> sum(v, 0i32))(t)\n",
+            "(t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))",
+            "(t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-var {} _))",
+            false,
+        ),
+        (
+            "rank_hole",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 4, 3, f32] =\n\
+               vmap(fn (v: tensor[..r, f32]) -> relu(v))(t)\n",
+            "(d-rank {} r)",
+            "(d-rank {} _)",
+            true,
+        ),
+    ];
+
+    for (stem, source, needle, replacement, must_fence) in cases {
+        let surf_path = dir.path().join(format!("{stem}.ch"));
+        let deep_path = dir.path().join(format!("{stem}.dp"));
+        write_file(&surf_path, source);
+        let generated = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let generated = String::from_utf8(generated).expect("generated Deep is UTF-8");
+        assert!(
+            generated.contains(needle),
+            "{stem} fixture must carry `{needle}` before mutation: {generated}"
+        );
+        let holed = generated.replacen(needle, replacement, 1);
+        fs::write(&deep_path, holed).expect("write generated Deep hole case");
+
+        let json = run_json_check(&deep_path);
+        let errors = json["errors"].as_array().expect("errors array");
+        let owned_fence_errors = errors
+            .iter()
+            .filter(|error| {
+                error["kind"] == "TypeMismatch"
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("core transform fragment") && message.contains("vmap")
                     })
-                }),
-                "{stem} ({path:?}) must carry the core-transform fence diagnostic: {json}"
+            })
+            .count();
+        if must_fence {
+            assert!(
+                json["score"].as_f64().is_some_and(|score| score < 1.0),
+                "{stem} can absorb transform-relevant shape and must be fenced: {json}"
+            );
+            assert_eq!(
+                owned_fence_errors, 1,
+                "{stem} needs one owned vmap fence diagnostic: {json}"
+            );
+        } else {
+            assert_eq!(
+                json["score"].as_f64(),
+                Some(1.0),
+                "{stem} preserves explicit mapped tensor structure: {json}"
+            );
+            assert!(
+                errors.is_empty(),
+                "{stem} must remain a supported generated-Deep control: {json}"
             );
         }
     }

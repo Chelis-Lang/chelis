@@ -67,6 +67,13 @@
 //! list while the arm could never match. The paired positive control is the
 //! same program with a matching literal family, which must stay at 1.0 so the
 //! rejection cannot creep into a well-formed match.
+//!
+//! Membership (chelis#2109): a locally bound untyped lambda passed to `vmap`
+//! bypassed the launch-core inline-lambda fence and let the checker certify a
+//! false result type at score 1.0. The focused CLI matrix owns Surf/Deep
+//! parity, the correct-result rejection, nested type holes, alias propagation,
+//! and typed local controls; these corpus rows keep the class-wide score
+//! invariant explicit.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -130,6 +137,54 @@ fn surf_known_bad_programs_score_below_one() {
                add(s, e)\n\
              }\n\
              out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_untyped_local_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_wildcard_local_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v: _) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_nested_tuple_hole_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(fn (pair: (tensor[4, 3, f32], _)) -> \
+                 sum(pair.1, 0i32))((copy(t), t))\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_tuple_destructured_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               (mapped, keep) = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_block_forwarded_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = {\n\
+                 forwarded = mapped\n\
+                 forwarded\n\
+               }\n\
+               vmap(alias)(t)\n\
+             }\n"
                 .to_string(),
             ".ch",
         ),

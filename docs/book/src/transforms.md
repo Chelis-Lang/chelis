@@ -12,16 +12,29 @@ For the 0.19 core promise, write named transforms against a direct, unshadowed
 top-level function declaration, such as `grad(loss)` or `vmap(process)`.
 The checker rejects aliases of a top-level function at either module or local
 scope, and a local binding that shadows a top-level target, rather than
-silently selecting a different callable. An inline `vmap` lambda remains
-supported when every parameter has an explicit type; an untyped parameter is
-rejected because it could be inferred from the unsliced input rather than the
-mapped slice.
+silently selecting a different callable. An inline or locally bound `vmap`
+lambda remains supported when every parameter has explicit structure wherever
+`vmap` inserts the mapped axis. A whole type hole such as `_`, a type hole
+nested through a reference or tuple, and a Deep rank hole are not explicit
+mapped structure: they could bind to the unsliced input rather than the mapped
+slice. Fixed-rank tensor dimension and precision variables remain supported
+because the tensor constructor and axis insertion are already determined;
+named type and rank variables remain governed by their ordinary binder rules.
+Surf uses `*` for a dynamic tensor extent and rejects `_` in tensor dimension,
+precision, or rank-spread slots. An unsupported lambda is rejected through
+module or local aliases and transparent value flow, including block results,
+direct tuple projections, tuple destructuring, match-pattern binding, and
+match results. Structural pattern, result, and projection flow follows only
+the corresponding tuple component, and lexical shadowing replaces the earlier
+value.
 
 These are current supported-fragment fences, not changes to the language
 semantics in the numbered specification. The related launch rows are
 [#1887](https://github.com/Chelis-Lang/chelis/issues/1887),
 [#1952](https://github.com/Chelis-Lang/chelis/issues/1952), and
-[#1954](https://github.com/Chelis-Lang/chelis/issues/1954).
+[#1954](https://github.com/Chelis-Lang/chelis/issues/1954), with the
+local-lambda fence completed by
+[#2109](https://github.com/Chelis-Lang/chelis/issues/2109).
 
 ## grad
 
