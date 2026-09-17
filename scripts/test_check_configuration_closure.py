@@ -525,7 +525,9 @@ class SourceReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             CLOSURE.ConfigurationClosureFailure, "stale uncompiled-source exception"
         ):
-            CLOSURE.check_every_source_is_compiled((), REPO_ROOT, (exception,))
+            CLOSURE.check_every_source_is_compiled(
+                (), REPO_ROOT, (exception,), nightly_only=()
+            )
 
     def test_rejects_an_exception_whose_gate_is_missing(self) -> None:
         exception = CLOSURE.UncompiledException(
@@ -536,7 +538,9 @@ class SourceReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             CLOSURE.ConfigurationClosureFailure, "missing owning gate"
         ):
-            CLOSURE.check_every_source_is_compiled((), REPO_ROOT, (exception,))
+            CLOSURE.check_every_source_is_compiled(
+                (), REPO_ROOT, (exception,), nightly_only=()
+            )
 
     def test_live_nightly_only_inventory_is_well_formed(self) -> None:
         labels = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
@@ -571,7 +575,9 @@ class SourceReconciliationTests(unittest.TestCase):
                 root,
                 exceptions=(),
                 nightly_only=nightly,
-                per_pull_request_features=(),
+                resolved_features_by_row={
+                    "all-features": frozenset({("pkg", "feature")})
+                },
             )
 
     def test_reports_a_nightly_only_entry_a_registered_run_compiled(self) -> None:
@@ -602,7 +608,75 @@ class SourceReconciliationTests(unittest.TestCase):
                     root,
                     exceptions=(),
                     nightly_only=nightly,
-                    per_pull_request_features={("pkg", "feature")},
+                    resolved_features_by_row={
+                        "all-features": frozenset({("pkg", "feature")}),
+                        "default-features": frozenset({("pkg", "feature")}),
+                    },
+                )
+
+    def test_rejects_a_nonexistent_nightly_feature_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            (root / "src").mkdir()
+            (root / "src/nightly.rs").write_text("", encoding="utf-8")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
+            )
+            nightly = (
+                CLOSURE.NightlyOnlySource(
+                    path="src/nightly.rs",
+                    feature="pkg/missing",
+                    row="all-features",
+                ),
+            )
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure,
+                "pkg/missing.*not enabled.*all-features",
+            ):
+                CLOSURE.check_every_source_is_compiled(
+                    (root / "target/debug",),
+                    root,
+                    exceptions=(),
+                    nightly_only=nightly,
+                    resolved_features_by_row={
+                        "all-features": frozenset({("pkg", "feature")})
+                    },
+                )
+
+    def test_rejects_a_feature_named_under_the_wrong_nightly_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            (root / "src").mkdir()
+            (root / "src/nightly.rs").write_text("", encoding="utf-8")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/nightly.rs\n", encoding="utf-8"
+            )
+            nightly = (
+                CLOSURE.NightlyOnlySource(
+                    path="src/nightly.rs",
+                    feature="pkg/feature",
+                    row="default-features-macos",
+                ),
+            )
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure,
+                "pkg/feature.*not enabled.*default-features-macos",
+            ):
+                CLOSURE.check_every_source_is_compiled(
+                    (root / "target/debug",),
+                    root,
+                    exceptions=(),
+                    nightly_only=nightly,
+                    resolved_features_by_row={
+                        "all-features": frozenset({("pkg", "feature")}),
+                        "default-features-macos": frozenset(),
+                    },
                 )
 
     def test_require_complete_drops_the_nightly_allowance(self) -> None:
@@ -630,6 +704,9 @@ class SourceReconciliationTests(unittest.TestCase):
                 root,
                 exceptions=(),
                 nightly_only=nightly,
+                resolved_features_by_row={
+                    "all-features": frozenset({("pkg", "feature")})
+                },
             )
             # ... and not permitted on the run that compiles everything.
             with self.assertRaisesRegex(
@@ -641,6 +718,9 @@ class SourceReconciliationTests(unittest.TestCase):
                     exceptions=(),
                     nightly_only=nightly,
                     require_complete=True,
+                    resolved_features_by_row={
+                        "all-features": frozenset({("pkg", "feature")})
+                    },
                 )
 
     def test_rejects_a_nightly_entry_naming_a_per_pull_request_row(self) -> None:

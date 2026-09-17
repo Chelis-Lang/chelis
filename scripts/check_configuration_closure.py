@@ -40,7 +40,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tomllib
-from typing import Collection, Iterable, Sequence
+from typing import Collection, Iterable, Mapping, Sequence
 
 from capacity_census_cache_publication import COMPILE_CASES as CACHE_COMPILE_CASES
 from capacity_census_wire_calls import DRIVER as WIRE_CALL_DRIVER
@@ -473,14 +473,14 @@ def check_matrix_covers_declared_features(
 
 
 def features_enabled_per_pull_request(
-    by_row: dict[str, frozenset[tuple[str, str]]],
+    by_row: Mapping[str, Collection[tuple[str, str]]],
     matrix: Sequence[ClippyRun] = CLIPPY_MATRIX,
 ) -> frozenset[tuple[str, str]]:
     """Cargo-resolved features enabled by at least one per-PR matrix row."""
     return frozenset(
         feature
         for run in matrix
-        if run.cadence == PER_PULL_REQUEST
+        if run.cadence == PER_PULL_REQUEST and run.label in by_row
         for feature in by_row[run.label]
     )
 
@@ -609,7 +609,9 @@ def check_every_source_is_compiled(
     exceptions: Sequence[UncompiledException] = UNCOMPILED_EXCEPTIONS,
     nightly_only: Sequence[NightlyOnlySource] = NIGHTLY_ONLY_SOURCES,
     require_complete: bool = False,
-    per_pull_request_features: Collection[tuple[str, str]] = (),
+    resolved_features_by_row: Mapping[
+        str, Collection[tuple[str, str]]
+    ] | None = None,
 ) -> None:
     """Leg 3: reconcile repository sources against rustc's own dep-info.
 
@@ -620,6 +622,7 @@ def check_every_source_is_compiled(
     stale without inferring its producer from those artifacts.
     """
     labels = {run.label: run for run in CLIPPY_MATRIX}
+    by_row = resolved_features_by_row or {}
     nightly_features: dict[str, tuple[str, str]] = {}
     for source in nightly_only:
         if not (repo_root / source.path).is_file():
@@ -638,7 +641,13 @@ def check_every_source_is_compiled(
                 f"nightly-only source {source.path} has invalid feature identity "
                 f"{source.feature!r}; expected package/feature"
             )
-        nightly_features[source.path] = (package, feature)
+        feature_identity = (package, feature)
+        if feature_identity not in by_row.get(source.row, ()):
+            raise ConfigurationClosureFailure(
+                f"nightly-only feature {source.feature} is not enabled by its "
+                f"named row {source.row!r}"
+            )
+        nightly_features[source.path] = feature_identity
     for exception in exceptions:
         if not (repo_root / exception.directory).is_dir():
             raise ConfigurationClosureFailure(
@@ -681,7 +690,7 @@ def check_every_source_is_compiled(
         set() if require_complete else {source.path for source in nightly_only}
     )
     if not require_complete:
-        enabled_per_pull_request = set(per_pull_request_features)
+        enabled_per_pull_request = features_enabled_per_pull_request(by_row)
         stale = sorted(
             path
             for path in allowed_nightly
@@ -740,7 +749,7 @@ def validate(
         else default_target_directories(repo_root),
         repo_root,
         require_complete=require_complete,
-        per_pull_request_features=features_enabled_per_pull_request(by_row),
+        resolved_features_by_row=by_row,
     )
     print("CONFIGURATION CLOSURE: PASS", flush=True)
 
