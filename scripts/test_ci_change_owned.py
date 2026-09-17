@@ -2076,11 +2076,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
             sorted(identity.canonical for identity in weights),
         )
 
-    def test_package_expansion_preserves_the_trusted_v3_plan_envelope(
+    def test_package_expansion_preserves_the_trusted_v4_plan_envelope(
         self,
     ) -> None:
         plan = self._plan(lane="package-expansion")
-        self.assertEqual(plan["version"], 3)
+        self.assertEqual(plan["version"], 4)
         self.assertEqual(
             plan["shard_planning"]["package_expansion"],
             {"algorithm": "sha256-modulo-v1"},
