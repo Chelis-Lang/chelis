@@ -2164,6 +2164,15 @@ impl Subst {
         }
     }
 
+    /// Resolve the shape run currently assigned to a rank variable, preserving
+    /// a sole unbound/aliased `Dim::Rank` identity for rigidity checks.
+    pub(crate) fn constraint_rank(&self, rank: RankVar) -> Vec<Dim> {
+        self.resolve_rvar(rank)
+            .into_iter()
+            .map(|dim| self.constraint_dim(&dim))
+            .collect()
+    }
+
     pub(crate) fn observe_dim(&self, dim: &Dim) -> DimObservation {
         let constraint = self.constraint_dim(dim);
         let name = match dim {

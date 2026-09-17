@@ -287,14 +287,15 @@ fn infer_app_inner(
         } else {
             constructor_for_shape(source_name, CallShape::Positional, env, adt_reg).map(
                 |(_, scheme, _)| {
-                    let (ty, _, dvar_mapping) = env.instantiate_scheme(scheme, vg, subst);
+                    let instantiated = env.instantiate_scheme(scheme, vg, subst);
                     // chelis#1801: a constructor head is instantiated here
                     // rather than through the Var rule, so it records its
                     // own fresh dimension variables or the bracket above
                     // would see none for a `Ctor(...)` application.
-                    product
-                        .record_instantiation_dvars(dvar_mapping.iter().map(|(_, fresh)| *fresh));
-                    ty
+                    product.record_instantiation_dvars(
+                        instantiated.dvars.iter().map(|(_, fresh)| *fresh),
+                    );
+                    instantiated.ty
                 },
             )
         };

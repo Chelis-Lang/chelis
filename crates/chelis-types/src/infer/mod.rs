@@ -28,7 +28,7 @@ use crate::deep_type::{
     TypeUseSite, deferred_family_diagnostic, is_deferred_dtype_name, is_unsigned_dtype_name,
     unsigned_family_diagnostic,
 };
-use crate::env::{Env, TopLevelValueVisibility};
+use crate::env::{DeclarationBinderIdentities, Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
 use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};

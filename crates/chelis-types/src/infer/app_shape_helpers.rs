@@ -622,12 +622,14 @@ pub(super) fn render_declared_dim(dim_names: &UnordMap<DimVar, String>, dv: DimV
 /// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
 /// never trips the collapse check.
 pub(super) fn check_declared_dvars_rigid(
+    declaration: Option<&str>,
     declared_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);
+    let owner = declaration.map_or_else(String::new, |name| format!(" in declaration `{name}`"));
     // First resolved dim seen -> the declared dvar that produced it.
     // A second declared dvar resolving to the same dim is a collapse.
     let mut seen: Vec<(Dim, DimVar)> = Vec::new();
@@ -643,8 +645,10 @@ pub(super) fn check_declared_dvars_rigid(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
-                     body: declared dim parameters must remain polymorphic",
-                    render(*dv)
+                     body{owner}: an authored dimension binder is rigid and the body must \
+                     type-check for every dimension \
+                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                    render(*dv),
                 ),
                 vec![
                     "Replace the polymorphic dim with the concrete literal in the signature, or \
@@ -662,9 +666,9 @@ pub(super) fn check_declared_dvars_rigid(
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "distinct declared dim parameters {} and {} were unified by the \
-                         function body: declared dim parameters are rigid and must remain \
-                         distinct",
+                        "distinct declared dim parameters {} and {} were unified by the function \
+                         body{owner}: authored dimension binders are rigid and must remain \
+                         distinct (spec/04-type-system.md §3.1.3 [04-INF-6])",
                         render(*prev),
                         render(*dv)
                     ),

@@ -1,30 +1,29 @@
-//! chelis#1486 / [04-INF-6]: authored type binders are rigid in the body.
+//! [04-INF-6]: authored type, dimension, and rank binders are rigid in the body.
 //!
-//! `spec/04-type-system.md` §3.1.3 makes every explicitly authored type
-//! variable universally quantified and rigid within the declaration's body:
+//! `spec/04-type-system.md` §3.1.3 makes every explicitly authored binder
+//! universally quantified and rigid within the declaration's body:
 //! the body must type-check for every admissible instantiation. A body
 //! constraint that identifies the binder with a concrete type, with another
-//! authored binder of the same signature, or with a type containing either is
-//! a type error at the declaration, and the declaration's scheme stays the
-//! declared signature.
+//! authored binder of the same signature, or with a type/shape containing
+//! either is a type error at the declaration, and the declaration's scheme
+//! stays the declared signature.
 //!
-//! This is the type-variable twin of §4.4's dimension rule, which
-//! [`super::app_shape_helpers::check_declared_dvars_rigid`] enforces; the two
-//! run at the same point in [`super::common::infer_top_level`], immediately
-//! after the post-body signature unification. In addition to concrete pins
-//! and collapsed binders, the type check rejects a body that requires a
-//! narrower dtype family than its authored contract permits.
+//! The type and rank checks here run beside §4.4's dimension rule, enforced by
+//! [`super::app_shape_helpers::check_declared_dvars_rigid`], immediately after
+//! post-body signature unification. In addition to concrete pins and collapsed
+//! binders, the type check rejects a body that requires a narrower dtype family
+//! than its authored contract permits.
 //!
 //! An inference hole (`(t-var {} _)`) is NOT a binder and is not checked here.
 //! [04-INF-5] gives the hole the type its body determines; it never reaches
-//! `declared_type_names` because `DeepTypeResolver::type_var_names` records
-//! only named `t-var` occurrences.
+//! the declaration-owned identity maps because the binder list never includes
+//! `_`.
 
 use chelis_unord::UnordMap;
 
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Type, TypeVar, TypeVarRestriction};
+use crate::types::{Dim, RankVar, Type, TypeVar, TypeVarRestriction};
 use crate::unify::Subst;
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
@@ -33,6 +32,13 @@ fn render_declared_binder(type_names: &UnordMap<TypeVar, String>, tv: TypeVar) -
     match type_names.get(&tv) {
         Some(name) => format!("`{name}`"),
         None => format!("t{}", tv.0),
+    }
+}
+
+fn render_declared_rank(rank_names: &UnordMap<RankVar, String>, rv: RankVar) -> String {
+    match rank_names.get(&rv) {
+        Some(name) => format!("`{name}`"),
+        None => format!("r{}", rv.0),
     }
 }
 
@@ -126,6 +132,75 @@ pub(super) fn check_declared_tvars_rigid(
             ));
         } else {
             seen.push((resolved_var, binder));
+        }
+    }
+}
+
+/// Post-body rigidity check for a declaration's authored rank binders
+/// ([04-INF-6]).
+///
+/// A rank binder may remain an unbound rank variable or alias another
+/// unconstrained rank identity during signature/body reconciliation. Binding
+/// it to any concrete shape run fixes its rank and violates the universal
+/// declaration. Two authored rank binders may not collapse to the same
+/// surviving rank identity.
+pub(super) fn check_declared_rvars_rigid(
+    declaration: &str,
+    rank_names: &UnordMap<RankVar, String>,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let mut binders = rank_names
+        .to_sorted()
+        .into_iter()
+        .map(|(rv, _)| *rv)
+        .collect::<Vec<_>>();
+    binders.sort_by_key(|rv| rv.0);
+
+    let mut seen: Vec<(RankVar, RankVar)> = Vec::new();
+    for binder in binders {
+        let resolved = subst.constraint_rank(binder);
+        let [Dim::Rank(resolved_var)] = resolved.as_slice() else {
+            let shape = resolved
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "declared rank parameter {} of `{declaration}` was narrowed to concrete \
+                     shape [{shape}] by the function body: an authored rank binder is rigid and \
+                     the body must type-check for every rank \
+                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                    render_declared_rank(rank_names, binder),
+                ),
+                vec![
+                    "Write the concrete shape in the annotation, or keep the body polymorphic in \
+                     the declared rank."
+                        .to_string(),
+                ],
+            ));
+            continue;
+        };
+        if let Some((_, previous)) = seen.iter().find(|(candidate, _)| candidate == resolved_var) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "distinct declared rank parameters {} and {} of `{declaration}` were unified \
+                     by the function body: authored rank binders are rigid and must remain \
+                     distinct (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                    render_declared_rank(rank_names, *previous),
+                    render_declared_rank(rank_names, binder),
+                ),
+                vec![
+                    "Use the same binder on both sides if they are meant to denote one rank, or \
+                     fix the body so each declared rank stays independent."
+                        .to_string(),
+                ],
+            ));
+        } else {
+            seen.push((*resolved_var, binder));
         }
     }
 }

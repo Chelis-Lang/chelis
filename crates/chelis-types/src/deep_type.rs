@@ -16,6 +16,7 @@ use chelis_unord::{UnordMap, UnordSet};
 use chelis_deep::ast as deep;
 
 use crate::adt::AdtRegistry;
+use crate::env::DeclarationBinderIdentities;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::{DeclarationDiagnosticOwner, DiagnosticSink};
 use crate::types::{
@@ -125,9 +126,10 @@ pub(crate) enum BinderMode<'a> {
     /// User input outside a binder declaration. Only `_` is a legal inference
     /// hole; other `t-var` / `d-var` / `d-rank` names are unbound.
     ClosedInput,
-    /// References inside a declaration reuse its instantiated type binders.
-    /// Allocating a fresh variable here would discard [04-DTYPE-2]'s bound.
-    Lexical(&'a UnordSet<String>, &'a UnordMap<String, TypeVar>),
+    /// References inside a declaration reuse its instantiated type,
+    /// dimension, and rank binders. Allocating a fresh variable here would
+    /// discard [04-INF-6] identity (and a type binder's [04-DTYPE-2] bound).
+    Lexical(&'a DeclarationBinderIdentities),
     /// A nominal declaration whose parameter kinds were fixed before any
     /// declaration body was resolved.
     ExplicitKinds(&'a UnordMap<String, NominalParamKind>),
@@ -264,8 +266,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             current_location: None,
             resolving_tensor_precision: false,
         };
-        if let BinderMode::Lexical(_, variables) = binder_mode {
-            resolver.type_vars = variables.clone();
+        if let BinderMode::Lexical(identities) = binder_mode {
+            resolver.type_vars = identities.type_vars.clone();
+            resolver.dim_vars = identities.dim_vars.clone();
+            resolver.rank_vars = identities.rank_vars.clone();
         }
         if let BinderMode::ExplicitKinds(kinds) = binder_mode {
             for (name, kind) in kinds.to_sorted() {
@@ -465,27 +469,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         vars
     }
 
-    /// The source name bound to each dimension variable this resolver
-    /// minted, as `DimVar -> name` (chelis#260).
-    ///
-    /// `dim_vars` above discards the names, which is why a declared-dim
-    /// diagnostic could only render the internal `d{N}` id. These are the
-    /// PRE-generalization variables: a consumer that reports on an
-    /// instantiated signature must compose this with the instantiation's
-    /// original-to-fresh mapping.
-    pub(crate) fn dim_var_names(&self) -> UnordMap<DimVar, String> {
-        // `to_sorted` rather than an unordered walk: `UnordMap` deliberately
-        // offers no `iter`, because hash order must not reach observable
-        // compiler behavior (chelis#1444). The result is a map, so the order
-        // this is built in cannot escape -- but taking the deterministic
-        // walk keeps that true by construction rather than by argument.
-        self.dim_vars
-            .to_sorted()
-            .into_iter()
-            .map(|(name, dv)| (*dv, name.clone()))
-            .collect()
-    }
-
     pub(crate) fn dim_vars(&self) -> Vec<DimVar> {
         let mut vars = self
             .dim_vars
@@ -506,6 +489,17 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .collect::<Vec<_>>();
         vars.sort_by_key(|var| var.0);
         vars
+    }
+
+    /// All role-specific identities introduced while resolving a declaration
+    /// signature. The binder list is unkinded, so one source name may have
+    /// independent identities in more than one map.
+    pub(crate) fn binder_identities(&self) -> DeclarationBinderIdentities {
+        DeclarationBinderIdentities {
+            type_vars: self.type_vars.clone(),
+            dim_vars: self.dim_vars.clone(),
+            rank_vars: self.rank_vars.clone(),
+        }
     }
 
     pub(crate) fn diagnostic_location(&self) -> Option<TypeDiagnosticLocation> {
@@ -739,6 +733,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if !self.allows_name(name) {
             return Err(self.unbound("dimension", name));
         }
+        if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.dim_vars.contains_key(name)
+        {
+            return Err(self.unbound("dimension", name));
+        }
         Ok(*self
             .dim_vars
             .entry(name.to_string())
@@ -767,6 +765,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if !self.allows_name(name) {
             return Err(self.unbound("rank", name));
         }
+        if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.rank_vars.contains_key(name)
+        {
+            return Err(self.unbound("rank", name));
+        }
         Ok(*self
             .rank_vars
             .entry(name.to_string())
@@ -776,7 +778,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     fn allows_name(&self, name: &str) -> bool {
         match self.binder_mode {
             BinderMode::ClosedInput => false,
-            BinderMode::Lexical(names, _) => names.contains(name),
+            BinderMode::Lexical(identities) => identities.contains_name(name),
             BinderMode::ExplicitKinds(kinds) => kinds.contains_key(name),
             BinderMode::ExplicitGeneric(names) => names.contains(name),
             BinderMode::TrustedCompilerMetadata => true,

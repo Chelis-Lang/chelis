@@ -1904,7 +1904,7 @@ pub(super) fn collect_declarations(
             {
                 let dtype_bounds = declaration_dtype_bounds(meta);
                 let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type_with_bounds_and_dim_names(
+                let resolved = resolve_deep_type_with_binder_identities(
                     type_expr,
                     vg,
                     adt_reg,
@@ -1924,15 +1924,7 @@ pub(super) fn collect_declarations(
                     (Ok(resolved), Ok(())) => {
                         let scheme = env.generalize(&resolved.ty, subst);
                         env.bind(name.to_string(), scheme);
-                        // chelis#260: keep the source names of the declared dim
-                        // and type parameters. This is the only point where `n`,
-                        // `m` and `t` are still associated with their variables.
-                        env.record_declared_dim_names(name, resolved.dim_names);
-                        // chelis#1486 / [04-INF-6]: the type-name recording
-                        // lets the post-body rigidity check name an explicitly
-                        // declared binder rather than an internal variable id.
-                        // An inference hole never reaches this map ([04-INF-5]).
-                        env.record_declared_type_names(name, resolved.type_names);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
                     (Ok(resolved), Err(witness)) => {
                         let recovery = crate::deep_type::RejectedSignatureType::from_resolved(
@@ -1940,13 +1932,11 @@ pub(super) fn collect_declarations(
                             witness,
                         );
                         env.bind_rejected_signature(name.to_string(), recovery, subst);
-                        env.record_declared_dim_names(name, resolved.dim_names);
-                        env.record_declared_type_names(name, resolved.type_names);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
                     (Err(rejected), _) => {
                         env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
-                        env.record_declared_dim_names(name, rejected.dim_names);
-                        env.record_declared_type_names(name, rejected.type_names);
+                        env.record_declared_binder_identities(name, rejected.binder_identities);
                     }
                 }
             }
@@ -2408,15 +2398,12 @@ pub(super) fn infer_top_level(
         // keyed by the FRESH variables the instantiation below mints. Empty
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
-        // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
-        // signature's AUTHORED type binders, keyed by declaration-owned fresh
-        // variables. Outer-signature occurrences come from instantiation;
-        // unbounded names absent there are minted directly from the structural
-        // binder list so ordinary body annotations retain [04-INF-6] scope.
-        // Empty means the signature authored no binders; an inference hole is
-        // never a member. The deferred-borrow drain reports on these fresh
-        // variables long after this setup, so the composed map is parked on
-        // `Env` below.
+        // [04-INF-6]: compose this declaration's authored type, dimension, and
+        // rank identities. Outer-signature occurrences come from one scheme
+        // instantiation; roles absent there are completed from the structural
+        // binder list. An inference hole is never a member. The deferred-borrow
+        // drain reports on the type projection long after this setup, so that
+        // projection is parked on `Env` below.
         let binder_names = declared_signatures
             .get(&name)
             .map(|metadata| &metadata.binders);
@@ -2432,8 +2419,7 @@ pub(super) fn infer_top_level(
         };
         let recursion::DeclaredMemberSetup {
             ty: declared_ty,
-            dim_names: declared_dim_names,
-            type_names: declared_type_names,
+            binder_identities: declared_binder_identities,
             caller_guard: _recursion_caller_guard,
         } = recursive_expected.prepare_declared_member(
             recursion::DeclaredMemberRequest::new(
@@ -2446,6 +2432,9 @@ pub(super) fn infer_top_level(
             vg,
             subst,
         );
+        let declared_dim_names = declared_binder_identities.dim_names();
+        let declared_type_names = declared_binder_identities.type_names();
+        let declared_rank_names = declared_binder_identities.rank_names();
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
@@ -2466,12 +2455,7 @@ pub(super) fn infer_top_level(
                 .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
                 .collect();
         let mut body_env = env.clone();
-        body_env.set_type_resolution_binders(
-            declared_signatures
-                .get(&name)
-                .map(|metadata| &metadata.binders),
-            &declared_type_names,
-        );
+        body_env.set_type_resolution_binders(binder_names.map(|_| &declared_binder_identities));
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 
         let body_diagnostic_checkpoint = errors.checkpoint();
@@ -2602,23 +2586,45 @@ pub(super) fn infer_top_level(
             // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
             // structural relaxed-retry guard does not see it because the
             // initial unify already succeeded by collapsing `n` and `m`.
-            let mut declared_dvars: Vec<DimVar> = Vec::new();
-            if let Type::Fn(decl_params, _) = &decl_ty {
+            let mut declared_param_dvars: Vec<DimVar> = Vec::new();
+            let mut return_only_dvars: Vec<DimVar> = Vec::new();
+            if let Type::Fn(decl_params, decl_ret) = &decl_ty {
                 for t in decl_params {
                     for dv in crate::env::free_dvars(t) {
-                        if !declared_dvars.contains(&dv) {
-                            declared_dvars.push(dv);
+                        if !declared_param_dvars.contains(&dv) {
+                            declared_param_dvars.push(dv);
                         }
                     }
                 }
+                return_only_dvars = crate::env::free_dvars(decl_ret)
+                    .into_iter()
+                    .filter(|dv| !declared_param_dvars.contains(dv))
+                    .collect();
             }
-            check_declared_dvars_rigid(&declared_dvars, &declared_dim_names, subst, errors);
-            // chelis#1486 / [04-INF-6]: the type-binder twin of the check
-            // above. `declared_type_names`' key set is exactly this
-            // declaration's authored binders, explicit and implicit alike, so
-            // the check needs no separate walk of the declared type and an
-            // inference hole ([04-INF-5]) is excluded by construction.
+            // [04-INF-6] also covers a listed dimension used only in ordinary
+            // body annotations. Those declaration-owned identities do not
+            // occur in `decl_ty`, so include every authored dimension except
+            // the signature's explicit return-only set, whose output-inferred
+            // policy remains owned by §4.4.1 below.
+            let rigid_declared_dvars = declared_dim_names
+                .to_sorted()
+                .into_iter()
+                .map(|(dv, _)| *dv)
+                .filter(|dv| !return_only_dvars.contains(dv))
+                .collect::<Vec<_>>();
+            check_declared_dvars_rigid(
+                Some(&name),
+                &rigid_declared_dvars,
+                &declared_dim_names,
+                subst,
+                errors,
+            );
+            // [04-INF-6]: the type/rank twins of the dimension check above.
+            // Their key sets come from the same declaration-owned identity
+            // object, and inference holes ([04-INF-5]) are excluded by
+            // construction.
             check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
+            check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
             // chelis#273: the param-position guard above never sees a dim
             // parameter that occurs only in the return type, so a body
             // could silently pin a return-only rigid dim. Reject the
@@ -2626,7 +2632,7 @@ pub(super) fn infer_top_level(
             // output-inferred uses (hello_tensor-style) green.
             check_return_only_dvars_rigid(
                 &decl_ty,
-                &declared_dvars,
+                &declared_param_dvars,
                 &declared_dim_names,
                 subst,
                 errors,

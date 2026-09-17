@@ -6,33 +6,27 @@
 
 use super::*;
 
-/// A declaration's resolved type together with the three binder facts the
-/// declaration carries: the dtype-family bounds its metadata declared
-/// (chelis#1474), the source spelling of every dimension parameter it
-/// introduced (chelis#260), and the source spelling of every authored TYPE
-/// binder it introduced (chelis#260 Site 2 and chelis#1486, [04-INF-6]).
+/// A declaration's resolved type together with its dtype-family bounds and one
+/// role-complete binder-identity object.
 ///
 /// A struct rather than a tuple because this has now grown twice: chelis#1474
 /// added the dtype-family bounds and chelis#260 added the dimension names,
 /// each time making an unnamed tuple harder to read at the call sites.
 ///
-/// `dim_names` and `type_names` are the same fact on the two binder kinds,
-/// and both exist for the same reason: the names are in scope only while the
-/// declaration's signature is being resolved, and the diagnostics that need
-/// them, the borrow report and the [04-INF-6] rigidity check, both run after
-/// instantiation, where only the internal ids survive.
+/// The identities are in scope only while the declaration's signature is
+/// being resolved. The ordinary body annotation resolvers and [04-INF-6]
+/// rigidity checks run after instantiation, so all three variable kinds must
+/// cross that boundary together.
 pub(super) struct ResolvedDeclaredType {
     pub(super) ty: Type,
     pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
-    pub(super) dim_names: UnordMap<DimVar, String>,
-    pub(super) type_names: UnordMap<TypeVar, String>,
+    pub(super) binder_identities: DeclarationBinderIdentities,
 }
 
 pub(super) struct RejectedDeclaredType {
     pub(super) recovery: crate::deep_type::RejectedSignatureType,
     pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
-    pub(super) dim_names: UnordMap<DimVar, String>,
-    pub(super) type_names: UnordMap<TypeVar, String>,
+    pub(super) binder_identities: DeclarationBinderIdentities,
 }
 
 pub(super) fn resolve_deep_type(
@@ -43,7 +37,7 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
-    let resolved = resolve_deep_type_with_bounds_and_dim_names(
+    let resolved = resolve_deep_type_with_binder_identities(
         expr,
         vg,
         adt_reg,
@@ -74,7 +68,7 @@ pub(super) fn resolve_deep_type(
 /// entry points that each ran the resolver would resolve the declaration
 /// twice and leave two mechanisms to keep in step.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
+pub(super) fn resolve_deep_type_with_binder_identities(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
@@ -84,25 +78,23 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<ResolvedDeclaredType, Box<RejectedDeclaredType>> {
-    let (resolution, bound_result, bounds, dim_names, type_names) = {
+    let (resolution, bound_result, bounds, binder_identities) = {
         let mut resolver =
             DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
                 .with_declaration_diagnostic_owner(diagnostic_owner)
                 .with_dtype_bounds(dtype_bounds);
         let resolution = resolver.resolve_signature(expr);
-        let dim_names = resolver.dim_var_names();
-        let type_names = resolver.type_var_names();
+        let binder_identities = resolver.binder_identities();
         let bounds = resolver.resolved_dtype_bounds();
         let bound_result = resolver.finish_dtype_bounds();
-        (resolution, bound_result, bounds, dim_names, type_names)
+        (resolution, bound_result, bounds, binder_identities)
     };
     let recovery = match (resolution, bound_result) {
         (Ok(resolved), Ok(bounds)) => {
             return Ok(ResolvedDeclaredType {
                 ty: resolve_type_aliases(&resolved.into_type(), adt_reg, vg),
                 bounds,
-                dim_names,
-                type_names,
+                binder_identities,
             });
         }
         (Ok(resolved), Err(witness)) => {
@@ -117,8 +109,7 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     Err(Box::new(RejectedDeclaredType {
         recovery,
         bounds,
-        dim_names,
-        type_names,
+        binder_identities,
     }))
 }
 

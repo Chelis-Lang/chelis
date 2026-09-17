@@ -433,6 +433,80 @@ fn cli_preserves_and_checks_body_only_surf_binders() {
 }
 
 #[test]
+fn cli_rejects_concrete_pins_of_body_only_dimension_and_rank_binders() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source, declaration, binder, role) in [
+        (
+            0,
+            "def narrowed_dimension[n]() = {\n\
+               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               value\n\
+             }\n",
+            "narrowed_dimension",
+            "n",
+            "dimension",
+        ),
+        (
+            1,
+            "def narrowed_rank[r]() = {\n\
+               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               value\n\
+             }\n",
+            "narrowed_rank",
+            "r",
+            "rank",
+        ),
+        (
+            2,
+            "def recursive_dimension[n](stop: bool) -> i32 = {\n\
+               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               if stop then 0i32 else recursive_dimension(true)\n\
+             }\n",
+            "recursive_dimension",
+            "n",
+            "dimension",
+        ),
+        (
+            3,
+            "def recursive_rank[r](stop: bool) -> i32 = {\n\
+               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               if stop then 0i32 else recursive_rank(true)\n\
+             }\n",
+            "recursive_rank",
+            "r",
+            "rank",
+        ),
+    ] {
+        let surf_path = format!("body-only-rigid-{index}.ch");
+        fs::write(dir.path().join(&surf_path), source).expect("write Surf fixture");
+
+        let deep = run(dir.path(), &["deep", &surf_path]);
+        assert!(
+            deep.status.success(),
+            "`chelis deep` failed: {}",
+            text(&deep)
+        );
+        let deep_path = format!("body-only-rigid-{index}.dp");
+        fs::write(dir.path().join(&deep_path), &deep.stdout).expect("write canonical Deep fixture");
+
+        for path in [&surf_path, &deep_path] {
+            let checked = check_json(dir.path(), path);
+            let messages = error_messages(&checked);
+            assert!(
+                checked["score"].as_f64() != Some(1.0)
+                    && messages.iter().any(|message| {
+                        message.contains(declaration)
+                            && message.contains(&format!("`{binder}`"))
+                            && message.contains("[04-INF-6]")
+                    }),
+                "`chelis check` must reject {role} binder `{binder}` pinned through {path}: \
+                 {checked}"
+            );
+        }
+    }
+}
+
+#[test]
 fn cli_checks_canonical_deep_body_only_binders_and_rejects_undeclared_neighbors() {
     let dir = tempdir().expect("tempdir");
     for (index, binder, annotation) in [

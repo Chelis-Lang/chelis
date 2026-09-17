@@ -109,7 +109,7 @@ pub(super) fn infer_fn(
     // dimension variable. So this call cannot currently reach a named
     // collapse, and passing an empty map renders the internal id rather
     // than inventing a name.
-    check_declared_dvars_rigid(&declared_dvars, &UnordMap::new(), subst, errors);
+    check_declared_dvars_rigid(None, &declared_dvars, &UnordMap::new(), subst, errors);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);

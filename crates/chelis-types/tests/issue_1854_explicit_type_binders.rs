@@ -1,6 +1,6 @@
 //! chelis#1854 acceptance at both checker ingresses.
 
-use chelis_deep::{Expr, parser::parse_str as parse_deep};
+use chelis_deep::{Expr, parser::parse_str as parse_deep, printer::print_canonical_flat};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{check_ir_program, check_typed_program};
 
@@ -398,6 +398,94 @@ fn body_only_type_binder_is_generalized_and_remains_rigid() {
         }),
         "a body-only authored binder must remain rigid: {ir:?}"
     );
+}
+
+fn assert_body_only_shape_binder_pin_rejects(
+    source: &str,
+    declaration: &str,
+    binder: &str,
+    role: &str,
+) {
+    let surf_program = surf(source);
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        let ir = diagnostics(check_ir_program(program));
+        let typed = diagnostics(check_typed_program(program));
+        assert_eq!(
+            typed, ir,
+            "{carrier} checker ingresses must agree for body-only {role} binder `{binder}`"
+        );
+        assert!(
+            ir.iter().any(|diagnostic| {
+                diagnostic.message.contains(declaration)
+                    && diagnostic.message.contains(&format!("`{binder}`"))
+                    && diagnostic.message.contains("[04-INF-6]")
+            }),
+            "{carrier} must reject concrete narrowing of body-only {role} binder `{binder}`: \
+             {ir:?}\n{canonical_source}"
+        );
+    }
+}
+
+#[test]
+fn body_only_dimension_and_rank_binders_cannot_be_pinned_to_concrete_shapes() {
+    for (source, binder, role) in [
+        (
+            "def narrowed_dimension[n]() = {\n\
+               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               value\n\
+             }",
+            "n",
+            "dimension",
+        ),
+        (
+            "def narrowed_rank[r]() = {\n\
+               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               value\n\
+             }",
+            "r",
+            "rank",
+        ),
+    ] {
+        let declaration = if role == "dimension" {
+            "narrowed_dimension"
+        } else {
+            "narrowed_rank"
+        };
+        assert_body_only_shape_binder_pin_rejects(source, declaration, binder, role);
+    }
+}
+
+#[test]
+fn recursive_body_only_dimension_and_rank_binders_remain_rigid() {
+    for (source, declaration, binder, role) in [
+        (
+            "def recursive_dimension[n](stop: bool) -> i32 = {\n\
+               value: tensor[n, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               if stop then 0i32 else recursive_dimension(true)\n\
+             }",
+            "recursive_dimension",
+            "n",
+            "dimension",
+        ),
+        (
+            "def recursive_rank[r](stop: bool) -> i32 = {\n\
+               value: tensor[..r, f32] = to_tensor([1.0f32, 2.0f32])\n\
+               if stop then 0i32 else recursive_rank(true)\n\
+             }",
+            "recursive_rank",
+            "r",
+            "rank",
+        ),
+    ] {
+        assert_body_only_shape_binder_pin_rejects(source, declaration, binder, role);
+    }
 }
 
 #[test]

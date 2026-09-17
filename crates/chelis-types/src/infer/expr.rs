@@ -104,7 +104,7 @@ pub(crate) fn copy_result_from_source(resolved: &Type) -> Option<Type> {
 /// exposes an explicit binder set.
 pub(super) fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
     env.type_resolution_binders()
-        .map(|names| BinderMode::Lexical(names, env.type_resolution_variables()))
+        .map(BinderMode::Lexical)
         .unwrap_or(BinderMode::ClosedInput)
 }
 
@@ -1039,18 +1039,18 @@ pub(super) fn infer_var(
             TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed.cloned(),
         };
         if let Some(scheme) = resolved_scheme {
-            // One instantiation, both renamings. chelis#1801 needs the
-            // dimension pairing on EVERY reference, not only an in-group
-            // one, so the reference instantiates through the single
-            // mechanism and takes what it needs from the result;
+            // One instantiation, all quantifier renamings. chelis#1801 needs
+            // the dimension pairing on EVERY reference, not only an in-group
+            // one, so the reference instantiates through the single mechanism
+            // and takes what it needs from the result;
             // `env::tests::dvar_mapping_instantiation_matches_plain_instantiation`
             // pins that this is the same instantiation the two projections
             // used to perform.
-            let (ty, tvar_mapping, dvar_mapping) = env.instantiate_scheme(&scheme, vg, subst);
+            let instantiated = env.instantiate_scheme(&scheme, vg, subst);
             // chelis#1801: the application rule reads these back to decide
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).
-            product.record_instantiation_dvars(dvar_mapping.iter().map(|(_, fresh)| *fresh));
+            product.record_instantiation_dvars(instantiated.dvars.iter().map(|(_, fresh)| *fresh));
             if super::recursion::should_record_occurrence(name, &scheme) {
                 // spec/04 section 3.1.1: inside a recursive binding group,
                 // record the instantiation minted for an in-group reference
@@ -1058,9 +1058,14 @@ pub(super) fn infer_var(
                 // instantiation.
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                super::recursion::record_occurrence(name, &tvar_mapping, span_id, span_offset);
+                super::recursion::record_occurrence(
+                    name,
+                    &instantiated.tvars,
+                    span_id,
+                    span_offset,
+                );
             }
-            let resolved = subst.apply(&ty);
+            let resolved = subst.apply(&instantiated.ty);
             // RFC D-CHECK: a bare reference to an out-of-module
             // opaque constructor is hidden, and an out-of-module
             // reference to an unexported binding whose signature

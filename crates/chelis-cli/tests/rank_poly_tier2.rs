@@ -331,13 +331,13 @@ fn user_fn_call_in_rank_poly_body_rejected() {
 // ── Tier-3 supersedes the old parse boundary ────────────────────────────
 
 /// `..r` adjacent to a concrete dim is now valid Tier-3 syntax: a rank-poly
-/// identity over `tensor[..r, k]` checks clean. The Tier-2/Tier-3 boundary
+/// identity over `tensor[..r, 3]` checks clean. The Tier-2/Tier-3 boundary
 /// moved from parse time to unification, where an *undetermined* split between
 /// two adjacent spreads is rejected (see `rank_poly_tier3`).
 #[test]
 fn rank_var_adjacent_to_concrete_dim_now_checks_clean() {
-    let json = check_json("def f[r](x: &tensor[..r, k, f32]) -> tensor[..r, k, f32] = relu(x)\n");
-    assert_clean(&json, "tensor[..r, k] adjacency now valid (Tier-3)");
+    let json = check_json("def f[r](x: &tensor[..r, 3, f32]) -> tensor[..r, 3, f32] = relu(x)\n");
+    assert_clean(&json, "tensor[..r, 3] adjacency now valid (Tier-3)");
 }
 
 /// Control: the same activation written WITHOUT `..r` (concrete rank) still
