@@ -415,6 +415,10 @@ vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
 
+The executable [`vmap_tensor_capture.ch`](../examples/vmap_tensor_capture.ch)
+demonstrates that the mapped input varies by row while one lexical tensor
+capture is shared across all rows.
+
 Fusing `vmap(grad(f))` does not remove §2.3's shape-preserving zero
 cotangents or change §2.2's selected-parameter order. An absent adjoint after
 lowering a complete body gives an exact positive-zero tensor of the batched

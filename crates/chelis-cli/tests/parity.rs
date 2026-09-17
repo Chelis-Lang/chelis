@@ -753,6 +753,17 @@ fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
 }
 
+#[test]
+fn parity_vmap_tensor_capture() {
+    let path = examples_root().join("vmap_tensor_capture.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"weights = tensor(shape=[2], data=[10.0, 20.0])\nout = tensor(shape=[3], data=[30.0, 60.0, 20.0])\n",
+    );
+    drive_parity(&path, true);
+}
+
 // The opaque-invariants worked example (RFC `opaque_invariants_rfc.md`).
 // Library-only: `@opaque`/`@invariant` declare the `Probability` type and
 // `@property` desugars to a `bool` def, so there is no top-level work and both
