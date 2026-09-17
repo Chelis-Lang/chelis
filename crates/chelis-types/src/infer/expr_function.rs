@@ -501,7 +501,27 @@ pub(super) fn infer_let(
                 let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
                 let contract_checkpoint = product.admission_contract_checkpoint();
-                let mut rhs_type_metadata_resolution = None;
+                let mut rhs_type_metadata_resolution = stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| {
+                        let authored = meta
+                            .surf_binding_type()
+                            .is_none_or(|origin| *origin.value() == BindingTypeOrigin::Explicit);
+                        authored.then(|| meta.ty().map(|value| value.expression()))?
+                    })
+                    .map(|declared_ty_expr| {
+                        match resolve_deep_type_with_diagnostic_owner(
+                            declared_ty_expr,
+                            vg,
+                            adt_reg,
+                            TypeUseSite::Annotation,
+                            annotation_binder_mode(&let_env),
+                            let_env.type_resolution_diagnostic_owner(),
+                            errors,
+                        ) {
+                            Ok(ty) => OwnedTypeMetadataResolution::Resolved(ty),
+                            Err(witness) => OwnedTypeMetadataResolution::Failed(witness),
+                        }
+                    });
                 let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
                     &mut let_env,
@@ -548,12 +568,13 @@ pub(super) fn infer_let(
                         // No ownership record means any `expr_ty` error came
                         // from the RHS itself. Resolve the ascription as its
                         // own root so two independent failures both surface.
-                        None => match resolve_deep_type(
+                        None => match resolve_deep_type_with_diagnostic_owner(
                             declared_ty_expr,
                             vg,
                             adt_reg,
                             TypeUseSite::Annotation,
                             annotation_binder_mode(&let_env),
+                            let_env.type_resolution_diagnostic_owner(),
                             errors,
                         ) {
                             Ok(ty) => ty,

@@ -37,6 +37,18 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
+    resolve_deep_type_with_diagnostic_owner(expr, vg, adt_reg, use_site, binder_mode, None, errors)
+}
+
+pub(super) fn resolve_deep_type_with_diagnostic_owner(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    use_site: TypeUseSite,
+    binder_mode: BinderMode<'_>,
+    diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<Type, ErrorWitness> {
     let resolved = resolve_deep_type_with_binder_identities(
         expr,
         vg,
@@ -44,7 +56,7 @@ pub(super) fn resolve_deep_type(
         use_site,
         binder_mode,
         UnordMap::new(),
-        None,
+        diagnostic_owner,
         errors,
     )
     .map_err(|rejected| rejected.recovery.witness)?;

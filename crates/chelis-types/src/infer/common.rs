@@ -1193,12 +1193,14 @@ fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut 
 /// function bodies, so a binding timeline cannot express source order.
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    debug_assert_eq!(items.len(), declaration_diagnostic_owners.len());
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
     // project to the `&deep::Expr` slice the reporters expect.
@@ -1220,10 +1222,13 @@ pub(super) fn collect_all_declarations(
     // declarations unbound; the check entry's `cancellation_gate` rejects the
     // unit before anything reads it.
     let cancel = crate::cancel::current_cancel_token();
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1234,12 +1239,16 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Aliases,
+            diagnostic_owner,
         );
     }
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1250,6 +1259,7 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Rest,
+            diagnostic_owner,
         );
     }
 }
@@ -1824,6 +1834,7 @@ pub(super) fn collect_declarations(
     headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) {
     let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
@@ -1911,7 +1922,7 @@ pub(super) fn collect_declarations(
                     TypeUseSite::Defsig,
                     BinderMode::ExplicitGeneric(&binder_names),
                     dtype_bounds,
-                    Some(&DeclarationDiagnosticOwner::new(lexical_module, name)),
+                    declaration_diagnostic_owner,
                     errors,
                 );
                 let bounds = match &resolved {
@@ -2455,7 +2466,10 @@ pub(super) fn infer_top_level(
                 .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
                 .collect();
         let mut body_env = env.clone();
-        body_env.set_type_resolution_binders(binder_names.map(|_| &declared_binder_identities));
+        body_env.set_type_resolution_scope(
+            binder_names.map(|_| &declared_binder_identities),
+            declaration_diagnostic_owner,
+        );
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 
         let body_diagnostic_checkpoint = errors.checkpoint();

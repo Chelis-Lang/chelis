@@ -200,6 +200,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     stack_guard!("infer_expr", expr, vg.fresh_type());
 
     product.total_nodes += 1;
+    let type_metadata_owned_by_caller = type_metadata_resolution.is_some();
 
     let result = match expr {
         deep::Expr::Atom(atom, _) => infer_atom(atom, errors),
@@ -724,6 +725,40 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         ),
     };
 
+    let result = if !type_metadata_owned_by_caller
+        && !matches!(stamped_parts(expr), Some((DeepTag::Lit, _, _)))
+        && let Some((_, meta, _)) = stamped_parts(expr)
+        && let Some(authored_type) = meta.ty()
+    {
+        let declared = match resolve_deep_type_with_diagnostic_owner(
+            authored_type.expression(),
+            vg,
+            adt_reg,
+            TypeUseSite::Annotation,
+            annotation_binder_mode(env),
+            env.type_resolution_diagnostic_owner(),
+            errors,
+        ) {
+            Ok(declared) => declared,
+            Err(witness) => propagate(&witness),
+        };
+        if let Err(error) = unify(&result, &declared, subst) {
+            errors.push(CheckError::new(
+                check_error_kind_from_type_error_kind(&error.kind),
+                format!(
+                    "expression ascription does not match value: {}",
+                    error.message
+                ),
+                vec![format!(
+                    "Declared expression type is {declared}; inferred value type is {result}"
+                )],
+            ));
+        }
+        declared
+    } else {
+        result
+    };
+
     if !matches!(result, Type::Error(_)) {
         product.typed_nodes += 1;
     }
@@ -1211,12 +1246,13 @@ pub(super) fn infer_lit(
     // Check metadata for type annotation
     if let Some(ty) = meta.and_then(|m| m.ty()) {
         let val = ty.expression();
-        let resolved = match resolve_deep_type(
+        let resolved = match resolve_deep_type_with_diagnostic_owner(
             val,
             vg,
             adt_reg,
             TypeUseSite::Annotation,
             annotation_binder_mode(env),
+            env.type_resolution_diagnostic_owner(),
             errors,
         ) {
             Ok(ty) => ty,

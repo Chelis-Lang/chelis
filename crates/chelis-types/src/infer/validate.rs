@@ -860,9 +860,14 @@ impl TensorPrecisionOwner {
     fn declaration_diagnostic_owner(&self) -> Option<DeclarationDiagnosticOwner> {
         (self.kind == TensorPrecisionOwnerKind::Value)
             .then(|| {
-                self.name
-                    .as_deref()
-                    .map(|name| DeclarationDiagnosticOwner::new(self.scope.path.as_deref(), name))
+                self.name.as_deref().map(|name| {
+                    DeclarationDiagnosticOwner::new(
+                        self.scope.path.as_deref(),
+                        self.scope.occurrence,
+                        name,
+                        self.occurrence,
+                    )
+                })
             })
             .flatten()
     }
@@ -996,6 +1001,16 @@ fn tensor_precision_owner_plan(items: &[TensorPrecisionItem<'_>]) -> Vec<TensorP
     }
 
     owners
+}
+
+pub(super) fn declaration_diagnostic_owner_plan(
+    exprs: &[deep::Expr],
+) -> Vec<Option<DeclarationDiagnosticOwner>> {
+    let items = tensor_precision_items(exprs);
+    tensor_precision_owner_plan(&items)
+        .iter()
+        .map(TensorPrecisionOwner::declaration_diagnostic_owner)
+        .collect()
 }
 
 pub(super) fn validate_tensor_precisions_in_program(

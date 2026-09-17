@@ -42,14 +42,23 @@ pub(crate) struct DiagnosticCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DeclarationDiagnosticOwner {
     lexical_module: Option<String>,
+    lexical_scope_occurrence: usize,
     declaration_name: String,
+    declaration_occurrence: usize,
 }
 
 impl DeclarationDiagnosticOwner {
-    pub(crate) fn new(lexical_module: Option<&str>, declaration_name: &str) -> Self {
+    pub(crate) fn new(
+        lexical_module: Option<&str>,
+        lexical_scope_occurrence: usize,
+        declaration_name: &str,
+        declaration_occurrence: usize,
+    ) -> Self {
         Self {
             lexical_module: lexical_module.map(str::to_string),
+            lexical_scope_occurrence,
             declaration_name: declaration_name.to_string(),
+            declaration_occurrence,
         }
     }
 }

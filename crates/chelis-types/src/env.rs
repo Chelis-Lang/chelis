@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::session::DeclarationDiagnosticOwner;
 use crate::types::*;
 use crate::unify::Subst;
 
@@ -144,6 +145,7 @@ impl DeclarationBinderIdentities {
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
     identities: Option<DeclarationBinderIdentities>,
+    diagnostic_owner: Option<DeclarationDiagnosticOwner>,
 }
 
 /// Constructor identity selected by declaration/import scope.
@@ -333,11 +335,13 @@ impl Env {
     /// Install the binder set owned by the declaration whose body is about to
     /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
     /// sibling declaration or back into a reusable library snapshot.
-    pub(crate) fn set_type_resolution_binders(
+    pub(crate) fn set_type_resolution_scope(
         &mut self,
         identities: Option<&DeclarationBinderIdentities>,
+        diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     ) {
         self.type_resolution_scope.identities = identities.cloned();
+        self.type_resolution_scope.diagnostic_owner = diagnostic_owner.cloned();
     }
 
     /// Declaration-owned identities visible to a nested source annotation.
@@ -345,6 +349,12 @@ impl Env {
     /// allocate inference variables.
     pub(crate) fn type_resolution_binders(&self) -> Option<&DeclarationBinderIdentities> {
         self.type_resolution_scope.identities.as_ref()
+    }
+
+    /// Diagnostic identity shared by every annotation resolver in the active
+    /// declaration body.
+    pub(crate) fn type_resolution_diagnostic_owner(&self) -> Option<&DeclarationDiagnosticOwner> {
+        self.type_resolution_scope.diagnostic_owner.as_ref()
     }
 
     pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {

@@ -507,6 +507,83 @@ fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
 }
 
 #[test]
+fn expression_tensor_ascriptions_preserve_rigid_dimension_identity() {
+    let source = "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = (y: tensor[n,p])";
+    let surf_program = surf(source);
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared expression ascription must parse");
+
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        let ir = diagnostics(check_ir_program(program));
+        let typed = diagnostics(check_typed_program(program));
+        assert_eq!(typed, ir, "{carrier} checker ingress parity");
+        assert!(
+            ir.iter().any(|diagnostic| {
+                diagnostic.kind == "DimensionMismatch"
+                    && diagnostic.message.contains("`n`")
+                    && diagnostic.message.contains("`m`")
+                    && diagnostic.message.contains("[04-INF-6]")
+            }),
+            "{carrier} must reject an expression ascription that collapses distinct rigid \
+             declaration dimensions: {ir:?}\n{canonical_source}"
+        );
+    }
+}
+
+#[test]
+fn contextual_literal_copies_share_one_unknown_precision_owner() {
+    for (extent, values) in [("1", "[1.0]"), ("3", "[1.0, 2.0, 3.0]")] {
+        let source = format!(
+            "def main() -> tensor[{extent}, f32] = {{\n  \
+             xs: tensor[{extent}, p] = {values}\n  \
+             xs\n\
+             }}\n"
+        );
+        let program = surf(&source);
+        let ir = diagnostics(check_ir_program(&program));
+        let typed = diagnostics(check_typed_program(&program));
+        assert_eq!(typed, ir, "checker ingress parity for `{source}`");
+        assert_eq!(
+            ir.len(),
+            1,
+            "generated contextual literal copies must not multiply the declaration-owned \
+             diagnostic: {ir:?}"
+        );
+        assert!(
+            ir[0].kind == "TypeMismatch"
+                && ir[0]
+                    .message
+                    .contains("unknown primitive type `p` in type annotation")
+                && ir[0].span_offset.is_some()
+                && ir[0].span_id.is_some()
+                && ir[0].suggestions.iter().any(|suggestion| {
+                    suggestion.contains("nearest active dtype")
+                        && suggestion.contains("declare `p`")
+                }),
+            "wrong unknown-precision owner: {ir:?}"
+        );
+    }
+}
+
+#[test]
+fn defsig_less_function_metadata_shares_the_declaration_owner() {
+    let tensor = "(t-tensor {} (d-lit {} 2) (t-prim {} madeup))";
+    let program = parse_deep(&format!(
+        "(def {{}} helper
+           (fn {{type: (t-fn {{}} {tensor} {tensor})}}
+             (params {{}} (x {{type: {tensor}}}))
+             (var {{}} x)))"
+    ))
+    .expect("defsig-less function metadata fixture must parse");
+
+    assert_unknown_spelling_order(&program, &["madeup"]);
+}
+
+#[test]
 fn body_only_surf_binders_check_at_both_ingresses() {
     for source in [
         "def maker[p]() = fn (x: p) -> x",

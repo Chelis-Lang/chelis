@@ -200,6 +200,7 @@ pub(crate) fn resolve_declared_surface_in_session(
                 &headers,
                 sink,
                 phase,
+                None,
             );
         }
     }

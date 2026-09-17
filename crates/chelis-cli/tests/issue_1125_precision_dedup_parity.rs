@@ -148,10 +148,23 @@ fn diagnostics(errors: &[CheckError]) -> Vec<String> {
     diagnostics
 }
 
-fn unsupported_count(errors: &[CheckError]) -> usize {
+fn precision_diagnostic_count(
+    errors: &[CheckError],
+    allow_legacy_unknown_precision_fallback: bool,
+) -> usize {
     errors
         .iter()
-        .filter(|error| matches!(error.kind, CheckErrorKind::UnsupportedTensorPrecision))
+        .filter(|error| match error.kind {
+            CheckErrorKind::TypeMismatch => {
+                error.message.contains("unknown primitive type `madeup`")
+            }
+            CheckErrorKind::UnsupportedTensorPrecision => {
+                allow_legacy_unknown_precision_fallback && error.message.contains("madeup")
+                    || error.message.contains("f8e4m3")
+                    || error.message.contains("cannot cast")
+            }
+            _ => false,
+        })
         .count()
 }
 
@@ -182,7 +195,10 @@ fn run_cli(source: &str, command: &str) -> Output {
     process.output().expect("run chelis")
 }
 
-fn check_unsupported_count(source: &str) -> usize {
+fn check_precision_diagnostic_count(
+    source: &str,
+    allow_legacy_unknown_precision_fallback: bool,
+) -> usize {
     let output = run_cli(source, "check");
     assert_eq!(
         output.status.code(),
@@ -202,11 +218,25 @@ fn check_unsupported_count(source: &str) -> usize {
         .as_array()
         .expect("check errors")
         .iter()
-        .filter(|error| error["kind"] == "UnsupportedTensorPrecision")
+        .filter(|error| {
+            let message = error["message"].as_str().unwrap_or_default();
+            match error["kind"].as_str() {
+                Some("TypeMismatch") => message.contains("unknown primitive type `madeup`"),
+                Some("UnsupportedTensorPrecision") => {
+                    (allow_legacy_unknown_precision_fallback && message.contains("madeup"))
+                        || message.contains("f8e4m3")
+                        || message.contains("cannot cast")
+                }
+                _ => false,
+            }
+        })
         .count()
 }
 
-fn prove_unsupported_count(source: &str) -> usize {
+fn prove_precision_diagnostic_count(
+    source: &str,
+    allow_legacy_unknown_precision_fallback: bool,
+) -> usize {
     let output = run_cli(source, "prove");
     assert_eq!(
         output.status.code(),
@@ -230,7 +260,11 @@ fn prove_unsupported_count(source: &str) -> usize {
         })
         .filter(|diagnostic| {
             diagnostic.as_str().is_some_and(|text| {
-                text.contains("tensor element precision `madeup` is not a recognized primitive")
+                text.contains("unknown primitive type `madeup`")
+                    || allow_legacy_unknown_precision_fallback
+                        && text.contains(
+                            "tensor element precision `madeup` is not a recognized primitive",
+                        )
                     || text.contains("cannot cast tensor element to `f8e4m3`")
                     || text.contains("cannot use `f8e4m3` as a scalar dtype")
             })
@@ -239,6 +273,7 @@ fn prove_unsupported_count(source: &str) -> usize {
 }
 
 fn assert_multiplicity(source: &str, expected: usize, label: &str) {
+    let allow_legacy_unknown_precision_fallback = source == UNDECODABLE_HEAD_METADATA;
     let program = parse_and_stamp_file(source).expect("fixture must stamp");
     let (ir, typed) = checker_errors(&program);
     assert_eq!(
@@ -246,19 +281,24 @@ fn assert_multiplicity(source: &str, expected: usize, label: &str) {
         diagnostics(&ir),
         "{label}: check_ir_program and check_typed_program must report the same defects"
     );
-    assert_eq!(unsupported_count(&ir), expected, "{label}: IR diagnostics");
     assert_eq!(
-        unsupported_count(&typed),
+        precision_diagnostic_count(&ir, allow_legacy_unknown_precision_fallback),
+        expected,
+        "{label}: IR diagnostics: {:?}",
+        diagnostics(&ir)
+    );
+    assert_eq!(
+        precision_diagnostic_count(&typed, allow_legacy_unknown_precision_fallback),
         expected,
         "{label}: typed diagnostics"
     );
     assert_eq!(
-        check_unsupported_count(source),
+        check_precision_diagnostic_count(source, allow_legacy_unknown_precision_fallback),
         expected,
         "{label}: chelis check diagnostics"
     );
     assert_eq!(
-        prove_unsupported_count(source),
+        prove_precision_diagnostic_count(source, allow_legacy_unknown_precision_fallback),
         expected,
         "{label}: chelis prove diagnostics"
     );
