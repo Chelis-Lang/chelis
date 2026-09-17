@@ -107,6 +107,40 @@ fn matching_def_annotations_reuse_the_standalone_signature_binders() {
 }
 
 #[test]
+fn declaration_body_annotations_reuse_bare_type_binders_without_broadening_tensors() {
+    for source in [
+        "def ident[p](x: p) -> p = { y: p = x\n y }",
+        "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
+        "def ident[p](x: p) -> p = (x: p)",
+        "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
+        "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(t-var {} p)") && !rendered.contains("(t-prim {} p)"),
+            "an enclosing declaration binder must cover ordinary body type positions: \
+             {source}\n{rendered}"
+        );
+    }
+
+    for source in [
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { y: tensor[n, p] = x\n y }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         (x: tensor[n, p])",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(t-prim {} p)"),
+            "chelis#1904 remains the owner of body-local tensor precision scope: \
+             {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
 fn matching_def_cannot_declare_a_second_binder_list() {
     let error = parse_str(
         "sig ident[a]: a -> a\n\

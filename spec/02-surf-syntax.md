@@ -417,6 +417,11 @@ Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
 `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
 or def quantifier scope (e.g., in a let-typed binding), no
 quantifier exists, so the existing rule applies.
+Within a quantified def body, the declaration's type binders remain in scope
+for ordinary annotation type positions, including lambda parameters,
+expression ascriptions, block bindings, and nested ADT arguments. A tensor
+precision slot in one of those body-local annotations does not inherit that
+scope; it remains a closed primitive request under the value-position rule.
 The retired v0.18 integer spellings `int8`, `int16`, `int32`, and `int64`
 never become type variables. They are rejected with the
 versioned-migration diagnostic even when listed.

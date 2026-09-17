@@ -1004,7 +1004,7 @@ fn agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes() {
 #[test]
 fn a_named_local_claim_uses_its_declaring_runtime_extent() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = "def f(anchor: tensor[n, f32], x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+    let source = "def f[n](anchor: tensor[n, f32], x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
                   y: tensor[n, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
                   y\n\
                   }\n\

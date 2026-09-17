@@ -2222,6 +2222,12 @@ through the declaration's explicit `[..]` binder list:
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
+An enclosing declaration binder remains available in ordinary type positions
+inside that declaration's body, including lambda parameters, expression
+ascriptions, block bindings, and nested ADT arguments. Body-local tensor
+precision slots remain value-position annotations and therefore use the closed
+primitive rule rather than inheriting the declaration's precision binders.
+
 No occurrence introduces a binder. Every `t-var`, `d-var`, and `d-rank`
 name in a signature appears in its explicit list. An unlisted lowercase
 name in a scalar or precision type position remains a primitive-name

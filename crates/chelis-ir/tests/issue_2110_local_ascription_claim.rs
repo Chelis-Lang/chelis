@@ -414,7 +414,7 @@ fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
 
 #[test]
 fn staged_host_partition_retains_the_local_ascription_site() {
-    let source = "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = {\n  \
+    let source = "def f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[*, f32] = {\n  \
                   y: tensor[2, f32] = reshape(x, [numel(source)])\n  \
                   y\n\
                   }\n";
@@ -612,7 +612,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     }
 
     let named = lower(
-        "def f(anchor: tensor[n, f32], x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+        "def f[n](anchor: tensor[n, f32], x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
          y: tensor[n, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
          y\n\
          }\n",

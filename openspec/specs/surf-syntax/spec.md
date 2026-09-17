@@ -276,7 +276,10 @@ signature's complete `[..]` binder list. A non-primitive name in a tensor precis
 SHALL become `t-var` only when listed; an unlisted spelling remains a primitive request and
 SHALL be rejected by the closed primitive resolver. The `[..]` clause SHALL override the
 case-split so a listed PascalCase name is a type variable. A matching `def` SHALL NOT carry
-a second binder list.
+a second binder list. A declaration binder SHALL remain in scope for ordinary type
+positions in body-local lambda parameters, expression ascriptions, block bindings, and
+nested ADT arguments. A tensor precision slot in those body-local annotations SHALL remain
+a closed primitive request.
 
 #### Scenario: Sig precision name is an explicit type variable
 
@@ -287,6 +290,16 @@ a second binder list.
 
 - **WHEN** a def is `def f[a, b](x: tensor[3, p]) = ...` with `p` absent from `[a, b]`
 - **THEN** the shared primitive resolver rejects `p` as unknown and suggests the nearest active dtype
+
+#### Scenario: Body annotation keeps ordinary binder scope
+
+- **WHEN** `def identity[p](x: p) -> p = (x: p)` uses `p` in an expression ascription
+- **THEN** that `p` desugars to the declaration's `t-var`
+
+#### Scenario: Body tensor precision remains closed
+
+- **WHEN** `def identity[n, p](x: tensor[n, p]) = (x: tensor[n, p])` uses `p` in a body-local tensor precision slot
+- **THEN** that body-local `p` remains a primitive request and is rejected by the closed primitive resolver
 
 ### Requirement: Blocks and sequencing
 

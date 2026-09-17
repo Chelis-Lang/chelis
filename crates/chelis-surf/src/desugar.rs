@@ -184,6 +184,17 @@ impl DesugarCtx {
         self.current_type_binders.borrow().get(name).copied()
     }
 
+    fn desugar_body_annotation_type(&self, ty: &TypeExpr) -> deep::Expr {
+        let tvar_set: UnordSet<String> = self
+            .current_type_binders
+            .borrow()
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        desugar_type_with_scope_mode(ty, &UnordSet::new(), &tvar_set, true, false)
+    }
+
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = UnordMap::new();
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
@@ -1707,7 +1718,16 @@ impl DesugarCtx {
             }
 
             Expr::Lambda(params, body, _) => {
-                let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
+                let param_names: Vec<deep::Expr> = params
+                    .iter()
+                    .map(|param| {
+                        let annotation = param
+                            .ty
+                            .as_ref()
+                            .map(|ty| self.desugar_body_annotation_type(ty));
+                        desugar_param_with_annotation(param, annotation)
+                    })
+                    .collect();
                 let params_node = node(DeepTag::Params, param_names);
                 let lambda_params = params
                     .iter()
@@ -1904,7 +1924,7 @@ impl DesugarCtx {
             Expr::Annotate(e, ty, _) => {
                 // Type annotation pushed into metadata of the desugared expression
                 let desugared = self.desugar_expr_with_scope(e, local_fn_params);
-                inject_type_metadata(desugared, desugar_type(ty))
+                inject_type_metadata(desugared, self.desugar_body_annotation_type(ty))
             }
 
             Expr::Block(bindings, final_expr, _) => {
@@ -2051,7 +2071,7 @@ impl DesugarCtx {
                     };
                     if let Some(ty) = &binding.ty {
                         let value = with_metadata_value(
-                            inject_type_metadata(value, desugar_type(ty)),
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
                             M::SurfBindingType(Spanned::new(
                                 BindingTypeOrigin::Explicit,
                                 type_expr_span(ty),
@@ -2519,7 +2539,7 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
 /// names remain unkinded declaration binders and are emitted according to
 /// their position (`t-var`, `d-var`, or precision `t-var`).
 fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -> deep::Expr {
-    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
+    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false, true)
 }
 
 /// Desugar a sig against its complete explicit binder list.
@@ -2541,7 +2561,7 @@ fn desugar_type_with_scope(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
-    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true)
+    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true, true)
 }
 
 fn desugar_type_with_scope_mode(
@@ -2549,6 +2569,7 @@ fn desugar_type_with_scope_mode(
     dim_vars: &UnordSet<String>,
     tvar_set: &UnordSet<String>,
     single_letter_dim_vars: bool,
+    tensor_precision_binders: bool,
 ) -> deep::Expr {
     let desugared = match ty {
         TypeExpr::DimensionLiteral(value, _) => node(DeepTag::DLit, vec![int(value.value())]),
@@ -2646,6 +2667,7 @@ fn desugar_type_with_scope_mode(
                             dim_vars,
                             tvar_set,
                             single_letter_dim_vars,
+                            tensor_precision_binders,
                         )],
                     ),
                 })
@@ -2664,7 +2686,7 @@ fn desugar_type_with_scope_mode(
                 None if is_reserved_dtype_name(precision) => {
                     node(DeepTag::TPrim, vec![sym(precision)])
                 }
-                None if tvar_set.contains(precision.as_str()) => {
+                None if tensor_precision_binders && tvar_set.contains(precision.as_str()) => {
                     node(DeepTag::TVar, vec![sym(precision)])
                 }
                 // Not a primitive and not quantified: still `t-prim`, so the
@@ -2679,7 +2701,13 @@ fn desugar_type_with_scope_mode(
             let mut children: Vec<deep::Expr> = params
                 .iter()
                 .map(|p| {
-                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, single_letter_dim_vars)
+                    desugar_type_with_scope_mode(
+                        p,
+                        dim_vars,
+                        tvar_set,
+                        single_letter_dim_vars,
+                        tensor_precision_binders,
+                    )
                 })
                 .collect();
             children.push(desugar_type_with_scope_mode(
@@ -2687,6 +2715,7 @@ fn desugar_type_with_scope_mode(
                 dim_vars,
                 tvar_set,
                 single_letter_dim_vars,
+                tensor_precision_binders,
             ));
             node(DeepTag::TFn, children)
         }
@@ -2698,13 +2727,20 @@ fn desugar_type_with_scope_mode(
                 dim_vars,
                 tvar_set,
                 single_letter_dim_vars,
+                tensor_precision_binders,
             )],
         ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
             children.extend(args.iter().map(|a| {
-                desugar_type_with_scope_mode(a, dim_vars, tvar_set, single_letter_dim_vars)
+                desugar_type_with_scope_mode(
+                    a,
+                    dim_vars,
+                    tvar_set,
+                    single_letter_dim_vars,
+                    tensor_precision_binders,
+                )
             }));
             node(DeepTag::TAdt, children)
         }
@@ -2715,7 +2751,13 @@ fn desugar_type_with_scope_mode(
             elems
                 .iter()
                 .map(|e| {
-                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, single_letter_dim_vars)
+                    desugar_type_with_scope_mode(
+                        e,
+                        dim_vars,
+                        tvar_set,
+                        single_letter_dim_vars,
+                        tensor_precision_binders,
+                    )
                 })
                 .collect(),
         ),

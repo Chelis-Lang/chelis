@@ -308,6 +308,51 @@ fn explicit_surf_binders_and_active_primitives_check_clean() {
 }
 
 #[test]
+fn declaration_body_annotations_preserve_the_existing_role_sensitive_scope() {
+    for source in [
+        "def ident[p](x: p) -> p = { y: p = x\n y }",
+        "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
+        "def ident[p](x: p) -> p = (x: p)",
+        "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
+        "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
+    ] {
+        let program = surf(source);
+        check_ir_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "IR ingress must accept body binder use in `{source}`: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(&program).unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must accept body binder use in `{source}`: {:?}",
+                report.errors
+            )
+        });
+    }
+
+    for source in [
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { y: tensor[n, p] = x\n y }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         (x: tensor[n, p])",
+    ] {
+        let program = surf(source);
+        let ir = diagnostics(check_ir_program(&program));
+        let typed = diagnostics(check_typed_program(&program));
+        assert_eq!(typed, ir, "checker ingress parity for `{source}`");
+        assert!(
+            ir.iter()
+                .any(|diagnostic| { diagnostic.message.contains("tensor element precision `p`") }),
+            "chelis#1904's existing tensor-annotation boundary must remain rejected: \
+             {source}\n{ir:?}"
+        );
+    }
+}
+
+#[test]
 fn explicit_deep_t_var_nodes_remain_valid_binders() {
     let program = parse_deep(
         "(defsig {} ident (float32)
