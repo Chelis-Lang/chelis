@@ -2586,57 +2586,18 @@ pub(super) fn infer_top_level(
             // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
             // structural relaxed-retry guard does not see it because the
             // initial unify already succeeded by collapsing `n` and `m`.
-            let mut declared_param_dvars: Vec<DimVar> = Vec::new();
-            let mut return_only_dvars: Vec<DimVar> = Vec::new();
-            if let Type::Fn(decl_params, decl_ret) = &decl_ty {
-                for t in decl_params {
-                    for dv in crate::env::free_dvars(t) {
-                        if !declared_param_dvars.contains(&dv) {
-                            declared_param_dvars.push(dv);
-                        }
-                    }
-                }
-                return_only_dvars = crate::env::free_dvars(decl_ret)
-                    .into_iter()
-                    .filter(|dv| !declared_param_dvars.contains(dv))
-                    .collect();
-            }
-            // [04-INF-6] also covers a listed dimension used only in ordinary
-            // body annotations. Those declaration-owned identities do not
-            // occur in `decl_ty`, so include every authored dimension except
-            // the signature's explicit return-only set, whose output-inferred
-            // policy remains owned by §4.4.1 below.
-            let rigid_declared_dvars = declared_dim_names
-                .to_sorted()
-                .into_iter()
-                .map(|(dv, _)| *dv)
-                .filter(|dv| !return_only_dvars.contains(dv))
-                .collect::<Vec<_>>();
-            check_declared_dvars_rigid(
-                Some(&name),
-                &rigid_declared_dvars,
-                &declared_dim_names,
-                subst,
-                errors,
-            );
+            // Classify every authored dimension identity together. Parameter
+            // and body-only roles are rigid under [04-INF-6]; result-only
+            // roles retain §4.4.1 output inference and may collapse only with
+            // another result-only identity. This declaration-level path is
+            // shared by ordinary and recursive members.
+            check_authored_dvars_rigid(&name, &decl_ty, &declared_dim_names, subst, errors);
             // [04-INF-6]: the type/rank twins of the dimension check above.
             // Their key sets come from the same declaration-owned identity
             // object, and inference holes ([04-INF-5]) are excluded by
             // construction.
             check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
             check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
-            // chelis#273: the param-position guard above never sees a dim
-            // parameter that occurs only in the return type, so a body
-            // could silently pin a return-only rigid dim. Reject the
-            // input-coupled pins/collapses while keeping the legitimate
-            // output-inferred uses (hello_tensor-style) green.
-            check_return_only_dvars_rigid(
-                &decl_ty,
-                &declared_param_dvars,
-                &declared_dim_names,
-                subst,
-                errors,
-            );
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only

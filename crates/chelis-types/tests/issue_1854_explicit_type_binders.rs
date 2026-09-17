@@ -488,6 +488,92 @@ fn recursive_body_only_dimension_and_rank_binders_remain_rigid() {
     }
 }
 
+fn assert_body_only_dimension_cannot_collapse_into_return_only(source: &str, declaration: &str) {
+    let surf_program = surf(source);
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        let ir = diagnostics(check_ir_program(program));
+        let typed = diagnostics(check_typed_program(program));
+        assert_eq!(
+            typed, ir,
+            "{carrier} checker ingresses must agree for `{declaration}`"
+        );
+        assert!(
+            ir.iter().any(|diagnostic| {
+                diagnostic.message.contains(declaration)
+                    && diagnostic.message.contains("`n`")
+                    && diagnostic.message.contains("`m`")
+                    && diagnostic.message.contains("[04-INF-6]")
+            }),
+            "{carrier} must reject a rigid body-only `m` collapsed into return-only `n`: \
+             {ir:?}\n{canonical_source}"
+        );
+    }
+}
+
+#[test]
+fn body_only_dimension_cannot_collapse_into_a_distinct_return_only_binder() {
+    for (source, declaration) in [
+        (
+            "def mixed_return_only[n, m](values: List[f32]) -> tensor[n, f32] = {\n\
+               result: tensor[m, f32] = to_tensor(values)\n\
+               result\n\
+             }",
+            "mixed_return_only",
+        ),
+        (
+            "def recursive_mixed_return_only[n, m](\n\
+               values: List[f32],\n\
+               stop: bool\n\
+             ) -> tensor[n, f32] = {\n\
+               result: tensor[m, f32] = to_tensor(values)\n\
+               if stop then result else recursive_mixed_return_only(values, true)\n\
+             }",
+            "recursive_mixed_return_only",
+        ),
+    ] {
+        assert_body_only_dimension_cannot_collapse_into_return_only(source, declaration);
+    }
+}
+
+#[test]
+fn distinct_return_only_dimensions_may_share_one_body_inferred_output() {
+    let source = "def shared_return_only[n, m](values: List[f32]) \
+                  -> (tensor[n, f32], tensor[m, f32]) = {\n\
+                    result = to_tensor(values)\n\
+                    (result, result)\n\
+                  }";
+    let surf_program = surf(source);
+    let canonical_source = print_canonical_flat(&surf_program);
+    let canonical_program =
+        parse_deep(&canonical_source).expect("desugared canonical Deep must parse");
+
+    for (carrier, program) in [
+        ("Surf-desugared Deep", surf_program.as_slice()),
+        ("canonical Deep", canonical_program.as_slice()),
+    ] {
+        check_ir_program(program).unwrap_or_else(|report| {
+            panic!(
+                "normalized IR ingress must preserve return-only output inference through \
+                 {carrier}: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(program).unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must preserve return-only output inference through {carrier}: {:?}",
+                report.errors
+            )
+        });
+    }
+}
+
 #[test]
 fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
     for (source, name, needle) in [

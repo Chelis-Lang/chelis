@@ -507,6 +507,89 @@ fn cli_rejects_concrete_pins_of_body_only_dimension_and_rank_binders() {
 }
 
 #[test]
+fn cli_rejects_body_only_dimension_collapsed_into_return_only_at_both_surfaces() {
+    let dir = tempdir().expect("tempdir");
+    for (index, source, declaration) in [
+        (
+            0,
+            "def mixed_return_only[n, m](values: List[f32]) -> tensor[n, f32] = {\n\
+               result: tensor[m, f32] = to_tensor(values)\n\
+               result\n\
+             }\n",
+            "mixed_return_only",
+        ),
+        (
+            1,
+            "def recursive_mixed_return_only[n, m](\n\
+               values: List[f32],\n\
+               stop: bool\n\
+             ) -> tensor[n, f32] = {\n\
+               result: tensor[m, f32] = to_tensor(values)\n\
+               if stop then result else recursive_mixed_return_only(values, true)\n\
+             }\n",
+            "recursive_mixed_return_only",
+        ),
+    ] {
+        let surf_path = format!("mixed-return-only-{index}.ch");
+        fs::write(dir.path().join(&surf_path), source).expect("write Surf fixture");
+
+        let deep = run(dir.path(), &["deep", &surf_path]);
+        assert!(
+            deep.status.success(),
+            "`chelis deep` failed: {}",
+            text(&deep)
+        );
+        let deep_path = format!("mixed-return-only-{index}.dp");
+        fs::write(dir.path().join(&deep_path), &deep.stdout).expect("write canonical Deep fixture");
+
+        for path in [&surf_path, &deep_path] {
+            let checked = check_json(dir.path(), path);
+            let messages = error_messages(&checked);
+            assert!(
+                checked["score"].as_f64() != Some(1.0)
+                    && messages.iter().any(|message| {
+                        message.contains(declaration)
+                            && message.contains("`n`")
+                            && message.contains("`m`")
+                            && message.contains("[04-INF-6]")
+                    }),
+                "`chelis check` must reject rigid body-only `m` collapsed into return-only `n` \
+                 through {path}: {checked}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_preserves_return_only_to_return_only_output_inference() {
+    let dir = tempdir().expect("tempdir");
+    let source = "def shared_return_only[n, m](values: List[f32]) \
+                  -> (tensor[n, f32], tensor[m, f32]) = {\n\
+                    result = to_tensor(values)\n\
+                    (result, result)\n\
+                  }\n";
+    fs::write(dir.path().join("shared-return-only.ch"), source).expect("write Surf fixture");
+
+    let deep = run(dir.path(), &["deep", "shared-return-only.ch"]);
+    assert!(
+        deep.status.success(),
+        "`chelis deep` failed: {}",
+        text(&deep)
+    );
+    fs::write(dir.path().join("shared-return-only.dp"), &deep.stdout)
+        .expect("write canonical Deep fixture");
+
+    for path in ["shared-return-only.ch", "shared-return-only.dp"] {
+        let checked = check_json(dir.path(), path);
+        assert_eq!(
+            checked["score"].as_f64(),
+            Some(1.0),
+            "two return-only binders may share one body-inferred output through {path}: {checked}"
+        );
+    }
+}
+
+#[test]
 fn cli_checks_canonical_deep_body_only_binders_and_rejects_undeclared_neighbors() {
     let dir = tempdir().expect("tempdir");
     for (index, binder, annotation) in [
