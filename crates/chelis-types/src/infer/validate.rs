@@ -477,23 +477,26 @@ pub(super) fn validate_tensor_precisions_in_program(
     // keeps each def's tensor types in their own key space (otherwise
     // every def lives under def_context="" and errors collapse).
     for expr in top_level_decl_items(exprs) {
-        let def_name = match expr {
-            deep::Expr::List(list, _)
+        let def_name = match expr.carrier() {
+            deep::ExprCarrier::DecodedNode(tag, _, children)
                 if matches!(
-                    get_tag(list),
-                    Some(DeepTag::Def)
-                        | Some(DeepTag::Defsig)
-                        | Some(DeepTag::Deftype)
-                        | Some(DeepTag::Typealias)
+                    tag,
+                    DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
                 ) =>
             {
-                children(list)
+                children
                     .first()
                     .and_then(symbol_name)
                     .unwrap_or("")
                     .to_string()
             }
-            _ => String::new(),
+            deep::ExprCarrier::DecodedNode(_, _, _)
+            | deep::ExprCarrier::StructuralList(_)
+            | deep::ExprCarrier::UndecodableHead(_, _, _)
+            | deep::ExprCarrier::Atom(_)
+            | deep::ExprCarrier::MetadataMap(_)
+            | deep::ExprCarrier::MetadataExpression(_)
+            | deep::ExprCarrier::MalformedLegacyList(_) => String::new(),
         };
         walk_for_tensor_precision(expr, errors, &mut seen, &def_name);
     }
