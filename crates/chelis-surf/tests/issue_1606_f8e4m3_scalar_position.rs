@@ -48,6 +48,15 @@ fn assert_reaches_rejection(deep: &str, position: &str) {
     );
 }
 
+fn assert_forbidden_binder(source: &str, position: &str) {
+    let error = parse_str(source).expect_err("f8e4m3 cannot enter a declaration binder list");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("`f8e4m3`") && rendered.contains("cannot be a declaration binder"),
+        "wrong forbidden-binder diagnostic for {position}: {rendered}"
+    );
+}
+
 /// REGRESSION test. The named instance of chelis#1606: a scalar parameter
 /// and return annotation.
 #[test]
@@ -64,17 +73,18 @@ fn f8e4m3_in_a_sig_reaches_the_rejection() {
 }
 
 /// REGRESSION test. An explicit `[..]` quantifier list naming `f8e4m3` must
-/// not rebind it, in scalar position or in the tensor precision slot.
+/// reject it before either scalar or tensor use can be rebound.
 #[test]
 fn f8e4m3_explicit_binder_does_not_rebind_in_scalar_or_tensor_position() {
-    let scalar = deep_of("module P.M\nexport (f)\ndef f[f8e4m3](x: f8e4m3) -> f8e4m3 = x\n");
-    assert_reaches_rejection(&scalar, "an explicit binder in a scalar position");
-
-    let tensor = deep_of(
+    assert_forbidden_binder(
+        "module P.M\nexport (f)\ndef f[f8e4m3](x: f8e4m3) -> f8e4m3 = x\n",
+        "an explicit binder in a scalar position",
+    );
+    assert_forbidden_binder(
         "module P.M\nexport (f)\n\
          def f[f8e4m3](x: tensor[3, f8e4m3]) -> tensor[3, f8e4m3] = x\n",
+        "an explicit binder in a tensor precision slot",
     );
-    assert_reaches_rejection(&tensor, "an explicit binder in a tensor precision slot");
 }
 
 /// REGRESSION test. A `&f8e4m3` reference type.

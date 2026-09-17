@@ -72,6 +72,16 @@ fn assert_reaches_rejection(deep: &str, name: &str, position: &str) {
     );
 }
 
+fn assert_forbidden_binder(source: &str, name: &str, position: &str) {
+    let error = parse_str(source).expect_err("reserved dtype cannot enter binder list");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&format!("`{name}`"))
+            && rendered.contains("cannot be a declaration binder"),
+        "wrong forbidden-binder diagnostic for `{name}` in {position}: {rendered}"
+    );
+}
+
 /// REGRESSION test. The named instance of chelis#1593: a scalar parameter and
 /// return annotation.
 #[test]
@@ -203,29 +213,30 @@ fn the_formatter_leaves_an_unsigned_spelling_unchanged() {
 }
 
 /// REGRESSION test. §5.8.1's rule is stated on the category, so an explicit
-/// `[..]` quantifier list does not rebind a reserved spelling. Below the
-/// quantifier check this still produced `(t-var {} u8)`.
+/// `[..]` quantifier list rejects a reserved spelling before it can be rebound.
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_scalar_name() {
     for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
-        let deep = deep_of(&format!(
-            "module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"
-        ));
-        assert_reaches_rejection(&deep, name, "an explicit binder in a scalar position");
+        assert_forbidden_binder(
+            &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
+            name,
+            "an explicit binder in a scalar position",
+        );
     }
 }
 
-/// REGRESSION test. The tensor form of the same hole. The precision slot's
-/// quantifier check sat above its reserved-name row, so an explicit binder
-/// defeated the very fall-through the scalar arm was copying.
+/// REGRESSION test. The tensor form of the same reserved-binder rejection.
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_tensor_precision() {
     for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
-        let deep = deep_of(&format!(
-            "module P.M\nexport (f)\n\
-             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
-        ));
-        assert_reaches_rejection(&deep, name, "an explicit binder in a tensor precision slot");
+        assert_forbidden_binder(
+            &format!(
+                "module P.M\nexport (f)\n\
+                 def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+            ),
+            name,
+            "an explicit binder in a tensor precision slot",
+        );
     }
 }
 
