@@ -701,7 +701,7 @@ fn a_late_bound_secondary_operand_is_validated_too() {
             resolved_invalid: "def f(xs: List[i32], k: f32) -> i32 = index(xs, k)\n",
             late_invalid: "def f(xs: List[i32], k: f32) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
             late_valid: "def f(xs: List[i32], k: i64) -> i32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
-            diagnostic: "index expects integer index, got f32",
+            diagnostic: "index expects i64 index, got f32",
         },
         Cell {
             // `concat`'s List/List rule IS a unification of the element types,

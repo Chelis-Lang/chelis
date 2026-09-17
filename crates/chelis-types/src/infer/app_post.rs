@@ -1291,8 +1291,8 @@ pub(super) fn finish_unified_app(
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
                 match &index_arg {
-                    Type::Prim(prec) if prec.is_integer() => {}
-                    // chelis#1512: not an integer YET. Suspending the call
+                    Type::Prim(Prim::Int64) => {}
+                    // chelis#1512: not an i64 YET. Suspending the call
                     // re-enters this route once the operand binds, so this
                     // same guard decides against a settled type.
                     Type::Var(_) => site.register(&arg_tys, &result_ty, product),
@@ -1304,7 +1304,7 @@ pub(super) fn finish_unified_app(
                                 CheckErrorKind::TypeMismatch,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("index expects integer index, got {other}"),
+                                    format!("index expects i64 index, got {other}"),
                                 ),
                                 vec![],
                             ),

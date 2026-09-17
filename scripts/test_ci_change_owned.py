@@ -386,6 +386,29 @@ class SchemaTests(unittest.TestCase):
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
                 self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
         by_path = {rule.prefix: rule for rule in config.path_rules}
+        kinded_nominal_dimensions = by_path[
+            "examples/kinded_nominal_dimensions.ch"
+        ]
+        self.assertEqual(kinded_nominal_dimensions.disposition, "packages")
+        self.assertEqual(
+            kinded_nominal_dimensions.packages,
+            ("chelis-cli", "chelis-e2e"),
+        )
+        for source, test in (
+            (
+                "crates/chelis-cli/tests/parity.rs",
+                "parity_kinded_nominal_dimensions",
+            ),
+            (
+                "crates/chelis-e2e/tests/spec_suite.rs",
+                "spec_all_executable_examples_parse_and_check",
+            ),
+        ):
+            with self.subTest(source=source, test=test):
+                self.assertIn(
+                    test,
+                    owned.test_functions((root / source).read_text()),
+                )
         runtime_extent_oracle_tests = by_path["scripts/test_runtime_extent_oracle.py"]
         self.assertEqual(
             (
@@ -1299,6 +1322,93 @@ class PlanningTests(unittest.TestCase):
         )
         self.assertEqual(plan["selected_packages"], ["p", "q"])
         self.assertEqual(plan["path_dispositions"][0]["kind"], "path_rule_packages")
+
+    def test_kinded_nominal_dimensions_exact_rule_selects_both_consumers_and_removal_fails_closed(
+        self,
+    ) -> None:
+        path = "examples/kinded_nominal_dimensions.ch"
+        cli_parity = "crates/chelis-cli/tests/parity.rs"
+        e2e_spec_suite = "crates/chelis-e2e/tests/spec_suite.rs"
+        cli_heavy = "crates/chelis-cli/tests/heavy.rs"
+        sources = {
+            cli_parity: "#[test]\nfn parity_kinded_nominal_dimensions() {}\n",
+            e2e_spec_suite: (
+                "#[test]\nfn spec_all_executable_examples_parse_and_check() {}\n"
+                "#[test]\nfn excluded_case() {}\n"
+            ),
+            cli_heavy: "#[test]\nfn heavy_case() {}\n",
+            "scripts/tool.py": "",
+            path: "out = 1i64\n",
+        }
+        consumer_metadata = metadata(
+            package(
+                "chelis-cli",
+                [
+                    ("parity", cli_parity, []),
+                    ("heavy", cli_heavy, []),
+                ],
+            ),
+            package(
+                "chelis-e2e",
+                [("spec_suite", e2e_spec_suite, [])],
+            ),
+        )
+        base_config = config_text(
+            standing=("chelis-cli", "parity"),
+            target_exclusion=("chelis-cli", "heavy"),
+            test_exclusion=("chelis-e2e", "spec_suite", "excluded_case"),
+        )
+        exact_rule = f"""
+
+[[path_rule]]
+prefix = {json.dumps(path)}
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+"""
+
+        def plan(config: owned.Config) -> dict:
+            return owned.make_plan(
+                mode="push",
+                base_sha="a" * 40,
+                candidate_sha="b" * 40,
+                records=[owned.ChangeRecord("M", path)],
+                base_metadata=consumer_metadata,
+                candidate_metadata=consumer_metadata,
+                config=config,
+                tracked_paths=set(sources),
+                source_reader=sources.__getitem__,
+            )
+
+        selected = plan(load_config(base_config + exact_rule))
+        self.assertEqual(
+            selected["path_dispositions"],
+            [
+                {
+                    "path": path,
+                    "status": "M",
+                    "kind": "path_rule_packages",
+                    "rule": path,
+                    "packages": ["chelis-cli", "chelis-e2e"],
+                }
+            ],
+        )
+        self.assertEqual(
+            selected["selected_packages"],
+            ["chelis-cli", "chelis-e2e"],
+        )
+        self.assertTrue(
+            {
+                "chelis-cli::parity",
+                "chelis-e2e::spec_suite",
+            }
+            <= set(selected["package_expansion"])
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"unclassified changed path: {path}",
+        ):
+            plan(load_config(base_config))
 
     def test_targeted_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
         shared = "crates/p/tests/shared.rs"
