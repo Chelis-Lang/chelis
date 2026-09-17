@@ -1059,6 +1059,11 @@ reason = "the required Hull integrity and conformance gates load the committed c
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
+prefix = "tests/support/capacity_census_stdlib.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "tests/support/capacity_census_stdlib_tests.rs"
 disposition = "packages"
 packages = ["chelis-cli"]

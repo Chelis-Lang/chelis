@@ -734,6 +734,7 @@ class SchemaTests(unittest.TestCase):
                 )
         package_owners = {
             "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/capacity_census_stdlib.rs": ("chelis-cli",),
             "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
             "tests/support/helper_summary_fatal.ch": (
                 "chelis-cli",
