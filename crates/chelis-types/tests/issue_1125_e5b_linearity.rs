@@ -76,22 +76,46 @@ fn carrier_roles(pattern: &syn::Pat) -> BTreeSet<String> {
     scan.roles
 }
 
-fn tokens_mention(tokens: TokenStream, expected: &str) -> bool {
-    tokens.into_iter().any(|token| match token {
-        TokenTree::Ident(ident) => ident.to_string().trim_start_matches("r#") == expected,
-        TokenTree::Group(group) => tokens_mention(group.stream(), expected),
-        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
+fn token_spellings(tokens: TokenStream, spellings: &mut Vec<String>) {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                spellings.push(ident.to_string().trim_start_matches("r#").to_string());
+            }
+            TokenTree::Punct(punct) => spellings.push(punct.as_char().to_string()),
+            TokenTree::Group(group) => token_spellings(group.stream(), spellings),
+            TokenTree::Literal(_) => {}
+        }
+    }
 }
 
-fn macro_mentions_carrier(mac: &syn::Macro) -> bool {
-    tokens_mention(mac.tokens.clone(), "carrier")
+fn macro_findings(mac: &syn::Macro) -> Vec<String> {
+    let mut spellings = Vec::new();
+    token_spellings(mac.tokens.clone(), &mut spellings);
+    let mut findings = Vec::new();
+    for (reserved, message) in [
+        ("carrier", "carrier access hidden inside a macro"),
+        ("to_list", "Node-to-List bridge hidden inside a macro"),
+    ] {
+        if spellings.iter().any(|spelling| spelling == reserved) {
+            findings.push(message.to_string());
+        }
+    }
+    if spellings
+        .windows(4)
+        .any(|window| window == ["Expr", ":", ":", "List"])
+    {
+        findings.push("legacy Expr::List construction hidden inside a macro".to_string());
+    }
+    findings
 }
 
 fn cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().is_ident("cfg")
-            && matches!(&attr.meta, syn::Meta::List(list) if tokens_mention(list.tokens.clone(), "test"))
+            && attr
+                .parse_args::<syn::Path>()
+                .is_ok_and(|path| path.is_ident("test"))
     })
 }
 
@@ -100,7 +124,7 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
 
     #[derive(Default)]
     struct CarrierTotalityScan {
-        carrier_calls: usize,
+        carrier_references: usize,
         direct_matches: usize,
         findings: Vec<String>,
     }
@@ -129,7 +153,7 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
 
         fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
             if ident_is(&call.method, "carrier") {
-                self.carrier_calls += 1;
+                self.carrier_references += 1;
             } else if ident_is(&call.method, "to_list") {
                 self.findings
                     .push("Node-to-List bridge in a semantic reader".to_string());
@@ -137,27 +161,29 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
             visit::visit_expr_method_call(self, call);
         }
 
-        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(path) = &*call.func {
-                if path_ends_with(&path.path, "carrier") {
-                    self.carrier_calls += 1;
-                } else if path_ends_with(&path.path, "to_list") {
-                    self.findings
-                        .push("Node-to-List bridge in a semantic reader".to_string());
-                }
-                if path_is(&path.path, &["Expr", "List"]) {
-                    self.findings
-                        .push("legacy Expr::List construction in a semantic reader".to_string());
-                }
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if (path.qself.is_some() || path.path.segments.len() > 1)
+                && path_ends_with(&path.path, "carrier")
+            {
+                self.carrier_references += 1;
             }
-            visit::visit_expr_call(self, call);
+            visit::visit_expr_path(self, path);
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if path_ends_with(path, "to_list") {
+                self.findings
+                    .push("Node-to-List bridge in a semantic reader".to_string());
+            }
+            if path_is(path, &["Expr", "List"]) {
+                self.findings
+                    .push("legacy Expr::List construction in a semantic reader".to_string());
+            }
+            visit::visit_path(self, path);
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-            if macro_mentions_carrier(mac) {
-                self.findings
-                    .push("carrier access hidden inside a macro".to_string());
-            }
+            self.findings.extend(macro_findings(mac));
             visit::visit_macro(self, mac);
         }
 
@@ -170,10 +196,10 @@ fn carrier_totality_findings(source: &str) -> Vec<String> {
 
     let mut scan = CarrierTotalityScan::default();
     scan.visit_file(&file);
-    if scan.carrier_calls != scan.direct_matches {
+    if scan.carrier_references != scan.direct_matches {
         scan.findings.push(format!(
-            "{} carrier call(s) but {} direct carrier match(es)",
-            scan.carrier_calls, scan.direct_matches
+            "{} carrier reference(s) but {} direct carrier match(es)",
+            scan.carrier_references, scan.direct_matches
         ));
     }
     scan.findings
@@ -374,12 +400,43 @@ fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
 }
 "#,
         r#"
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    let classify = Expr::carrier;
+    match classify(expr) {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+"#,
+        r#"
+macro_rules! legacy {
+    ($node:expr) => {{
+        let _ = $node.to_list();
+        Expr::List(Default::default(), Default::default())
+    }};
+}
+"#,
+        r#"
 // #[cfg(test)] is documentation here, not an item attribute.
 fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     let carrier = expr.carrier();
     match carrier {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
         _ => None,
+    }
+}
+"#,
+        r#"
+#[cfg(not(test))]
+mod production {
+    fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+        let carrier = expr.carrier();
+        match carrier {
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                Some((tag, metadata, children))
+            }
+            _ => None,
+        }
     }
 }
 "#,
