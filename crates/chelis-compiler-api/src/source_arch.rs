@@ -4542,7 +4542,6 @@ fn root_manifest_walkers_consume_stamped_nodes_without_list_reconstruction() {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RootManifestCarrierAudit {
-    target_function_found: bool,
     decoded_node_patterns: usize,
     direct_node_patterns: usize,
     to_list_calls: usize,
@@ -4550,58 +4549,223 @@ struct RootManifestCarrierAudit {
 
 impl RootManifestCarrierAudit {
     fn is_compliant(&self) -> bool {
-        self.target_function_found
-            && self.decoded_node_patterns > 0
-            && self.direct_node_patterns == 0
-            && self.to_list_calls == 0
+        self.decoded_node_patterns > 0 && self.direct_node_patterns == 0 && self.to_list_calls == 0
     }
 }
 
-fn path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
-    let actual = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    actual.len() >= expected.len()
-        && actual[actual.len() - expected.len()..]
+#[derive(Debug, Default)]
+struct RootManifestCarrierBindings {
+    imports: BTreeMap<String, Vec<String>>,
+    type_aliases: BTreeMap<String, Vec<String>>,
+}
+
+impl RootManifestCarrierBindings {
+    fn collect(file: &syn::File) -> Self {
+        let mut bindings = Self::default();
+        for item in &file.items {
+            match item {
+                syn::Item::Use(import) => {
+                    collect_root_manifest_imports(&import.tree, &[], &mut bindings.imports);
+                }
+                syn::Item::Type(alias) => {
+                    if let syn::Type::Path(path) = alias.ty.as_ref() {
+                        bindings.type_aliases.insert(
+                            alias.ident.to_string(),
+                            path.path
+                                .segments
+                                .iter()
+                                .map(|segment| segment.ident.to_string())
+                                .collect(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        bindings
+    }
+
+    fn resolve(&self, path: &syn::Path) -> Vec<String> {
+        let mut resolved = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        for _ in 0..=self.imports.len() + self.type_aliases.len() {
+            let Some(first) = resolved.first().cloned() else {
+                break;
+            };
+            let replacement = self
+                .type_aliases
+                .get(&first)
+                .or_else(|| self.imports.get(&first));
+            let Some(replacement) = replacement else {
+                break;
+            };
+            let mut next = replacement.clone();
+            next.extend(resolved.iter().skip(1).cloned());
+            if next == resolved {
+                break;
+            }
+            resolved = next;
+        }
+        resolved
+    }
+
+    fn resolves_to(&self, path: &syn::Path, expected: &[&str]) -> bool {
+        self.resolve(path)
             .iter()
             .map(String::as_str)
             .eq(expected.iter().copied())
+    }
+
+    fn resolves_to_expr_node(&self, path: &syn::Path) -> bool {
+        self.resolves_to(path, &["chelis_deep", "ast", "Expr", "Node"])
+            || self.resolves_to(path, &["chelis_deep", "Expr", "Node"])
+    }
+
+    fn resolves_to_decoded_node(&self, path: &syn::Path) -> bool {
+        self.resolves_to(path, &["chelis_deep", "ast", "ExprCarrier", "DecodedNode"])
+            || self.resolves_to(path, &["chelis_deep", "ExprCarrier", "DecodedNode"])
+    }
+
+    fn resolves_to_node_type(&self, path: &syn::Path) -> bool {
+        self.resolves_to(path, &["chelis_deep", "node", "Node"])
+    }
+
+    fn resolves_to_node_to_list(&self, path: &syn::Path) -> bool {
+        self.resolves_to(path, &["chelis_deep", "node", "Node", "to_list"])
+    }
 }
 
-impl<'ast> Visit<'ast> for RootManifestCarrierAudit {
-    fn visit_pat_tuple_struct(&mut self, pattern: &'ast syn::PatTupleStruct) {
-        if path_ends_with(&pattern.path, &["ExprCarrier", "DecodedNode"]) {
-            self.decoded_node_patterns += 1;
+fn collect_root_manifest_imports(
+    tree: &syn::UseTree,
+    prefix: &[String],
+    imports: &mut BTreeMap<String, Vec<String>>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut next = prefix.to_vec();
+            next.push(path.ident.to_string());
+            collect_root_manifest_imports(&path.tree, &next, imports);
         }
-        if pattern
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "Node")
-        {
-            self.direct_node_patterns += 1;
+        syn::UseTree::Name(name) => {
+            let name = name.ident.to_string();
+            let mut target = prefix.to_vec();
+            if name != "self" {
+                target.push(name.clone());
+            }
+            let visible = if name == "self" {
+                prefix.last().cloned()
+            } else {
+                Some(name)
+            };
+            if let Some(visible) = visible {
+                imports.insert(visible, target);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut target = prefix.to_vec();
+            target.push(rename.ident.to_string());
+            imports.insert(rename.rename.to_string(), target);
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_root_manifest_imports(item, prefix, imports);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn root_manifest_type_path(ty: &syn::Type) -> Option<&syn::Path> {
+    match ty {
+        syn::Type::Path(path) => Some(&path.path),
+        syn::Type::Reference(reference) => root_manifest_type_path(&reference.elem),
+        syn::Type::Paren(paren) => root_manifest_type_path(&paren.elem),
+        syn::Type::Group(group) => root_manifest_type_path(&group.elem),
+        _ => None,
+    }
+}
+
+fn root_manifest_pattern_ident(pattern: &syn::Pat) -> Option<String> {
+    match pattern {
+        syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
+        syn::Pat::Reference(reference) => root_manifest_pattern_ident(&reference.pat),
+        syn::Pat::Type(typed) => root_manifest_pattern_ident(&typed.pat),
+        _ => None,
+    }
+}
+
+struct RootManifestCarrierVisitor<'a> {
+    audit: RootManifestCarrierAudit,
+    bindings: &'a RootManifestCarrierBindings,
+    node_bindings: Vec<BTreeSet<String>>,
+}
+
+impl RootManifestCarrierVisitor<'_> {
+    fn is_node_binding(&self, name: &str) -> bool {
+        self.node_bindings
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+}
+
+impl<'ast> Visit<'ast> for RootManifestCarrierVisitor<'_> {
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        let mut node_bindings = BTreeSet::new();
+        for input in &function.sig.inputs {
+            let syn::FnArg::Typed(argument) = input else {
+                continue;
+            };
+            if root_manifest_type_path(&argument.ty)
+                .is_some_and(|path| self.bindings.resolves_to_node_type(path))
+                && let Some(name) = root_manifest_pattern_ident(&argument.pat)
+            {
+                node_bindings.insert(name);
+            }
+        }
+        self.node_bindings.push(node_bindings);
+        visit::visit_item_fn(self, function);
+        self.node_bindings.pop();
+    }
+
+    fn visit_pat_tuple_struct(&mut self, pattern: &'ast syn::PatTupleStruct) {
+        if self.bindings.resolves_to_decoded_node(&pattern.path) {
+            self.audit.decoded_node_patterns += 1;
+        }
+        if self.bindings.resolves_to_expr_node(&pattern.path) {
+            self.audit.direct_node_patterns += 1;
+            if let Some(scope) = self.node_bindings.last_mut()
+                && let Some(node) = pattern.elems.first().and_then(root_manifest_pattern_ident)
+            {
+                scope.insert(node);
+            }
         }
         visit::visit_pat_tuple_struct(self, pattern);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "to_list" {
-            self.to_list_calls += 1;
+        if call.method == "to_list"
+            && let syn::Expr::Path(receiver) = call.receiver.as_ref()
+            && receiver.path.segments.len() == 1
+            && receiver
+                .path
+                .segments
+                .first()
+                .is_some_and(|segment| self.is_node_binding(&segment.ident.to_string()))
+        {
+            self.audit.to_list_calls += 1;
         }
         visit::visit_expr_method_call(self, call);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = call.func.as_ref()
-            && path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "to_list")
+            && self.bindings.resolves_to_node_to_list(&path.path)
         {
-            self.to_list_calls += 1;
+            self.audit.to_list_calls += 1;
         }
         visit::visit_expr_call(self, call);
     }
@@ -4609,23 +4773,22 @@ impl<'ast> Visit<'ast> for RootManifestCarrierAudit {
 
 fn audit_root_manifest_carriers(source: &str) -> Result<RootManifestCarrierAudit, syn::Error> {
     let file = syn::parse_file(source)?;
-    let mut audit = RootManifestCarrierAudit::default();
-    for item in &file.items {
-        let syn::Item::Fn(function) = item else {
-            continue;
-        };
-        if function.sig.ident == "tagged_children" {
-            audit.target_function_found = true;
-            audit.visit_block(&function.block);
-        }
-    }
-    Ok(audit)
+    let bindings = RootManifestCarrierBindings::collect(&file);
+    let mut visitor = RootManifestCarrierVisitor {
+        audit: RootManifestCarrierAudit::default(),
+        bindings: &bindings,
+        node_bindings: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    Ok(visitor.audit)
 }
 
 #[test]
 fn root_manifest_carrier_guard_rejects_each_regression_class() {
     let direct_node = audit_root_manifest_carriers(
         r#"
+            use chelis_deep::{ExprCarrier, ast::Expr};
+
             fn tagged_children(expr: &Expr) {
                 match expr.carrier() {
                     ExprCarrier::DecodedNode(_, _, _) => {}
@@ -4644,6 +4807,8 @@ fn root_manifest_carrier_guard_rejects_each_regression_class() {
 
     let missing_decoded = audit_root_manifest_carriers(
         r#"
+            use chelis_deep::ast::Expr;
+
             fn tagged_children(expr: &Expr) {
                 let _ = expr;
             }
@@ -4655,12 +4820,11 @@ fn root_manifest_carrier_guard_rejects_each_regression_class() {
 
     let reconstruction_bridge = audit_root_manifest_carriers(
         r#"
-            fn tagged_children(expr: &Expr, span: Span) {
-                match expr.carrier() {
-                    ExprCarrier::DecodedNode(_, _, _) => {}
-                    _ => {}
-                }
-                let _ = expr.to_list(span);
+            use chelis_deep::{ExprCarrier, Span, ast::Expr, node::Node};
+
+            fn tagged_children(expr: &Expr, node: &Node, span: Span) {
+                if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
+                let _ = node.to_list(span);
             }
         "#,
     )
@@ -4673,6 +4837,8 @@ fn root_manifest_carrier_guard_rejects_each_regression_class() {
 
     let decoy_and_alias = audit_root_manifest_carriers(
         r#"
+            use chelis_deep::{ExprCarrier, ast::Expr as DeepExpr};
+
             fn unrelated(expr: &Expr) {
                 if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
             }
@@ -4686,11 +4852,13 @@ fn root_manifest_carrier_guard_rejects_each_regression_class() {
     )
     .unwrap();
     assert!(!decoy_and_alias.is_compliant(), "{decoy_and_alias:?}");
-    assert_eq!(decoy_and_alias.decoded_node_patterns, 0);
+    assert_eq!(decoy_and_alias.decoded_node_patterns, 1);
     assert_eq!(decoy_and_alias.direct_node_patterns, 1);
 
     let associated_reconstruction_bridge = audit_root_manifest_carriers(
         r#"
+            use chelis_deep::{ExprCarrier, Span, ast::Expr, node::Node};
+
             fn tagged_children(expr: &Expr, span: Span) {
                 match expr.carrier() {
                     ExprCarrier::DecodedNode(_, _, _) => {}
@@ -4706,6 +4874,73 @@ fn root_manifest_carrier_guard_rejects_each_regression_class() {
         "{associated_reconstruction_bridge:?}"
     );
     assert_eq!(associated_reconstruction_bridge.to_list_calls, 1);
+
+    let imported_alias_and_renamed_reader = audit_root_manifest_carriers(
+        r#"
+            use chelis_deep::ExprCarrier as CarrierView;
+            use chelis_deep::ast::Expr as SyntaxTree;
+
+            type ManifestExpr = SyntaxTree;
+
+            fn inspect_manifest_value(expr: &ManifestExpr) {
+                if let CarrierView::DecodedNode(_, _, _) = expr.carrier() {}
+                if let ManifestExpr::Node(_, _) = expr {}
+            }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        imported_alias_and_renamed_reader.direct_node_patterns, 1,
+        "the guard must resolve the Chelis Expr import independently of helper and alias names"
+    );
+
+    let delegated_bridge = audit_root_manifest_carriers(
+        r#"
+            use chelis_deep::ExprCarrier as CarrierView;
+            use chelis_deep::ast::Expr as SyntaxTree;
+            use chelis_deep::node::Node as SyntaxNode;
+
+            fn legacy_bridge(expr: &SyntaxTree) {
+                if let SyntaxTree::Node(node, span) = expr {
+                    let _ = SyntaxNode::to_list(node, *span);
+                }
+            }
+
+            fn inspect_manifest_value(expr: &SyntaxTree) {
+                if let CarrierView::DecodedNode(_, _, _) = expr.carrier() {}
+                legacy_bridge(expr);
+            }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        delegated_bridge.direct_node_patterns, 1,
+        "delegating to a renamed helper must not hide direct Chelis Expr::Node matching"
+    );
+    assert_eq!(
+        delegated_bridge.to_list_calls, 1,
+        "delegating to a renamed helper must not hide a Chelis Node::to_list bridge"
+    );
+
+    let unrelated_same_named_symbols = audit_root_manifest_carriers(
+        r#"
+            use chelis_deep::ExprCarrier as CarrierView;
+            use unrelated::{Expr, Node};
+
+            fn inspect_manifest_value(expr: &Expr) {
+                if let CarrierView::DecodedNode(_, _, _) = expr.carrier() {}
+                if let Expr::Node(node, span) = expr {
+                    let _ = Node::to_list(node, *span);
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(
+        unrelated_same_named_symbols.is_compliant(),
+        "unrelated Expr, Node, and to_list symbols are not Chelis carrier bridges: \
+         {unrelated_same_named_symbols:?}"
+    );
 }
 
 #[test]

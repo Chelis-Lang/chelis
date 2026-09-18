@@ -1342,8 +1342,7 @@ fn get_tag(list: &List) -> Option<DeepTag> {
 fn children(list: &List) -> &[Expr] {
     match list.elements.as_slice() {
         [Expr::Atom(Atom::Tag(_), _), Expr::Map(_, _), children @ ..] => children,
-        [Expr::Atom(Atom::Tag(_), _), _, children @ ..] if !children.is_empty() => children,
-        [Expr::Atom(Atom::Tag(_), _), _] => &list.elements[1..],
+        [Expr::Atom(Atom::Tag(_), _), children @ ..] => children,
         _ => &[],
     }
 }
@@ -2181,12 +2180,20 @@ mod tests {
             DeepTag::Var,
             vec![Expr::Atom(Atom::Name("value".into()), span)],
         );
-        assert_eq!(var_name(&var), Some("value"));
+        assert_eq!(
+            var_name(&var),
+            None,
+            "a non-name first semantic child must not borrow identity from a trailing child"
+        );
         let literal = malformed(
             DeepTag::Lit,
             vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
         );
-        assert_eq!(string_literal(&literal), Some("gpu:0"));
+        assert_eq!(
+            string_literal(&literal),
+            None,
+            "a non-string first semantic child must not borrow a literal from a trailing child"
+        );
 
         let handler = malformed(DeepTag::HandleEffect, vec![Expr::Atom(Atom::Int(1), span)]);
         let mut errors = Vec::new();
@@ -2197,6 +2204,53 @@ mod tests {
                     && error.message.contains("handle-effect")
             }),
             "[04-TOT-3] requires the malformed handle-effect diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_less_var_preserves_only_its_first_semantic_child_identity() {
+        let span = Span::new(0, 0);
+        let malformed_var = |name: &str, trailing: Expr| {
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                        Expr::Atom(Atom::Name(name.into()), span),
+                        trailing,
+                    ],
+                },
+                span,
+            )
+        };
+        let app = |callee| {
+            Expr::node(
+                DeepTag::App,
+                Metadata::default(),
+                vec![callee, Expr::Atom(Atom::Float(0.5), span)],
+                span,
+            )
+        };
+        let infer = |expr: &Expr| {
+            infer_expr_effects(expr, &BTreeMap::new(), &BTreeSet::new(), &BTreeMap::new())
+        };
+
+        let dropout = app(malformed_var(
+            "dropout",
+            Expr::Atom(Atom::Name("not-the-callee".into()), span),
+        ));
+        assert!(
+            infer(&dropout).contains(&Effect::Random),
+            "[03-ROLE-1]/[04-EFF-1]: missing metadata must not erase the Var's first \
+             semantic child identity"
+        );
+
+        let pure = app(malformed_var(
+            "identity",
+            Expr::Atom(Atom::Name("dropout".into()), span),
+        ));
+        assert!(
+            !infer(&pure).contains(&Effect::Random),
+            "[03-ROLE-1]: a trailing malformed child must not mint the Var's identity"
         );
     }
 
