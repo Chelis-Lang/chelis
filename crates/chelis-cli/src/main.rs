@@ -11743,14 +11743,31 @@ fn display_root_name(name: &str) -> String {
     } else {
         (name, None)
     };
-    let short = base
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .or_else(|| base.rsplit_once('.').map(|(_, tail)| tail))
-        .unwrap_or(base);
+    let short = base.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(base);
     match suffix {
         Some(suffix) => format!("{short}.{suffix}"),
         None => short.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod issue_1359_display_root_name_tests {
+    use super::display_root_name;
+
+    #[test]
+    fn package_qualification_is_removed_without_dropping_record_descendants() {
+        assert_eq!(display_root_name("pkg__gadt.text"), "gadt.text");
+        assert_eq!(
+            display_root_name("pkg__gadt.inner.value"),
+            "gadt.inner.value"
+        );
+        assert_eq!(display_root_name("pkg__value"), "value");
+    }
+
+    #[test]
+    fn tuple_descendants_keep_existing_spelling() {
+        assert_eq!(display_root_name("tuple_root.0"), "tuple_root.0");
+        assert_eq!(display_root_name("pkg__tuple_root.1.0"), "tuple_root.1.0");
     }
 }
 
