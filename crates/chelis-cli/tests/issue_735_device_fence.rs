@@ -6,9 +6,6 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
-const CUDA_DIAGNOSTIC: &str = "error: `chelis build --target c` cannot satisfy resource \
-region `cuda:0`: host C accepts only `cpu` or `cpu:<label>`\n";
-
 fn write(path: &Path, source: &str) {
     fs::write(path, source).expect("write fixture");
 }
@@ -16,6 +13,10 @@ fn write(path: &Path, source: &str) {
 #[test]
 fn surf_c_build_rejects_device_requests_at_exit_one_without_artifacts() {
     for device in [
+        "cpu:0",
+        "cpu:author-device",
+        "cpu:socket_9",
+        "cpu:HOST_2",
         "cuda:0",
         "metal",
         "rocm",
@@ -37,7 +38,7 @@ fn surf_c_build_rejects_device_requests_at_exit_one_without_artifacts() {
         );
         let expected = format!(
             "error: `chelis build --target c` cannot satisfy resource region `{device}`: \
-             host C accepts only `cpu` or `cpu:<label>`\n"
+             host C accepts only exact `cpu`\n"
         );
 
         Command::cargo_bin("chelis")
@@ -65,47 +66,72 @@ fn surf_c_build_rejects_device_requests_at_exit_one_without_artifacts() {
 
 #[test]
 fn deep_c_build_has_the_same_rejection_and_artifact_absence() {
-    let dir = tempdir().expect("tempdir");
-    let source = dir.path().join("device.dp");
-    let output = dir.path().join("out");
-    write(
-        &source,
-        r#"(def {} value
+    for device in ["cuda:0", "cpu:author-device", "cpu:socket_9"] {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("device.dp");
+        let output = dir.path().join("out");
+        write(
+            &source,
+            &r#"(def {} value
   (handle-effect {effect: resource}
-    (lit {type: (t-prim {} string)} "cuda:0")
+    (lit {type: (t-prim {} string)} "__DEVICE__")
     (lit {type: (t-prim {} i32)} 1)))
-"#,
-    );
+"#
+            .replace("__DEVICE__", device),
+        );
 
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            source.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            output.to_str().unwrap(),
-        ])
-        .assert()
-        .code(1)
-        .stdout(predicate::eq(""))
-        .stderr(predicate::eq(CUDA_DIAGNOSTIC));
+        let expected = format!(
+            "error: `chelis build --target c` cannot satisfy resource region `{device}`: \
+             host C accepts only exact `cpu`\n"
+        );
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                source.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::eq(""))
+            .stderr(predicate::eq(expected));
 
-    assert!(!output.exists());
+        assert!(!output.exists(), "{device}");
+    }
 }
 
 #[test]
 fn nested_device_requests_cannot_hide_behind_host_regions() {
-    for source_text in [
-        "value: i32 = with device(\"cpu\") { with device(\"cuda:0\") { 1 } }\n",
-        "value: i32 = with device(\"cuda:0\") { with device(\"cpu\") { 1 } }\n",
+    for (source_text, rejected_device) in [
+        (
+            "value: i32 = with device(\"cpu\") { with device(\"cuda:0\") { 1 } }\n",
+            "cuda:0",
+        ),
+        (
+            "value: i32 = with device(\"cuda:0\") { with device(\"cpu\") { 1 } }\n",
+            "cuda:0",
+        ),
+        (
+            "value: i32 = with device(\"cpu\") { with device(\"cpu:author-device\") { 1 } }\n",
+            "cpu:author-device",
+        ),
+        (
+            "value: i32 = with device(\"cpu:socket_9\") { with device(\"cpu\") { 1 } }\n",
+            "cpu:socket_9",
+        ),
     ] {
         let dir = tempdir().expect("tempdir");
         let source = dir.path().join("nested.ch");
         let output = dir.path().join("out");
         write(&source, source_text);
+        let expected = format!(
+            "error: `chelis build --target c` cannot satisfy resource region \
+             `{rejected_device}`: host C accepts only exact `cpu`\n"
+        );
 
         Command::cargo_bin("chelis")
             .expect("binary")
@@ -121,10 +147,40 @@ fn nested_device_requests_cannot_hide_behind_host_regions() {
             .assert()
             .code(1)
             .stdout(predicate::eq(""))
-            .stderr(predicate::eq(CUDA_DIAGNOSTIC));
+            .stderr(predicate::eq(expected));
 
         assert!(!output.exists());
     }
+
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("nested-two-rejected.ch");
+    let output = dir.path().join("out");
+    write(
+        &source,
+        "value: i32 = with device(\"cpu:author-device\") { \
+         with device(\"cpu:socket_9\") { 1 } }\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::eq(""))
+        .stderr(predicate::eq(
+            "error: `chelis build --target c` cannot satisfy resource region \
+             `cpu:author-device`: host C accepts only exact `cpu`; \
+             `chelis build --target c` cannot satisfy resource region \
+             `cpu:socket_9`: host C accepts only exact `cpu`\n",
+        ));
+    assert!(!output.exists());
 }
 
 #[test]
@@ -133,12 +189,8 @@ fn unpinned_and_explicit_host_c_programs_still_emit_artifacts() {
         ("plain", "value: i32 = 1\n"),
         ("cpu", "value: i32 = with device(\"cpu\") { 1 }\n"),
         (
-            "named_cpu",
-            "value: i32 = with device(\"cpu:author-device\") { 1 }\n",
-        ),
-        (
             "nested_cpu",
-            "value: i32 = with device(\"cpu:outer\") { with device(\"cpu:inner\") { 1 } }\n",
+            "value: i32 = with device(\"cpu\") { with device(\"cpu\") { 1 } }\n",
         ),
     ] {
         let dir = tempdir().expect("tempdir");

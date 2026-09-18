@@ -2740,12 +2740,11 @@ execution boundaries reject an unhandled `Test` effect.
 
 > **[04-EFF-2]** Before emitting a host-C artifact, the build boundary SHALL
 > reject every reachable `resource` handler whose device designator is not
-> either `cpu` or `cpu:<label>`, where `<label>` is a non-empty ASCII sequence
-> of letters, digits, `-`, or `_`. The rejection SHALL be a
-> `BuildTargetMismatch` diagnostic and SHALL occur before any artifact or
-> emission observation is produced. This rule applies independently to every
-> nested resource region. It defines the host-C admission boundary only; it
-> does not define placement, transfer, or accelerator-target semantics.
+> exactly `cpu`. The rejection SHALL be a `BuildTargetMismatch` diagnostic and
+> SHALL occur before any artifact or emission observation is produced. This
+> rule applies independently to every nested resource region. It defines the
+> host-C admission boundary only; it does not define device-label vocabulary,
+> placement, transfer, or accelerator-target semantics.
 
 Inference and checking obey these rules:
 

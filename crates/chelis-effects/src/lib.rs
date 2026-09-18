@@ -215,9 +215,8 @@ fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
 /// for the requested build target.
 ///
 /// Today this validates:
-///   * resource-region pinning (host C admits only `cpu` or a named
-///     `cpu:<label>` selector; accelerator selectors require an accelerator
-///     target).
+///   * resource-region pinning (host C admits only exact `cpu`; every other
+///     selector requires a target capability that defines its semantics).
 ///
 /// Per spec/04-type-system.md §1.1.3 the Metal target additionally
 /// rejects FP64 because Apple Silicon GPUs lack FP64 ALUs (software
@@ -1283,7 +1282,7 @@ fn validate_build_target_handler(
                         message: if target == "c" {
                             format!(
                                 "`chelis build --target c` cannot satisfy resource region \
-                                 `{device}`: host C accepts only `cpu` or `cpu:<label>`"
+                                 `{device}`: host C accepts only exact `cpu`"
                             )
                         } else {
                             format!(
@@ -1314,22 +1313,13 @@ fn validate_build_target_handler(
     }
 }
 
-/// The host-C selector grammar owned by spec/04 [04-EFF-2].
+/// The host-C selector contract owned by spec/04 [04-EFF-2].
 ///
 /// This is deliberately a positive host classification. Any new accelerator
 /// spelling therefore fails closed instead of inheriting host execution merely
 /// because it lacks a known prefix.
 fn is_c_host_device_designator(device: &str) -> bool {
-    if device == "cpu" {
-        return true;
-    }
-    let Some(label) = device.strip_prefix("cpu:") else {
-        return false;
-    };
-    !label.is_empty()
-        && label
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    device == "cpu"
 }
 
 /// Convert semantic effects to their dedicated AST annotation payload.
@@ -2568,15 +2558,14 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
 
     #[test]
     fn c_target_accepts_only_explicit_host_resource_designators() {
-        for device in ["cpu", "cpu:0", "cpu:author-device", "cpu:HOST_2"] {
-            let program = surf_checked(&format!(
-                "def main() -> i32 = with device(\"{device}\") {{ 1 }}\n"
-            ));
-            validate_build_target(&program, "c")
-                .unwrap_or_else(|errors| panic!("{device}: {errors:?}"));
-        }
+        let program = surf_checked("def main() -> i32 = with device(\"cpu\") { 1 }\n");
+        validate_build_target(&program, "c").expect("exact cpu host region");
 
         for device in [
+            "cpu:0",
+            "cpu:author-device",
+            "cpu:socket_9",
+            "cpu:HOST_2",
             "cuda:0",
             "metal",
             "rocm",
@@ -2603,7 +2592,7 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
                 errors[0].message,
                 format!(
                     "`chelis build --target c` cannot satisfy resource region `{device}`: \
-                     host C accepts only `cpu` or `cpu:<label>`"
+                     host C accepts only exact `cpu`"
                 ),
                 "{device}"
             );
@@ -2624,6 +2613,8 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
         for source in [
             r#"def main() -> i32 = with device("cpu") { with device("cuda:0") { 1 } }"#,
             r#"def main() -> i32 = with device("metal") { with device("cpu") { 1 } }"#,
+            r#"def main() -> i32 = with device("cpu") { with device("cpu:author-device") { 1 } }"#,
+            r#"def main() -> i32 = with device("cpu:socket_9") { with device("cpu") { 1 } }"#,
         ] {
             let program = surf_checked(source);
             let errors = validate_build_target(&program, "c").expect_err(source);
@@ -2631,10 +2622,27 @@ def pure_add(x: i64, y: i64) -> i64 = add(x, y)
             assert_eq!(errors[0].kind, EffectErrorKind::BuildTargetMismatch);
         }
 
-        let accepted = surf_checked(
-            r#"def main() -> i32 = with device("cpu:outer") { with device("cpu:inner") { 1 } }"#,
-        );
+        let accepted =
+            surf_checked(r#"def main() -> i32 = with device("cpu") { with device("cpu") { 1 } }"#);
         validate_build_target(&accepted, "c").expect("nested host regions");
+
+        let two_rejected = surf_checked(
+            r#"def main() -> i32 = with device("cpu:author-device") { with device("cpu:socket_9") { 1 } }"#,
+        );
+        let errors = validate_build_target(&two_rejected, "c").expect_err("two rejected regions");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "`chelis build --target c` cannot satisfy resource region \
+                 `cpu:author-device`: host C accepts only exact `cpu`",
+                "`chelis build --target c` cannot satisfy resource region \
+                 `cpu:socket_9`: host C accepts only exact `cpu`",
+            ]
+        );
     }
 
     #[test]

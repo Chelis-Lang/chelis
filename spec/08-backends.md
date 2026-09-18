@@ -252,9 +252,9 @@ language work.
 
 The first shipped effect surface interacts with backend selection in two explicit ways:
 
-- `chelis build --target c` admits only `with device("cpu") { ... }` and
-  well-formed `with device("cpu:<label>") { ... }` host regions; every other
-  device designator is rejected before artifact emission as specified by
+- `chelis build --target c` admits only exact `with device("cpu") { ... }`
+  host regions; every other device designator, including `cpu:<label>`, is
+  rejected before artifact emission as specified by
   `spec/04-type-system.md` [04-EFF-2]
 - `chelis build --target hip` rejects incompatible non-GPU resource regions
 - `chelis build` for either target currently rejects lowered `dropout`; seeded dropout

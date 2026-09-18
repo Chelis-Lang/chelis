@@ -170,8 +170,8 @@ resumable computations - complexity that is hard for both humans and LLMs.
 - `dropout(x, rate)` is the minimum concrete `Random` source
 - `with seed(42) { ... }` handles `Random`
 - `with device("...") { ... }` marks a resource region validated against
-  `chelis build --target ...`; host C admits only `cpu` and well-formed
-  `cpu:<label>` selectors under `spec/04-type-system.md` [04-EFF-2]
+  `chelis build --target ...`; host C admits only exact `cpu` under
+  `spec/04-type-system.md` [04-EFF-2]
 - unhandled top-level `Random` is a check error with repair guidance
 - seeded `dropout` is implemented in lowering/eval/AD, but not yet in emitted C/HIP
   codegen
@@ -242,8 +242,8 @@ resumable computations - complexity that is hard for both humans and LLMs.
 - seeded lowering/eval is deterministic for same seed and observably different for
   different seeds
 - build-target mismatch is reported for incompatible `with device(...)` regions;
-  host C admits only `cpu` and well-formed `cpu:<label>` selectors, and rejects
-  every other selector before artifact emission
+  host C admits only exact `cpu`, and rejects every other selector before
+  artifact emission
 
 ### Acceptance Gate
 
