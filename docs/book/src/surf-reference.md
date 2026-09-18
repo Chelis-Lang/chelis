@@ -211,6 +211,13 @@ sorted_values = sort(diag, 0).0
 sorted_indices = sort(diag, 0).1
 ```
 
+When projecting through nested tuples, group the inner numeric projection so
+the next suffix cannot merge with it as a float:
+
+```chelis-surf-fragment
+first = (nested.0).0
+```
+
 ## Control flow
 
 `if` is an expression and `else` is mandatory:

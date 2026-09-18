@@ -939,7 +939,9 @@ fn format_expr(expr: &Expr) -> String {
                 .join(", ")
         ),
         Expr::Access(expr, field, _) => format!("{}.{}", wrap_simple(expr), field),
-        Expr::TupleGet(expr, index, _) => format!("{}.{}", wrap_simple(expr), index),
+        Expr::TupleGet(expr, index, _) => {
+            format!("{}.{}", wrap_tuple_projection_receiver(expr), index)
+        }
         Expr::Binary(op, left, right, _) => {
             // Operands that are compound, non-self-delimiting expressions
             // (`if`/`match`/`fn`/`|>`/block) MUST be parenthesized, or the
@@ -1469,6 +1471,20 @@ fn wrap_simple(expr: &Expr) -> String {
         | Expr::TupleGet(_, _, _)
         | Expr::Tuple(_, _) => format_expr(expr),
         _ => format!("({})", format_expr(expr)),
+    }
+}
+
+/// Render the receiver of a numeric tuple projection.
+///
+/// Most postfix receivers are self-delimiting, but a tuple projection followed
+/// immediately by another numeric projection is not: `pairs.0.0` lexes the
+/// second suffix as `Float(0.0)`. Preserve grouping for that one shape so the
+/// formatter's output remains parseable without adding redundant parentheses
+/// to ordinary or mixed field/projection chains (chelis#1709).
+fn wrap_tuple_projection_receiver(expr: &Expr) -> String {
+    match expr {
+        Expr::TupleGet(..) => format!("({})", format_expr(expr)),
+        _ => wrap_simple(expr),
     }
 }
 
