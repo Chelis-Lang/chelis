@@ -2738,6 +2738,15 @@ execution boundaries reject an unhandled `Test` effect.
 > type error; lowering SHALL NOT erase its handler or execute the body as if
 > no handler were present.
 
+> **[04-EFF-2]** Before emitting a host-C artifact, the build boundary SHALL
+> reject every reachable `resource` handler whose device designator is not
+> either `cpu` or `cpu:<label>`, where `<label>` is a non-empty ASCII sequence
+> of letters, digits, `-`, or `_`. The rejection SHALL be a
+> `BuildTargetMismatch` diagnostic and SHALL occur before any artifact or
+> emission observation is produced. This rule applies independently to every
+> nested resource region. It defines the host-C admission boundary only; it
+> does not define placement, transfer, or accelerator-target semantics.
+
 Inference and checking obey these rules:
 
 - effect inference runs after HM type inference on the annotated Deep returned by the
@@ -2763,7 +2772,7 @@ Inference and checking obey these rules:
   signature is enforced. `spec/05-risc-primitives.md` [05-RNG-1] governs the
   seeded stream in every lane
 - `with device(device) { ... }` marks a resource region that is validated against the
-  chosen build target
+  chosen build target; [04-EFF-2] defines the host-C admission boundary
 - declared `Resource("...")` annotations on `t-fn` expressions constrain the
   inferred resource set, and checked `fn` metadata records every unhandled
   `Resource(Device)` effect

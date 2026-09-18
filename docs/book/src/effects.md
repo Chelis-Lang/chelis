@@ -38,6 +38,12 @@ A handler is a `with` block. `with seed(...)` takes an i64-suffixed integer lite
 the randomness inside it deterministic; an unhandled `Random` effect at the top level is a
 check error with repair guidance. `with device(...)` takes a string literal naming the device.
 
+The core host-C build accepts only `with device("cpu")` or a named host selector such as
+`with device("cpu:worker_0")`. Any accelerator, unknown, or malformed selector—including
+`cuda:0`, `metal`, an empty string, or `cpu:`—produces a `BuildTargetMismatch` before
+`chelis build --target c` writes artifacts. Accelerator placement and transfer semantics are
+experimental; a device request is never treated as permission to run the region on host C.
+
 ```chelis-surf-fragment
 with seed(42i64) {
   dropout(x, 0.5)

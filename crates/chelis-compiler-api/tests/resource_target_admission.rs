@@ -59,6 +59,94 @@ fn ordinary_and_callable_apis_enforce_the_selected_target() {
 }
 
 #[test]
+fn c_apis_reject_every_non_host_or_malformed_device_before_emission() {
+    for device in [
+        "cuda:0",
+        "metal",
+        "rocm",
+        "xpu:1",
+        "Gpu:0",
+        "gpu:0",
+        "host",
+        "",
+        "cpu:",
+        "cpu:two words",
+        "cpu:/0",
+    ] {
+        let source = function(device);
+        for result in [
+            compile(request(&source, CompileTarget::C)).map(|_| ()),
+            compile_for_execution(request(&source, CompileTarget::C)).map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.stage, "effects", "{device}: {error:?}");
+            assert!(error.transcript.is_empty(), "{device}: {error:?}");
+            assert_eq!(error.errors.len(), 1, "{device}: {error:?}");
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::BuildTargetMismatch,
+                "{device}"
+            );
+            assert_eq!(
+                error.errors[0].message,
+                format!(
+                    "`chelis build --target c` cannot satisfy resource region `{device}`: \
+                     host C accepts only `cpu` or `cpu:<label>`"
+                ),
+                "{device}"
+            );
+            assert_eq!(error.errors[0].suggestions.len(), 1, "{device}");
+        }
+    }
+}
+
+#[test]
+fn c_apis_preserve_unpinned_and_explicit_host_programs() {
+    for source in [
+        "def main(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)",
+        "def main(x: tensor[2, f32]) -> tensor[2, f32] = with device(\"cpu\") { mul(x, x) }",
+        "def main(x: tensor[2, f32]) -> tensor[2, f32] = with device(\"cpu:author-device\") { mul(x, x) }",
+        "def main(x: tensor[2, f32]) -> tensor[2, f32] = with device(\"cpu:outer\") { with device(\"cpu:inner\") { mul(x, x) } }",
+    ] {
+        compile(request(source, CompileTarget::C)).unwrap_or_else(|error| {
+            panic!("{source}: {error:?}");
+        });
+        compile_for_execution(request(source, CompileTarget::C)).unwrap_or_else(|error| {
+            panic!("{source}: {error:?}");
+        });
+    }
+}
+
+#[test]
+fn deep_api_rejects_non_host_device_with_the_same_typed_diagnostic() {
+    let source = r#"(def {} main
+      (fn {}
+        (params {} (x {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}))
+        (handle-effect {effect: resource}
+          (lit {type: (t-prim {} string)} "cuda:0")
+          (app {} (var {} mul) (var {} x) (var {} x)))))"#;
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Deep,
+        source: source.into(),
+        target: CompileTarget::C,
+        entry_name: Some("main".into()),
+    })
+    .unwrap_err();
+    assert_eq!(error.stage, "effects");
+    assert!(error.transcript.is_empty());
+    assert_eq!(error.errors.len(), 1);
+    assert_eq!(
+        error.errors[0].kind(),
+        chelis_vocab::DiagnosticKind::BuildTargetMismatch
+    );
+    assert_eq!(
+        error.errors[0].message,
+        "`chelis build --target c` cannot satisfy resource region `cuda:0`: \
+         host C accepts only `cpu` or `cpu:<label>`"
+    );
+}
+
+#[test]
 fn legacy_value_root_compilation_checks_resource_regions() {
     for (device, allowed) in [("cpu", true), ("gpu:0", false)] {
         let source = format!("x: i32 = with device(\"{device}\") {{ 1 }}");

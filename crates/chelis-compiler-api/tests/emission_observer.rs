@@ -27,6 +27,10 @@ def main(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(helper(a)
 fn rejected_resource_region_produces_no_emission_observation() {
     for (target, device, allowed) in [
         (CompileTarget::C, "cpu", true),
+        (CompileTarget::C, "cpu:author-device", true),
+        (CompileTarget::C, "cuda:0", false),
+        (CompileTarget::C, "metal", false),
+        (CompileTarget::C, "cpu:", false),
         (CompileTarget::C, "gpu:0", false),
         (CompileTarget::Hip, "gpu:0", true),
         (CompileTarget::Hip, "cpu", false),
