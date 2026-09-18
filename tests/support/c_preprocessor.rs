@@ -154,12 +154,14 @@ pub fn preprocess_root(
             }
             root_seen |= path == input;
             current = match path.strip_prefix(&include_dir) {
-                Ok(relative) => Some(
-                    relative
+                Ok(relative) => {
+                    let name = relative
                         .to_str()
                         .ok_or("non-UTF-8 published header identity")?
-                        .to_string(),
-                ),
+                        .to_string();
+                    per_file.entry(name.clone()).or_default();
+                    Some(name)
+                }
                 Err(_) => None,
             };
             continue;
@@ -287,6 +289,18 @@ mod tests {
             !rows.contains_key("value.h"),
             "same basenames cannot collapse identities"
         );
+    }
+
+    #[test]
+    fn declarationless_owned_root_retains_its_reached_identity() {
+        let fixture = Fixture::new();
+        fixture.write("root.h", "#include \"detail/value.h\"\n");
+        fixture.write("detail/value.h", "long long nested_value(void);\n");
+
+        let rows = preprocess_root(&fixture.0, "root.h", &Environment::native_c()).unwrap();
+
+        assert_eq!(rows.get("root.h").map(String::as_str), Some(""));
+        assert!(rows["detail/value.h"].contains("long long nested_value(void)"));
     }
 
     #[test]
