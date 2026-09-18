@@ -562,6 +562,34 @@ class SchemaTests(unittest.TestCase):
                     test,
                     owned.test_functions((root / source).read_text()),
                 )
+        nested_tuple_projection = by_path[
+            "examples/nested_tuple_projection.ch"
+        ]
+        self.assertEqual(nested_tuple_projection.disposition, "packages")
+        self.assertEqual(
+            nested_tuple_projection.packages,
+            ("chelis-cli", "chelis-e2e"),
+        )
+        self.assertFalse(
+            nested_tuple_projection.matches(
+                "examples/nested_tuple_projection_extra.ch"
+            )
+        )
+        for source, test in (
+            (
+                "crates/chelis-cli/tests/parity.rs",
+                "parity_nested_tuple_projection",
+            ),
+            (
+                "crates/chelis-e2e/tests/spec_suite.rs",
+                "spec_all_executable_examples_parse_and_check",
+            ),
+        ):
+            with self.subTest(source=source, test=test):
+                self.assertIn(
+                    test,
+                    owned.test_functions((root / source).read_text()),
+                )
         runtime_extent_oracle_tests = by_path["scripts/test_runtime_extent_oracle.py"]
         self.assertEqual(
             (

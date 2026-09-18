@@ -771,6 +771,14 @@ prefix = "examples/kinded_nominal_dimensions.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e"]
 
+# Exact executable-corpus source exercised by both
+# chelis-cli::parity::parity_nested_tuple_projection and
+# chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/nested_tuple_projection.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
 # Exact executable-corpus sources exercised by
 # chelis-e2e::spec_all_executable_examples_parse_and_check. Keep these exact:
 # unrelated future example files must acquire their own evidence-backed owner.
