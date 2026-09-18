@@ -3171,38 +3171,56 @@ pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> 
 /// The walk covers the whole checked program, including nested callback and
 /// otherwise-unreachable function bodies.
 pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> Option<String> {
-    fn find(expr: &Expr, builtins: &[&str]) -> Option<String> {
-        match expr.carrier() {
-            ExprCarrier::DecodedNode(tag, metadata, children) => {
-                if tag == DeepTag::App
-                    && let Some(ExprCarrier::DecodedNode(DeepTag::Var, _, callee_children)) =
-                        children.first().map(Expr::carrier)
-                    && let Some(name) = callee_children.first().and_then(symbol_name)
-                    && builtins.contains(&name)
-                {
-                    return Some(name.to_string());
-                }
-                metadata
-                    .find_expression(|value| find(value, builtins))
-                    .or_else(|| children.iter().find_map(|expr| find(expr, builtins)))
-            }
-            ExprCarrier::StructuralList(elements) => {
-                elements.iter().find_map(|expr| find(expr, builtins))
-            }
-            ExprCarrier::UndecodableHead(_, metadata, children) => metadata
-                .find_expression(|value| find(value, builtins))
-                .or_else(|| children.iter().find_map(|expr| find(expr, builtins))),
-            ExprCarrier::MetadataMap(map) => map.find_expression(|value| find(value, builtins)),
-            ExprCarrier::MetadataExpression(meta) => find(&meta.expr, builtins)
-                .or_else(|| meta.metadata.find_expression(|value| find(value, builtins))),
-            ExprCarrier::MalformedLegacyList(list) => {
-                list.elements.iter().find_map(|expr| find(expr, builtins))
-            }
-            ExprCarrier::Atom(_) => None,
-        }
-    }
+    program
+        .exprs()
+        .iter()
+        .find_map(|expr| find_direct_builtin_call_in_expr(expr, builtins))
+}
 
-    program.exprs().iter().find_map(|expr| find(expr, builtins))
+fn find_direct_builtin_call_in_expr(expr: &Expr, builtins: &[&str]) -> Option<String> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::App
+                && let Some(ExprCarrier::DecodedNode(DeepTag::Var, _, callee_children)) =
+                    children.first().map(Expr::carrier)
+                && let Some(name) = callee_children.first().and_then(symbol_name)
+                && builtins.contains(&name)
+            {
+                return Some(name.to_string());
+            }
+            metadata
+                .find_expression(|value| find_direct_builtin_call_in_expr(value, builtins))
+                .or_else(|| {
+                    children
+                        .iter()
+                        .find_map(|expr| find_direct_builtin_call_in_expr(expr, builtins))
+                })
+        }
+        ExprCarrier::StructuralList(elements) => elements
+            .iter()
+            .find_map(|expr| find_direct_builtin_call_in_expr(expr, builtins)),
+        ExprCarrier::UndecodableHead(_, metadata, children) => metadata
+            .find_expression(|value| find_direct_builtin_call_in_expr(value, builtins))
+            .or_else(|| {
+                children
+                    .iter()
+                    .find_map(|expr| find_direct_builtin_call_in_expr(expr, builtins))
+            }),
+        ExprCarrier::MetadataMap(map) => {
+            map.find_expression(|value| find_direct_builtin_call_in_expr(value, builtins))
+        }
+        ExprCarrier::MetadataExpression(meta) => {
+            find_direct_builtin_call_in_expr(&meta.expr, builtins).or_else(|| {
+                meta.metadata
+                    .find_expression(|value| find_direct_builtin_call_in_expr(value, builtins))
+            })
+        }
+        ExprCarrier::MalformedLegacyList(list) => list
+            .elements
+            .iter()
+            .find_map(|expr| find_direct_builtin_call_in_expr(expr, builtins)),
+        ExprCarrier::Atom(_) => None,
+    }
 }
 
 fn host_callback_uses_builtin<T>(callback: &HostCallback<T>, builtin: &str) -> bool {
@@ -19320,6 +19338,47 @@ mod tests {
 
     fn parse_one_expr(source: &str) -> Expr {
         deep_expr(source)
+    }
+
+    #[test]
+    fn direct_builtin_expr_reader_covers_each_recursive_carrier() {
+        let span = chelis_deep::Span::new(0, 0);
+        let call = parse_one_expr("(app {} (var {} abs) (lit {} 1))");
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::PropertySeed(
+            chelis_deep::annotations::RuntimeExpression::try_new(call.clone())
+                .expect("a builtin call is valid runtime metadata"),
+        ));
+        let carriers = [
+            Expr::BareList(vec![call.clone()], span),
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: "future-form".to_string(),
+                meta: Metadata::default(),
+                children: vec![call.clone()],
+                span,
+            })),
+            Expr::Map(metadata, span),
+            Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(call.clone()),
+                },
+                span,
+            ),
+            Expr::List(
+                List {
+                    elements: vec![Expr::Atom(Atom::Name("malformed".to_string()), span), call],
+                },
+                span,
+            ),
+        ];
+
+        for carrier in carriers {
+            assert_eq!(
+                find_direct_builtin_call_in_expr(&carrier, &["abs"]),
+                Some("abs".to_string())
+            );
+            assert_eq!(find_direct_builtin_call_in_expr(&carrier, &["sqrt"]), None);
+        }
     }
 
     #[test]

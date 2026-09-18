@@ -27,6 +27,25 @@ fn top_level_value_detection_has_positive_and_negative_carrier_parity() {
 }
 
 #[test]
+fn top_level_value_detection_flattens_modules_on_both_ingresses() {
+    let module_with_value = "
+        (module {} host.parity
+          (def {} global_value (lit {} 1)))
+    ";
+    let (typed_value, ir_value) = checked_ingresses(module_with_value);
+    assert!(
+        program_has_top_level_value_bindings(&typed_value),
+        "typed ingress: {:#?}",
+        typed_value.exprs()
+    );
+    assert!(
+        program_has_top_level_value_bindings(&ir_value),
+        "IR ingress: {:#?}",
+        ir_value.exprs()
+    );
+}
+
+#[test]
 fn direct_builtin_detection_has_positive_and_negative_carrier_parity() {
     let with_abs = "
         (defsig {} absolute (t-fn {} (t-prim {} i32) (t-prim {} i32)))
@@ -52,4 +71,22 @@ fn direct_builtin_detection_has_positive_and_negative_carrier_parity() {
     let (typed_identity, ir_identity) = checked_ingresses(without_abs);
     assert_eq!(find_direct_builtin_call(&typed_identity, &["abs"]), None);
     assert_eq!(find_direct_builtin_call(&ir_identity, &["abs"]), None);
+}
+
+#[test]
+fn direct_builtin_detection_traverses_decoded_node_metadata() {
+    let with_metadata_call = "
+        (def {property_seed: (app {} (var {} abs) (lit {} 1))}
+          value
+          (lit {} 0))
+    ";
+    let (typed, ir) = checked_ingresses(with_metadata_call);
+    assert_eq!(
+        find_direct_builtin_call(&typed, &["abs"]),
+        Some("abs".to_string())
+    );
+    assert_eq!(
+        find_direct_builtin_call(&ir, &["abs"]),
+        Some("abs".to_string())
+    );
 }
