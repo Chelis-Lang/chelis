@@ -693,6 +693,11 @@ fn parity_scalar_string_foundation() {
 }
 
 #[test]
+fn parity_unicode_string_foundation() {
+    drive_parity(&examples_root().join("unicode_string_foundation.ch"), true);
+}
+
+#[test]
 fn parity_signed_seed() {
     drive_parity(&examples_root().join("signed_seed.ch"), true);
 }

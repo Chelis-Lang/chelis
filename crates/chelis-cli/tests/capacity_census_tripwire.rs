@@ -720,6 +720,34 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Character-code conversion follows [05-OP-58] exactly"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_from_utf8 ( const uint8_t * value , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Length-aware UTF-8 construction copies exactly the declared bytes"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_char_code ( chelis_string value ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Character-code conversion follows [05-OP-58] exactly"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_string ( chelis_string value ) ;",
+        &[],
+        "[05-OP-32]",
+        "Length-aware string observation writes every stored UTF-8 byte"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
         &["numeric-op"],
         "[05-OP-33]",

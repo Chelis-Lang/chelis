@@ -4776,6 +4776,8 @@ impl UncarriableWalk<'_> {
 const HOST_ONLY_BUILTINS: &[&str] = &[
     "print",
     "debug",
+    "char_code",
+    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
@@ -17875,8 +17877,8 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             })),
             _ => Some(fresh_host_inference()),
         },
-        "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "string_len" | "rank" | "shape"
-        | "numel" => Some(HostTypeTerm::Int64),
+        "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "char_code" | "string_len"
+        | "rank" | "shape" | "numel" => Some(HostTypeTerm::Int64),
         "cmplt" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
                 dims: tensor_ty.dims.clone(),
@@ -17904,7 +17906,7 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         },
         "lt" | "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
         | "string_starts_with" | "string_ends_with" => Some(HostTypeTerm::Bool),
-        "string_concat" | "string_trim" | "string_slice" | "to_string" => {
+        "char_from_code" | "string_concat" | "string_trim" | "string_slice" | "to_string" => {
             Some(HostTypeTerm::String)
         }
         "to_int" => Some(HostTypeTerm::Option(Box::new(HostTypeTerm::Int64))),

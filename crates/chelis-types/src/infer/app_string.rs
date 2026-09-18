@@ -37,6 +37,66 @@ pub(super) fn string_route_result(
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     match fname {
+        "char_code" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Prim(Prim::String) | Type::Error(_) => {
+                        return Some(Type::Prim(Prim::Int64));
+                    }
+                    Type::Var(_) => {
+                        return Some(site.defer(
+                            arg_tys,
+                            result_ty,
+                            product,
+                            Type::Prim(Prim::Int64),
+                        ));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("char_code expects string input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        "char_from_code" => {
+            if let Some(first_arg) = arg_tys.first() {
+                match subst.apply(first_arg) {
+                    Type::Prim(Prim::Int64) | Type::Error(_) => {
+                        return Some(Type::Prim(Prim::String));
+                    }
+                    Type::Var(_) => {
+                        return Some(site.defer(
+                            arg_tys,
+                            result_ty,
+                            product,
+                            Type::Prim(Prim::String),
+                        ));
+                    }
+                    other => {
+                        return Some(report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("char_from_code expects i64 input, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         "string_len" => {
             if let Some(first_arg) = arg_tys.first() {
                 match subst.apply(first_arg) {
@@ -256,5 +316,9 @@ pub(super) fn string_route_result(
 /// The names this module owns, so the caller's dispatch can hand them over in
 /// one arm rather than listing them twice.
 pub(super) fn string_route_owns(fname: &str) -> bool {
-    fname.starts_with("string_") || matches!(fname, "to_int" | "to_float")
+    fname.starts_with("string_")
+        || matches!(
+            fname,
+            "char_code" | "char_from_code" | "to_int" | "to_float"
+        )
 }

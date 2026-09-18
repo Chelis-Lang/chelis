@@ -539,28 +539,38 @@ class SchemaTests(unittest.TestCase):
                 workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
                 self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
         by_path = {rule.prefix: rule for rule in config.path_rules}
-        kinded_nominal_dimensions = by_path[
-            "examples/kinded_nominal_dimensions.ch"
-        ]
-        self.assertEqual(kinded_nominal_dimensions.disposition, "packages")
-        self.assertEqual(
-            kinded_nominal_dimensions.packages,
-            ("chelis-cli", "chelis-e2e"),
-        )
-        for source, test in (
-            (
-                "crates/chelis-cli/tests/parity.rs",
-                "parity_kinded_nominal_dimensions",
+        dual_consumer_examples = {
+            "examples/kinded_nominal_dimensions.ch": (
+                "parity_kinded_nominal_dimensions"
             ),
-            (
-                "crates/chelis-e2e/tests/spec_suite.rs",
-                "spec_all_executable_examples_parse_and_check",
+            "examples/unicode_string_foundation.ch": (
+                "parity_unicode_string_foundation"
             ),
-        ):
-            with self.subTest(source=source, test=test):
+        }
+        for path, cli_test in dual_consumer_examples.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(
+                    rule.packages,
+                    ("chelis-cli", "chelis-e2e"),
+                )
                 self.assertIn(
-                    test,
-                    owned.test_functions((root / source).read_text()),
+                    cli_test,
+                    owned.test_functions(
+                        (root / "crates/chelis-cli/tests/parity.rs").read_text()
+                    ),
+                )
+                self.assertIn(
+                    "spec_all_executable_examples_parse_and_check",
+                    owned.test_functions(
+                        (root / "crates/chelis-e2e/tests/spec_suite.rs").read_text()
+                    ),
+                )
+                neighbor = path.removesuffix(".ch") + "_extra.ch"
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in config.path_rules),
+                    f"{neighbor} inherited authority from an exact example rule",
                 )
         nested_tuple_projection = by_path[
             "examples/nested_tuple_projection.ch"
@@ -743,6 +753,10 @@ class SchemaTests(unittest.TestCase):
                 "heavy-e2e.yml",
                 "faithful-observation-phase2-oracle",
             ),
+            "spec/registry/builtin_semantic_identities.md": (
+                "ci.yml",
+                "script-unit",
+            ),
             "tests/conformance/hull/build_corpus.py": (
                 "ci.yml",
                 "script-unit",
@@ -771,8 +785,18 @@ class SchemaTests(unittest.TestCase):
             ),
             "a neighboring script inherited diagnostic-kind oracle ownership",
         )
+        builtin_registry_rule = by_path[
+            "spec/registry/builtin_semantic_identities.md"
+        ]
+        self.assertFalse(
+            builtin_registry_rule.matches(
+                "spec/registry/builtin_semantic_identities_extra.md"
+            ),
+            "a neighboring registry inherited the exact script-unit owner",
+        )
         package_owners = {
             "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/c_preprocessor.rs": ("chelis-cli",),
             "tests/support/capacity_census_stdlib.rs": ("chelis-cli",),
             "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
             "tests/support/helper_summary_fatal.ch": (
@@ -786,6 +810,11 @@ class SchemaTests(unittest.TestCase):
                 rule = by_path[path]
                 self.assertEqual(rule.disposition, "packages")
                 self.assertEqual(rule.packages, expected)
+        c_preprocessor = by_path["tests/support/c_preprocessor.rs"]
+        self.assertFalse(
+            c_preprocessor.matches("tests/support/c_preprocessor_extra.rs"),
+            "a neighboring support file inherited capacity-census ownership",
+        )
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(

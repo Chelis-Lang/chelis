@@ -312,8 +312,9 @@ The host lane is eager (no lazy list fusion).
 
 - **Dict:** `dict_of`, `dict_get`, `dict_contains`, `dict_remove`, `dict_insert`,
   `dict_merge`, `dict_keys`, `dict_values`, `dict_entries`.
-- **String:** `string_len`, `string_concat`, `string_slice`, `string_contains`,
-  `string_starts_with`, `string_ends_with`, `string_trim`, `to_string`.
+- **String:** `char_code`, `char_from_code`, `string_len`, `string_concat`,
+  `string_slice`, `string_contains`, `string_starts_with`, `string_ends_with`,
+  `string_trim`, `to_string`.
 - **Scalar coercion:** `to_int`, `to_float`.
 - **Tensor↔host bridges & queries:** `rank`, `shape`, `numel`, `tensor_to_scalar`,
   `scalar_to_tensor`, `to_tensor`, `to_list`. `shape(t, axis: i32)` returns the
@@ -422,7 +423,7 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               take drop range append index len
               dict_of dict_get dict_contains dict_remove dict_insert dict_merge
               dict_keys dict_values dict_entries
-              string_len string_concat string_slice string_contains
+              char_code char_from_code string_len string_concat string_slice string_contains
               string_starts_with string_ends_with string_trim to_string to_int
               to_float rank shape numel tensor_to_scalar scalar_to_tensor to_tensor
               to_list
@@ -620,7 +621,7 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 | `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `i64` indices) |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
 | `Std.Index` | `list_index`, `take_list`, `drop_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(i64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, independent of insertion history. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(i64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, escapes every RFC 8259 control character, decodes full `\uXXXX` escapes including valid surrogate pairs, and rejects malformed or unpaired sequences. Caveat: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |

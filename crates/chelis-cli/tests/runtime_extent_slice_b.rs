@@ -1518,7 +1518,7 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
         &format!("{}__chelis_owned_body", authored_c_symbol("run")),
     );
     let print_at = body
-        .find("chelis_string_from_cstr(\"effect\")")
+        .find(r#"chelis_string_from_utf8((const uint8_t *)"\145\146\146\145\143\164", INT64_C(6))"#)
         .expect("the print is emitted in the host body (chelis#1528)");
     let call_at = body
         .find(&format!("{kernel_name}("))

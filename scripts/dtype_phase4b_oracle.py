@@ -207,6 +207,10 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-32": tuple(
         """\
+| length-aware string construction | `chelis_string chelis_string_from_utf8(const uint8_t *value, int64_t len)` |
+| character code | `int64_t chelis_char_code(chelis_string value)` |
+| character from code | `chelis_string chelis_char_from_code(int64_t value)` |
+| string print | `void chelis_print_string(chelis_string value)` |
 | string length | `int64_t chelis_string_len(chelis_string value)` |
 | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
 | list length | `int64_t chelis_list_len(const chelis_list *list)` |
@@ -2206,6 +2210,11 @@ def validate_normative_contract(
             "Unicode scalar values",
             "A slice whose nonnegative start is at or beyond the scalar length "
             "is empty",
+            "Length-aware UTF-8 construction copies exactly the declared bytes",
+            "permits a null source pointer only for zero length",
+            "Character-code conversion follows [05-OP-58] exactly",
+            "Length-aware string observation writes every stored UTF-8 byte",
+            "without C-string termination semantics",
             "Dictionary keys are exactly `string`, `bool`, or a scalar of any active "
             "signed-integer dtype",
             "Equality includes the key kind and integer dtype",

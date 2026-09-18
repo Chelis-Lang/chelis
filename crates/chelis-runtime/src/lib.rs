@@ -9,9 +9,12 @@ pub use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
 pub use element::{Bf16Bits, F16Bits};
 use libc::{c_char, c_int};
 use memmap2::Mmap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+#[cfg(test)]
+use std::ffi::CString;
 use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::ptr;
 use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
@@ -1298,7 +1301,12 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
 struct RuntimeString {
     header: HeapHeader,
     value: String,
-    cstring: CString,
+    /// Exact UTF-8 bytes followed by one compatibility NUL.
+    ///
+    /// `chelis_string_data` remains available to legacy C consumers whose
+    /// inputs exclude embedded NUL. Length-aware construction and observation
+    /// use `value` and never treat this terminator as string content.
+    nul_terminated: Vec<u8>,
     /// Unicode scalar values in `value`, counted once at construction.
     ///
     /// `chelis_string_len` is character-indexed, so serving it from
@@ -1549,15 +1557,17 @@ fn cstr_to_string(ptr_: *const c_char) -> String {
 
 fn new_runtime_string(value: String) -> chelis_string {
     let bytes = value.len().saturating_add(1) as u64;
-    let cstring = CString::new(value.clone()).unwrap_or_else(|_| CString::new("").unwrap());
-    // One extra linear pass over bytes the constructor already copies once
-    // (`value.clone()`) and scans once (`CString::new`), in exchange for O(1)
-    // `chelis_string_len` and O(1) ASCII detection in `chelis_string_slice`.
+    let mut nul_terminated = Vec::with_capacity(value.len().saturating_add(1));
+    nul_terminated.extend_from_slice(value.as_bytes());
+    nul_terminated.push(0);
+    // One extra linear pass over bytes the constructor already copies once,
+    // in exchange for O(1) `chelis_string_len`, O(1) ASCII detection in
+    // `chelis_string_slice`, and a stable compatibility pointer.
     let char_count = value.chars().count();
     let inner = Box::new(RuntimeString {
         header: HeapHeader::new(ownership_ledger::Kind::String),
         value,
-        cstring,
+        nul_terminated,
         char_count,
     });
     let handle = Box::into_raw(inner);
@@ -3805,8 +3815,56 @@ pub unsafe extern "C" fn chelis_string_from_cstr(value: *const c_char) -> chelis
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_string_from_utf8(value: *const u8, len: i64) -> chelis_string {
+    if len < 0 {
+        runtime_fail!("Domain: chelis_string_from_utf8 requires a nonnegative byte length");
+    }
+    if len > 0 && value.is_null() {
+        runtime_fail!("Domain: chelis_string_from_utf8 received a null nonempty buffer");
+    }
+    let len = usize::try_from(len)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: chelis_string_from_utf8 byte length"));
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(value, len)
+    };
+    let text = std::str::from_utf8(bytes)
+        .unwrap_or_else(|_| runtime_fail!("Domain: chelis_string_from_utf8 requires valid UTF-8"));
+    new_runtime_string(text.to_owned())
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_string_data(value: chelis_string) -> *const c_char {
-    string_value(value).cstring.as_ptr()
+    string_value(value).nul_terminated.as_ptr().cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_char_code(value: chelis_string) -> i64 {
+    let mut chars = string_value(value).value.chars();
+    let character = chars.next().unwrap_or_else(|| {
+        runtime_fail!("Domain: char_code requires exactly one Unicode scalar value [05-OP-58]")
+    });
+    if chars.next().is_some() {
+        runtime_fail!("Domain: char_code requires exactly one Unicode scalar value [05-OP-58]");
+    }
+    i64::from(u32::from(character))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_char_from_code(value: i64) -> chelis_string {
+    let character = u32::try_from(value)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or_else(|| {
+            runtime_fail!("Domain: char_from_code requires a Unicode scalar value [05-OP-58]")
+        });
+    new_runtime_string(character.to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_print_string(value: chelis_string) {
+    write_stdout(&string_value(value).value);
 }
 
 #[no_mangle]
@@ -6446,8 +6504,16 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
 }
 
 unsafe fn write_stdout(text: &str) {
-    let c_text = CString::new(text).expect("runtime print text must not contain NUL");
-    libc::printf(c"%s".as_ptr(), c_text.as_ptr());
+    if libc::fflush(ptr::null_mut()) != 0 {
+        runtime_fail!("compiled stdout flush failed before length-aware write");
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(text.as_bytes())
+        .unwrap_or_else(|error| runtime_fail!("compiled stdout write failed: {error}"));
+    stdout
+        .flush()
+        .unwrap_or_else(|error| runtime_fail!("compiled stdout flush failed: {error}"));
 }
 
 unsafe fn value_to_string_inline(value: chelis_value) -> String {

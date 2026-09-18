@@ -426,7 +426,11 @@ void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank
 chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape);
 
 chelis_string chelis_string_from_cstr(const char *value);
+chelis_string chelis_string_from_utf8(const uint8_t *value, int64_t len);
 const char *chelis_string_data(chelis_string value);
+int64_t chelis_char_code(chelis_string value);
+chelis_string chelis_char_from_code(int64_t value);
+void chelis_print_string(chelis_string value);
 void chelis_string_retain(chelis_string value);
 void chelis_string_release(chelis_string value);
 chelis_string chelis_string_concat(chelis_string lhs, chelis_string rhs);

@@ -166,7 +166,7 @@ fn c_render_result(prim: Prim) -> &'static str {
         | Prim::Bool => {
             "chelis_scalar scalar = chelis_tensor_to_scalar(outputs[0]); \
              chelis_string text = chelis_string_from_scalar(scalar); \
-             printf(\"%s\", chelis_string_data(text)); chelis_string_release(text);"
+             chelis_print_string(text); chelis_string_release(text);"
         }
         Prim::F8e4m3 | Prim::String => {
             panic!("eval agreement has no C renderer for {}", prim.name())

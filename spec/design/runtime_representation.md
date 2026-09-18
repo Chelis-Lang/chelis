@@ -1221,6 +1221,15 @@ A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
 
+The length-aware UTF-8 string boundary is one such exact final form. The C
+backend owner `runtime_string_literal` emits fixed-width byte escapes and an
+explicit byte count, and the public runtime owner `chelis_string_from_utf8`
+accepts that counted `uint8_t` sequence before constructing a validated Chelis
+string. Those bytes are encoded text, not tensor elements or an untyped numeric
+carrier. Only those two scanner identities receive this disposition; adjacent
+string accessors, constructors, and backend emitters remain unclassified unless
+they independently satisfy a final form.
+
 ### The inventory's universe is a file list
 
 The inventory's completeness claim is over an explicit, reviewed list of the

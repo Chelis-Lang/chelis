@@ -23,6 +23,8 @@ Each row names its governing atom.
 | `Boundary:split:SplitTensor` | [05-OP-53] |
 | `Boundary:string_concat:StringConcat` | [05-OP-58] |
 | `Boundary:string_contains:StringContains` | [05-OP-58] |
+| `Boundary:char_code:CharCode` | [05-OP-58] |
+| `Boundary:char_from_code:CharFromCode` | [05-OP-58] |
 | `Boundary:string_ends_with:StringEndsWith` | [05-OP-58] |
 | `Boundary:string_len:StringLen` | [05-OP-58] |
 | `Boundary:string_slice:StringSlice` | [05-OP-58] |

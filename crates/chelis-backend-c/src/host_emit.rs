@@ -52,6 +52,8 @@ enum CExpressionBuiltin {
     StringStartsWith,
     StringEndsWith,
     StringLen,
+    CharCode,
+    CharFromCode,
     ToString,
     ToInt,
     ToFloat,
@@ -120,6 +122,8 @@ impl CExpressionBuiltin {
             "string_starts_with" => Self::StringStartsWith,
             "string_ends_with" => Self::StringEndsWith,
             "string_len" => Self::StringLen,
+            "char_code" => Self::CharCode,
+            "char_from_code" => Self::CharFromCode,
             "to_string" => Self::ToString,
             "to_int" => Self::ToInt,
             "to_float" => Self::ToFloat,
@@ -171,6 +175,26 @@ impl CExpressionBuiltin {
 
 use crate::emit::CEmitter;
 use crate::emitted_expr::{BinaryOperator, EmittedExpr, UnaryOperator};
+
+/// Emit a C string literal whose bytes are unambiguous in every following
+/// lexical context. Fixed-width three-digit octal escapes preserve embedded
+/// NUL and cannot absorb an adjacent decimal or hexadecimal digit.
+fn c_utf8_byte_literal(value: &str) -> String {
+    let mut literal = String::from("\"");
+    for byte in value.as_bytes() {
+        literal.push_str(&format!("\\{byte:03o}"));
+    }
+    literal.push('"');
+    literal
+}
+
+fn runtime_string_literal(value: &str) -> String {
+    format!(
+        "chelis_string_from_utf8((const uint8_t *){}, INT64_C({}))",
+        c_utf8_byte_literal(value),
+        value.len()
+    )
+}
 use crate::host_abi::{
     HostAbiBinding as HostBinding, HostAbiCallback as HostCallback,
     HostAbiCallbackKind as HostCallbackKind, HostAbiExpr as HostExpr,
@@ -1534,7 +1558,7 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
         "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
     );
-    out.push("    fputs(chelis_string_data(text), stdout);".to_string());
+    out.push("    chelis_print_string(text);".to_string());
     out.push("    chelis_string_release(text);".to_string());
     out.push("}".to_string());
     out.push(String::new());
@@ -3888,8 +3912,9 @@ impl<'a> HostEmitter<'a> {
                 if *value { "true" } else { "false" }
             )),
             HostExprKind::String(value) => self.lines.push(format!(
-                "{}{target} = chelis_string_from_cstr({:?});",
-                self.indent, value
+                "{}{target} = {};",
+                self.indent,
+                runtime_string_literal(value)
             )),
             HostExprKind::List(items, expr_ty) => {
                 require_same_abi_type(ty, expr_ty, "list expression")?;
@@ -5413,6 +5438,10 @@ impl<'a> HostEmitter<'a> {
                     EmittedExpr::call("chelis_string_ends_with", [arg(0), arg(1)])
                 }
                 CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
+                CExpressionBuiltin::CharCode => EmittedExpr::call("chelis_char_code", [arg(0)]),
+                CExpressionBuiltin::CharFromCode => {
+                    EmittedExpr::call("chelis_char_from_code", [arg(0)])
+                }
                 CExpressionBuiltin::ToString => match &arg_vars[0].1 {
                     HostType::Int8 => EmittedExpr::call(
                         "chelis_string_from_scalar",
@@ -7055,8 +7084,9 @@ impl<'a> HostEmitter<'a> {
         };
         let ctor_value = self.next_temp("adt_ctor");
         self.lines.push(format!(
-            "{}chelis_string {ctor_value} = chelis_string_from_cstr({:?});",
-            self.indent, ctor
+            "{}chelis_string {ctor_value} = {};",
+            self.indent,
+            runtime_string_literal(ctor)
         ));
         self.lines.push(format!(
             "{}{target} = chelis_adt_construct({ctor_value}, {}, {});",
@@ -8002,7 +8032,7 @@ impl<'a> HostEmitter<'a> {
     fn emit_print_value(&mut self, value: &str, ty: &HostType) -> Result<(), Unsupported> {
         match ty {
             HostType::String => self.lines.push(format!(
-                "{}printf(\"%s\\n\", chelis_string_data({}));",
+                "{}chelis_print_string({}); printf(\"\\n\");",
                 self.indent, value
             )),
             HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
@@ -8020,7 +8050,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{{ chelis_value boxed = {boxed}; \
                      chelis_string text = chelis_string_from_scalar(chelis_value_unbox_scalar(boxed)); \
-                     printf(\"%s\\n\", chelis_string_data(text)); \
+                     chelis_print_string(text); printf(\"\\n\"); \
                      chelis_string_release(text); }}",
                     self.indent
                 ));
@@ -8124,10 +8154,9 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         match ty {
-            HostType::String => self.lines.push(format!(
-                "{}printf(\"%s\", chelis_string_data({}));",
-                self.indent, value
-            )),
+            HostType::String => self
+                .lines
+                .push(format!("{}chelis_print_string({});", self.indent, value)),
             HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                 self.lines.push(format!(
                     "{}printf(\"%lld\", (long long){});",
@@ -8140,7 +8169,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!(
                     "{}{{ chelis_value boxed = {boxed}; \
                      chelis_string text = chelis_string_from_scalar(chelis_value_unbox_scalar(boxed)); \
-                     printf(\"%s\", chelis_string_data(text)); \
+                     chelis_print_string(text); \
                      chelis_string_release(text); }}",
                     self.indent
                 ));
@@ -8255,7 +8284,7 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{}case CHELIS_VALUE_SCALAR: {{ chelis_string text = \
              chelis_string_from_scalar(chelis_value_unbox_scalar({value})); \
-             fputs(chelis_string_data(text), stdout); chelis_string_release(text); break; }}",
+             chelis_print_string(text); chelis_string_release(text); break; }}",
             self.indent
         ));
         self.lines.push(format!(
@@ -8263,7 +8292,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data(chelis_string_borrow_value({value}))); break;",
+            "{}case CHELIS_VALUE_STRING: chelis_print_string(chelis_string_borrow_value({value})); break;",
             self.indent
         ));
         for (tag, printer, accessor) in [
@@ -9359,6 +9388,19 @@ mod expression_dispatch_tests {
         assert_eq!(
             error.what.as_ref(),
             &UnsupportedKind::Builtin("future_unimplemented_builtin".into())
+        );
+    }
+
+    #[test]
+    fn runtime_string_literals_use_fixed_width_byte_escapes_for_every_admitted_class() {
+        let value = "\"\\\n\t\r\0A1é";
+        assert_eq!(
+            c_utf8_byte_literal(value),
+            r#""\042\134\012\011\015\000\101\061\303\251""#
+        );
+        assert_eq!(
+            runtime_string_literal(value),
+            r#"chelis_string_from_utf8((const uint8_t *)"\042\134\012\011\015\000\101\061\303\251", INT64_C(10))"#
         );
     }
 

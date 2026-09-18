@@ -1888,6 +1888,11 @@ exact ADT identity by [05-OP-34].
 > encoded bytes. A slice whose nonnegative start is at or beyond the scalar
 > length is empty; otherwise it takes at most `len` scalars and truncates at
 > the end.
+> Length-aware UTF-8 construction copies exactly the declared bytes, including
+> embedded NUL, requires valid UTF-8, and permits a null source pointer only
+> for zero length. Character-code conversion follows [05-OP-58] exactly.
+> Length-aware string observation writes every stored UTF-8 byte in order,
+> including embedded NUL, without C-string termination semantics.
 >
 > Dictionary keys are exactly `string`, `bool`, or a scalar of any active
 > signed-integer dtype. Equality includes the key kind and integer dtype and
@@ -3624,7 +3629,9 @@ path even though bare `round` under `grad` remains a structural
 > **[05-OP-58]** Signature: `string_len(s)` returns i64; `string_concat(a,b)` returns
 > string; `string_slice(s,start,length)` takes i64 offsets and returns
 > string; `string_contains`, `string_starts_with`, and `string_ends_with`
-> take two strings and return bool; `string_trim(s)` returns string.
+> take two strings and return bool; `string_trim(s)` returns string;
+> `char_code(ch: string)` returns i64; and
+> `char_from_code(code: i64)` returns string.
 >
 > Domain: String length and slicing count Unicode scalar values, not UTF-8
 > bytes or grapheme clusters. Strings are not normalized; offset/count
@@ -3634,11 +3641,18 @@ path even though bare `round` under `grad` remains a structural
 > length scalar values starting at start, returning empty at or beyond the
 > end. Contains/prefix/suffix compare the supplied literal strings,
 > including the empty string. Trim removes leading and trailing Unicode
-> White_Space characters and preserves the interior bytes.
+> White_Space characters and preserves the interior bytes. `char_code`
+> returns the Unicode scalar value of its one-scalar operand.
+> `char_from_code` returns the UTF-8 encoding of the supplied Unicode scalar
+> value. The two operations are exact inverses over their admitted domains,
+> including U+0000 and non-BMP values.
 >
 > Failure: Negative slice start/length is a domain error; unrepresentable
-> i64 lengths trap Overflow. Wrong types/arity are type errors, not
-> stringification or parsing fallbacks.
+> i64 lengths trap Overflow. `char_code` traps `Domain` unless its operand
+> contains exactly one Unicode scalar value. `char_from_code` traps `Domain`
+> for a negative value, a surrogate code point U+D800 through U+DFFF, or a
+> value above U+10FFFF. Wrong types/arity are type errors, not stringification
+> or parsing fallbacks.
 >
 > Adjoint: These string operations structurally reject differentiation; no numeric cotangent is fabricated.
 >

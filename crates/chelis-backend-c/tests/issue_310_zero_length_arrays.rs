@@ -86,7 +86,9 @@ fn issue_310_nullary_adt_variant_emits_no_zero_length_array() {
     );
     // The construct call must pass a NULL field pointer with count 0.
     assert!(
-        src.contains("chelis_string_from_cstr(\"Nothing\")"),
+        src.contains(
+            r#"chelis_string_from_utf8((const uint8_t *)"\116\157\164\150\151\156\147", INT64_C(7))"#,
+        ),
         "{src}"
     );
     assert!(
@@ -119,7 +121,12 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
         src.contains("[1];"),
         "single-field ADT variant must still declare a `[1];` array:\n{src}"
     );
-    assert!(src.contains("chelis_string_from_cstr(\"Just\")"), "{src}");
+    assert!(
+        src.contains(
+            r#"chelis_string_from_utf8((const uint8_t *)"\112\165\163\164", INT64_C(4))"#,
+        ),
+        "{src}"
+    );
     assert!(src.contains("chelis_adt_construct("), "{src}");
     // Must NOT degrade to NULL/0 when fields are present.
     assert!(

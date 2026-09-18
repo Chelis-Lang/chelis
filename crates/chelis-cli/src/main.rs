@@ -10490,7 +10490,7 @@ static void chelis_manifest_print_tensor_elem(const chelis_tensor *tensor, int64
     memcpy(&bits, (const uint8_t *)view.data + index * width, (size_t)width);
     chelis_scalar scalar = chelis_scalar_from_bits(view.dtype, bits);
     chelis_string text = chelis_string_from_scalar(scalar);
-    fputs(chelis_string_data(text), stdout);
+    chelis_print_string(text);
     chelis_string_release(text);
 }
 
@@ -10546,7 +10546,7 @@ mod exact_manifest_observation_driver_tests {
         for required in [
             "chelis_scalar_from_bits",
             "chelis_string_from_scalar",
-            "chelis_string_data",
+            "chelis_print_string",
             "chelis_string_release",
             "chelis_dtype_size",
             "view.dtype",
@@ -10561,6 +10561,7 @@ mod exact_manifest_observation_driver_tests {
             "chelis_format_shortest",
             "CHELIS_F64",
             "CHELIS_BOOL",
+            "chelis_string_data",
             "tensor->ndim",
         ] {
             assert!(
