@@ -314,6 +314,10 @@ pub(super) fn annotate_expr_with_scope(
     // Bail value is the identity (unannotated) expr: annotation is a
     // best-effort pass and the entry boundary fails the check anyway.
     stack_guard!("annotate_expr_with_scope", expr, expr.clone());
+    // PP7/E5e producer exception: this is an exhaustive representation-
+    // preserving transformer. The List and Node arms each rebuild the same
+    // carrier they received; neither arm decides that the other carrier is
+    // semantically absent.
     match expr {
         deep::Expr::Atom(_, _) => expr.clone(),
         // Metadata values are source/compiler context, not runtime children
@@ -361,7 +365,7 @@ pub(super) fn annotate_expr_with_scope(
             let (annotated_children, fn_ty_override) = match tag {
                 Some(DeepTag::Fn) => {
                     let (kids, fn_ty) =
-                        annotate_fn_children(list, expr, product, None, annotation_context, errors);
+                        annotate_fn_children(expr, product, None, annotation_context, errors);
                     (kids, Some(fn_ty))
                 }
                 // `(def name (fn ...))`: when the def has a separate
@@ -384,39 +388,18 @@ pub(super) fn annotate_expr_with_scope(
                         .enumerate()
                         .map(|(index, child)| {
                             let role = child_stamp_role(DeepTag::Def, index, kids.len());
-                            if let (
-                                ChildStampRole::RuntimeExpr,
-                                Some(declared),
-                                deep::Expr::List(fn_list, fn_span),
-                            ) = (role, declared_param_types.as_ref(), child)
-                                && get_tag(fn_list) == Some(DeepTag::Fn)
-                            {
-                                let (fn_kids, fn_ty) = annotate_fn_children(
-                                    fn_list,
+                            if let (ChildStampRole::RuntimeExpr, Some(declared)) =
+                                (role, declared_param_types.as_ref())
+                                && let Some(annotated) = annotate_declared_fn_child(
                                     child,
+                                    expr,
+                                    declared,
                                     product,
-                                    Some(declared),
                                     annotation_context,
                                     errors,
-                                );
-                                // The declaration owner's completed type retains the
-                                // authored result claim; the body owner remains the
-                                // independent inferred type used to check that claim.
-                                let fn_ty = product
-                                    .owner_type(expr, "declared function", errors)
-                                    .unwrap_or(fn_ty);
-                                let mut elements = vec![
-                                    fn_list.elements[0].clone(),
-                                    annotated_meta_map_with_override(
-                                        fn_list,
-                                        child,
-                                        product,
-                                        Some(fn_ty),
-                                        errors,
-                                    ),
-                                ];
-                                elements.extend(fn_kids);
-                                deep::Expr::List(deep::List { elements }, *fn_span)
+                                )
+                            {
+                                annotated
                             } else {
                                 annotate_child_for_role(
                                     DeepTag::Def,
@@ -433,7 +416,13 @@ pub(super) fn annotate_expr_with_scope(
                     (annotated, None)
                 }
                 Some(tag) => (
-                    annotate_children_by_role(tag, list, product, annotation_context, errors),
+                    annotate_children_by_role(
+                        tag,
+                        children(list),
+                        product,
+                        annotation_context,
+                        errors,
+                    ),
                     None,
                 ),
                 None => (children(list).to_vec(), None),
@@ -452,19 +441,43 @@ pub(super) fn annotate_expr_with_scope(
             let fn_ty_override = (tag == DeepTag::Fn)
                 .then(|| product.owner_type(expr, "function node", errors))
                 .flatten();
+            let declared_param_types = (tag == DeepTag::Def)
+                .then(|| {
+                    children
+                        .first()
+                        .and_then(symbol_name)
+                        .and_then(|name| annotation_context.declared_signature(name))
+                        .map(|metadata| metadata.param_types.as_slice())
+                })
+                .flatten();
             let annotated_children = children
                 .iter()
                 .enumerate()
                 .map(|(index, child)| {
-                    annotate_child_for_role(
-                        tag,
-                        index,
-                        children.len(),
-                        child,
-                        product,
-                        annotation_context,
-                        errors,
-                    )
+                    let role = child_stamp_role(tag, index, children.len());
+                    if let (DeepTag::Def, ChildStampRole::RuntimeExpr, Some(declared)) =
+                        (tag, role, declared_param_types)
+                        && let Some(annotated) = annotate_declared_fn_child(
+                            child,
+                            expr,
+                            declared,
+                            product,
+                            annotation_context,
+                            errors,
+                        )
+                    {
+                        annotated
+                    } else {
+                        annotate_child_for_role(
+                            tag,
+                            index,
+                            children.len(),
+                            child,
+                            product,
+                            annotation_context,
+                            errors,
+                        )
+                    }
                 })
                 .collect();
             let meta = annotated_node_meta_with_override(
@@ -493,19 +506,19 @@ pub(super) fn annotate_expr_with_scope(
 
 pub(super) fn annotate_children_by_role(
     tag: DeepTag,
-    list: &deep::List,
+    children: &[deep::Expr],
     product: &InferenceProduct,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
-    let kids = children(list);
-    kids.iter()
+    children
+        .iter()
         .enumerate()
         .map(|(index, child)| {
             annotate_child_for_role(
                 tag,
                 index,
-                kids.len(),
+                children.len(),
                 child,
                 product,
                 annotation_context,
@@ -570,29 +583,23 @@ pub(super) fn annotate_params_node(
     params_expr: &deep::Expr,
     declared_param_type_exprs: &[deep::Expr],
 ) -> deep::Expr {
-    // chelis#1107 amendment: accept both carriers. A stamped `(params ...)`
-    // arrives as `Expr::Node`, and the `List`-only read this replaced returned
-    // it unchanged -- so no parameter ever received its declared-type metadata
-    // on the stamped ingress.
-    //
-    // The bridge is materialized into a local rather than handled by
-    // re-entering this function: a self-recursive walk here would owe a
-    // `stack_guard!` (see `tests/stack_guard_coverage.rs`) for a recursion
-    // that is only ever one level deep.
-    let bridged;
-    let (list, span) = match params_expr {
-        deep::Expr::List(list, span) => (list, span),
-        deep::Expr::Node(node, span) if node.tag() == DeepTag::Params => {
-            bridged = node.to_list(*span);
-            (&bridged, span)
-        }
-        _ => return params_expr.clone(),
+    // This producer preserves the physical ingress carrier. Legacy Lists
+    // remain Lists for the transitional IR path; stamped Params nodes remain
+    // Nodes, and a newly annotated name-headed binder uses the stamped
+    // structural BareList carrier rather than degrading to a legacy List.
+    let (metadata, children) = match params_expr.carrier() {
+        deep::ExprCarrier::DecodedNode(DeepTag::Params, metadata, children) => (metadata, children),
+        deep::ExprCarrier::DecodedNode(_, _, _)
+        | deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_)
+        | deep::ExprCarrier::MalformedLegacyList(_) => return params_expr.clone(),
     };
-    if get_tag(list) != Some(DeepTag::Params) {
-        return params_expr.clone();
-    }
-    let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
-    for (index, param) in children(list).iter().enumerate() {
+    let stamped = matches!(params_expr, deep::Expr::Node(_, _));
+    let mut annotated_children = Vec::with_capacity(children.len());
+    for (index, param) in children.iter().enumerate() {
         match param {
             deep::Expr::Atom(deep::Atom::Name(name), atom_span) => {
                 // A synthesized sig from `desugar_fun_def` uses
@@ -605,30 +612,30 @@ pub(super) fn annotate_params_node(
                     .filter(|expr| !is_wildcard_tvar_expr(expr));
                 match declared {
                     Some(type_expr) => {
-                        elements.push(deep::Expr::List(
-                            deep::List {
-                                elements: vec![
-                                    deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
-                                    deep::Expr::Map(
-                                        deep::Metadata::from(
-                                            chelis_deep::annotations::MetadataValue::Type(
-                                                chelis_deep::annotations::TypeSyntax::try_new(
-                                                    type_expr.clone(),
-                                                )
-                                                .expect("declared parameter type syntax"),
-                                            ),
-                                        ),
-                                        *atom_span,
+                        let elements = vec![
+                            deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
+                            deep::Expr::Map(
+                                deep::Metadata::from(
+                                    chelis_deep::annotations::MetadataValue::Type(
+                                        chelis_deep::annotations::TypeSyntax::try_new(
+                                            type_expr.clone(),
+                                        )
+                                        .expect("declared parameter type syntax"),
                                     ),
-                                ],
-                            },
-                            *atom_span,
-                        ));
+                                ),
+                                *atom_span,
+                            ),
+                        ];
+                        annotated_children.push(if stamped {
+                            deep::Expr::BareList(elements, *atom_span)
+                        } else {
+                            deep::Expr::List(deep::List { elements }, *atom_span)
+                        });
                     }
-                    None => elements.push(param.clone()),
+                    None => annotated_children.push(param.clone()),
                 }
             }
-            _ => elements.push(
+            _ => annotated_children.push(
                 match declared_param_type_exprs
                     .get(index)
                     .filter(|ty| !is_wildcard_tvar_expr(ty))
@@ -639,11 +646,31 @@ pub(super) fn annotate_params_node(
             ),
         }
     }
-    deep::Expr::List(deep::List { elements }, *span)
+
+    match params_expr {
+        deep::Expr::Node(_, span) => {
+            deep::Expr::node(DeepTag::Params, metadata.clone(), annotated_children, *span)
+        }
+        deep::Expr::List(list, span) => {
+            let mut elements = list.elements[..2].to_vec();
+            elements.extend(annotated_children);
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::Atom(_, _)
+        | deep::Expr::Map(_, _)
+        | deep::Expr::MetaExpr(_, _)
+        | deep::Expr::BareList(_, _)
+        | deep::Expr::UnknownForm(_) => {
+            unreachable!("decoded params carrier is represented by List or Node")
+        }
+    }
 }
 
 fn annotate_parameter_hole(param: &deep::Expr, declared: &deep::Expr) -> deep::Expr {
     let mut annotated = param.clone();
+    // Producer-side carrier preservation: this mutates a private clone and
+    // returns the same representation. It does not decide whether an input
+    // carrier is semantically readable.
     let metadata = match &mut annotated {
         deep::Expr::MetaExpr(meta, _) => Some(&mut meta.metadata),
         deep::Expr::List(list, _) => match list.elements.get_mut(1) {
@@ -677,20 +704,21 @@ fn annotate_parameter_hole(param: &deep::Expr, declared: &deep::Expr) -> deep::E
 /// wrappers verbatim. `fn` literals with no declared signature pass
 /// `None` and keep bare params.
 pub(super) fn annotate_fn_children(
-    list: &deep::List,
-    owner_expr: &deep::Expr,
+    fn_expr: &deep::Expr,
     product: &InferenceProduct,
     declared_param_type_exprs: Option<&[deep::Expr]>,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> (Vec<deep::Expr>, Type) {
-    let kids = children(list);
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, kids) = fn_expr.carrier() else {
+        return (vec![], Type::Unit);
+    };
     if kids.is_empty() {
         return (vec![], Type::Unit);
     }
 
     let resolved_fn_ty = product
-        .owner_type(owner_expr, "function node", errors)
+        .owner_type(fn_expr, "function node", errors)
         .unwrap_or(Type::Unit);
     // Issue #319/#773: declared parameter syntax is copied from the owning
     // `sig` so borrow wrappers and shared symbolic variables remain exact.
@@ -726,6 +754,65 @@ pub(super) fn annotate_fn_children(
         ));
     }
     (result, resolved_fn_ty)
+}
+
+fn annotate_declared_fn_child(
+    child: &deep::Expr,
+    declaration_expr: &deep::Expr,
+    declared_param_type_exprs: &[deep::Expr],
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<deep::Expr> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) = child.carrier() else {
+        return None;
+    };
+    let (annotated_children, inferred_fn_ty) = annotate_fn_children(
+        child,
+        product,
+        Some(declared_param_type_exprs),
+        annotation_context,
+        errors,
+    );
+    // The declaration owner's completed type retains the authored result
+    // claim; the body owner remains the independent inferred type used to
+    // check that claim.
+    let fn_ty = product
+        .owner_type(declaration_expr, "declared function", errors)
+        .unwrap_or(inferred_fn_ty);
+
+    // Producer-side carrier preservation after the semantic carrier read:
+    // annotation rebuilds the same representation as `child`.
+    Some(match child {
+        deep::Expr::List(list, span) => {
+            let mut elements = vec![
+                list.elements[0].clone(),
+                annotated_meta_map_with_override(list, child, product, Some(fn_ty), errors),
+            ];
+            elements.extend(annotated_children);
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::Node(_, span) => deep::Expr::node(
+            DeepTag::Fn,
+            annotated_node_meta_with_override(
+                DeepTag::Fn,
+                metadata,
+                child,
+                Some(fn_ty),
+                product,
+                errors,
+            ),
+            annotated_children,
+            *span,
+        ),
+        deep::Expr::Atom(_, _)
+        | deep::Expr::Map(_, _)
+        | deep::Expr::MetaExpr(_, _)
+        | deep::Expr::BareList(_, _)
+        | deep::Expr::UnknownForm(_) => {
+            unreachable!("decoded fn carrier is represented by List or Node")
+        }
+    })
 }
 
 pub(super) fn annotated_meta_map_with_override(
