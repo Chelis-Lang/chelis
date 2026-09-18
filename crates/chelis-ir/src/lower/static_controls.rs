@@ -10,7 +10,15 @@ pub(super) fn type_prim(expr: &Expr, substitutions: &UnordMap<String, Prim>) -> 
     if let Some(name) = formal_param_type_var_name(expr) {
         return substitutions.get(&name).copied();
     }
-    let (tag, _, kids) = stamped_parts(expr)?;
+    let (tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, kids) => (tag, kids),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
+    };
     match tag {
         DeepTag::TTensor => type_prim(kids.last()?, substitutions),
         DeepTag::TRef => type_prim(kids.first()?, substitutions),
@@ -24,8 +32,14 @@ pub(super) fn scalar(
     substitutions: &UnordMap<String, Prim>,
     neg_is_builtin: bool,
 ) -> Option<StagedScalar> {
-    let Some((tag, metadata, kids)) = stamped_parts(expr) else {
-        return extract_numeric_leaf(expr);
+    let (tag, metadata, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, kids) => (tag, metadata, kids),
+        ExprCarrier::Atom(_) => return extract_numeric_leaf(expr),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     match tag {
         DeepTag::Var => values.get(symbol_name(kids.first()?)?).copied(),
@@ -146,7 +160,17 @@ struct Profile<'a> {
 
 impl Profile<'_> {
     fn callable(&self, expr: &Expr, env: &Environment) -> Option<Closure> {
-        if stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn) {
+        let is_function = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => true,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => false,
+        };
+        if is_function {
             return Some(Closure {
                 function: expr.clone(),
                 environment: Rc::new(env.clone()),
@@ -161,7 +185,16 @@ impl Profile<'_> {
             return None;
         }
         let function = self.defs.get(&name)?;
-        stamped_parts(function).filter(|(tag, _, _)| *tag == DeepTag::Fn)?;
+        match function.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => {}
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return None,
+        }
         Some(Closure {
             function: function.clone(),
             environment: Rc::new(Environment {
@@ -190,11 +223,32 @@ impl Profile<'_> {
             self.reason.get_or_insert(Reason::RecursiveControl);
             return;
         }
-        let (_, _, kids) = stamped_parts(&closure.function).expect("resolved function");
-        let Some((DeepTag::Params, _, params)) = kids.first().and_then(stamped_parts) else {
-            // No parameter environment can be inferred from a malformed
-            // function; its owning Deep/lowering boundary diagnoses it.
+        let kids = match closure.function.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Fn, _, kids) => kids,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => unreachable!("resolved function"),
+        };
+        let Some(params_expr) = kids.first() else {
             return;
+        };
+        let params = match params_expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Params, _, params) => params,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {
+                // No parameter environment can be inferred from a malformed
+                // function; its owning Deep/lowering boundary diagnoses it.
+                return;
+            }
         };
         let Some(body) = kids.get(1) else { return };
         let mut env = (*closure.environment).clone();
@@ -252,8 +306,14 @@ impl Profile<'_> {
 
     fn visit(&mut self, expr: &Expr, depth: usize, env: &Environment) {
         use crate::evaluation::LegacyEvaluationReason as Reason;
-        let Some((tag, metadata, kids)) = stamped_parts(expr) else {
-            return;
+        let (tag, metadata, kids) = match expr.carrier() {
+            ExprCarrier::DecodedNode(tag, metadata, kids) => (tag, metadata, kids),
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return,
         };
         if tag == DeepTag::App
             && let Some(callee) = kids.first()
@@ -262,7 +322,17 @@ impl Profile<'_> {
                 self.apply(closure, &kids[1..], depth, depth, env);
                 return;
             }
-            if let Some((DeepTag::Grad, _, grad)) = stamped_parts(callee)
+            let grad = match callee.carrier() {
+                ExprCarrier::DecodedNode(DeepTag::Grad, _, grad) => Some(grad),
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            };
+            if let Some(grad) = grad
                 && let Some(closure) = grad
                     .first()
                     .and_then(|function| self.callable(function, env))
@@ -311,7 +381,18 @@ impl Profile<'_> {
         }
         if tag == DeepTag::Fn {
             let mut scoped = env.clone();
-            if let Some((_, _, params)) = kids.first().and_then(stamped_parts) {
+            let params = kids
+                .first()
+                .and_then(|params_expr| match params_expr.carrier() {
+                    ExprCarrier::DecodedNode(_, _, params) => Some(params),
+                    ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => None,
+                });
+            if let Some(params) = params {
                 for param in params {
                     let mut names = UnordSet::new();
                     collect_param_bound_names(param, &mut names);
@@ -327,7 +408,19 @@ impl Profile<'_> {
         }
         if tag == DeepTag::Let {
             let mut scoped = env.clone();
-            if let Some((DeepTag::Bind, _, bindings)) = kids.first().and_then(stamped_parts) {
+            let bindings = kids
+                .first()
+                .and_then(|bindings_expr| match bindings_expr.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Bind, _, bindings) => Some(bindings),
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => None,
+                });
+            if let Some(bindings) = bindings {
                 for pair in bindings.as_chunks::<2>().0 {
                     let callable = self.callable(&pair[1], &scoped);
                     if callable.is_none() {
