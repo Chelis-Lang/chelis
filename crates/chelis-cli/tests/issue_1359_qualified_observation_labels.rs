@@ -3,7 +3,8 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
-use tempfile::tempdir;
+use std::path::PathBuf;
+use tempfile::{TempDir, tempdir};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -17,18 +18,19 @@ gadt = Box { text: "abcd" }
 
 const NESTED_PRODUCTS: &str = r#"
 type Inner =
-  | Inner { value: string }
+  | Inner { inner__value: string }
 
 type Outer =
-  | Outer { inner: Inner, pair: (i32, string) }
+  | Outer { field__name: string, inner: Inner, pair: (i32, string) }
 
-gadt =
+record_root =
   Outer {
-    inner: Inner { value: "abcd" },
+    field__name: "top",
+    inner: Inner { inner__value: "abcd" },
     pair: (cast(7, i32), "tail"),
   }
 
-tuple_root = (cast(1, i32), (cast(2, i32), cast(3, i32)))
+root__tuple = (cast(1, i32), (cast(2, i32), cast(3, i32)))
 "#;
 
 fn eval_text(source: &str) -> String {
@@ -66,6 +68,47 @@ fn eval_json(source: &str) -> Value {
         .stdout
         .clone();
     serde_json::from_slice(&output).expect("eval --json emits one JSON document")
+}
+
+fn reef_package(source: &str) -> (TempDir, PathBuf, PathBuf) {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("obs-labels");
+    let reef_home = dir.path().join("reef-home");
+    std::fs::create_dir_all(root.join("src")).expect("create package source directory");
+    std::fs::create_dir_all(&reef_home).expect("create reef home");
+    common::write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "obs-labels"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    common::write_file(
+        &root.join("src/main.ch"),
+        &format!("module App.Main\n\n{source}"),
+    );
+    (dir, root, reef_home)
+}
+
+fn eval_reef_text(root: &std::path::Path, reef_home: &std::path::Path) -> String {
+    let entry = root.join("src/main.ch");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(root)
+        .args(["eval", "--file", entry.to_str().expect("utf-8 path")])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).expect("reef eval stdout is UTF-8")
 }
 
 fn text_labels(stdout: &str) -> Vec<&str> {
@@ -107,12 +150,13 @@ fn nested_record_and_tuple_descendants_keep_their_originating_root() {
     let eval = eval_text(NESTED_PRODUCTS);
     let compiled = common::build_and_run(NESTED_PRODUCTS, "nested_qualified_roots");
     let expected = [
-        "gadt.inner.value",
-        "gadt.pair.0",
-        "gadt.pair.1",
-        "tuple_root.0",
-        "tuple_root.1.0",
-        "tuple_root.1.1",
+        "record_root.field__name",
+        "record_root.inner.inner__value",
+        "record_root.pair.0",
+        "record_root.pair.1",
+        "root__tuple.0",
+        "root__tuple.1.0",
+        "root__tuple.1.1",
     ];
 
     assert_eq!(
@@ -121,10 +165,37 @@ fn nested_record_and_tuple_descendants_keep_their_originating_root() {
     );
     assert_eq!(text_labels(&eval), expected);
     assert!(
-        !text_labels(&eval)
-            .iter()
-            .any(|name| matches!(*name, "value" | "pair.0" | "pair.1" | "root.0")),
-        "record and tuple suffixes must not lose their originating root: {eval}"
+        !text_labels(&eval).iter().any(|name| matches!(
+            *name,
+            "name" | "value" | "inner__value" | "tuple.0" | "tuple.1.0" | "tuple.1.1"
+        )),
+        "authored repeated underscores and originating roots must remain intact: {eval}"
+    );
+}
+
+#[test]
+fn reef_linker_qualification_is_removed_without_rewriting_authored_underscores() {
+    let (_dir, root, reef_home) = reef_package(NESTED_PRODUCTS);
+    let evaluated = eval_reef_text(&root, &reef_home);
+    let compiled = common::build_and_run_app(&reef_home, &root, "main");
+    let expected = [
+        "record_root.field__name",
+        "record_root.inner.inner__value",
+        "record_root.pair.0",
+        "record_root.pair.1",
+        "root__tuple.0",
+        "root__tuple.1.0",
+        "root__tuple.1.1",
+    ];
+
+    assert_eq!(
+        compiled, evaluated,
+        "reef eval and C output must be byte-identical after linker dequalification"
+    );
+    assert_eq!(text_labels(&evaluated), expected);
+    assert!(
+        !evaluated.contains("pkg__") && !evaluated.contains("Pkg__"),
+        "private linker qualification must not leak into package output: {evaluated}"
     );
 }
 

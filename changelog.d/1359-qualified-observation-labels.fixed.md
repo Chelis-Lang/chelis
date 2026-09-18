@@ -1,6 +1,8 @@
 `chelis eval` preserves binding-qualified record and tuple descendant labels
 such as `gadt.text`, matching compiled C observation output byte-for-byte.
-Previously evaluator text output could drop the originating binding and print
-only the field suffix. See
+Legal repeated underscores in roots and fields, such as `root__tuple` and
+`record_root.field__name`, are also preserved across standalone and Reef
+package output. Previously display dequalification could mistake authored
+`__` for a linker separator and drop part of the source label. See
 [#1359](https://github.com/Chelis-Lang/chelis/issues/1359) and
 [#2193](https://github.com/Chelis-Lang/chelis/pull/2193).

@@ -369,14 +369,43 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
 /// unchanged.
 ///
 /// Public so the eval value renderer (chelis-compiler-api) shows the
-/// user-facing constructor name rather than the internal mangled form,
-/// matching the de-mangling already applied to diagnostics (chelis#399).
+/// user-facing source name rather than the internal mangled form, matching the
+/// de-mangling already applied to diagnostics (chelis#399). Lowercase binding
+/// names may themselves contain `__`; the package/module casing boundary
+/// identifies where that authored terminal begins.
 pub fn demangle_ident(name: &str) -> String {
-    if name.starts_with("Pkg__") || name.starts_with("pkg__") {
+    if let Some(stem) = name.strip_prefix("pkg__")
+        && let Some(binding) = demangle_lowercase_binding(stem)
+    {
+        binding
+    } else if name.starts_with("Pkg__") || name.starts_with("pkg__") {
         terminal_segment(name).to_string()
     } else {
         name.to_string()
     }
+}
+
+fn demangle_lowercase_binding(stem: &str) -> Option<String> {
+    let segments = stem.split("__").collect::<Vec<_>>();
+    // Reef packages are lowercase while module paths are TypeIdent segments.
+    // The first non-TypeIdent segment after the module path begins the
+    // lowercase source binding; every later `__` belongs to that binding.
+    let module_start = segments.iter().position(|segment| {
+        segment
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+    })?;
+    let binding_start = segments[module_start..]
+        .iter()
+        .position(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_none_or(|ch| !ch.is_ascii_uppercase())
+        })
+        .map(|offset| module_start + offset)?;
+    (binding_start < segments.len()).then(|| segments[binding_start..].join("__"))
 }
 
 /// Best-effort de-mangle of a module key for display (RFC v4c). A reef
@@ -745,6 +774,14 @@ mod tests {
         assert_eq!(
             demangle_ident("pkg__opq__Demo__Types__raw_make"),
             "raw_make"
+        );
+        assert_eq!(
+            demangle_ident("pkg__obs__labels__App__Main__root__tuple"),
+            "root__tuple"
+        );
+        assert_eq!(
+            demangle_ident("pkg__obs__labels__App__Main__record_root"),
+            "record_root"
         );
         // Lexical (unmangled) identifiers pass through unchanged.
         assert_eq!(demangle_ident("Probability"), "Probability");

@@ -492,12 +492,9 @@ fn a_runtime_extent_nullary_root_executes_identically_on_both_lanes() {
 /// Evidentiary status: every assertion here is a regression assertion. On the
 /// base sha both programs evaluated to nothing and emitted no `int main(`.
 ///
-/// The ADT row asserts each lane's exact line separately rather than asserting
-/// the two are equal, because the lanes disagree on the *label* of a top-level
-/// record-field root: eval prints the bare field name and C qualifies it with
-/// the binding. That split is chelis#1359, it predates this change, and it is
-/// not caused by the runtime extent - a concrete `tensor[2, f32]` field splits
-/// the same way. The payload, which is what a runtime extent decides, agrees.
+/// The ADT row also locks chelis#1359's synchronized observation contract:
+/// evaluator and C qualify a top-level record-field root with its originating
+/// binding, independently of whether the field has a runtime extent.
 #[test]
 fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
     let shrink_to_last_two =
@@ -523,12 +520,12 @@ fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
     );
     let (evaluated, compiled) = run_both_lanes(&record_source, "record_root");
     assert_eq!(
-        evaluated, "t = tensor(shape=[2], data=[2.0, 3.0])",
-        "eval renders the record field root under its bare label (chelis#1359)"
+        evaluated, "main.t = tensor(shape=[2], data=[2.0, 3.0])",
+        "eval qualifies the record field root with its binding (chelis#1359)"
     );
     assert_eq!(
-        compiled, "main.t = tensor(shape=[2], data=[2.0, 3.0])",
-        "C qualifies the same field root with its binding (chelis#1359)"
+        compiled, evaluated,
+        "both lanes render the runtime-extent record root identically"
     );
 }
 

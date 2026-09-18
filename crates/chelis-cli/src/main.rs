@@ -11669,12 +11669,7 @@ fn apply_manifest_display_roots_to_globals(
 fn manifest_host_display_root(
     entry: &chelis_types::manifest::RootEntry,
 ) -> chelis_ir::host::HostDisplayRoot {
-    let short_def = entry
-        .def_name
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .or_else(|| entry.def_name.rsplit_once('.').map(|(_, tail)| tail))
-        .unwrap_or(entry.def_name.as_str());
+    let short_def = display_root_name(&entry.def_name);
     let suffix = entry
         .name
         .strip_prefix(entry.def_name.as_str())
@@ -11736,17 +11731,19 @@ fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
 }
 
 fn display_root_name(name: &str) -> String {
-    let (base, suffix) = if let Some((base, suffix)) = name.rsplit_once('.')
-        && suffix.chars().all(|ch| ch.is_ascii_digit())
-    {
-        (base, Some(suffix))
+    let (root, descendants) = if let Some((root, descendants)) = name.split_once('.') {
+        (root, Some(descendants))
     } else {
         (name, None)
     };
-    let short = base.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(base);
-    match suffix {
-        Some(suffix) => format!("{short}.{suffix}"),
-        None => short.to_string(),
+    let root = if chelis_types::is_linker_format_name(root) {
+        chelis_types::demangle_ident(root)
+    } else {
+        root.to_string()
+    };
+    match descendants {
+        Some(descendants) => format!("{root}.{descendants}"),
+        None => root,
     }
 }
 
@@ -11755,19 +11752,29 @@ mod issue_1359_display_root_name_tests {
     use super::display_root_name;
 
     #[test]
-    fn package_qualification_is_removed_without_dropping_record_descendants() {
-        assert_eq!(display_root_name("pkg__gadt.text"), "gadt.text");
+    fn only_complete_reef_linker_qualification_is_removed() {
         assert_eq!(
-            display_root_name("pkg__gadt.inner.value"),
-            "gadt.inner.value"
+            display_root_name("pkg__obs__labels__App__Main__record_root.field__name"),
+            "record_root.field__name"
         );
-        assert_eq!(display_root_name("pkg__value"), "value");
+        assert_eq!(
+            display_root_name("Pkg__obs__labels__App__Main__RecordRoot.inner__value"),
+            "RecordRoot.inner__value"
+        );
+        assert_eq!(display_root_name("pkg__lonely.field"), "pkg__lonely.field");
     }
 
     #[test]
-    fn tuple_descendants_keep_existing_spelling() {
-        assert_eq!(display_root_name("tuple_root.0"), "tuple_root.0");
-        assert_eq!(display_root_name("pkg__tuple_root.1.0"), "tuple_root.1.0");
+    fn authored_repeated_underscores_survive_in_roots_and_descendants() {
+        assert_eq!(
+            display_root_name("record_root.field__name"),
+            "record_root.field__name"
+        );
+        assert_eq!(
+            display_root_name("record_root.inner.inner__value"),
+            "record_root.inner.inner__value"
+        );
+        assert_eq!(display_root_name("root__tuple.1.0"), "root__tuple.1.0");
     }
 }
 

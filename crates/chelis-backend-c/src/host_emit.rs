@@ -2455,12 +2455,11 @@ fn emit_main(
     for binding in &program.globals {
         for display in &binding.display_roots {
             let mut entries = manifest.entries.iter().enumerate().filter(|(_, root)| {
-                let short_def = root
-                    .def_name
-                    .rsplit_once("__")
-                    .map(|(_, tail)| tail)
-                    .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
-                    .unwrap_or(root.def_name.as_str());
+                let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
+                    chelis_types::demangle_ident(&root.def_name)
+                } else {
+                    root.def_name.clone()
+                };
                 let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
                 let selected = binding.name == root.def_name
                     || matches!(
