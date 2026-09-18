@@ -2116,8 +2116,15 @@ impl SubexprLoweringContext {
         bindings: &Expr,
         declaration_name: Option<&str>,
     ) -> Vec<LocalAscriptionBindingRegion> {
-        let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(bindings) else {
-            return Vec::new();
+        let bind_kids = match bindings.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return Vec::new(),
         };
 
         #[derive(Default)]
@@ -9671,33 +9678,36 @@ impl<'program> LowerCtx<'program> {
         ascription: &chelis_types::CheckedLocalTensorAscription,
     ) -> bool {
         fn contains(expr: &Expr, ascription: &chelis_types::CheckedLocalTensorAscription) -> bool {
-            if let Some((tag, _, children)) = stamped_parts(expr) {
-                if tag == DeepTag::Fn {
-                    return false;
-                }
-                if tag == DeepTag::Bind {
-                    for pair in children.as_chunks::<2>().0 {
-                        let Some(name) = symbol_name(&pair[0]) else {
-                            continue;
-                        };
-                        if LowerCtx::local_ascription_matches_binding(
-                            ascription, name, &pair[0], &pair[1],
-                        ) {
-                            return true;
+            match expr.carrier() {
+                ExprCarrier::DecodedNode(DeepTag::Fn, _, _) => false,
+                ExprCarrier::DecodedNode(tag, _, children) => {
+                    if tag == DeepTag::Bind {
+                        for pair in children.as_chunks::<2>().0 {
+                            let Some(name) = symbol_name(&pair[0]) else {
+                                continue;
+                            };
+                            if LowerCtx::local_ascription_matches_binding(
+                                ascription, name, &pair[0], &pair[1],
+                            ) {
+                                return true;
+                            }
                         }
                     }
-                }
-                return children.iter().any(|child| contains(child, ascription));
-            }
-            match expr {
-                Expr::BareList(children, _) => {
                     children.iter().any(|child| contains(child, ascription))
                 }
-                Expr::UnknownForm(data) => data
-                    .children
-                    .iter()
-                    .any(|child| contains(child, ascription)),
-                _ => false,
+                ExprCarrier::StructuralList(children) => {
+                    children.iter().any(|child| contains(child, ascription))
+                }
+                ExprCarrier::UndecodableHead(_, _, children)
+                    if matches!(expr, Expr::UnknownForm(_)) =>
+                {
+                    children.iter().any(|child| contains(child, ascription))
+                }
+                ExprCarrier::UndecodableHead(_, _, _) => false,
+                ExprCarrier::MetadataExpression(meta) => contains(&meta.expr, ascription),
+                ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MalformedLegacyList(_) => false,
             }
         }
         contains(body, ascription)
@@ -9723,9 +9733,17 @@ impl<'program> LowerCtx<'program> {
         ascription.binding_name() == binding_name
             && (Self::expr_has_source_span(binding, ascription.binding_span())
                 || Self::expr_has_source_span(initializer, ascription.initializer_span())
-                || stamped_parts(initializer)
-                    .and_then(|(_, meta, _)| meta.surf_binding_type())
-                    .is_some_and(|origin| origin.span() == ascription.ascription_span()))
+                || match initializer.carrier() {
+                    ExprCarrier::DecodedNode(_, metadata, _) => metadata
+                        .surf_binding_type()
+                        .is_some_and(|origin| origin.span() == ascription.ascription_span()),
+                    ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => false,
+                })
     }
 
     /// Remove an authored local claim from the initializer's physical shape.
@@ -9796,10 +9814,27 @@ impl<'program> LowerCtx<'program> {
         claim: &chelis_types::LocalAscriptionAxisClaim,
     ) -> String {
         let authored = ascription.authored_type();
-        if let Some((DeepTag::TTensor, _, children)) = stamped_parts(authored)
-            && let Some(dim) = children.get(axis)
-            && let Some((tag, _, dim_children)) = stamped_parts(dim)
-        {
+        let dim_parts = match authored.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::TTensor, _, children) => {
+                children.get(axis).and_then(|dim| match dim.carrier() {
+                    ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+                    ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_)
+                    | ExprCarrier::MalformedLegacyList(_) => None,
+                })
+            }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => None,
+        };
+        if let Some((tag, dim_children)) = dim_parts {
             match tag {
                 DeepTag::DName | DeepTag::DVar => {
                     if let Some(name) = dim_children.first().and_then(symbol_name) {
@@ -20745,6 +20780,126 @@ mod tests {
             !pattern_scope_depends_on_bad(real_binder),
             "a real executable pattern binder still scopes the arm"
         );
+    }
+
+    fn local_ascription_fixture() -> (chelis_types::CheckedLocalTensorAscription, Expr) {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+             y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+             y\n\
+             }\n",
+        )
+        .expect("Surf local-ascription fixture parses");
+        let checked =
+            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
+                .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
+        let ascription = checked
+            .local_tensor_ascriptions()
+            .first()
+            .expect("fixture records one local ascription")
+            .clone();
+        let Some((DeepTag::Def, _, def_children)) = checked.exprs().last().and_then(stamped_parts)
+        else {
+            panic!("fixture retains one def")
+        };
+        let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(&def_children[1]) else {
+            panic!("fixture def retains its function")
+        };
+        let Some((DeepTag::Let, _, let_children)) = stamped_parts(&fn_children[1]) else {
+            panic!("fixture function retains its block")
+        };
+        let binding = let_children[0].clone();
+        (ascription, binding)
+    }
+
+    fn decoded_node(expr: &Expr) -> Expr {
+        let span = expr.span();
+        let ExprCarrier::DecodedNode(tag, metadata, children) = expr.carrier() else {
+            panic!("fixture must be decodable");
+        };
+        Expr::node(tag, metadata.clone(), children.to_vec(), span)
+    }
+
+    #[test]
+    fn local_ascription_regions_preserve_decoded_node_list_parity() {
+        let (ascription, binding) = local_ascription_fixture();
+        let ExprCarrier::DecodedNode(DeepTag::Bind, _, _) = binding.carrier() else {
+            panic!("fixture binding must decode as `bind`");
+        };
+        let node = decoded_node(&binding);
+        let context = SubexprLoweringContext {
+            program_types: Arc::new(BTreeMap::new()),
+            program_defs: Arc::new(BTreeMap::new()),
+            program_signatures: Arc::new(BTreeMap::new()),
+            local_tensor_ascriptions: Arc::new(vec![ascription.clone()]),
+        };
+
+        for decoded in [&binding, &node] {
+            let regions =
+                context.local_ascription_binding_regions(decoded, ascription.declaration_name());
+            assert_eq!(regions.len(), 1);
+            assert_eq!(regions[0].ascription_ids, [ascription.id().get()]);
+        }
+    }
+
+    #[test]
+    fn local_ascription_body_reader_separates_executable_and_opaque_children() {
+        let (ascription, binding) = local_ascription_fixture();
+        let span = Span::new(0, 0);
+        let metadata_body = Expr::node(
+            DeepTag::Let,
+            Metadata::default(),
+            vec![
+                binding.clone(),
+                Expr::node(
+                    DeepTag::Lit,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Int(0), span)],
+                    span,
+                ),
+            ],
+            span,
+        );
+        for body in [
+            binding.clone(),
+            decoded_node(&binding),
+            Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(binding.clone()),
+                },
+                span,
+            ),
+            Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                head: "future-body".into(),
+                meta: Metadata::default(),
+                children: vec![binding.clone()],
+                span,
+            })),
+        ] {
+            assert!(
+                LowerCtx::body_contains_local_ascription(&body, &ascription),
+                "executable carrier must expose its binding"
+            );
+        }
+        for body in [
+            Expr::Map(runtime_metadata(metadata_body), span),
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name("future-body".into()), span),
+                        Expr::Map(Metadata::default(), span),
+                        binding,
+                    ],
+                },
+                span,
+            ),
+        ] {
+            assert!(
+                !LowerCtx::body_contains_local_ascription(&body, &ascription),
+                "opaque carrier must not expose its binding"
+            );
+        }
     }
 
     #[test]
