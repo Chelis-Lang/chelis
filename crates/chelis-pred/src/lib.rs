@@ -437,9 +437,12 @@ fn node_desc(expr: &Expr) -> String {
         ExprCarrier::MetadataExpression(_) => "meta-expr".to_string(),
         ExprCarrier::DecodedNode(tag, _, _) => format!("`{}` node", tag.as_str()),
         ExprCarrier::StructuralList(_) => "bare list".to_string(),
-        ExprCarrier::UndecodableHead(_, _, _) => match expr {
+        ExprCarrier::UndecodableHead(head, _, _) => match expr {
             Expr::List(_, _) => "malformed list".to_string(),
-            Expr::UnknownForm(_) => "unknown form".to_string(),
+            // chelis#731 / [04-TOT-3]: preserve the undecodable head so the
+            // checker diagnostic names the malformed tag instead of
+            // collapsing every future form into one generic grammar error.
+            Expr::UnknownForm(_) => format!("unknown form `{head}`"),
             _ => unreachable!("undecodable carrier must retain its source variant"),
         },
         ExprCarrier::MalformedLegacyList(_) => "malformed list".to_string(),

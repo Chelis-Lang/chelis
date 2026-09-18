@@ -13,7 +13,7 @@ use chelis_compiler_api::schema::{
     WireInferredPrecision, WireInferredType, escaped_path,
 };
 use chelis_deep::DeepTag;
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, ExprCarrier as DeepExprCarrier};
 use chelis_surf::ast::{Decl, ImportKind};
 use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
 use chelis_unord::{UnordMap, UnordSet};
@@ -11270,28 +11270,9 @@ fn manifest_root_names_from_decls(
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
 ) -> Vec<String> {
-    fn collect_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {
-        match expr {
-            DeepExpr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
-                for child in list.elements.iter().skip(3) {
-                    collect_decl_names(child, names);
-                }
-            }
-            DeepExpr::Node(node, span) => {
-                let bridged = DeepExpr::List(node.to_list(*span), *span);
-                collect_decl_names(&bridged, names);
-            }
-            _ => {
-                if let Some(name) = deep_top_level_expr_name(expr) {
-                    names.insert(name.to_string());
-                }
-            }
-        }
-    }
-
     let mut selected_defs = UnordSet::new();
     for expr in chelis_surf::desugar::desugar_program(decls) {
-        collect_decl_names(&expr, &mut selected_defs);
+        collect_manifest_decl_names(&expr, &mut selected_defs);
     }
     let realizability = chelis_effects::realizability::infer_realizability(
         checked,
@@ -11303,6 +11284,27 @@ fn manifest_root_names_from_decls(
         .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
         .map(|entry| entry.name)
         .collect()
+}
+
+fn collect_manifest_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+            for child in children.iter().skip(1) {
+                collect_manifest_decl_names(child, names);
+            }
+        }
+        DeepExprCarrier::DecodedNode(_, _, _) => {
+            if let Some(name) = deep_top_level_expr_name(expr) {
+                names.insert(name.to_string());
+            }
+        }
+        DeepExprCarrier::StructuralList(_)
+        | DeepExprCarrier::UndecodableHead(_, _, _)
+        | DeepExprCarrier::Atom(_)
+        | DeepExprCarrier::MetadataMap(_)
+        | DeepExprCarrier::MetadataExpression(_)
+        | DeepExprCarrier::MalformedLegacyList(_) => {}
+    }
 }
 
 fn lowered_root_names_from_exprs(
@@ -11330,77 +11332,53 @@ fn collect_lowered_root_names_from_expr(
     type_env: &BTreeMap<String, DeepExpr>,
     out: &mut Vec<String>,
 ) {
-    match expr {
-        DeepExpr::List(list, _) => match list.tag() {
-            Some(DeepTag::Module) => {
-                for child in list.elements.iter().skip(3) {
-                    collect_lowered_root_names_from_expr(child, program_exprs, type_env, out);
-                }
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+            for child in children.iter().skip(1) {
+                collect_lowered_root_names_from_expr(child, program_exprs, type_env, out);
             }
-            _ => {
-                let Some(name) = deep_top_level_expr_name(expr) else {
-                    return;
-                };
-                if type_env.get(name).is_some_and(type_expr_is_function) {
-                    return;
-                }
-                if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
-                    extend_root_names_from_value(
-                        name,
-                        type_env.get(name),
-                        top_level_def_body(expr),
-                        out,
-                    );
-                }
-            }
-        },
-        DeepExpr::Node(node, span) => {
-            let bridged = DeepExpr::List(node.to_list(*span), *span);
-            collect_lowered_root_names_from_expr(&bridged, program_exprs, type_env, out);
         }
-        _ => {}
+        DeepExprCarrier::DecodedNode(_, _, _) => {
+            let Some(name) = deep_top_level_expr_name(expr) else {
+                return;
+            };
+            if type_env.get(name).is_some_and(type_expr_is_function) {
+                return;
+            }
+            if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
+                extend_root_names_from_value(
+                    name,
+                    type_env.get(name),
+                    top_level_def_body(expr),
+                    out,
+                );
+            }
+        }
+        DeepExprCarrier::StructuralList(_)
+        | DeepExprCarrier::UndecodableHead(_, _, _)
+        | DeepExprCarrier::Atom(_)
+        | DeepExprCarrier::MetadataMap(_)
+        | DeepExprCarrier::MetadataExpression(_)
+        | DeepExprCarrier::MalformedLegacyList(_) => {}
     }
 }
 
 fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-            (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-                Some(name.as_str())
-            }
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(DeepTag::Def, _, children) => match children.first() {
+            Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
             _ => None,
         },
-        DeepExpr::Node(node, _) => {
-            if node.tag() == DeepTag::Def {
-                match node.children_slice().first() {
-                    Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        }
         _ => None,
     }
 }
 
 fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-            (
-                Some(DeepTag::Def | DeepTag::Defsig),
-                Some(DeepExpr::Atom(DeepAtom::Name(name), _)),
-            ) => Some(name.as_str()),
-            _ => None,
-        },
-        DeepExpr::Node(node, _) => {
-            if matches!(node.tag(), DeepTag::Def | DeepTag::Defsig) {
-                match node.children_slice().first() {
-                    Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
-                    _ => None,
-                }
-            } else {
-                None
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(DeepTag::Def | DeepTag::Defsig, _, children) => {
+            match children.first() {
+                Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
+                _ => None,
             }
         }
         _ => None,
@@ -11708,13 +11686,8 @@ fn manifest_host_display_root(
 }
 
 fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {
-    match expr {
-        DeepExpr::List(list, _) => (list.tag() == Some(DeepTag::Def))
-            .then(|| list.elements.get(3))
-            .flatten(),
-        DeepExpr::Node(node, _) => (node.tag() == DeepTag::Def)
-            .then(|| node.children_slice().get(1))
-            .flatten(),
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(DeepTag::Def, _, children) => children.get(1),
         _ => None,
     }
 }
@@ -11725,24 +11698,24 @@ fn extend_root_names_from_value(
     value: Option<&DeepExpr>,
     out: &mut Vec<String>,
 ) {
-    if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(tag) = list.tag()
+    if let Some(ty) = ty
+        && let DeepExprCarrier::DecodedNode(tag, _, children) = ty.carrier()
     {
         if tag == DeepTag::TFn {
-            extend_root_names_from_value(name, list.elements.last(), None, out);
+            extend_root_names_from_value(name, children.last(), None, out);
             return;
         }
         if tag == DeepTag::TTuple {
-            for (index, child) in list.elements.iter().skip(2).enumerate() {
+            for (index, child) in children.iter().enumerate() {
                 extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
             }
             return;
         }
     }
-    if let Some(DeepExpr::List(list, _)) = value
-        && (list.tag() == Some(DeepTag::Tuple))
+    if let Some(value) = value
+        && let DeepExprCarrier::DecodedNode(DeepTag::Tuple, _, children) = value.carrier()
     {
-        for (index, child) in list.elements.iter().skip(2).enumerate() {
+        for (index, child) in children.iter().enumerate() {
             extend_root_names_from_value(
                 &format!("{name}.{index}"),
                 expr_type_metadata(child),
@@ -11756,11 +11729,8 @@ fn extend_root_names_from_value(
 }
 
 fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    match list.elements.get(1) {
-        Some(DeepExpr::Map(meta, _)) => meta.ty().map(|ty| ty.expression()),
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(_, metadata, _) => metadata.ty().map(|ty| ty.expression()),
         _ => None,
     }
 }
@@ -11785,7 +11755,10 @@ fn display_root_name(name: &str) -> String {
 }
 
 fn type_expr_is_function(expr: &DeepExpr) -> bool {
-    matches!(expr, DeepExpr::List(list, _) if (list.tag() == Some(DeepTag::TFn)))
+    matches!(
+        expr.carrier(),
+        DeepExprCarrier::DecodedNode(DeepTag::TFn, _, _)
+    )
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {
@@ -11799,43 +11772,180 @@ fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<Stri
 }
 
 fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<String>) {
-    match expr {
-        chelis_deep::ast::Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::DName)
-                && let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) =
-                    list.elements.get(2)
+    match expr.carrier() {
+        DeepExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::DName
+                && let Some(DeepExpr::Atom(DeepAtom::Name(name), _)) = children.first()
                 && name != "*"
             {
                 dims.push(name.clone());
             }
-            for child in &list.elements {
+            metadata.visit_expressions(&mut |value, _| collect_symbolic_dims_expr(value, dims));
+            for child in children {
                 collect_symbolic_dims_expr(child, dims);
             }
         }
-        chelis_deep::ast::Expr::Map(map, _) => {
+        DeepExprCarrier::MetadataMap(map) => {
             map.visit_expressions(&mut |value, _| collect_symbolic_dims_expr(value, dims));
         }
-        chelis_deep::ast::Expr::MetaExpr(meta, _) => {
+        DeepExprCarrier::MetadataExpression(meta) => {
             collect_symbolic_dims_expr(&meta.expr, dims);
             meta.metadata
                 .visit_expressions(&mut |value, _| collect_symbolic_dims_expr(value, dims));
         }
-        chelis_deep::ast::Expr::Atom(_, _) => {}
-        chelis_deep::ast::Expr::Node(node, span) => {
-            // Bridge: reconstruct List so DName detection works unchanged (#908)
-            let bridged = chelis_deep::ast::Expr::List(node.to_list(*span), *span);
-            collect_symbolic_dims_expr(&bridged, dims);
-        }
-        chelis_deep::ast::Expr::BareList(elems, _) => {
+        DeepExprCarrier::StructuralList(elems) => {
             for elem in elems {
                 collect_symbolic_dims_expr(elem, dims);
             }
         }
-        chelis_deep::ast::Expr::UnknownForm(data) => {
-            for child in &data.children {
+        DeepExprCarrier::UndecodableHead(_, metadata, children) => {
+            if !matches!(expr, DeepExpr::UnknownForm(_)) {
+                metadata.visit_expressions(&mut |value, _| collect_symbolic_dims_expr(value, dims));
+            }
+            for child in children {
                 collect_symbolic_dims_expr(child, dims);
             }
         }
+        DeepExprCarrier::MalformedLegacyList(list) => {
+            for element in &list.elements {
+                collect_symbolic_dims_expr(element, dims);
+            }
+        }
+        DeepExprCarrier::Atom(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod issue_1125_e5e_outer_reader_tests {
+    use super::*;
+    use chelis_deep::Span;
+    use chelis_deep::ast::{List, MetaExpr, Metadata, UnknownFormData};
+
+    fn span() -> Span {
+        Span::new(5, 13)
+    }
+
+    fn name(value: &str) -> DeepExpr {
+        DeepExpr::Atom(DeepAtom::Name(value.to_string()), span())
+    }
+
+    fn dname(value: &str) -> DeepExpr {
+        DeepExpr::node(
+            DeepTag::DName,
+            Metadata::default(),
+            vec![name(value)],
+            span(),
+        )
+    }
+
+    fn legacy_node(tag: DeepTag, children: Vec<DeepExpr>) -> DeepExpr {
+        let mut elements = vec![
+            DeepExpr::Atom(DeepAtom::Tag(tag), span()),
+            DeepExpr::Map(Metadata::default(), span()),
+        ];
+        elements.extend(children);
+        DeepExpr::List(List { elements }, span())
+    }
+
+    #[test]
+    fn manifest_reader_preserves_successor_and_legacy_parity() {
+        let successor = DeepExpr::node(
+            DeepTag::Module,
+            Metadata::default(),
+            vec![
+                name("fixture"),
+                DeepExpr::node(
+                    DeepTag::Def,
+                    Metadata::default(),
+                    vec![name("value"), dname("n")],
+                    span(),
+                ),
+            ],
+            span(),
+        );
+        let legacy = legacy_node(
+            DeepTag::Module,
+            vec![
+                name("fixture"),
+                legacy_node(DeepTag::Def, vec![name("value"), dname("n")]),
+            ],
+        );
+
+        let names = |expr: &DeepExpr| {
+            let mut names = UnordSet::new();
+            collect_manifest_decl_names(expr, &mut names);
+            names.to_sorted().into_iter().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(names(&successor), vec!["value".to_string()]);
+        assert_eq!(names(&successor), names(&legacy));
+    }
+
+    #[test]
+    fn symbolic_dimension_reader_preserves_successor_and_legacy_parity() {
+        let successor = dname("shared");
+        let legacy = legacy_node(DeepTag::DName, vec![name("shared")]);
+
+        assert_eq!(
+            collect_symbolic_dims_from_deep(&[successor]),
+            collect_symbolic_dims_from_deep(&[legacy])
+        );
+        assert_eq!(
+            collect_symbolic_dims_from_deep(&[dname("*")]),
+            Vec::<String>::new(),
+            "the wildcard remains a non-parameter on the successor carrier"
+        );
+    }
+
+    #[test]
+    fn symbolic_dimension_reader_explicitly_traverses_or_declines_every_carrier() {
+        let exprs = vec![
+            DeepExpr::BareList(vec![dname("structural_dim")], span()),
+            DeepExpr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-form".to_string(),
+                meta: Metadata::default(),
+                children: vec![dname("unknown_child_dim")],
+                span: span(),
+            })),
+            DeepExpr::MetaExpr(
+                MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(dname("wrapped_dim")),
+                },
+                span(),
+            ),
+            DeepExpr::List(
+                List {
+                    elements: vec![
+                        DeepExpr::Atom(DeepAtom::Tag(DeepTag::DName), span()),
+                        name("not-metadata"),
+                        dname("malformed_child_dim"),
+                    ],
+                },
+                span(),
+            ),
+            name("atom"),
+            DeepExpr::Map(Metadata::default(), span()),
+        ];
+
+        assert_eq!(
+            collect_symbolic_dims_from_deep(&exprs),
+            vec![
+                "malformed_child_dim",
+                "structural_dim",
+                "unknown_child_dim",
+                "wrapped_dim",
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_outer_readers_have_no_node_to_list_bridge() {
+        let source = include_str!("main.rs");
+        let forbidden = [".to_", "list("].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "manifest, lowering-root, and symbolic-dimension readers must consume ExprCarrier"
+        );
     }
 }
 

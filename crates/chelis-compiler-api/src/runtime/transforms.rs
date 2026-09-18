@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
@@ -149,18 +149,40 @@ impl<'a> EvalContext<'a> {
         // as the checker's `grad_result_type` and the IR lowering's
         // `is_selected_wrt` do.
         let grad_wrt = match kind {
-            TransformKind::Grad => grad_wrt_indices_from_transform(transform_expr),
+            TransformKind::Grad => grad_wrt_indices_from_transform(transform_expr)?,
             TransformKind::Vmap => None,
         };
 
-        // Best-effort fn-expr lookup so we can read the inner
+        // Read the exact admitted transform carrier so we can inspect the inner
         // function's parameter type metadata. The transform_expr is the
         // captured `(grad ... fn-expr ...)` or `(vmap ... fn-expr
         // axis-lit)` form; the fn-expr is the first child.
-        let fn_expr = match transform_expr {
-            Expr::List(list, _) => children(list).first(),
-            _ => None,
+        let expected_tag = match kind {
+            TransformKind::Grad => DeepTag::Grad,
+            TransformKind::Vmap => DeepTag::Vmap,
         };
+        let transform_children = match transform_expr.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children) if tag == expected_tag => children,
+            ExprCarrier::DecodedNode(tag, _, _) => {
+                return Err(format!(
+                    "host runtime: expected `{}`, found `{}` transform",
+                    expected_tag.as_str(),
+                    tag.as_str()
+                ));
+            }
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {
+                return Err(format!(
+                    "host runtime: `{}` transform is not a decoded runtime node",
+                    expected_tag.as_str()
+                ));
+            }
+        };
+        let fn_expr = transform_children.first();
         // #1956: only the already-resolved direct declaration owns free
         // values here. The fresh lowerer has no local callable for this
         // operand; its exact program_defs entry is the original Fn, and
@@ -743,25 +765,47 @@ impl<'a> EvalContext<'a> {
 /// wrt?)` transform form, or `None` for the default all-arguments grad.
 /// `wrt` is the optional second child: a `(tuple {} i ...)` of indices or
 /// a single index literal (`cast`-wrapped ints are peeled by
-/// `static_usize_value`). A non-`grad` head or an unreadable index yields
-/// `None`, so the caller falls back to the differentiate-all default.
-fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Option<Vec<usize>> {
-    let list = as_list(transform_expr)?;
-    if tag(list) != Some(DeepTag::Grad) {
-        return None;
+/// `static_usize_value`). Only an absent second child means the default
+/// all-arguments selection; an unreadable carrier or index is a runtime
+/// boundary error rather than the same silent default.
+fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Result<Option<Vec<usize>>, String> {
+    let children = match transform_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Grad, _, children) => children,
+        ExprCarrier::DecodedNode(tag, _, _) => {
+            return Err(format!(
+                "host runtime: expected `grad`, found `{}` transform",
+                tag.as_str()
+            ));
+        }
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => {
+            return Err("host runtime: `grad` transform is not a decoded runtime node".to_string());
+        }
+    };
+    let Some(wrt_expr) = children.get(1) else {
+        return Ok(None);
+    };
+    if let ExprCarrier::DecodedNode(DeepTag::Tuple, _, indices) = wrt_expr.carrier() {
+        return indices
+            .iter()
+            .map(|index| {
+                static_usize_value(index).ok_or_else(|| {
+                    "host runtime: `grad` wrt tuple contains a non-static parameter index"
+                        .to_string()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some);
     }
-    let wrt_expr = children(list).get(1)?;
-    if let Expr::List(tuple, _) = wrt_expr
-        && tag(tuple) == Some(DeepTag::Tuple)
-    {
-        return Some(
-            children(tuple)
-                .iter()
-                .filter_map(static_usize_value)
-                .collect(),
-        );
-    }
-    static_usize_value(wrt_expr).map(|index| vec![index])
+    static_usize_value(wrt_expr)
+        .map(|index| Some(vec![index]))
+        .ok_or_else(|| {
+            "host runtime: `grad` wrt selector is not a static parameter index".to_string()
+        })
 }
 
 fn lookup_registered_type<'a, T>(
@@ -882,10 +926,14 @@ fn grad_type_expr_has_float(
     registry: &chelis_types::adt::AdtRegistry,
     visiting: &mut Vec<(String, Vec<bool>)>,
 ) -> bool {
-    let (node_tag, kids) = match expr {
-        Expr::List(list, _) => (tag(list), children(list)),
-        Expr::Node(node, _) => (Some(node.tag()), node.children_slice()),
-        _ => (None, &[][..]),
+    let (node_tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (Some(tag), children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => (None, &[][..]),
     };
     match node_tag {
         Some(DeepTag::TPrim) => kids
@@ -1243,32 +1291,37 @@ fn resolve_transform_fn_for_formals<'a>(
     let mut vmap_axis: Option<usize> = None;
     let mut visited: UnordSet<&str> = UnordSet::new();
     loop {
-        let Expr::List(list, _) = current else {
-            return None;
+        let (tag, children) = match current.carrier() {
+            ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return None,
         };
-        match tag(list) {
-            Some(DeepTag::Fn) => return Some((current, vmap_axis)),
-            Some(DeepTag::Var) => {
-                let name = children(list).first().and_then(symbol_name)?;
+        match tag {
+            DeepTag::Fn => return Some((current, vmap_axis)),
+            DeepTag::Var => {
+                let name = children.first().and_then(symbol_name)?;
                 if !visited.insert(name) {
                     return None;
                 }
                 current = defs.get(name)?;
             }
-            Some(DeepTag::Grad) => {
-                current = children(list).first()?;
+            DeepTag::Grad => {
+                current = children.first()?;
             }
-            Some(DeepTag::Vmap) => {
+            DeepTag::Vmap => {
                 if vmap_axis.is_some() {
                     return None;
                 }
-                let kids = children(list);
-                let axis = match kids.get(1) {
+                let axis = match children.get(1) {
                     Some(axis_expr) => static_usize_value(axis_expr)?,
                     None => 0,
                 };
                 vmap_axis = Some(axis);
-                current = kids.first()?;
+                current = children.first()?;
             }
             _ => return None,
         }
@@ -1279,17 +1332,22 @@ fn resolve_transform_fn_for_formals<'a>(
 /// `cast(n, i32)` wrapper (mirrors the lowerer's
 /// `extract_usize_value` shapes for the vmap axis argument).
 fn static_usize_value(expr: &Expr) -> Option<usize> {
-    match expr {
-        Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
-        Expr::List(list, _) => match tag(list)? {
-            DeepTag::Lit => match children(list).first()? {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Int(n)) => usize::try_from(*n).ok(),
+        ExprCarrier::DecodedNode(tag, _, children) => match tag {
+            DeepTag::Lit => match children.first()? {
                 Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
                 _ => None,
             },
-            DeepTag::Cast => static_usize_value(children(list).first()?),
+            DeepTag::Cast => static_usize_value(children.first()?),
             _ => None,
         },
-        _ => None,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -1328,33 +1386,34 @@ fn vmap_lane_placeholder_type(
 /// The declared `{type: ...}` metadata on a single `(params ...)` child
 /// (a `(x {type: T})` list or a MetaExpr-wrapped symbol).
 pub(super) fn param_decl_type_expr(param: &Expr) -> Option<&Expr> {
-    match param {
-        Expr::List(param_list, _) => match param_list.elements.get(1) {
-            Some(Expr::Map(meta, _)) => meta.ty().map(|ty| ty.expression()),
-            _ => None,
-        },
-        Expr::BareList(elements, _) => match elements.get(1) {
-            Some(Expr::Map(meta, _)) => meta.ty().map(|ty| ty.expression()),
-            _ => None,
-        },
-        Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|ty| ty.expression()),
-        _ => None,
-    }
+    runtime_param_parts(param)?
+        .1
+        .and_then(|metadata| metadata.ty().map(|ty| ty.expression()))
 }
 
 /// `(fn ...)` param[index]'s declared type expression, if annotated.
 pub(super) fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> {
-    let Expr::List(list, _) = fn_expr else {
-        return None;
+    let params = match fn_expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children.first()?,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    if tag(list) != Some(DeepTag::Fn) {
-        return None;
-    }
-    let params = children(list).first()?;
-    let Expr::List(params_list, _) = params else {
-        return None;
+    let params = match params.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
-    param_decl_type_expr(children(params_list).get(index)?)
+    param_decl_type_expr(params.get(index)?)
 }
 
 /// Best-effort lookup of `(fn ...)` param[index]'s primitive precision
@@ -1364,10 +1423,14 @@ fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
 }
 
 pub(super) fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
-    let (node_tag, kids) = match expr {
-        Expr::List(list, _) => (tag(list)?, children(list)),
-        Expr::Node(node, _) => (node.tag(), node.children_slice()),
-        _ => return None,
+    let (node_tag, kids) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return None,
     };
     match node_tag {
         DeepTag::TPrim => kids.first().and_then(symbol_name).and_then(prim_from_name),
@@ -1564,28 +1627,42 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
 }
 
 pub(super) fn var_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
-            children(list).first().and_then(symbol_name)
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
+            children.first().and_then(symbol_name)
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
-            node.children_slice().first().and_then(symbol_name)
-        }
-        _ => None,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
+#[cfg(test)]
 pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
+    runtime_param_parts(expr).map(|(name, _)| name)
+}
+
+pub(super) fn runtime_param_parts(expr: &Expr) -> Option<(&str, Option<&Metadata>)> {
     match expr {
-        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
-        Expr::MetaExpr(meta, _) => runtime_param_name(&meta.expr),
-        Expr::BareList(elements, _) => elements.first().and_then(symbol_name),
-        Expr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(symbol_name)
-            .or_else(|| children(list).first().and_then(symbol_name)),
-        _ => None,
+        Expr::Atom(Atom::Name(name), _) => Some((name.as_str(), None)),
+        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
+            let [Expr::Atom(Atom::Name(name), _), Expr::Map(metadata, _)] = elements.as_slice()
+            else {
+                return None;
+            };
+            Some((name.as_str(), Some(metadata)))
+        }
+        Expr::MetaExpr(metadata_expr, _) => {
+            let Expr::Atom(Atom::Name(name), _) = metadata_expr.expr.as_ref() else {
+                return None;
+            };
+            Some((name.as_str(), Some(&metadata_expr.metadata)))
+        }
+        Expr::Node(..) | Expr::UnknownForm(..) | Expr::Atom(..) | Expr::Map(..) => None,
     }
 }
 
@@ -1614,13 +1691,20 @@ const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
 /// transform target (which would be a false-positive rejection of a
 /// perfectly differentiable program — see issue #257 review round 2).
 fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec<String>) {
-    let Expr::List(list, _) = expr else {
-        return;
+    let (tag, children) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (Some(tag), children),
+        ExprCarrier::StructuralList(children) => (None, children),
+        ExprCarrier::UndecodableHead(_, _, children) => (None, children),
+        ExprCarrier::MetadataExpression(meta) => {
+            scan_expr_for_host_only(&meta.expr, hit, vars);
+            return;
+        }
+        ExprCarrier::MalformedLegacyList(list) => (None, list.elements.as_slice()),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => return,
     };
-    if tag(list) == Some(DeepTag::App)
-        && let Some(Expr::List(callee, _)) = children(list).first()
-        && tag(callee) == Some(DeepTag::Var)
-        && let Some(name) = children(callee).first().and_then(symbol_name)
+    if tag == Some(DeepTag::App)
+        && let Some(callee) = children.first()
+        && let Some(name) = var_name(callee)
         && HOST_ONLY_BUILTIN_NAMES.contains(&name)
     {
         if hit.is_none() {
@@ -1628,12 +1712,12 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
         }
         return;
     }
-    if tag(list) == Some(DeepTag::Var)
-        && let Some(name) = children(list).first().and_then(symbol_name)
+    if tag == Some(DeepTag::Var)
+        && let Some(name) = children.first().and_then(symbol_name)
     {
         vars.push(name.to_string());
     }
-    for child in &list.elements {
+    for child in children {
         scan_expr_for_host_only(child, hit, vars);
     }
 }
@@ -1709,6 +1793,170 @@ mod scalar_gradient_tests {
         ] {
             let tensor = RuntimeTensorValue::from_wide("test", prim, shape, values).unwrap();
             assert!(repack_scalar_gradient(RuntimeValue::Tensor(tensor), Prim::F32).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod issue_1125_carrier_reader_tests {
+    use super::*;
+    use chelis_deep::annotations::{MetadataValue, TypeSyntax};
+    use chelis_deep::ast::{MetaExpr, UnknownFormData};
+
+    fn span() -> Span {
+        Span::new(2, 9)
+    }
+
+    fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+        Expr::node(tag, Metadata::default(), children, span())
+    }
+
+    fn legacy(tag: DeepTag, children: Vec<Expr>) -> Expr {
+        let mut elements = vec![
+            Expr::Atom(Atom::Tag(tag), span()),
+            Expr::Map(Metadata::default(), span()),
+        ];
+        elements.extend(children);
+        Expr::List(List { elements }, span())
+    }
+
+    fn name(value: &str) -> Expr {
+        Expr::Atom(Atom::Name(value.to_string()), span())
+    }
+
+    fn typed_param(name_value: &str, ty: Expr) -> Expr {
+        let mut metadata = Metadata::default();
+        metadata.replace(MetadataValue::Type(
+            TypeSyntax::try_new(ty).expect("valid parameter type"),
+        ));
+        Expr::MetaExpr(
+            MetaExpr {
+                metadata,
+                expr: Box::new(name(name_value)),
+            },
+            span(),
+        )
+    }
+
+    #[test]
+    fn grad_wrt_function_resolution_and_parameter_types_have_carrier_parity() {
+        let successor_type = node(DeepTag::TPrim, vec![name("f32")]);
+        let legacy_type = legacy(DeepTag::TPrim, vec![name("f32")]);
+        let successor_fn = node(
+            DeepTag::Fn,
+            vec![
+                node(
+                    DeepTag::Params,
+                    vec![
+                        typed_param("x", successor_type.clone()),
+                        typed_param("y", successor_type),
+                    ],
+                ),
+                node(DeepTag::Var, vec![name("body")]),
+            ],
+        );
+        let legacy_fn = legacy(
+            DeepTag::Fn,
+            vec![
+                legacy(
+                    DeepTag::Params,
+                    vec![
+                        typed_param("x", legacy_type.clone()),
+                        typed_param("y", legacy_type),
+                    ],
+                ),
+                legacy(DeepTag::Var, vec![name("body")]),
+            ],
+        );
+        let successor_transform = node(
+            DeepTag::Grad,
+            vec![
+                node(DeepTag::Var, vec![name("pair")]),
+                node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span())]),
+            ],
+        );
+        let legacy_transform = legacy(
+            DeepTag::Grad,
+            vec![
+                legacy(DeepTag::Var, vec![name("pair")]),
+                legacy(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span())]),
+            ],
+        );
+        let successor_defs = UnordMap::from_iter([("pair".to_string(), successor_fn.clone())]);
+        let legacy_defs = UnordMap::from_iter([("pair".to_string(), legacy_fn.clone())]);
+
+        assert_eq!(
+            grad_wrt_indices_from_transform(&successor_transform).unwrap(),
+            Some(vec![1])
+        );
+        assert_eq!(
+            grad_wrt_indices_from_transform(&successor_transform).unwrap(),
+            grad_wrt_indices_from_transform(&legacy_transform).unwrap()
+        );
+        assert!(resolve_transform_fn_for_formals(&successor_transform, &successor_defs).is_some());
+        assert!(resolve_transform_fn_for_formals(&legacy_transform, &legacy_defs).is_some());
+        assert_eq!(
+            param_type_expr_at(&successor_fn, 1).and_then(extract_prim_from_type_expr),
+            Some(Prim::F32)
+        );
+        assert_eq!(
+            param_type_expr_at(&successor_fn, 1).and_then(extract_prim_from_type_expr),
+            param_type_expr_at(&legacy_fn, 1).and_then(extract_prim_from_type_expr)
+        );
+
+        let successor_host_only = node(
+            DeepTag::App,
+            vec![node(DeepTag::Var, vec![name("tensor_scan")])],
+        );
+        let legacy_host_only = legacy(
+            DeepTag::App,
+            vec![legacy(DeepTag::Var, vec![name("tensor_scan")])],
+        );
+        assert_eq!(
+            find_reachable_host_only_builtin_call(&successor_host_only, &UnordMap::new()),
+            Some("tensor_scan".to_string())
+        );
+        assert_eq!(
+            find_reachable_host_only_builtin_call(&successor_host_only, &UnordMap::new()),
+            find_reachable_host_only_builtin_call(&legacy_host_only, &UnordMap::new())
+        );
+    }
+
+    #[test]
+    fn transform_readers_explicitly_decline_unrelated_carriers() {
+        let malformed = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Grad), span()),
+                    name("not-metadata"),
+                ],
+            },
+            span(),
+        );
+        let unrelated = [
+            Expr::BareList(vec![name("pair")], span()),
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-transform".to_string(),
+                meta: Metadata::default(),
+                children: vec![name("pair")],
+                span: span(),
+            })),
+            Expr::Atom(Atom::Int(1), span()),
+            Expr::Map(Metadata::default(), span()),
+            Expr::MetaExpr(
+                MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(name("pair")),
+                },
+                span(),
+            ),
+            malformed,
+        ];
+        let defs = UnordMap::new();
+        for carrier in unrelated {
+            assert!(grad_wrt_indices_from_transform(&carrier).is_err());
+            assert!(resolve_transform_fn_for_formals(&carrier, &defs).is_none());
+            assert_eq!(param_type_expr_at(&carrier, 0), None);
         }
     }
 }

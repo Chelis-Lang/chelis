@@ -2,8 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::UnordMap;
 use std::fs;
 
-use chelis_deep::ast::{Atom, Expr, List};
-use chelis_deep::{Span, decode_effect_kind};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, List};
 use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::evaluation::RandomExecutionContext;
@@ -13,6 +12,7 @@ use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
 };
 use chelis_vocab::EffectKind;
+use chelis_vocab::EffectKindDecodeError;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -491,21 +491,81 @@ fn render_shape(shape: &[usize]) -> String {
     format!("[{dimensions}]")
 }
 
+fn decode_effect_kind(metadata: &Metadata) -> Result<EffectKind, EffectKindDecodeError<'_>> {
+    metadata
+        .effect()
+        .map(|value| *value.value())
+        .ok_or(EffectKindDecodeError::Missing)
+}
+
 /// Isolated source-call classification must retain the checked frame types
 /// of bare arguments. Attach only missing type evidence: scalar expressions
 /// remain source expressions, never their already-evaluated runtime values.
-fn source_call_with_checked_argument_types(list: &List, types: &[Option<Expr>]) -> List {
-    let mut call = list.clone();
-    for (argument, ty) in call.elements[3..].iter_mut().zip(types) {
-        if let (Expr::List(argument, _), Some(ty)) = (argument, ty)
-            && let Some(Expr::Map(metadata, _)) = argument.elements.get_mut(1)
-            && metadata.ty().is_none()
-            && let Ok(ty) = chelis_deep::annotations::TypeSyntax::try_new(ty.clone())
-        {
-            metadata.replace(chelis_deep::annotations::MetadataValue::Type(ty));
+#[derive(Clone, Copy)]
+struct EvalNode<'a> {
+    expr: &'a Expr,
+    tag: DeepTag,
+    metadata: &'a Metadata,
+    children: &'a [Expr],
+}
+
+impl<'a> EvalNode<'a> {
+    fn new(expr: &'a Expr, tag: DeepTag, metadata: &'a Metadata, children: &'a [Expr]) -> Self {
+        Self {
+            expr,
+            tag,
+            metadata,
+            children,
         }
     }
-    call
+}
+
+fn rebuild_eval_node(node: EvalNode<'_>, metadata: Metadata, children: Vec<Expr>) -> Expr {
+    match node.expr {
+        Expr::Node(_, span) => Expr::node(node.tag, metadata, children, *span),
+        Expr::List(list, span) => {
+            let mut elements = Vec::with_capacity(children.len() + 2);
+            elements.push(list.elements[0].clone());
+            let metadata_span = list.elements.get(1).map(Expr::span).unwrap_or(*span);
+            elements.push(Expr::Map(metadata, metadata_span));
+            elements.extend(children);
+            Expr::List(List { elements }, *span)
+        }
+        _ => unreachable!("decoded EvalNode must retain a decoded carrier"),
+    }
+}
+
+fn attach_missing_checked_type(argument: &Expr, ty: &Expr) -> Expr {
+    let node = match argument.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            EvalNode::new(argument, tag, metadata, children)
+        }
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => return argument.clone(),
+    };
+    if node.metadata.ty().is_some() {
+        return argument.clone();
+    }
+    let Ok(ty) = chelis_deep::annotations::TypeSyntax::try_new(ty.clone()) else {
+        return argument.clone();
+    };
+    let mut metadata = node.metadata.clone();
+    metadata.replace(chelis_deep::annotations::MetadataValue::Type(ty));
+    rebuild_eval_node(node, metadata, node.children.to_vec())
+}
+
+fn source_call_with_checked_argument_types(node: EvalNode<'_>, types: &[Option<Expr>]) -> Expr {
+    let mut children = node.children.to_vec();
+    for (argument, ty) in children.iter_mut().skip(1).zip(types) {
+        if let Some(ty) = ty {
+            *argument = attach_missing_checked_type(argument, ty);
+        }
+    }
+    rebuild_eval_node(node, node.metadata.clone(), children)
 }
 
 impl<'a> EvalContext<'a> {
@@ -1037,45 +1097,44 @@ impl<'a> EvalContext<'a> {
         {
             return Err(chelis_types::EVAL_CANCELLED_MSG.to_string());
         }
-        match expr {
-            Expr::Atom(_, _) => Err("bare atom is not a runtime expression".to_string()),
-            Expr::Map(_, _) => Ok(RuntimeValue::Unit),
-            Expr::MetaExpr(meta, _) => self.eval_expr(&meta.expr),
-            Expr::List(list, _) => self.eval_list(list),
-            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-            Expr::Node(node, span) => {
-                let bridged = node.to_list(*span);
-                self.eval_list(&bridged)
+        match expr.carrier() {
+            ExprCarrier::Atom(_) => Err("bare atom is not a runtime expression".to_string()),
+            ExprCarrier::MetadataMap(_) => Ok(RuntimeValue::Unit),
+            ExprCarrier::MetadataExpression(meta) => self.eval_expr(&meta.expr),
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                self.eval_decoded(EvalNode::new(expr, tag, metadata, children))
             }
             // chelis#1087: loud rejection, identifying the form the way the
             // resugar boundary describes it rather than by an internal
             // variant name.
-            Expr::BareList(_, _) => {
+            ExprCarrier::StructuralList(_) => {
                 Err("a structural bare list is not a runtime expression".to_string())
             }
-            Expr::UnknownForm(data) => Err(format!(
-                "unknown form `{}` is not a runtime expression",
-                data.head
-            )),
+            ExprCarrier::UndecodableHead(head, _, _) => {
+                Err(format!("unknown form `{head}` is not a runtime expression"))
+            }
+            ExprCarrier::MalformedLegacyList(_) => {
+                Err("malformed legacy list is not a runtime expression".to_string())
+            }
         }
     }
 
-    fn eval_list(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        match tag(list) {
-            Some(DeepTag::Lit) => self.eval_lit(list),
-            Some(DeepTag::Var) => self.eval_var(list),
-            Some(DeepTag::App) => self.eval_app(list),
-            Some(DeepTag::If) => self.eval_if(list),
-            Some(DeepTag::Let) => self.eval_let(list),
-            Some(DeepTag::Tuple) => Ok(RuntimeValue::Tuple(
-                children(list)
+    fn eval_decoded(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        match node.tag {
+            DeepTag::Lit => self.eval_lit(node),
+            DeepTag::Var => self.eval_var(node),
+            DeepTag::App => self.eval_app(node),
+            DeepTag::If => self.eval_if(node),
+            DeepTag::Let => self.eval_let(node),
+            DeepTag::Tuple => Ok(RuntimeValue::Tuple(
+                node.children
                     .iter()
                     .map(|child| self.eval_expr(child))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            Some(DeepTag::Copy) => {
+            DeepTag::Copy => {
                 let value = self.eval_expr(
-                    children(list)
+                    node.children
                         .first()
                         .ok_or_else(|| "copy missing value".to_string())?,
                 )?;
@@ -1084,21 +1143,21 @@ impl<'a> EvalContext<'a> {
                     other => Err(format!("copy expects tensor input, got {other:?}")),
                 }
             }
-            Some(DeepTag::Borrow) => {
+            DeepTag::Borrow => {
                 // The IR lower path treats `borrow` as identity
                 // (chelis-ir/src/lower.rs::lower_identity); mirror that
                 // here so `&t` syntax type-checks AND evaluates.
                 self.eval_expr(
-                    children(list)
+                    node.children
                         .first()
                         .ok_or_else(|| "borrow missing value".to_string())?,
                 )
             }
-            Some(DeepTag::Block) => {
+            DeepTag::Block => {
                 // chelis#859: sequenced expressions, value is the last
                 // child's (spec/03 §2.3). Non-last children evaluate for
                 // their effects (e.g. `print` transcript lines).
-                let kids = children(list);
+                let kids = node.children;
                 let Some((last, init)) = kids.split_last() else {
                     return Err("a `block` node has no children".to_string());
                 };
@@ -1107,11 +1166,11 @@ impl<'a> EvalContext<'a> {
                 }
                 self.eval_expr(last)
             }
-            Some(DeepTag::Record) => self.eval_record(list),
-            Some(DeepTag::Access) => self.eval_access(list),
-            Some(DeepTag::TupleGet) => self.eval_tuple_get(list),
-            Some(DeepTag::Match) => self.eval_match(list),
-            Some(DeepTag::Fn) => self.eval_fn(list),
+            DeepTag::Record => self.eval_record(node),
+            DeepTag::Access => self.eval_access(node),
+            DeepTag::TupleGet => self.eval_tuple_get(node),
+            DeepTag::Match => self.eval_match(node),
+            DeepTag::Fn => self.eval_fn(node),
             // chelis#1923: a pipe cannot reach the evaluator. Every checker
             // entry folds it into the application it denotes
             // (`chelis_deep::pipe::fold_pipe`), and this evaluator reads the
@@ -1120,22 +1179,22 @@ impl<'a> EvalContext<'a> {
             // unresolved parameter had lost; the folded application carries
             // the operand's own annotation, so there is nothing left to
             // re-derive. Fail closed so a new unfolded ingress is loud.
-            Some(DeepTag::Pipe) => Err("a pipe reached evaluation unfolded: every checker \
+            DeepTag::Pipe => Err("a pipe reached evaluation unfolded: every checker \
                  entry folds a pipe into the application it denotes \
                  (spec/02-surf-syntax.md section 0.1; chelis#1923)"
                 .to_string()),
-            Some(DeepTag::Cast) => self.eval_cast(list),
-            Some(DeepTag::Realize) => {
+            DeepTag::Cast => self.eval_cast(node),
+            DeepTag::Realize => {
                 // Bucket 1: `realize` is identity in the host runtime,
                 // matching the C-backend `lower_realize` pass-through
                 // (`crates/chelis-ir/src/host.rs::lower_host_expr`).
                 self.eval_expr(
-                    children(list)
+                    node.children
                         .first()
                         .ok_or_else(|| "realize missing value".to_string())?,
                 )
             }
-            Some(DeepTag::Grad) => {
+            DeepTag::Grad => {
                 // Bucket 1: capture the `(grad ...)` form so it can be
                 // applied later. The application path
                 // (`apply_resolved_callable` for a `Transform`) routes
@@ -1144,33 +1203,33 @@ impl<'a> EvalContext<'a> {
                 // --target c` uses.
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Grad,
-                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    transform_expr: node.expr.clone(),
                     captured_env: self.bindings.clone(),
                     invocation_contracts: Box::default(),
                 })
             }
-            Some(DeepTag::Vmap) => {
+            DeepTag::Vmap => {
                 // Bucket 1: same pattern as `grad` above, capture-and-apply.
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Vmap,
-                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    transform_expr: node.expr.clone(),
                     captured_env: self.bindings.clone(),
                     invocation_contracts: Box::default(),
                 })
             }
-            Some(DeepTag::Jit) => {
+            DeepTag::Jit => {
                 // `spec/03-deep-syntax.md` §2.7: `jit` is a compilation
                 // trigger and a semantic no-op at evaluation. The host
                 // runtime evaluates the inner expression and returns its
                 // value, mirroring `lower_jit` in
                 // `crates/chelis-ir/src/lower.rs` and the IR DAG behavior.
                 self.eval_expr(
-                    children(list)
+                    node.children
                         .first()
                         .ok_or_else(|| "jit missing value".to_string())?,
                 )
             }
-            Some(DeepTag::Par) => {
+            DeepTag::Par => {
                 // `spec/03-deep-syntax.md` §2.3: `par` v1 is sequential
                 // composition; evaluate each child in order and return the
                 // value of the last child. Mirrors `lower_par` in
@@ -1182,16 +1241,15 @@ impl<'a> EvalContext<'a> {
                 // an error rather than synthesizing a zero default, since
                 // the parser/check layers should not have admitted an
                 // empty par body.
-                let kids = children(list);
                 let mut last: Option<RuntimeValue> = None;
-                for child in kids {
+                for child in node.children {
                     last = Some(self.eval_expr(child)?);
                 }
                 last.ok_or_else(|| "par has no children to evaluate".to_string())
             }
-            Some(DeepTag::HandleEffect) => {
-                let kids = children(list);
-                match decode_effect_kind(list)
+            DeepTag::HandleEffect => {
+                let kids = node.children;
+                match decode_effect_kind(node.metadata)
                     .map_err(|error| format!("{error} in `handle-effect` evaluation"))?
                 {
                     EffectKind::Random => {
@@ -1253,13 +1311,13 @@ impl<'a> EvalContext<'a> {
             }
             other => Err(format!(
                 "host runtime does not support `{}`",
-                other.map(DeepTag::as_str).unwrap_or("?")
+                other.as_str()
             )),
         }
     }
 
-    fn eval_record(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+    fn eval_record(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
         let ctor = kids
             .first()
             .and_then(symbol_name)
@@ -1267,16 +1325,25 @@ impl<'a> EvalContext<'a> {
         let mut fields_by_name = UnordMap::new();
         let mut source_order = Vec::new();
         for field in kids.iter().skip(1) {
-            let Some(field_list) = as_list(field) else {
-                continue;
+            let field_kids = match field.carrier() {
+                ExprCarrier::DecodedNode(DeepTag::Kv, _, children) => children,
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => {
+                    return Err("record field must be a decoded `kv` node".to_string());
+                }
             };
-            if tag(field_list) != Some(DeepTag::Kv) {
-                continue;
+            if field_kids.len() != 2 {
+                return Err("record `kv` field must contain a name and value".to_string());
             }
-            let field_kids = children(field_list);
-            let Some(name) = field_kids.first().and_then(symbol_name) else {
-                continue;
-            };
+            let name = field_kids
+                .first()
+                .and_then(symbol_name)
+                .ok_or_else(|| "record field name must be a symbol".to_string())?;
             let value = self.eval_expr(
                 field_kids
                     .get(1)
@@ -1315,8 +1382,8 @@ impl<'a> EvalContext<'a> {
         })
     }
 
-    fn eval_access(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+    fn eval_access(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
         let target = self.eval_expr(
             kids.first()
                 .ok_or_else(|| "access missing target".to_string())?,
@@ -1349,8 +1416,9 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_lit(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let value = children(list)
+    fn eval_lit(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let value = node
+            .children
             .first()
             .ok_or_else(|| "lit missing value".to_string())?;
         // Per spec/04-type-system.md §5.3, the desugarer narrows
@@ -1362,10 +1430,9 @@ impl<'a> EvalContext<'a> {
         // surrounding-position dtype, not just the bare default.
         // [02-SURF-P10b]: a literal in `cast(<literal>, p)` binds at `p`.
         // Resolve that stamp through the call frame's precision bindings.
-        let meta = get_meta(list);
-        let meta_dtype = match meta.and_then(lit_meta_prim) {
+        let meta_dtype = match lit_meta_prim(node.metadata) {
             Some(prim) => Some(prim),
-            None => match meta.and_then(lit_meta_type_var_name) {
+            None => match lit_meta_type_var_name(node.metadata) {
                 // Internal callee binders may remain unbound until inlining;
                 // preserve the default when no call-site binding exists.
                 Some(binder) => self.precision_bindings.get(binder).copied(),
@@ -1394,13 +1461,26 @@ impl<'a> EvalContext<'a> {
             // inner `()` is an empty bare list. Treat that as RuntimeValue::Unit so
             // `def test_noop() -> unit = ()` runs cleanly instead of dying with
             // "unsupported literal form".
-            Expr::List(inner, _) if inner.elements.is_empty() => Ok(RuntimeValue::Unit),
+            value
+                if match value.carrier() {
+                    ExprCarrier::StructuralList(elements) => elements.is_empty(),
+                    ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_) => false,
+                } =>
+            {
+                Ok(RuntimeValue::Unit)
+            }
             _ => Err("unsupported literal form".to_string()),
         }
     }
 
-    fn eval_var(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let name = children(list)
+    fn eval_var(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let name = node
+            .children
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "var missing name".to_string())?;
@@ -1440,24 +1520,38 @@ impl<'a> EvalContext<'a> {
         Err(format!("unknown runtime name `{name}`"))
     }
 
-    fn eval_fn(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
-        let params_list = kids
+    fn eval_fn(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
+        let params_expr = kids
             .first()
-            .and_then(as_list)
             .ok_or_else(|| "fn missing params".to_string())?;
-        if tag(params_list) != Some(DeepTag::Params) {
-            return Err("fn params malformed".to_string());
-        }
-        let params = children(params_list)
+        let params_children = match params_expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {
+                return Err("fn params malformed".to_string());
+            }
+        };
+        let decoded_params = params_children
             .iter()
-            .filter_map(runtime_param_name)
-            .map(str::to_string)
+            .map(|param| {
+                runtime_param_parts(param).ok_or_else(|| "fn params malformed".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let params = decoded_params
+            .iter()
+            .map(|(name, _)| (*name).to_string())
             .collect::<Vec<_>>();
-        let param_types = children(params_list)
+        let param_types = decoded_params
             .iter()
-            .filter(|param| runtime_param_name(param).is_some())
-            .map(|param| param_decl_type_expr(param).cloned())
+            .map(|(_, metadata)| {
+                metadata.and_then(|metadata| metadata.ty().map(|ty| ty.expression().clone()))
+            })
             .collect::<Vec<_>>();
         let body = kids
             .get(1)
@@ -1474,13 +1568,11 @@ impl<'a> EvalContext<'a> {
             })
             .cloned();
         Ok(RuntimeValue::Closure {
-            checked_function: Box::new(Expr::List(list.clone(), body.span())),
+            checked_function: Box::new(node.expr.clone()),
             params,
             param_types,
             return_type,
-            checked_signature: get_meta(list)
-                .and_then(|meta| meta.ty())
-                .map(|ty| ty.expression().clone()),
+            checked_signature: node.metadata.ty().map(|ty| ty.expression().clone()),
             invocation_contracts: Box::default(),
             body,
             // Named declarations are initialized in an empty lexical frame;
@@ -1491,16 +1583,16 @@ impl<'a> EvalContext<'a> {
         })
     }
 
-    fn eval_app(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        self.eval_app_under_result_claim(list, &[])
+    fn eval_app(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        self.eval_app_under_result_claim(node, &[])
     }
 
     fn eval_app_under_result_claim(
         &mut self,
-        list: &List,
+        node: EvalNode<'_>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+        let kids = node.children;
         let func = kids
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
@@ -1512,10 +1604,8 @@ impl<'a> EvalContext<'a> {
         if var_name(func) == Some("dropout")
             && self.active_builtin_symbol("dropout")
             && self.execution_exclusion.is_none()
-            && chelis_ir::lower::evaluation_profile(
-                &Expr::List(list.clone(), Span::new(0, 0)),
-                &self.top_level_defs,
-            ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
+            && chelis_ir::lower::evaluation_profile(node.expr, &self.top_level_defs)
+                == chelis_ir::evaluation::EvaluationProfile::FixedControl
         {
             return self.eval_named_axis_reduction_app("dropout", kids);
         }
@@ -1553,9 +1643,7 @@ impl<'a> EvalContext<'a> {
             .iter()
             .map(|arg| self.static_type_expr_of(arg))
             .collect::<Vec<_>>();
-        let result_type_expr = get_meta(list)
-            .and_then(|meta| meta.ty())
-            .map(|ty| ty.expression().clone());
+        let result_type_expr = node.metadata.ty().map(|ty| ty.expression().clone());
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))
@@ -1581,18 +1669,18 @@ impl<'a> EvalContext<'a> {
             && result_type_expr.as_ref().is_some_and(|ty| {
                 tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
             })
-            && let source_call = source_call_with_checked_argument_types(list, &arg_type_exprs)
-            && chelis_ir::lower::evaluation_profile(
-                &Expr::List(source_call.clone(), Span::new(0, 0)),
-                &self.top_level_defs,
-            ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
+            && let source_call = source_call_with_checked_argument_types(node, &arg_type_exprs)
+            && chelis_ir::lower::evaluation_profile(&source_call, &self.top_level_defs)
+                == chelis_ir::evaluation::EvaluationProfile::FixedControl
             // Scalar-staging trials must retain the same checked type evidence
             // as admission, or a data argument can be mistaken for a control
             // expression and executed a second time by the lowerer.
             && let Some(value) = self.try_named_axis_def_call(
                 &resolved,
                 &def_expr,
-                children(&source_call),
+                tagged_expr_children(&source_call)
+                    .map(|(_, children)| children)
+                    .expect("source call preserves its decoded carrier"),
                 &args,
                 true,
             )?
@@ -1673,7 +1761,7 @@ impl<'a> EvalContext<'a> {
             && !self.bindings.contains_key(callee)
             && !self.tensor_bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+            && def_expr.tag() == Some(DeepTag::Fn)
             && self.def_requires_named_axis_routing(&resolved)
             // chelis#1277 B2h: a def the C lane lowers as a kernel takes that
             // kernel at application; site B keeps only the defs C also
@@ -1697,7 +1785,7 @@ impl<'a> EvalContext<'a> {
         let callable = if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && (matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+            && (def_expr.tag() == Some(DeepTag::Fn)
                 || self
                     .type_env
                     .get(&resolved)
@@ -1716,8 +1804,8 @@ impl<'a> EvalContext<'a> {
         )
     }
 
-    fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+    fn eval_if(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
         let cond =
             self.eval_if_condition(kids.first().ok_or_else(|| "if missing cond".to_string())?)?;
         match cond {
@@ -1760,44 +1848,39 @@ impl<'a> EvalContext<'a> {
         if claims.is_empty() {
             return self.eval_expr(expr);
         }
-        // The ordinary evaluator bridges typed nodes through the same list
-        // dispatch. Preserve that route instead of making a second AST walk.
-        if let Expr::Node(node, span) = expr {
-            return self.eval_under_result_claim(&Expr::List(node.to_list(*span), *span), claims);
-        }
-        match tagged_expr_children(expr) {
-            Some((DeepTag::Block, kids)) => {
-                if let Some((last, init)) = kids.split_last() {
-                    for child in init {
-                        self.eval_expr(child)?;
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(tag, metadata, kids) => {
+                let node = EvalNode::new(expr, tag, metadata, kids);
+                match tag {
+                    DeepTag::Block => {
+                        if let Some((last, init)) = kids.split_last() {
+                            for child in init {
+                                self.eval_expr(child)?;
+                            }
+                            return self.eval_under_result_claim(last, claims);
+                        }
                     }
-                    return self.eval_under_result_claim(last, claims);
+                    DeepTag::Let => return self.eval_let_under_result_claim(node, claims),
+                    DeepTag::If => {
+                        let condition =
+                            self.eval_if_condition(kids.first().ok_or("if missing cond")?)?;
+                        let selected = match condition {
+                            true => kids.get(1).ok_or("if missing then branch")?,
+                            false => kids.get(2).ok_or("if missing else branch")?,
+                        };
+                        return self.eval_under_result_claim(selected, claims);
+                    }
+                    DeepTag::Match => return self.eval_match_under_result_claim(node, claims),
+                    DeepTag::App => return self.eval_app_under_result_claim(node, claims),
+                    _ => {}
                 }
             }
-            Some((DeepTag::Let, _)) => {
-                if let Some(list) = as_list(expr) {
-                    return self.eval_let_under_result_claim(list, claims);
-                }
-            }
-            Some((DeepTag::If, kids)) => {
-                let condition = self.eval_if_condition(kids.first().ok_or("if missing cond")?)?;
-                let selected = match condition {
-                    true => kids.get(1).ok_or("if missing then branch")?,
-                    false => kids.get(2).ok_or("if missing else branch")?,
-                };
-                return self.eval_under_result_claim(selected, claims);
-            }
-            Some((DeepTag::Match, _)) => {
-                if let Some(list) = as_list(expr) {
-                    return self.eval_match_under_result_claim(list, claims);
-                }
-            }
-            Some((DeepTag::App, _)) => {
-                if let Some(list) = as_list(expr) {
-                    return self.eval_app_under_result_claim(list, claims);
-                }
-            }
-            _ => {}
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {}
         }
         self.eval_expr(expr)
     }
@@ -1810,26 +1893,34 @@ impl<'a> EvalContext<'a> {
     /// subsequent effects execute; other bindings never inherit them.
     fn eval_let_under_result_claim(
         &mut self,
-        list: &List,
+        node: EvalNode<'_>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+        let kids = node.children;
         let (Some(bind_list_expr), Some(body)) = (kids.first(), kids.get(1)) else {
             // A malformed let has no producing binding to guard; `eval_let`
             // owns the diagnostic.
-            return self.eval_let(list);
+            return self.eval_let(node);
         };
-        let Some(bind_list) = as_list(bind_list_expr) else {
-            return self.eval_let(list);
+        let bind_node = match bind_list_expr.carrier() {
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                EvalNode::new(bind_list_expr, tag, metadata, children)
+            }
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => return self.eval_let(node),
         };
-        if tag(bind_list) != Some(DeepTag::Bind) {
-            return self.eval_let(list);
+        if bind_node.tag != DeepTag::Bind {
+            return self.eval_let(node);
         }
         let guarded = let_result_binding_index(bind_list_expr, body);
         let saved = self.bindings.clone();
         let saved_types = self.binding_types.clone();
         let result = (|| {
-            let bind_kids = children(bind_list);
+            let bind_kids = bind_node.children;
             let declaration_name = self
                 .active_declaration_names
                 .last()
@@ -1988,13 +2079,25 @@ impl<'a> EvalContext<'a> {
         Ok(value)
     }
 
-    fn eval_let(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
-        let bind_list = kids
+    fn eval_let(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
+        let bind_expr = kids
             .first()
-            .and_then(as_list)
             .ok_or_else(|| "let missing bindings".to_string())?;
-        if tag(bind_list) != Some(DeepTag::Bind) {
+        let bind_node = match bind_expr.carrier() {
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                EvalNode::new(bind_expr, tag, metadata, children)
+            }
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {
+                return Err("let missing bindings".to_string());
+            }
+        };
+        if bind_node.tag != DeepTag::Bind {
             return Err("let bindings malformed".to_string());
         }
         let saved = self.bindings.clone();
@@ -2003,7 +2106,7 @@ impl<'a> EvalContext<'a> {
         // body evaluation errors) so a caught-and-continued error can
         // never leak partial binds or stale binding types.
         let result = (|| {
-            let bind_kids = children(bind_list);
+            let bind_kids = bind_node.children;
             let declaration_name = self
                 .active_declaration_names
                 .last()
@@ -2056,19 +2159,26 @@ impl<'a> EvalContext<'a> {
         result
     }
 
-    fn eval_tuple_get(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+    fn eval_tuple_get(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
         let tuple = self.eval_expr(
             kids.first()
                 .ok_or_else(|| "tuple-get missing tuple".to_string())?,
         )?;
-        let index = children(
-            as_list(
-                kids.get(1)
-                    .ok_or_else(|| "tuple-get missing index".to_string())?,
-            )
-            .ok_or_else(|| "tuple-get index must be a literal".to_string())?,
-        );
+        let index_expr = kids
+            .get(1)
+            .ok_or_else(|| "tuple-get missing index".to_string())?;
+        let index = match index_expr.carrier() {
+            ExprCarrier::DecodedNode(_, _, children) => children,
+            ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_)
+            | ExprCarrier::MalformedLegacyList(_) => {
+                return Err("tuple-get index must be a literal".to_string());
+            }
+        };
         let idx = index
             .first()
             .and_then(int_value)
@@ -2083,30 +2193,37 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_match(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        self.eval_match_under_result_claim(list, &[])
+    fn eval_match(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        self.eval_match_under_result_claim(node, &[])
     }
 
     fn eval_match_under_result_claim(
         &mut self,
-        list: &List,
+        node: EvalNode<'_>,
         claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+        let kids = node.children;
         let scrutinee = self.eval_expr(
             kids.first()
                 .ok_or_else(|| "match missing scrutinee".to_string())?,
         )?;
         for arm in kids.iter().skip(1) {
-            let Some(arm_list) = as_list(arm) else {
-                continue;
+            let arm_kids = match arm.carrier() {
+                ExprCarrier::DecodedNode(DeepTag::Arm, _, children) => children,
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => {
+                    return Err("match arm must be a decoded `arm` node".to_string());
+                }
             };
-            if tag(arm_list) != Some(DeepTag::Arm) {
-                continue;
-            }
-            let arm_kids = children(arm_list);
-            if arm_kids.len() < 3 {
-                continue;
+            if arm_kids.len() != 3 {
+                return Err(
+                    "match `arm` must contain exactly a pattern, guard, and body".to_string(),
+                );
             }
             let saved = self.bindings.clone();
             let saved_types = self.binding_types.clone();
@@ -2470,16 +2587,23 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_cast(&mut self, list: &List) -> Result<RuntimeValue, String> {
-        let kids = children(list);
+    fn eval_cast(&mut self, node: EvalNode<'_>) -> Result<RuntimeValue, String> {
+        let kids = node.children;
         let value = self.eval_expr(
             kids.first()
                 .ok_or_else(|| "cast missing value".to_string())?,
         )?;
         let target = kids
             .get(1)
-            .and_then(as_list)
-            .and_then(|ty| children(ty).first())
+            .and_then(|ty| match ty.carrier() {
+                ExprCarrier::DecodedNode(_, _, children) => children.first(),
+                ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            })
             .and_then(symbol_name)
             .ok_or_else(|| "cast missing target type".to_string())?;
         // Resolve the textual target into a Prim using the canonical

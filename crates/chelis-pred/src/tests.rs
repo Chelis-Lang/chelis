@@ -265,6 +265,18 @@ fn grammar_rejects_match() {
 }
 
 #[test]
+fn grammar_rejection_names_the_unknown_form_head() {
+    let src = "(fn {} (params {} p) (future_form {} true))";
+    assert_eq!(
+        predicate_in_grammar(&fnnode(src)),
+        Err(PredGrammarError::DisallowedNode(
+            "unknown form `future_form`".to_string()
+        )),
+        "[04-TOT-3] requires the diagnostic to identify the malformed tag"
+    );
+}
+
+#[test]
 fn grammar_rejects_lambda() {
     let src = "(fn {} (params {} p) \
         (fn {} (params {} q) (access {} (var {} q) value)))";
@@ -345,7 +357,7 @@ fn grammar_rejects_each_nonexpression_carrier_with_its_exact_role() {
                 children: vec![],
                 span,
             })),
-            "unknown form",
+            "unknown form `future-form`",
         ),
         (
             Expr::List(
