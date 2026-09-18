@@ -5,7 +5,13 @@
 //! pre-flight).
 
 use super::*;
+use chelis_deep::Span;
+use chelis_deep::ast::{List, Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str;
+use std::fs;
+use std::path::{Path, PathBuf};
+use syn::ext::IdentExt;
+use syn::visit::Visit;
 
 /// Parse a single Deep expression (the predicate fn node).
 fn fnnode(src: &str) -> Expr {
@@ -301,6 +307,501 @@ fn grammar_rejects_non_fn_top() {
 }
 
 #[test]
+fn grammar_reads_successor_and_legacy_decoded_nodes_identically() {
+    let span = Span::new(3, 9);
+    let successor = Expr::node(
+        DeepTag::Var,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name("value".to_string()), span)],
+        span,
+    );
+    let legacy = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                Expr::Map(Metadata::default(), span),
+                Expr::Atom(Atom::Name("value".to_string()), span),
+            ],
+        },
+        span,
+    );
+
+    assert_eq!(check_in_grammar(&successor), Ok(()));
+    assert_eq!(check_in_grammar(&legacy), Ok(()));
+}
+
+#[test]
+fn grammar_rejects_each_nonexpression_carrier_with_its_exact_role() {
+    let span = Span::new(3, 9);
+    let cases = [
+        (
+            Expr::BareList(vec![Expr::Atom(Atom::Name("item".to_string()), span)], span),
+            "bare list",
+        ),
+        (
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-form".to_string(),
+                meta: Metadata::default(),
+                children: vec![],
+                span,
+            })),
+            "unknown form",
+        ),
+        (
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name("future-legacy".to_string()), span),
+                        Expr::Map(Metadata::default(), span),
+                    ],
+                },
+                span,
+            ),
+            "malformed list",
+        ),
+        (
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                        Expr::Atom(Atom::Name("not-metadata".to_string()), span),
+                    ],
+                },
+                span,
+            ),
+            "malformed list",
+        ),
+        (Expr::Map(Metadata::default(), span), "map"),
+        (
+            Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(Expr::Atom(Atom::Bool(true), span)),
+                },
+                span,
+            ),
+            "meta-expr",
+        ),
+    ];
+
+    for (expr, expected) in cases {
+        assert_eq!(
+            check_in_grammar(&expr),
+            Err(PredGrammarError::DisallowedNode(expected.to_string()))
+        );
+    }
+}
+
+#[test]
+fn predicate_reader_has_no_node_to_list_bridge() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let sources = production_rust_sources(&source_root);
+    assert!(
+        sources.iter().any(|path| path.ends_with("lib.rs")),
+        "production audit must include the crate root"
+    );
+
+    let calls = sources
+        .into_iter()
+        .flat_map(|path| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let syntax = syn::parse_file(&source)
+                .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+            audit_syntax(&path.display().to_string(), &syntax)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        calls.is_empty(),
+        "predicate grammar reserves method, qualified, imported, and macro `to_list` spellings \
+         so it cannot reconstruct a Node list; found {:?}",
+        calls
+    );
+}
+
+fn production_rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut sources = Vec::new();
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+        {
+            let entry = entry.expect("production source directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_none_or(|name| name != "tests.rs")
+            {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    sources
+}
+
+fn ident_is(ident: &proc_macro2::Ident, expected: &str) -> bool {
+    ident.unraw() == expected
+}
+
+fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            ident_is(&path.ident, "to_list") || use_tree_mentions_to_list(&path.tree)
+        }
+        syn::UseTree::Name(name) => ident_is(&name.ident, "to_list"),
+        syn::UseTree::Rename(rename) => {
+            ident_is(&rename.ident, "to_list") || ident_is(&rename.rename, "to_list")
+        }
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_to_list),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn tokens_mention_to_list(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident_is(&ident, "to_list"),
+        proc_macro2::TokenTree::Group(group) => tokens_mention_to_list(group.stream()),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
+}
+
+fn macro_mentions_to_list(mac: &syn::Macro) -> bool {
+    mac.path
+        .segments
+        .last()
+        .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
+        || tokens_mention_to_list(mac.tokens.clone())
+}
+
+fn attribute_mentions_to_list(attribute: &syn::Attribute) -> bool {
+    if attribute
+        .path()
+        .segments
+        .last()
+        .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
+    {
+        return true;
+    }
+    match &attribute.meta {
+        syn::Meta::List(list) => tokens_mention_to_list(list.tokens.clone()),
+        syn::Meta::NameValue(name_value) => {
+            struct ToListPathScan(bool);
+            impl<'ast> Visit<'ast> for ToListPathScan {
+                fn visit_path(&mut self, path: &'ast syn::Path) {
+                    self.0 |= path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| ident_is(&segment.ident, "to_list"));
+                    syn::visit::visit_path(self, path);
+                }
+            }
+            let mut scan = ToListPathScan(false);
+            scan.visit_expr(&name_value.value);
+            scan.0
+        }
+        syn::Meta::Path(_) => false,
+    }
+}
+
+fn audit_source(source: &str) -> Vec<String> {
+    let syntax = syn::parse_file(source).expect("audit fixture parses");
+    audit_syntax("fixture", &syntax)
+}
+
+fn audit_syntax(label: &str, syntax: &syn::File) -> Vec<String> {
+    let mut audit = NodeToListSpellingAudit {
+        label,
+        findings: Vec::new(),
+    };
+    audit.visit_file(syntax);
+    audit.findings
+}
+
+struct NodeToListSpellingAudit<'a> {
+    label: &'a str,
+    findings: Vec<String>,
+}
+
+impl NodeToListSpellingAudit<'_> {
+    fn record(&mut self, kind: &str) {
+        self.findings.push(format!("{}: {kind}", self.label));
+    }
+}
+
+impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if ident_is(&call.method, "to_list") {
+            self.record("reserved method spelling");
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        if path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
+            && (path.qself.is_some() || path.path.segments.len() > 1)
+        {
+            self.record("reserved qualified path spelling");
+        }
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_mentions_to_list(&item.tree) {
+            self.record("reserved imported path spelling");
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if attribute_mentions_to_list(attribute) {
+            self.record("reserved attribute identifier");
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if item
+            .ident
+            .as_ref()
+            .is_some_and(|ident| ident_is(ident, "to_list"))
+        {
+            self.record("reserved macro definition");
+        }
+        syn::visit::visit_item_macro(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if ident_is(&item.ident, "to_list")
+            || item
+                .rename
+                .as_ref()
+                .is_some_and(|(_, rename)| ident_is(rename, "to_list"))
+        {
+            self.record("reserved extern-crate identifier");
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if macro_mentions_to_list(mac) {
+            self.record("reserved macro identifier");
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+#[test]
+fn node_to_list_audit_rejects_method_and_aliased_associated_calls() {
+    for source in [
+        "use chelis_deep::node::Node; fn bridge(node: Node) { let _ = node.to_list(span); }",
+        "use chelis_deep::node::Node; fn bridge() { let _ = Node::to_list(node, span); }",
+        "use chelis_deep::node::Node; type DeepNode = Node; fn bridge() { let _ = DeepNode::to_list(node, span); }",
+        "fn bridge() { let adapter = chelis_deep::node::Node::to_list; let _ = adapter(node, span); }",
+        "type DeepNode = chelis_deep::node::Node; fn bridge() { let adapter = <DeepNode>::to_list; let _ = adapter(node, span); }",
+    ] {
+        let calls = audit_source(source);
+        assert!(
+            !calls.is_empty(),
+            "bridge spelling escaped the predicate source audit: {source}"
+        );
+    }
+}
+
+#[test]
+fn node_to_list_audit_allows_unrelated_same_named_functions() {
+    let source = "
+        fn to_list(value: u32) -> u32 { value }
+        fn unrelated_conversion(value: u32) {
+            let _ = to_list(value);
+        }
+    ";
+    let calls = audit_source(source);
+    assert!(
+        calls.is_empty(),
+        "the structural ratchet reserves receiver and qualified spellings, not an unqualified \
+         free function: {:?}",
+        calls
+    );
+}
+
+#[test]
+fn node_to_list_audit_reserves_all_receiver_spellings_without_type_inference() {
+    for source in [
+        "use chelis_deep::node; fn bridge() { let _ = node::Node::to_list(value, span); }",
+        "use chelis_deep::node as deep_node; fn bridge() { let _ = deep_node::Node::to_list(value, span); }",
+        "use chelis_deep::node::*; fn bridge() { let _ = Node::to_list(value, span); }",
+        "extern crate chelis_deep as deep; fn bridge() { let _ = deep::node::Node::to_list(value, span); }",
+        "fn bridge() { use chelis_deep::node::Node as LocalNode; let _ = LocalNode::to_list(value, span); }",
+        "fn bridge() { type LocalNode = chelis_deep::node::Node; let _ = LocalNode::to_list(value, span); }",
+        "use chelis_deep::node::Node; fn bridge() { let f = |node: &Node| node.to_list(span); }",
+        "fn make_node() -> chelis_deep::node::Node { todo!() } fn bridge() { let node = make_node(); node.to_list(span); }",
+        "fn bridge(node: Box<chelis_deep::node::Node>) { node.to_list(span); }",
+        "fn bridge(node: chelis_deep::node::Node) { let f = |node: Unrelated| node.to_list(span); let _ = node; }",
+        "use chelis_deep::node::Node::to_list as bridge; fn call() { bridge(node, span); }",
+        "use helper::convert as to_list; fn call() { to_list(node); }",
+        "fn bridge() { quote::quote! { node.to_list(span) }; }",
+        "fn bridge() { to_list!(); }",
+        "fn bridge() { helper::to_list!(); }",
+        "macro_rules! to_list { () => {} }",
+        "#[to_list] fn bridge() {}",
+        "fn bridge(node: &chelis_deep::node::Node, span: chelis_deep::Span) { let _ = node.r#to_list(span); }",
+        "fn bridge() { helper::r#to_list!(); }",
+        "macro_rules! r#to_list { () => {} }",
+        "#[r#to_list] fn bridge() {}",
+        "extern crate r#to_list;",
+        "extern crate helper as r#to_list;",
+    ] {
+        let calls = audit_source(source);
+        assert!(
+            !calls.is_empty(),
+            "reserved bridge spelling escaped the predicate source audit: {source}"
+        );
+    }
+
+    assert!(
+        audit_source(r#"fn bridge() { format_args!("to_list"); }"#).is_empty(),
+        "literal content is not an identifier use of the reserved spelling"
+    );
+}
+
+#[test]
+fn unknown_form_parameter_head_does_not_enter_binder_scope() {
+    let span = Span::new(3, 9);
+    let parameter = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future_parameter".to_string(),
+        meta: Metadata::default(),
+        children: vec![],
+        span,
+    }));
+    assert_eq!(
+        binder_name(&parameter),
+        None,
+        "an UnknownForm head is not an authored parameter binder"
+    );
+
+    let predicate = Expr::node(
+        DeepTag::Fn,
+        Metadata::default(),
+        vec![
+            Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("future_parameter".to_string()), span)],
+                span,
+            ),
+        ],
+        span,
+    );
+    assert!(fn_parts(&predicate).is_none());
+    assert!(matches!(
+        predicate_in_grammar(&predicate),
+        Err(PredGrammarError::NotAPredicateFn(_))
+    ));
+}
+
+#[test]
+fn annotated_bare_list_parameter_enters_binder_scope() {
+    let span = Span::new(4, 10);
+    let parameter = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("structural_parameter".to_string()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    assert_eq!(
+        binder_name(&parameter),
+        Some("structural_parameter".to_string()),
+        "the stamped annotated-parameter carrier is a legal structural binder"
+    );
+
+    let predicate = Expr::node(
+        DeepTag::Fn,
+        Metadata::default(),
+        vec![
+            Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(
+                    Atom::Name("structural_parameter".to_string()),
+                    span,
+                )],
+                span,
+            ),
+        ],
+        span,
+    );
+    assert_eq!(
+        fn_parts(&predicate).map(|(binder, _)| binder),
+        Some("structural_parameter".to_string())
+    );
+    assert_eq!(predicate_in_grammar(&predicate), Ok(()));
+    assert!(predicate_free_vars(&predicate).is_empty());
+    assert_eq!(classify_predicate(&predicate), PredAmenability::Linear);
+}
+
+#[test]
+fn malformed_parameter_carriers_never_mint_binder_scope() {
+    let span = Span::new(5, 11);
+    let malformed = [
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("legacy_parameter".to_string()), span),
+                    Expr::Map(Metadata::default(), span),
+                    Expr::Atom(Atom::Name("extra".to_string()), span),
+                ],
+            },
+            span,
+        ),
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                    Expr::Map(Metadata::default(), span),
+                    Expr::Atom(Atom::Name("decoded_parameter".to_string()), span),
+                    Expr::Atom(Atom::Name("extra".to_string()), span),
+                ],
+            },
+            span,
+        ),
+    ];
+
+    for parameter in malformed {
+        assert_eq!(binder_name(&parameter), None);
+        let predicate = Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+                Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("external".to_string()), span)],
+                    span,
+                ),
+            ],
+            span,
+        );
+        assert!(fn_parts(&predicate).is_none());
+        assert!(matches!(
+            predicate_in_grammar(&predicate),
+            Err(PredGrammarError::NotAPredicateFn(_))
+        ));
+        assert!(predicate_free_vars(&predicate).is_empty());
+        assert_eq!(classify_predicate(&predicate), PredAmenability::Opaque);
+    }
+}
+
+#[test]
 fn grammar_accepts_sum_over_field() {
     let src = "(fn {} (params {} p) \
         (app {} (var {} gte) \
@@ -329,11 +830,133 @@ fn free_vars_picks_up_module_constant() {
 }
 
 #[test]
+fn malformed_decoded_var_is_rejected_without_erasing_its_free_variable() {
+    let span = Span::new(3, 9);
+    let predicate = |body| {
+        Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::Params,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                    span,
+                ),
+                body,
+            ],
+            span,
+        )
+    };
+    let children = || {
+        vec![
+            Expr::Atom(Atom::Name("external".to_string()), span),
+            Expr::Atom(Atom::Name("extra".to_string()), span),
+        ]
+    };
+    let legacy = predicate(Expr::List(
+        List {
+            elements: [
+                vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+                children(),
+            ]
+            .concat(),
+        },
+        span,
+    ));
+
+    assert!(matches!(
+        predicate_in_grammar(&legacy),
+        Err(PredGrammarError::DisallowedNode(_))
+    ));
+    assert_eq!(
+        predicate_free_vars(&legacy),
+        vec!["external".to_string()],
+        "a wrong-arity legacy Var preserves its old first-child free-variable role"
+    );
+}
+
+#[test]
 fn free_vars_excludes_field_selectors() {
     // The field names `value` are selectors, never variables.
     let vars = predicate_free_vars(&fnnode(POLYNOMIAL));
     assert!(!vars.iter().any(|v| v == "value"));
     assert!(vars.is_empty());
+}
+
+#[test]
+fn free_vars_distinguish_legacy_unknown_lists_from_unknown_forms() {
+    let span = Span::new(3, 9);
+    let free_var = || {
+        Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("external".to_string()), span)],
+            span,
+        )
+    };
+    let predicate = |body| {
+        Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::Params,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                    span,
+                ),
+                body,
+            ],
+            span,
+        )
+    };
+
+    let legacy = predicate(Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future-form".to_string()), span),
+                Expr::Map(Metadata::default(), span),
+                free_var(),
+            ],
+        },
+        span,
+    ));
+    assert_eq!(
+        predicate_free_vars(&legacy),
+        vec!["external".to_string()],
+        "legacy List traversal must retain its pre-carrier child walk"
+    );
+
+    let successor_unknown = predicate(Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future-form".to_string(),
+        meta: Metadata::default(),
+        children: vec![free_var()],
+        span,
+    })));
+    assert!(
+        predicate_free_vars(&successor_unknown).is_empty(),
+        "UnknownForm children were not predicate free-variable scope before this slice"
+    );
+
+    let malformed_legacy = predicate(Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::App), span),
+                Expr::Atom(Atom::Name("not-metadata".to_string()), span),
+                free_var(),
+            ],
+        },
+        span,
+    ));
+    assert_eq!(
+        predicate_free_vars(&malformed_legacy),
+        vec!["external".to_string()],
+        "malformed legacy Lists retained the old skip-two child traversal"
+    );
 }
 
 #[test]
