@@ -150,9 +150,9 @@ def escape_text(text: string) -> string = fold(fn (acc: string, idx: i64) -> str
 def escape_char(ch: string) -> string =
   if eq(ch, "\"") then "\\\"" else if eq(ch, "\\") then "\\\\" else if eq(ch, "\u{8}") then "\\b" else if eq(ch, "\u{c}") then "\\f" else if eq(ch, "\n") then "\\n" else if eq(ch, "\r") then "\\r" else if eq(ch, "\t") then "\\t" else {
     code = char_code(ch)
-    if lt(code, cast(32, i64)) then string_concat("\\u00", string_concat(hex_digit(floor_div(code, cast(16, i64))), hex_digit(mod(code, cast(16, i64))))) else ch
+    if lt(code, cast(32, i64)) then string_concat("\\u00", string_concat(digit(floor_div(code, cast(16, i64))), digit(mod(code, cast(16, i64))))) else ch
   }
-def hex_digit(value: i64) -> string = if eq(value, cast(0, i64)) then "0" else if eq(value, cast(1, i64)) then "1" else if eq(value, cast(2, i64)) then "2" else if eq(value, cast(3, i64)) then "3" else if eq(value, cast(4, i64)) then "4" else if eq(value, cast(5, i64)) then "5" else if eq(value, cast(6, i64)) then "6" else if eq(value, cast(7, i64)) then "7" else if eq(value, cast(8, i64)) then "8" else if eq(value, cast(9, i64)) then "9" else if eq(value, cast(10, i64)) then "a" else if eq(value, cast(11, i64)) then "b" else if eq(value, cast(12, i64)) then "c" else if eq(value, cast(13, i64)) then "d" else if eq(value, cast(14, i64)) then "e" else "f"
+def digit(value: i64) -> string = if eq(value, cast(0, i64)) then "0" else if eq(value, cast(1, i64)) then "1" else if eq(value, cast(2, i64)) then "2" else if eq(value, cast(3, i64)) then "3" else if eq(value, cast(4, i64)) then "4" else if eq(value, cast(5, i64)) then "5" else if eq(value, cast(6, i64)) then "6" else if eq(value, cast(7, i64)) then "7" else if eq(value, cast(8, i64)) then "8" else if eq(value, cast(9, i64)) then "9" else if eq(value, cast(10, i64)) then "a" else if eq(value, cast(11, i64)) then "b" else if eq(value, cast(12, i64)) then "c" else if eq(value, cast(13, i64)) then "d" else if eq(value, cast(14, i64)) then "e" else "f"
 def parse_value(text: string, idx: i64) -> Option[(Json, i64)] =
   if gte(idx, string_len(text)) then None else {
     ch = char_at(text, idx)
@@ -260,12 +260,12 @@ def decode_escape(text: string, idx: i64) -> Option[(string, i64)] = {
   if eq(ch, "\"") then Some(("\"", next)) else if eq(ch, "\\") then Some(("\\", next)) else if eq(ch, "/") then Some(("/", next)) else if eq(ch, "b") then Some(("\u{8}", next)) else if eq(ch, "f") then Some(("\u{c}", next)) else if eq(ch, "n") then Some(("\n", next)) else if eq(ch, "r") then Some(("\r", next)) else if eq(ch, "t") then Some(("\t", next)) else if eq(ch, "u") then decode_unicode_escape(text, next) else None
 }
 def decode_unicode_escape(text: string, start: i64) -> Option[(string, i64)] =
-  match hex_quad(text, start) with {
+  match quad(text, start) with {
     | Some(high) => {
     next = add(start, cast(4, i64))
     if and(gte(high, cast(55296, i64)), lte(high, cast(56319, i64))) then {
       low_start = add(next, cast(2, i64))
-      if or(gte(add(next, cast(1, i64)), string_len(text)), or(neq(char_at(text, next), "\\"), neq(char_at(text, add(next, cast(1, i64))), "u"))) then None else match hex_quad(text, low_start) with {
+      if or(gte(add(next, cast(1, i64)), string_len(text)), or(neq(char_at(text, next), "\\"), neq(char_at(text, add(next, cast(1, i64))), "u"))) then None else match quad(text, low_start) with {
         | Some(low) => if and(gte(low, cast(56320, i64)), lte(low, cast(57343, i64))) then {
         code = add(cast(65536, i64), add(mul(sub(high, cast(55296, i64)), cast(1024, i64)), sub(low, cast(56320, i64))))
         Some((char_from_code(code), add(low_start, cast(4, i64))))
@@ -276,11 +276,11 @@ def decode_unicode_escape(text: string, start: i64) -> Option[(string, i64)] =
   }
     | None => None
   }
-def hex_quad(text: string, start: i64) -> Option[i64] =
-  if gt(add(start, cast(4, i64)), string_len(text)) then None else match hex_value(char_at(text, start)) with {
-    | Some(a) => match hex_value(char_at(text, add(start, cast(1, i64)))) with {
-    | Some(b) => match hex_value(char_at(text, add(start, cast(2, i64)))) with {
-    | Some(c) => match hex_value(char_at(text, add(start, cast(3, i64)))) with {
+def quad(text: string, start: i64) -> Option[i64] =
+  if gt(add(start, cast(4, i64)), string_len(text)) then None else match quad_value(char_at(text, start)) with {
+    | Some(a) => match quad_value(char_at(text, add(start, cast(1, i64)))) with {
+    | Some(b) => match quad_value(char_at(text, add(start, cast(2, i64)))) with {
+    | Some(c) => match quad_value(char_at(text, add(start, cast(3, i64)))) with {
     | Some(d) => Some(add(add(mul(a, cast(4096, i64)), mul(b, cast(256, i64))), add(mul(c, cast(16, i64)), d)))
     | None => None
   }
@@ -290,7 +290,7 @@ def hex_quad(text: string, start: i64) -> Option[i64] =
   }
     | None => None
   }
-def hex_value(ch: string) -> Option[i64] = if eq(ch, "0") then Some(cast(0, i64)) else if eq(ch, "1") then Some(cast(1, i64)) else if eq(ch, "2") then Some(cast(2, i64)) else if eq(ch, "3") then Some(cast(3, i64)) else if eq(ch, "4") then Some(cast(4, i64)) else if eq(ch, "5") then Some(cast(5, i64)) else if eq(ch, "6") then Some(cast(6, i64)) else if eq(ch, "7") then Some(cast(7, i64)) else if eq(ch, "8") then Some(cast(8, i64)) else if eq(ch, "9") then Some(cast(9, i64)) else if or(eq(ch, "a"), eq(ch, "A")) then Some(cast(10, i64)) else if or(eq(ch, "b"), eq(ch, "B")) then Some(cast(11, i64)) else if or(eq(ch, "c"), eq(ch, "C")) then Some(cast(12, i64)) else if or(eq(ch, "d"), eq(ch, "D")) then Some(cast(13, i64)) else if or(eq(ch, "e"), eq(ch, "E")) then Some(cast(14, i64)) else if or(eq(ch, "f"), eq(ch, "F")) then Some(cast(15, i64)) else None
+def quad_value(ch: string) -> Option[i64] = if eq(ch, "0") then Some(cast(0, i64)) else if eq(ch, "1") then Some(cast(1, i64)) else if eq(ch, "2") then Some(cast(2, i64)) else if eq(ch, "3") then Some(cast(3, i64)) else if eq(ch, "4") then Some(cast(4, i64)) else if eq(ch, "5") then Some(cast(5, i64)) else if eq(ch, "6") then Some(cast(6, i64)) else if eq(ch, "7") then Some(cast(7, i64)) else if eq(ch, "8") then Some(cast(8, i64)) else if eq(ch, "9") then Some(cast(9, i64)) else if or(eq(ch, "a"), eq(ch, "A")) then Some(cast(10, i64)) else if or(eq(ch, "b"), eq(ch, "B")) then Some(cast(11, i64)) else if or(eq(ch, "c"), eq(ch, "C")) then Some(cast(12, i64)) else if or(eq(ch, "d"), eq(ch, "D")) then Some(cast(13, i64)) else if or(eq(ch, "e"), eq(ch, "E")) then Some(cast(14, i64)) else if or(eq(ch, "f"), eq(ch, "F")) then Some(cast(15, i64)) else None
 def parse_number(text: string, idx: i64) -> Option[(Json, i64)] = {
   end = scan_number_end(text, idx)
   raw = string_slice(text, idx, sub(end, idx))
