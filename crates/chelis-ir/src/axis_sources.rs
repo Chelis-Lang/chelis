@@ -3344,8 +3344,42 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 let axis = usize::try_from(*axis).expect("verified local ascription axis");
                 let site = result_extent_sites(dag, node.id)
                     .into_iter()
-                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
-                    .expect("verified local ascription producer");
+                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32));
+                let activation = local_ascription_guard_activation(dag, node.id, *required);
+                let Some(site) = site else {
+                    sites.push((
+                        (node.id.0, axis),
+                        LocalGuardClaim {
+                            claim: claim.clone(),
+                            canonical: CanonicalExtent::Witness(*required),
+                            op: crate::grad::risc_op_name(&node.op),
+                            observed: LocalGuardObservation::MalformedSameShapeAgreement(format!(
+                                "local ascription claim at node {} axis {} has no tensor producer",
+                                node.id.0, axis
+                            )),
+                            activation: activation.ok().flatten(),
+                        },
+                    ));
+                    continue;
+                };
+                let activation = match activation {
+                    Ok(activation) => activation,
+                    Err(reason) => {
+                        sites.push((
+                            (node.id.0, axis),
+                            LocalGuardClaim {
+                                claim: claim.clone(),
+                                canonical: CanonicalExtent::Witness(*required),
+                                op: site.operation,
+                                observed: LocalGuardObservation::MalformedSameShapeAgreement(
+                                    reason,
+                                ),
+                                activation: None,
+                            },
+                        ));
+                        continue;
+                    }
+                };
                 let (producer, observed) = if required.0 < site.producer.0 {
                     (site.producer, site.observation)
                 } else {
@@ -3364,8 +3398,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: local_ascription_guard_activation(dag, node.id, *required)
-                            .expect("verified local ascription activation"),
+                        activation,
                     },
                 ));
                 continue;
@@ -3757,6 +3790,46 @@ mod tests {
         assert!(!protected[named_claim.0]);
         assert!(!protected[local_claim.0]);
         assert!(!protected[unrelated.0]);
+    }
+
+    #[test]
+    fn malformed_local_ascription_owner_is_an_explicit_failed_observation() {
+        let mut dag = Dag::new();
+        let claim = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: 0,
+                    binding: "empty".into(),
+                    claim: "0".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 0).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let owner = dag.add_node(
+            RiscOp::Load {
+                name: "to_tensor".into(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::F32),
+            None,
+        );
+        dag.add_shape_dep(owner, claim);
+
+        let sites = local_dim_guard_sites(&dag);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].0, (owner.0, 0));
+        assert!(matches!(
+            &sites[0].1.observed,
+            LocalGuardObservation::MalformedSameShapeAgreement(reason)
+                if reason.contains("has no tensor producer")
+        ));
     }
 
     #[test]
