@@ -400,7 +400,7 @@ impl Expander {
                     DeepTag::Fn => self.expand_fn(node, macros, scope),
                     DeepTag::Let => self.expand_let(node, macros, scope),
                     DeepTag::Match => self.expand_match(node, macros, scope),
-                    _ => Ok(rebuild_macro_node(
+                    _ => try_rebuild_macro_node(
                         node,
                         try_map_meta_entries(metadata, |value| {
                             self.expand_expr(value, macros, scope)
@@ -409,7 +409,8 @@ impl Expander {
                             .iter()
                             .map(|child| self.expand_expr(child, macros, scope))
                             .collect::<Result<Vec<_>, _>>()?,
-                    )),
+                    )
+                    .map_err(Into::into),
                 }
             }
         }
@@ -427,7 +428,7 @@ impl Expander {
         let mut expanded = vec![kids[0].clone()];
         let body = self.expand_sequence(&kids[1..], macros)?;
         expanded.extend(body);
-        Ok(rebuild_macro_node(node, node.metadata.clone(), expanded))
+        try_rebuild_macro_node(node, node.metadata.clone(), expanded).map_err(Into::into)
     }
 
     fn expand_fn(
@@ -443,14 +444,15 @@ impl Expander {
 
         let blocker_names = params_blockers(params_expr);
         let fn_scope = scope.with_blockers(&blocker_names);
-        Ok(rebuild_macro_node(
+        try_rebuild_macro_node(
             node,
             node.metadata.clone(),
             vec![
                 params_expr.clone(),
                 self.expand_expr(body, macros, &fn_scope)?,
             ],
-        ))
+        )
+        .map_err(Into::into)
     }
 
     fn expand_let(
@@ -474,10 +476,10 @@ impl Expander {
             scope_for_values.add_blocker(name.to_string());
         }
         let children = vec![
-            rebuild_macro_node(bind_node, bind_node.metadata.clone(), new_bind_children),
+            try_rebuild_macro_node(bind_node, bind_node.metadata.clone(), new_bind_children)?,
             self.expand_expr(body, macros, &scope_for_values)?,
         ];
-        Ok(rebuild_macro_node(node, node.metadata.clone(), children))
+        try_rebuild_macro_node(node, node.metadata.clone(), children).map_err(Into::into)
     }
 
     fn expand_match(
@@ -504,17 +506,17 @@ impl Expander {
                     if !is_unit_list(&arm_kids[1]) {
                         arm_children[1] = self.expand_expr(&arm_kids[1], macros, &arm_scope)?;
                     }
-                    children.push(rebuild_macro_node(
+                    children.push(try_rebuild_macro_node(
                         arm_node,
                         arm_node.metadata.clone(),
                         arm_children,
-                    ));
+                    )?);
                     continue;
                 }
             }
             children.push(self.expand_expr(arm, macros, scope)?);
         }
-        Ok(rebuild_macro_node(node, node.metadata.clone(), children))
+        try_rebuild_macro_node(node, node.metadata.clone(), children).map_err(Into::into)
     }
 
     fn try_expand_macro_call(

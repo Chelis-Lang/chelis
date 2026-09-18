@@ -2,7 +2,7 @@
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, MetaExpr, Metadata, UnknownFormData};
 use chelis_deep::{DeepTag, Span};
-use chelis_macros::{ExpansionOptions, expand_program};
+use chelis_macros::{ExpansionError, ExpansionOptions, expand_program};
 
 fn sp() -> Span {
     Span::new(7, 11)
@@ -60,6 +60,43 @@ fn macro_call(name_value: &str, argument: Expr) -> Expr {
         DeepTag::App,
         vec![decoded(DeepTag::Var, vec![name(name_value)]), argument],
     )
+}
+
+fn transitional_macro_call(name_value: &str, argument: Expr) -> Expr {
+    transitional_decoded(
+        DeepTag::App,
+        vec![decoded(DeepTag::Var, vec![name(name_value)]), argument],
+    )
+}
+
+fn direct_invalid_result_error(argument: Expr) -> ExpansionError {
+    let nested_call = transitional_macro_call("identity", argument);
+    let successor_parent = decoded(
+        DeepTag::App,
+        vec![decoded(DeepTag::Var, vec![name("sink")]), nested_call],
+    );
+    let program = vec![
+        macro_definition("identity", decoded(DeepTag::Var, vec![name("value")])),
+        successor_parent,
+    ];
+
+    expand_program(&program, &options())
+        .expect_err("an invalid direct macro result must reject at successor reconstruction")
+}
+
+fn direct_invalid_body_result_error(body: Expr) -> ExpansionError {
+    let nested_call = transitional_macro_call(
+        "invalid_body",
+        decoded(DeepTag::Lit, vec![Expr::Atom(Atom::Int(0), sp())]),
+    );
+    let successor_parent = decoded(
+        DeepTag::App,
+        vec![decoded(DeepTag::Var, vec![name("sink")]), nested_call],
+    );
+    let program = vec![macro_definition("invalid_body", body), successor_parent];
+
+    expand_program(&program, &options())
+        .expect_err("an invalid macro body result must reject at successor reconstruction")
 }
 
 fn assert_successor_decoded_carriers(expr: &Expr) {
@@ -366,4 +403,28 @@ fn malformed_transitional_call_rejects_instead_of_panicking_during_reconstructio
             .contains("structural name `bare` at RuntimeExpr child position"),
         "the rejection must retain the deciding successor-node invariant: {error}"
     );
+}
+
+#[test]
+fn direct_name_result_under_successor_parent_is_typed_rejection() {
+    assert!(matches!(
+        direct_invalid_result_error(name("bare")),
+        ExpansionError::InvalidNode(_)
+    ));
+}
+
+#[test]
+fn direct_tag_result_under_successor_parent_is_typed_rejection() {
+    assert!(matches!(
+        direct_invalid_result_error(Expr::Atom(Atom::Tag(DeepTag::Lit), sp())),
+        ExpansionError::InvalidNode(_)
+    ));
+}
+
+#[test]
+fn direct_raw_vocabulary_result_under_successor_parent_is_typed_rejection() {
+    assert!(matches!(
+        direct_invalid_body_result_error(raw_form("lit", vec![Expr::Atom(Atom::Int(1), sp())],)),
+        ExpansionError::InvalidNode(_)
+    ));
 }
