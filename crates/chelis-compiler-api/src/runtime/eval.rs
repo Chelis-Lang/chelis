@@ -1478,6 +1478,7 @@ impl<'a> EvalContext<'a> {
             })
             .cloned();
         Ok(RuntimeValue::Closure {
+            checked_function: Box::new(Expr::List(list.clone(), body.span())),
             params,
             param_types,
             return_type,
@@ -2205,6 +2206,7 @@ impl<'a> EvalContext<'a> {
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
+                checked_function: _,
                 params,
                 param_types,
                 return_type,
