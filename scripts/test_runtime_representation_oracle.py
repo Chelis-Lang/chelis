@@ -1032,10 +1032,23 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(oracle.owner_module_final_form("backend-element-spelling", path, owner))
             self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, owner))
             self.assertFalse(oracle.owner_module_final_form("backend-element-spelling", path, owner + "_unchecked"))
-            self.assertEqual(forms[path], [{"kind": "backend-element-spelling", "owner": owner}])
+            self.assertIn({"kind": "backend-element-spelling", "owner": owner}, forms[path])
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
+
+    def test_utf8_string_byte_boundaries_are_exact_final_forms(self) -> None:
+        manifest = oracle.coverage_manifest()
+        forms = manifest["source_inventory"]["owner_module_final_forms"]
+        for path, kind, owner in oracle.UTF8_STRING_FINAL_FORMS:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertIn({"kind": kind, "owner": owner}, forms[path])
+        self.assertFalse(oracle.owner_module_final_form(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            "chelis_string_data",
+        ))
 
     def test_checked_snapshot_observation_and_allocation_have_execution_receipts(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]

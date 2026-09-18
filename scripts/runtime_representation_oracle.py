@@ -206,6 +206,18 @@ C_INDEX_PROJECTION_OWNERS = (
     ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
     ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
 )
+UTF8_STRING_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "runtime_string_literal",
+    ),
+    (
+        "crates/chelis-runtime/include/chelis_runtime.h",
+        "raw-element-pointer",
+        "chelis_string_from_utf8",
+    ),
+)
 PHASE2_FINAL_FORMS = (
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
     ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
@@ -295,6 +307,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     ) or (
         kind == "backend-element-spelling"
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
+    ) or (
+        (path, kind, owner) in UTF8_STRING_FINAL_FORMS
     ) or (
         (path, kind, owner) in PHASE2_FINAL_FORMS
     )
@@ -668,6 +682,31 @@ def _validate_frozen_mutation_contract(
         )
 
 
+def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
+    rows = [
+        *PHASE2_FINAL_FORMS,
+        *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
+        *UTF8_STRING_FINAL_FORMS,
+        *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
+        *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
+        (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
+        *((VOCAB_OWNER, "dtype-contract", owner) for owner in VOCAB_FINAL_CONTRACT_OWNERS),
+        (VOCAB_OWNER, "width-arithmetic", "DTypeContract::byte_width"),
+        (
+            CAPACITY_KEY_OWNER,
+            "exact-capacity-arithmetic",
+            CAPACITY_KEY_EXACT_PRODUCT_OWNER,
+        ),
+    ]
+    by_path: dict[str, list[dict[str, str]]] = {}
+    for path, kind, owner in rows:
+        by_path.setdefault(path, []).append({"kind": kind, "owner": owner})
+    return {
+        path: sorted(path_rows, key=lambda row: (row["kind"], row["owner"]))
+        for path, path_rows in sorted(by_path.items())
+    }
+
+
 def _coverage_manifest_from_configuration(
     probes: Sequence[MutationProbe],
     legs: Sequence[OracleLeg],
@@ -694,39 +733,7 @@ def _coverage_manifest_from_configuration(
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
-            "owner_module_final_forms": {
-                **{
-                    path: [
-                        {"kind": kind, "owner": owner}
-                        for candidate_path, kind, owner in PHASE2_FINAL_FORMS
-                        if candidate_path == path
-                    ]
-                    for path in sorted({path for path, _, _ in PHASE2_FINAL_FORMS})
-                },
-                **{
-                    path: [{"kind": "backend-element-spelling", "owner": owner}]
-                    for path, owner in C_INDEX_PROJECTION_OWNERS
-                },
-                METADATA_OWNER: [
-                    {"kind": "width-arithmetic", "owner": owner}
-                    for owner in METADATA_FINAL_WIDTH_OWNERS
-                ],
-                ELEMENT_OWNER: [
-                    {"kind": "dtype-contract", "owner": owner}
-                    for owner in ELEMENT_FINAL_CONTRACT_OWNERS
-                ] + [{"kind": "width-arithmetic", "owner": "assert_registration"}],
-                VOCAB_OWNER: [
-                    {"kind": "dtype-contract", "owner": owner}
-                    for owner in VOCAB_FINAL_CONTRACT_OWNERS
-                ]
-                + [{"kind": "width-arithmetic", "owner": "DTypeContract::byte_width"}],
-                CAPACITY_KEY_OWNER: [
-                    {
-                        "kind": "exact-capacity-arithmetic",
-                        "owner": CAPACITY_KEY_EXACT_PRODUCT_OWNER,
-                    }
-                ],
-            },
+            "owner_module_final_forms": _owner_module_final_forms_manifest(),
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
         },
