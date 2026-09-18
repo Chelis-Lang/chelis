@@ -326,6 +326,12 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
         )
         test.assertIn(flag, workflow["jobs"][job_id]["if"])
     rust_policy = workflow["jobs"]["lint-rust"]
+    checkout = next(
+        step
+        for step in rust_policy["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    test.assertEqual(checkout.get("with", {}).get("fetch-depth"), 2)
     nextest = next(
         step
         for step in rust_policy["steps"]

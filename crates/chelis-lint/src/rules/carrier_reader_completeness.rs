@@ -1,9 +1,9 @@
 //! Fast PP7/E5d authoring-time ratchet for Deep carrier readers.
 //!
-//! The rule parses newly added production Rust source with `syn`. It rejects
-//! bare `Expr::List` patterns that can silently decline another admitted
-//! carrier and typed `Node::to_list` reader bridges. Existing E5e debt is not
-//! frozen by source identity or occurrence count.
+//! The rule parses changed production Rust source with `syn`. It rejects bare
+//! `Expr::List` patterns that can silently decline another admitted carrier
+//! and explicit `Node::to_list` paths. Existing E5e debt is not frozen by
+//! source identity or occurrence count.
 
 use crate::{Context, PreparedRuleState, Rule, Severity, Surface, Violation};
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +41,7 @@ impl Rule for CarrierReaderCompleteness {
 
     fn summary(&self) -> &str {
         "new Deep readers outside chelis-deep must not use bare Expr::List \
-         patterns or Node::to_list bridges"
+         patterns or explicit Node::to_list paths"
     }
 
     fn severity(&self) -> Severity {
@@ -79,6 +79,7 @@ struct ChangedLines {
     scan_all: bool,
     all_lines: BTreeSet<String>,
     ranges: BTreeMap<String, Vec<LineRange>>,
+    deletion_anchors: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +114,10 @@ impl ChangedLines {
             git_output(&repo_root, &["rev-parse", "--verify", candidate])
                 .and_then(|base| git_output(&repo_root, &["merge-base", &base, &head]))
         })
-        .unwrap_or(head);
+        .or_else(|| git_output(&repo_root, &["rev-parse", "--verify", "HEAD^1"]));
+        let Some(baseline) = baseline else {
+            return Self::all();
+        };
         let Some(diff) = git_output(
             &repo_root,
             &[
@@ -152,6 +156,23 @@ impl ChangedLines {
                 .iter()
                 .any(|range| start <= range.end && end >= range.start)
         })
+    }
+
+    fn includes_candidate(
+        &self,
+        path: &str,
+        start: usize,
+        end: usize,
+        deletion_scope: Option<LineRange>,
+    ) -> bool {
+        self.includes(path, start, end)
+            || deletion_scope.is_some_and(|scope| {
+                self.deletion_anchors.get(path).is_some_and(|anchors| {
+                    anchors
+                        .iter()
+                        .any(|anchor| *anchor >= scope.start && *anchor <= scope.end)
+                })
+            })
     }
 }
 
@@ -203,7 +224,13 @@ fn parse_unified_diff(diff: &str) -> ChangedLines {
             .next()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
-        if count > 0 {
+        if count == 0 {
+            changed
+                .deletion_anchors
+                .entry(path.clone())
+                .or_default()
+                .push(start);
+        } else {
             changed
                 .ranges
                 .entry(path.clone())
@@ -224,7 +251,8 @@ fn check_context(ctx: &Context<'_>, changed: &ChangedLines) -> Vec<Violation> {
     if !is_scoped_path(&path)
         || (!changed.scan_all
             && !changed.all_lines.contains(&path)
-            && !changed.ranges.contains_key(&path))
+            && !changed.ranges.contains_key(&path)
+            && !changed.deletion_anchors.contains_key(&path))
     {
         return Vec::new();
     }
@@ -259,7 +287,14 @@ fn check_context(ctx: &Context<'_>, changed: &ChangedLines) -> Vec<Violation> {
     visitor
         .candidates
         .into_iter()
-        .filter(|candidate| changed.includes(&path, candidate.changed_start, candidate.changed_end))
+        .filter(|candidate| {
+            changed.includes_candidate(
+                &path,
+                candidate.changed_start,
+                candidate.changed_end,
+                candidate.deletion_scope,
+            )
+        })
         .map(|candidate| candidate.violation(ctx))
         .collect()
 }
@@ -291,6 +326,7 @@ fn is_scoped_path(path: &str) -> bool {
 struct DeepAliases {
     expr: BTreeSet<String>,
     modules: BTreeSet<String>,
+    nodes: BTreeSet<String>,
     variants: BTreeMap<String, String>,
     expr_variant_glob: bool,
 }
@@ -318,15 +354,50 @@ impl DeepAliases {
             }
         }
         let owner = segments.get(segments.len().checked_sub(2)?)?;
-        if (segments.first().is_some_and(|root| root == "chelis_deep")
-            || segments
-                .first()
-                .is_some_and(|root| self.modules.contains(root)))
-            && owner == "Expr"
-        {
+        if segments.first().is_some_and(|root| self.is_deep_root(root)) && owner == "Expr" {
             return Some(variant);
         }
         self.expr.contains(owner).then_some(variant)
+    }
+
+    fn is_deep_root(&self, root: &str) -> bool {
+        root == "chelis_deep" || self.modules.contains(root)
+    }
+
+    fn is_node_path(&self, path: &syn::Path) -> bool {
+        let Some(last) = path.segments.last() else {
+            return false;
+        };
+        if path.segments.len() == 1 {
+            self.nodes.contains(&last.ident.to_string())
+        } else {
+            last.ident == "Node"
+                && path
+                    .segments
+                    .first()
+                    .is_some_and(|root| self.is_deep_root(&root.ident.to_string()))
+        }
+    }
+
+    fn is_node_type(&self, ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Path(path) if path.qself.is_none() && self.is_node_path(&path.path))
+    }
+
+    fn is_node_to_list_path(&self, expression: &syn::ExprPath) -> bool {
+        if expression
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "to_list")
+        {
+            return false;
+        }
+        if let Some(qself) = &expression.qself {
+            return self.is_node_type(&qself.ty);
+        }
+        let mut owner = expression.path.clone();
+        owner.segments.pop();
+        self.is_node_path(&owner)
     }
 }
 
@@ -381,7 +452,9 @@ fn collect_use_aliases(tree: &syn::UseTree, prefix: &mut Vec<String>, aliases: &
             }
         }
         syn::UseTree::Glob(_) => {
-            if prefix.first().is_some_and(|root| root == "chelis_deep")
+            if prefix
+                .first()
+                .is_some_and(|root| aliases.is_deep_root(root))
                 && prefix.last().is_some_and(|owner| owner == "Expr")
             {
                 aliases.expr_variant_glob = true;
@@ -391,7 +464,7 @@ fn collect_use_aliases(tree: &syn::UseTree, prefix: &mut Vec<String>, aliases: &
 }
 
 fn record_use_alias(full: &[String], local: String, aliases: &mut DeepAliases) {
-    if full.first().is_none_or(|root| root != "chelis_deep") {
+    if full.first().is_none_or(|root| !aliases.is_deep_root(root)) {
         return;
     }
     if full.len() >= 3
@@ -410,6 +483,9 @@ fn record_use_alias(full: &[String], local: String, aliases: &mut DeepAliases) {
     match full.last().map(String::as_str) {
         Some("Expr") => {
             aliases.expr.insert(local);
+        }
+        Some("Node") => {
+            aliases.nodes.insert(local);
         }
         Some("chelis_deep" | "ast" | "node" | "self") => {
             aliases.modules.insert(local);
@@ -430,6 +506,7 @@ struct Candidate {
     col: usize,
     changed_start: usize,
     changed_end: usize,
+    deletion_scope: Option<LineRange>,
 }
 
 impl Candidate {
@@ -463,6 +540,7 @@ struct CandidateVisitor<'a> {
     candidates: Vec<Candidate>,
     suppress_list_pattern: bool,
     changed_scope: Option<proc_macro2::Span>,
+    deletion_scope: Option<LineRange>,
 }
 
 impl<'a> CandidateVisitor<'a> {
@@ -472,6 +550,7 @@ impl<'a> CandidateVisitor<'a> {
             candidates: Vec::new(),
             suppress_list_pattern: false,
             changed_scope: None,
+            deletion_scope: None,
         }
     }
 
@@ -485,6 +564,7 @@ impl<'a> CandidateVisitor<'a> {
             col: report_start.column + 1,
             changed_start,
             changed_end: changed.end().line.max(changed_start),
+            deletion_scope: self.deletion_scope,
         });
     }
 }
@@ -520,11 +600,19 @@ impl<'ast> Visit<'ast> for CandidateVisitor<'_> {
         for arm in &expression.arms {
             let previous_suppression = self.suppress_list_pattern;
             let previous_scope = self.changed_scope;
+            let previous_deletion_scope = self.deletion_scope;
             self.suppress_list_pattern = complete && arm.guard.is_none();
             self.changed_scope = Some(arm.span());
+            let match_span = expression.span();
+            let match_start = match_span.start().line;
+            self.deletion_scope = Some(LineRange {
+                start: match_start,
+                end: match_span.end().line.max(match_start),
+            });
             self.visit_pat(&arm.pat);
             self.suppress_list_pattern = previous_suppression;
             self.changed_scope = previous_scope;
+            self.deletion_scope = previous_deletion_scope;
             if let Some((_, guard)) = &arm.guard {
                 self.visit_expr(guard);
             }
@@ -541,31 +629,11 @@ impl<'ast> Visit<'ast> for CandidateVisitor<'_> {
         visit::visit_pat_tuple_struct(self, pattern);
     }
 
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "to_list" {
-            self.push_candidate(CandidateKind::NodeToList, call.method.span());
-        }
-        visit::visit_expr_method_call(self, call);
-    }
-
     fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
-        if expression
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "to_list")
-            && (expression.qself.is_some() || expression.path.segments.len() > 1)
-        {
+        if self.aliases.is_node_to_list_path(expression) {
             self.push_candidate(CandidateKind::NodeToList, expression.path.span());
         }
         visit::visit_expr_path(self, expression);
-    }
-
-    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        if use_tree_mentions_to_list(&item.tree) {
-            self.push_candidate(CandidateKind::NodeToList, item.span());
-        }
-        visit::visit_item_use(self, item);
     }
 
     fn visit_macro(&mut self, macro_call: &'ast syn::Macro) {
@@ -583,18 +651,6 @@ impl<'ast> Visit<'ast> for CandidateVisitor<'_> {
             return;
         }
         visit::visit_macro(self, macro_call);
-    }
-}
-
-fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
-    match tree {
-        syn::UseTree::Path(path) => {
-            path.ident == "to_list" || use_tree_mentions_to_list(&path.tree)
-        }
-        syn::UseTree::Name(name) => name.ident == "to_list",
-        syn::UseTree::Rename(rename) => rename.ident == "to_list",
-        syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_to_list),
-        syn::UseTree::Glob(_) => false,
     }
 }
 

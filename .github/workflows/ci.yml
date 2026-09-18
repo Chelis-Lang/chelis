@@ -448,6 +448,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.changes.outputs.candidate_sha }}
+          fetch-depth: 2
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).

@@ -2853,12 +2853,16 @@ enum a traversal must exhaust, not an `Option` it may drop.
 - **E5d, the lint and its corpus. Implemented by this slice.** The blocking
   `carrier-reader-completeness` rule parses newly added production Rust
   structurally and rejects bare `Expr::List` reader patterns, including
-  guarded match arms, and typed `Node::to_list` bridges outside `chelis-deep`.
-  An unguarded exhaustive `Expr` carrier match is permitted. A true producer
-  or proven-symmetric legacy exception must be inline at the site with a
-  nonempty necessity. The ratchet carries no exact-site inventory, source
-  count, or claim that existing E5e readers are adjudicated. A CLI integration
-  test plants the guarded-arm blind spot and proves that
+  guarded match arms and carrier-arm deletion, plus associated-function
+  expressions that structurally resolve to `chelis_deep::Node::to_list`,
+  outside
+  `chelis-deep`. Method-call syntax is outside this AST-only rule because
+  resolving its receiver type would require Rust type inference. An unguarded
+  exhaustive `Expr` carrier match is permitted. A true producer or
+  proven-symmetric legacy exception must be inline at the site with a nonempty
+  necessity. The ratchet carries no exact-site inventory, source count,
+  type-inference claim, or claim that existing E5e readers are adjudicated. A
+  CLI integration test plants the guarded-arm blind spot and proves that
   `chelis lint --check .` rejects it.
 - **E5e, the remaining sites.** Existing unswept readers are assessed and
   repaired behind E5b so the sweep has one accessor to route to. E5d neither

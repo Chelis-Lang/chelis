@@ -5,6 +5,11 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
 
+const BARE_READER: &str = r#"
+use chelis_deep::Expr;
+fn read(expr: &Expr) -> bool { matches!(expr, Expr::List(_, _)) }
+"#;
+
 fn check(rel: &str, source: &str) -> Vec<chelis_lint::Violation> {
     let root = Path::new("/repo");
     let path = root.join(rel);
@@ -25,6 +30,32 @@ fn write_workspace(root: &Path, source: &str) {
     let source_dir = root.join("crates/chelis-types/src/infer");
     fs::create_dir_all(&source_dir).expect("create fixture source root");
     fs::write(source_dir.join("reader.rs"), source).expect("write fixture");
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .status()
+        .expect("run git fixture command");
+    assert!(status.success(), "git {args:?}");
+}
+
+fn init_repo(root: &Path, branch: &str) {
+    git(root, &["init", "-q", "-b", branch]);
+    git(root, &["config", "user.email", "lint@example.invalid"]);
+    git(root, &["config", "user.name", "Lint Test"]);
+}
+
+fn commit_all(root: &Path, message: &str) {
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", message]);
+}
+
+fn lint_workspace(root: &Path) -> Vec<chelis_lint::Violation> {
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
+    chelis_lint::lint(root, &rules).expect("lint fixture workspace")
 }
 
 #[test]
@@ -85,18 +116,28 @@ fn read_if(expr: &DeepExpr) -> bool {
 }
 
 #[test]
+fn chained_module_alias_is_rejected() {
+    let violations = check(
+        "crates/chelis-types/src/infer/planted.rs",
+        r#"
+use chelis_deep as deep;
+use deep::Expr as E;
+fn read(expr: &E) -> bool { matches!(expr, E::List(_, _)) }
+"#,
+    );
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
 fn node_bridge_spellings_are_rejected() {
     let violations = check(
         "crates/chelis-ir/src/planted.rs",
         r#"
 use chelis_deep::{Node, Node as DeepNode, Span};
 
-fn bridge(node: &Node, span: Span) {
-    let _ = node.to_list(span);
-}
-
-fn bridge_ufcs(node: DeepNode, span: Span) {
+fn bridge(node: DeepNode, span: Span) {
     let _ = DeepNode::to_list(node, span);
+    let _ = <Node>::to_list(node, span);
 }
 "#,
     );
@@ -107,6 +148,21 @@ fn bridge_ufcs(node: DeepNode, span: Span) {
             .all(|violation| violation.message.contains("Node::to_list")),
         "{violations:?}"
     );
+}
+
+#[test]
+fn unrelated_to_list_apis_are_allowed() {
+    let source = r#"
+struct Catalog;
+impl Catalog { fn to_list(&self) {} }
+fn to_list() {}
+fn use_catalog(catalog: &Catalog) {
+    catalog.to_list();
+    Catalog::to_list(catalog);
+    crate::to_list();
+}
+"#;
+    assert!(check("crates/chelis-ir/src/planted.rs", source).is_empty());
 }
 
 #[test]
@@ -136,7 +192,6 @@ fn read(expr: &Expr) -> usize {
 #[test]
 fn inline_exception_requires_a_class_and_nonempty_necessity() {
     let dir = tempdir().expect("tempdir");
-    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
 
     write_workspace(
         dir.path(),
@@ -148,7 +203,7 @@ fn read(expr: &Expr) -> bool {
 }
 "#,
     );
-    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint empty necessity");
+    let violations = lint_workspace(dir.path());
     assert_eq!(violations.len(), 1, "{violations:?}");
 
     write_workspace(
@@ -161,7 +216,7 @@ fn preserve_legacy_output(expr: &Expr) -> bool {
 }
 "#,
     );
-    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint justified exception");
+    let violations = lint_workspace(dir.path());
     assert!(violations.is_empty(), "{violations:?}");
 }
 
@@ -177,24 +232,10 @@ fn existing(expr: &Expr) -> bool {
 }
 "#,
     );
-    for args in [
-        &["init", "-q"][..],
-        &["config", "user.email", "lint@example.invalid"][..],
-        &["config", "user.name", "Lint Test"][..],
-        &["add", "."][..],
-        &["commit", "-qm", "baseline"][..],
-    ] {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir.path())
-            .args(args)
-            .status()
-            .expect("run git fixture command");
-        assert!(status.success(), "git {args:?}");
-    }
+    init_repo(dir.path(), "main");
+    commit_all(dir.path(), "baseline");
 
-    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
-    let baseline = chelis_lint::lint(dir.path(), &rules).expect("lint baseline");
+    let baseline = lint_workspace(dir.path());
     assert!(baseline.is_empty(), "{baseline:?}");
 
     let path = dir.path().join("crates/chelis-types/src/infer/reader.rs");
@@ -207,7 +248,68 @@ fn added(expr: &Expr) -> bool {
 "#,
     );
     fs::write(path, source).expect("add new reader");
-    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint changed source");
+    let violations = lint_workspace(dir.path());
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn detached_shallow_history_uses_first_parent_as_the_baseline() {
+    let dir = tempdir().expect("tempdir");
+    write_workspace(dir.path(), "fn baseline() {}\n");
+    init_repo(dir.path(), "candidate");
+    commit_all(dir.path(), "baseline");
+
+    write_workspace(dir.path(), BARE_READER);
+    commit_all(dir.path(), "candidate");
+    git(dir.path(), &["checkout", "--detach", "-q", "HEAD"]);
+
+    let violations = lint_workspace(dir.path());
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn committed_source_without_any_baseline_fails_closed() {
+    let dir = tempdir().expect("tempdir");
+    write_workspace(dir.path(), BARE_READER);
+    init_repo(dir.path(), "candidate");
+    commit_all(dir.path(), "root candidate");
+
+    let violations = lint_workspace(dir.path());
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn deleting_other_carrier_arms_exposes_the_surviving_list_reader() {
+    let dir = tempdir().expect("tempdir");
+    write_workspace(
+        dir.path(),
+        r#"
+use chelis_deep::Expr;
+fn read(expr: &Expr) -> usize {
+    match expr {
+        Expr::List(list, _) => list.elements.len(),
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_)
+        | Expr::Atom(_, _) | Expr::Map(_, _) | Expr::MetaExpr(_, _) => 0,
+    }
+}
+"#,
+    );
+    init_repo(dir.path(), "main");
+    commit_all(dir.path(), "baseline");
+
+    write_workspace(
+        dir.path(),
+        r#"
+use chelis_deep::Expr;
+fn read(expr: &Expr) -> usize {
+    match expr {
+        Expr::List(list, _) => list.elements.len(),
+    }
+}
+"#,
+    );
+
+    let violations = lint_workspace(dir.path());
     assert_eq!(violations.len(), 1, "{violations:?}");
 }
 
