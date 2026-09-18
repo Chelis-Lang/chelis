@@ -377,13 +377,11 @@ fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String
         .collect()
 }
 
-fn shallow_node_list(node: &chelis_deep::node::Node, span: Span) -> List {
-    List {
-        elements: vec![
-            Expr::Atom(Atom::Tag(node.tag()), span),
-            Expr::Map(node.meta().clone(), span),
-        ],
-    }
+fn effect_kind_from_metadata(metadata: &Metadata) -> Result<EffectKind, EffectKindDecodeError<'_>> {
+    metadata
+        .effect()
+        .map(|value| *value.value())
+        .ok_or(EffectKindDecodeError::Missing)
 }
 
 fn infer_expr_effects(
@@ -393,12 +391,28 @@ fn infer_expr_effects(
     locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     record_effect_work(|profile| profile.infer_expr_visits += 1);
-    match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => EffectSet::new(),
-        Expr::MetaExpr(meta, _) => {
+    match expr.carrier() {
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => EffectSet::new(),
+        ExprCarrier::MetadataExpression(meta) => {
             infer_expr_effects(&meta.expr, top_level_effects, top_level_callables, locals)
         }
-        Expr::List(list, _) => {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            let handled_effect = (tag == DeepTag::HandleEffect)
+                .then(|| effect_kind_from_metadata(metadata).ok())
+                .flatten();
+            infer_tagged_effects(
+                tag,
+                children,
+                handled_effect,
+                top_level_effects,
+                top_level_callables,
+                locals,
+            )
+        }
+        ExprCarrier::StructuralList(children) | ExprCarrier::UndecodableHead(_, _, children) => {
+            infer_children_effects(children, top_level_effects, top_level_callables, locals)
+        }
+        ExprCarrier::MalformedLegacyList(list) => {
             let Some(tag) = get_tag(list) else {
                 return infer_children_effects(
                     &list.elements,
@@ -410,47 +424,62 @@ fn infer_expr_effects(
             let handled_effect = (tag == DeepTag::HandleEffect)
                 .then(|| decode_effect_kind(list).ok())
                 .flatten();
-            infer_tagged_effects(
+            infer_malformed_tagged_effects(
                 tag,
-                children(list),
+                list,
                 handled_effect,
                 top_level_effects,
                 top_level_callables,
                 locals,
             )
         }
-        Expr::Node(node, span) => {
-            let handled_effect = if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                decode_effect_kind(&header).ok()
-            } else {
-                None
-            };
-            infer_tagged_effects(
-                node.tag(),
-                node.children_slice(),
-                handled_effect,
-                top_level_effects,
-                top_level_callables,
-                locals,
-            )
-        }
-        Expr::BareList(elems, _) => elems
-            .iter()
-            .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
-        Expr::UnknownForm(data) => data
-            .children
-            .iter()
-            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
     }
+}
+
+fn infer_malformed_tagged_effects(
+    tag: DeepTag,
+    list: &List,
+    handled_effect: Option<EffectKind>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
+) -> EffectSet {
+    if matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
+        return infer_tagged_effects(
+            tag,
+            &list.elements[2..],
+            handled_effect,
+            top_level_effects,
+            top_level_callables,
+            locals,
+        );
+    }
+
+    // A malformed legacy list without a metadata map is ambiguous: the
+    // second element may be the first semantic child, or it may be a corrupt
+    // metadata placeholder followed by the original children. Preserve both
+    // interpretations and union their effects so neither source role can hide
+    // an effectful descendant.
+    let metadata_less_children = &list.elements[1..];
+    let mut effects = infer_tagged_effects(
+        tag,
+        metadata_less_children,
+        handled_effect,
+        top_level_effects,
+        top_level_callables,
+        locals,
+    );
+    if let Some(placeholder_children) = metadata_less_children.get(1..) {
+        effects.extend(&infer_tagged_effects(
+            tag,
+            placeholder_children,
+            handled_effect,
+            top_level_effects,
+            top_level_callables,
+            locals,
+        ));
+    }
+    effects
 }
 
 fn infer_children_effects(
@@ -623,8 +652,8 @@ fn infer_handle_effects(
     top_level_callables: &BTreeSet<String>,
     locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
-    if kids.len() < 2 {
-        return EffectSet::new();
+    if kids.len() != 2 {
+        return infer_children_effects(kids, top_level_effects, top_level_callables, locals);
     }
     let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
     let mut body_effects =
@@ -904,42 +933,43 @@ fn validate_handlers(exprs: &[Expr], errors: &mut Vec<EffectError>) {
 }
 
 fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
-    match expr {
-        Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::HandleEffect) {
-                validate_handler_kind(decode_effect_kind(list), children(list), errors);
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::HandleEffect {
+                validate_handler_kind(effect_kind_from_metadata(metadata), children, errors);
             }
-            for kid in &list.elements {
+            metadata.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
+            for kid in children {
                 validate_handler_expr(kid, errors);
             }
         }
-        Expr::Map(map, _) => {
+        ExprCarrier::MetadataMap(map) => {
             map.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
-        Expr::MetaExpr(meta, _) => {
+        ExprCarrier::MetadataExpression(meta) => {
             validate_handler_expr(&meta.expr, errors);
             meta.metadata
                 .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
-        Expr::Atom(_, _) => {}
-        Expr::Node(node, span) => {
-            if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                validate_handler_kind(decode_effect_kind(&header), node.children_slice(), errors);
-            }
-            node.meta()
-                .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
-            for child in node.children_slice() {
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::StructuralList(children) => {
+            for child in children {
                 validate_handler_expr(child, errors);
             }
         }
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                validate_handler_expr(elem, errors);
+        ExprCarrier::UndecodableHead(_, metadata, children) => {
+            if matches!(expr, Expr::List(_, _)) {
+                metadata.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
+            }
+            for child in children {
+                validate_handler_expr(child, errors);
             }
         }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::MalformedLegacyList(list) => {
+            if get_tag(list) == Some(DeepTag::HandleEffect) {
+                validate_handler_kind(decode_effect_kind(list), children(list), errors);
+            }
+            for child in &list.elements {
                 validate_handler_expr(child, errors);
             }
         }
@@ -951,6 +981,18 @@ fn validate_handler_kind(
     kids: &[Expr],
     errors: &mut Vec<EffectError>,
 ) {
+    if kids.len() != 2 {
+        errors.push(EffectError {
+            kind: EffectErrorKind::InvalidHandler,
+            message: format!(
+                "`handle-effect` requires exactly two children (handler payload and body), got {}",
+                kids.len()
+            ),
+            suggestions: vec!["Use `(handle-effect {effect: ...} <handler> <body>)`".to_string()],
+        });
+        return;
+    }
+
     match effect_kind {
         Ok(EffectKind::Random)
             if kids
@@ -1151,8 +1193,51 @@ fn validate_declared_vs_inferred(
 }
 
 fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<EffectError>) {
-    match expr {
-        Expr::List(list, _) => {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::HandleEffect {
+                validate_build_target_handler(
+                    effect_kind_from_metadata(metadata),
+                    children,
+                    target,
+                    errors,
+                );
+            }
+            metadata.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
+            for kid in children {
+                validate_build_target_expr(kid, target, errors);
+            }
+        }
+        ExprCarrier::MetadataMap(map) => {
+            map.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
+        }
+        ExprCarrier::MetadataExpression(meta) => {
+            validate_build_target_expr(&meta.expr, target, errors);
+            meta.metadata.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
+        }
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::StructuralList(children) => {
+            for child in children {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
+        ExprCarrier::UndecodableHead(_, metadata, children) => {
+            if matches!(expr, Expr::List(_, _)) {
+                metadata.visit_expressions(&mut |value, _| {
+                    validate_build_target_expr(value, target, errors)
+                });
+            }
+            for child in children {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
+        ExprCarrier::MalformedLegacyList(list) => {
             if get_tag(list) == Some(DeepTag::HandleEffect) {
                 validate_build_target_handler(
                     decode_effect_kind(list),
@@ -1161,46 +1246,7 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
                     errors,
                 );
             }
-            for kid in &list.elements {
-                validate_build_target_expr(kid, target, errors);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_expressions(&mut |value, _| {
-                validate_build_target_expr(value, target, errors)
-            });
-        }
-        Expr::MetaExpr(meta, _) => {
-            validate_build_target_expr(&meta.expr, target, errors);
-            meta.metadata.visit_expressions(&mut |value, _| {
-                validate_build_target_expr(value, target, errors)
-            });
-        }
-        Expr::Atom(_, _) => {}
-        Expr::Node(node, span) => {
-            if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                validate_build_target_handler(
-                    decode_effect_kind(&header),
-                    node.children_slice(),
-                    target,
-                    errors,
-                );
-            }
-            node.meta().visit_expressions(&mut |value, _| {
-                validate_build_target_expr(value, target, errors)
-            });
-            for child in node.children_slice() {
-                validate_build_target_expr(child, target, errors);
-            }
-        }
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                validate_build_target_expr(elem, target, errors);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+            for child in &list.elements {
                 validate_build_target_expr(child, target, errors);
             }
         }
@@ -1272,14 +1318,20 @@ fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
+            children.first().and_then(symbol_name)
+        }
+        ExprCarrier::MalformedLegacyList(list) if get_tag(list) == Some(DeepTag::Var) => {
             children(list).first().and_then(symbol_name)
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
-            node.children_slice().first().and_then(symbol_name)
-        }
-        _ => None,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -1288,10 +1340,11 @@ fn get_tag(list: &List) -> Option<DeepTag> {
 }
 
 fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
+    match list.elements.as_slice() {
+        [Expr::Atom(Atom::Tag(_), _), Expr::Map(_, _), children @ ..] => children,
+        [Expr::Atom(Atom::Tag(_), _), _, children @ ..] if !children.is_empty() => children,
+        [Expr::Atom(Atom::Tag(_), _), _] => &list.elements[1..],
+        _ => &[],
     }
 }
 
@@ -1303,15 +1356,33 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 }
 
 fn string_literal(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(Expr::Atom(Atom::Str(value), _)) => Some(value.as_str()),
-                _ => None,
-            }
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
+        ExprCarrier::DecodedNode(DeepTag::Lit, _, children) => {
+            children.first().and_then(|child| match child.carrier() {
+                ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_)
+                | ExprCarrier::MalformedLegacyList(_) => None,
+            })
         }
-        _ => None,
+        ExprCarrier::MalformedLegacyList(list) if get_tag(list) == Some(DeepTag::Lit) => {
+            children(list).first().and_then(|child| match child {
+                Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
+                _ => None,
+            })
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -1623,6 +1694,138 @@ mod tests {
     }
 
     #[test]
+    fn guarded_var_and_literal_readers_match_successor_and_legacy_carriers() {
+        let span = Span::new(0, 0);
+        let successor_var = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("value".into()), span)],
+            span,
+        );
+        let successor_lit = Expr::node(
+            DeepTag::Lit,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
+            span,
+        );
+        let legacy_var = recursively_legacy_carried(&successor_var);
+        let legacy_lit = recursively_legacy_carried(&successor_lit);
+
+        assert_eq!(var_name(&successor_var), Some("value"));
+        assert_eq!(var_name(&legacy_var), Some("value"));
+        assert_eq!(string_literal(&successor_lit), Some("gpu:0"));
+        assert_eq!(string_literal(&legacy_lit), Some("gpu:0"));
+
+        let wrong_tag = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
+            span,
+        );
+        assert_eq!(string_literal(&wrong_tag), None);
+        assert_eq!(
+            var_name(&Expr::BareList(
+                vec![Expr::Atom(Atom::Name("value".into()), span)],
+                span,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn undecodable_source_variants_keep_metadata_traversal_distinct() {
+        fn stamped_def_body(source: &str) -> Expr {
+            let exprs = chelis_deep::parse_and_stamp(source).expect("fixture stamps");
+            let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = exprs[0].carrier() else {
+                panic!("fixture is a def");
+            };
+            children[1].clone()
+        }
+
+        fn expression_metadata(expr: Expr) -> Metadata {
+            Metadata::from(MetadataValue::PropertySeed(
+                chelis_deep::annotations::RuntimeExpression::try_new(expr)
+                    .expect("handler is a runtime expression"),
+            ))
+        }
+
+        fn legacy_name_head(metadata: Metadata, span: Span) -> Expr {
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name("future-wrapper".into()), span),
+                        Expr::Map(metadata, span),
+                    ],
+                },
+                span,
+            )
+        }
+
+        fn unknown_form(metadata: Metadata, span: Span) -> Expr {
+            Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                head: "future-wrapper".into(),
+                meta: metadata,
+                children: Vec::new(),
+                span,
+            }))
+        }
+
+        let span = Span::new(0, 0);
+        let invalid_random = stamped_def_body(
+            "(def {} x
+               (handle-effect {effect: random}
+                 (var {} seed)
+                 (lit {} 1)))",
+        );
+        let invalid_metadata = expression_metadata(invalid_random);
+        let mut legacy_errors = Vec::new();
+        validate_handler_expr(
+            &legacy_name_head(invalid_metadata.clone(), span),
+            &mut legacy_errors,
+        );
+        assert_eq!(legacy_errors.len(), 1);
+        assert_eq!(legacy_errors[0].kind, EffectErrorKind::InvalidHandler);
+
+        let mut unknown_errors = Vec::new();
+        validate_handler_expr(&unknown_form(invalid_metadata, span), &mut unknown_errors);
+        assert!(
+            unknown_errors.is_empty(),
+            "UnknownForm metadata was not traversed before the carrier migration: {unknown_errors:?}"
+        );
+
+        let gpu_resource = stamped_def_body(
+            "(def {} x
+               (handle-effect {effect: resource}
+                 (lit {} \"gpu:0\")
+                 (lit {} 1)))",
+        );
+        let resource_metadata = expression_metadata(gpu_resource);
+        let mut legacy_target_errors = Vec::new();
+        validate_build_target_expr(
+            &legacy_name_head(resource_metadata.clone(), span),
+            "c",
+            &mut legacy_target_errors,
+        );
+        assert!(
+            legacy_target_errors
+                .iter()
+                .any(|error| error.kind == EffectErrorKind::BuildTargetMismatch)
+        );
+
+        let mut unknown_target_errors = Vec::new();
+        validate_build_target_expr(
+            &unknown_form(resource_metadata, span),
+            "c",
+            &mut unknown_target_errors,
+        );
+        assert!(
+            unknown_target_errors.is_empty(),
+            "UnknownForm metadata was not traversed by target validation before migration: \
+             {unknown_target_errors:?}"
+        );
+    }
+
+    #[test]
     fn effects_reader_classes_decline_or_analyze_through_malformed_carriers() {
         let span = Span::new(0, 0);
         let malformed = |tag, children: Vec<Expr>| {
@@ -1886,6 +2089,160 @@ mod tests {
             !source.contains(&definition),
             "E5b requires declared-effect reads to disposition ExprCarrier directly"
         );
+    }
+
+    #[test]
+    fn malformed_legacy_effect_readers_preserve_tagged_behavior() {
+        let span = Span::new(0, 0);
+        let malformed = |tag, children: Vec<Expr>| {
+            let mut elements = vec![
+                Expr::Atom(Atom::Tag(tag), span),
+                Expr::Atom(Atom::Int(0), span),
+            ];
+            elements.extend(children);
+            Expr::List(List { elements }, span)
+        };
+
+        let callee = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("dropout".into()), span)],
+            span,
+        );
+        let app = malformed(DeepTag::App, vec![callee.clone()]);
+        assert!(
+            infer_expr_effects(&app, &BTreeMap::new(), &BTreeSet::new(), &BTreeMap::new())
+                .contains(&Effect::Random),
+            "a malformed legacy App must retain its prior tag-directed effect semantics"
+        );
+        let app_without_metadata_slot = Expr::List(
+            List {
+                elements: vec![Expr::Atom(Atom::Tag(DeepTag::App), span), callee],
+            },
+            span,
+        );
+        assert!(
+            infer_expr_effects(
+                &app_without_metadata_slot,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeMap::new()
+            )
+            .contains(&Effect::Random),
+            "a malformed legacy App must not discard its first positional child"
+        );
+        let app_without_metadata_slot_and_with_arg = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::App), span),
+                    Expr::node(
+                        DeepTag::Var,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name("dropout".into()), span)],
+                        span,
+                    ),
+                    Expr::Atom(Atom::Float(0.5), span),
+                ],
+            },
+            span,
+        );
+        assert!(
+            infer_expr_effects(
+                &app_without_metadata_slot_and_with_arg,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeMap::new()
+            )
+            .contains(&Effect::Random),
+            "a metadata-less App with later children must retain its first positional child"
+        );
+        let handler_without_metadata_slot = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::HandleEffect), span),
+                    app_without_metadata_slot_and_with_arg,
+                    Expr::Atom(Atom::Int(1), span),
+                ],
+            },
+            span,
+        );
+        assert!(
+            infer_expr_effects(
+                &handler_without_metadata_slot,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeMap::new()
+            )
+            .contains(&Effect::Random),
+            "a metadata-less HandleEffect must retain an effectful first descendant"
+        );
+
+        let var = malformed(
+            DeepTag::Var,
+            vec![Expr::Atom(Atom::Name("value".into()), span)],
+        );
+        assert_eq!(var_name(&var), Some("value"));
+        let literal = malformed(
+            DeepTag::Lit,
+            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
+        );
+        assert_eq!(string_literal(&literal), Some("gpu:0"));
+
+        let handler = malformed(DeepTag::HandleEffect, vec![Expr::Atom(Atom::Int(1), span)]);
+        let mut errors = Vec::new();
+        validate_handler_expr(&handler, &mut errors);
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::InvalidHandler
+                    && error.message.contains("handle-effect")
+            }),
+            "[04-TOT-3] requires the malformed handle-effect diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn decoded_legacy_handlers_reject_every_wrong_arity() {
+        let valid = parse_str(
+            "(handle-effect {effect: random} \
+             (lit {type: (t-prim {} i64)} 1) \
+             (lit {type: (t-prim {} f32)} 1.0))",
+        )
+        .expect("valid handler parses")
+        .remove(0);
+        let ExprCarrier::DecodedNode(DeepTag::HandleEffect, metadata, children) = valid.carrier()
+        else {
+            panic!("valid handler decodes")
+        };
+        let span = valid.span();
+        let legacy_elements = || {
+            let mut elements = vec![
+                Expr::Atom(Atom::Tag(DeepTag::HandleEffect), span),
+                Expr::Map(metadata.clone(), span),
+            ];
+            elements.extend(children.iter().cloned());
+            elements
+        };
+
+        for elements in [legacy_elements()[..3].to_vec(), {
+            let mut elements = legacy_elements();
+            elements.push(
+                parse_str("(app {} (var {} dropout) (lit {type: (t-prim {} f32)} 0.5))")
+                    .expect("effectful extra child parses")
+                    .remove(0),
+            );
+            elements
+        }] {
+            let malformed = Expr::List(List { elements }, span);
+            let mut errors = Vec::new();
+            validate_handler_expr(&malformed, &mut errors);
+            assert!(
+                errors.iter().any(|error| {
+                    error.kind == EffectErrorKind::InvalidHandler
+                        && error.message.contains("exactly two children")
+                }),
+                "wrong-arity handler must diagnose: {errors:?}"
+            );
+        }
     }
 
     #[test]

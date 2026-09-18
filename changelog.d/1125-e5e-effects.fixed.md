@@ -1,0 +1,1 @@
+Preserve effect inference, handler diagnostics, and realizability behavior across stamped, legacy, malformed, structural, and undecodable Deep carriers. See [#1125](https://github.com/Chelis-Lang/chelis/issues/1125).

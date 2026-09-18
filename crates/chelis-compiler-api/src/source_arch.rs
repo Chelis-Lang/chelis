@@ -4530,15 +4530,182 @@ fn compiler_path_consumes_the_target_carrying_manifest() {
 
 #[test]
 fn root_manifest_walkers_consume_stamped_nodes_without_list_reconstruction() {
-    let source = include_str!("../../chelis-effects/src/realizability.rs");
+    let audit =
+        audit_root_manifest_carriers(include_str!("../../chelis-effects/src/realizability.rs"))
+            .expect("realizability source parses");
     assert!(
-        !source.contains(".to_list("),
-        "#1082 regression: realizability rebuilt a legacy List from a stamped Node"
+        audit.is_compliant(),
+        "#1082/#1125 regression: realizability must match stamped nodes through \
+         ExprCarrier::DecodedNode without direct Expr::Node patterns or to_list bridges: {audit:?}"
     );
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RootManifestCarrierAudit {
+    target_function_found: bool,
+    decoded_node_patterns: usize,
+    direct_node_patterns: usize,
+    to_list_calls: usize,
+}
+
+impl RootManifestCarrierAudit {
+    fn is_compliant(&self) -> bool {
+        self.target_function_found
+            && self.decoded_node_patterns > 0
+            && self.direct_node_patterns == 0
+            && self.to_list_calls == 0
+    }
+}
+
+fn path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
+    let actual = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    actual.len() >= expected.len()
+        && actual[actual.len() - expected.len()..]
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+}
+
+impl<'ast> Visit<'ast> for RootManifestCarrierAudit {
+    fn visit_pat_tuple_struct(&mut self, pattern: &'ast syn::PatTupleStruct) {
+        if path_ends_with(&pattern.path, &["ExprCarrier", "DecodedNode"]) {
+            self.decoded_node_patterns += 1;
+        }
+        if pattern
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Node")
+        {
+            self.direct_node_patterns += 1;
+        }
+        visit::visit_pat_tuple_struct(self, pattern);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "to_list" {
+            self.to_list_calls += 1;
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref()
+            && path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "to_list")
+        {
+            self.to_list_calls += 1;
+        }
+        visit::visit_expr_call(self, call);
+    }
+}
+
+fn audit_root_manifest_carriers(source: &str) -> Result<RootManifestCarrierAudit, syn::Error> {
+    let file = syn::parse_file(source)?;
+    let mut audit = RootManifestCarrierAudit::default();
+    for item in &file.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if function.sig.ident == "tagged_children" {
+            audit.target_function_found = true;
+            audit.visit_block(&function.block);
+        }
+    }
+    Ok(audit)
+}
+
+#[test]
+fn root_manifest_carrier_guard_rejects_each_regression_class() {
+    let direct_node = audit_root_manifest_carriers(
+        r#"
+            fn tagged_children(expr: &Expr) {
+                match expr.carrier() {
+                    ExprCarrier::DecodedNode(_, _, _) => {}
+                    _ => {}
+                }
+                match expr {
+                    Expr::Node(_, _) => {}
+                    _ => {}
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(!direct_node.is_compliant(), "{direct_node:?}");
+    assert_eq!(direct_node.direct_node_patterns, 1);
+
+    let missing_decoded = audit_root_manifest_carriers(
+        r#"
+            fn tagged_children(expr: &Expr) {
+                let _ = expr;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(!missing_decoded.is_compliant(), "{missing_decoded:?}");
+    assert_eq!(missing_decoded.decoded_node_patterns, 0);
+
+    let reconstruction_bridge = audit_root_manifest_carriers(
+        r#"
+            fn tagged_children(expr: &Expr, span: Span) {
+                match expr.carrier() {
+                    ExprCarrier::DecodedNode(_, _, _) => {}
+                    _ => {}
+                }
+                let _ = expr.to_list(span);
+            }
+        "#,
+    )
+    .unwrap();
     assert!(
-        source.contains("Expr::Node(node,"),
-        "#1082 regression: realizability has no direct stamped-Node traversal"
+        !reconstruction_bridge.is_compliant(),
+        "{reconstruction_bridge:?}"
     );
+    assert_eq!(reconstruction_bridge.to_list_calls, 1);
+
+    let decoy_and_alias = audit_root_manifest_carriers(
+        r#"
+            fn unrelated(expr: &Expr) {
+                if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
+            }
+            fn tagged_children(expr: &DeepExpr) {
+                match expr {
+                    DeepExpr::Node(_, _) => {}
+                    _ => {}
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(!decoy_and_alias.is_compliant(), "{decoy_and_alias:?}");
+    assert_eq!(decoy_and_alias.decoded_node_patterns, 0);
+    assert_eq!(decoy_and_alias.direct_node_patterns, 1);
+
+    let associated_reconstruction_bridge = audit_root_manifest_carriers(
+        r#"
+            fn tagged_children(expr: &Expr, span: Span) {
+                match expr.carrier() {
+                    ExprCarrier::DecodedNode(_, _, _) => {}
+                    _ => {}
+                }
+                let _ = Node::to_list(node, span);
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(
+        !associated_reconstruction_bridge.is_compliant(),
+        "{associated_reconstruction_bridge:?}"
+    );
+    assert_eq!(associated_reconstruction_bridge.to_list_calls, 1);
 }
 
 #[test]
