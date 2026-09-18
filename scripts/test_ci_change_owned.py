@@ -796,6 +796,7 @@ class SchemaTests(unittest.TestCase):
         )
         package_owners = {
             "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/c_preprocessor.rs": ("chelis-cli",),
             "tests/support/capacity_census_stdlib.rs": ("chelis-cli",),
             "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
             "tests/support/helper_summary_fatal.ch": (
@@ -809,6 +810,11 @@ class SchemaTests(unittest.TestCase):
                 rule = by_path[path]
                 self.assertEqual(rule.disposition, "packages")
                 self.assertEqual(rule.packages, expected)
+        c_preprocessor = by_path["tests/support/c_preprocessor.rs"]
+        self.assertFalse(
+            c_preprocessor.matches("tests/support/c_preprocessor_extra.rs"),
+            "a neighboring support file inherited capacity-census ownership",
+        )
         remediation = by_path["spec/design/remediation_roadmap.md"]
         self.assertEqual(remediation.disposition, "owner")
         self.assertEqual(
