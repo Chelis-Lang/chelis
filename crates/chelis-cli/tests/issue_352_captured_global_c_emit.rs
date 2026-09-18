@@ -620,6 +620,37 @@ out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
     assert_eq!(binding_line(&stdout, "out"), binding_line(&eval_out, "out"));
 }
 
+/// A transformed closure may capture both a callable and a tensor. Building
+/// the unbatched backward DAG must preserve the callable's lexical environment
+/// while retaining the tensor capture at its authored rank; the later vmap
+/// rewrite owns the explicit batch lift.
+#[test]
+fn issue_516_vmap_grad_preserves_combined_callable_and_tensor_captures() {
+    let source = "w = to_tensor([10.0f32, 20.0f32])\n\
+def map_jacobian(\n\
+  model: &tensor[2, f32] -> tensor[2, f32],\n\
+  xs: tensor[3, 2, f32]\n\
+) -> tensor[3, 2, f32] = {\n\
+  objective = fn (theta: tensor[2, f32]) -> tensor_to_scalar(sum(mul(model(theta), w), 0i32))\n\
+  vmap(grad(objective))(xs)\n\
+}\n\
+def square(theta: &tensor[2, f32]) -> tensor[2, f32] = mul(theta, theta)\n\
+combo_out = map_jacobian(square, to_tensor([[1.0f32, 1.0f32], [2.0f32, 2.0f32], [3.0f32, 3.0f32]]))\n";
+
+    let eval_out = chelis_eval(source, "vmapgradcombinedcap");
+    assert_eq!(
+        binding_line(&eval_out, "combo_out"),
+        "combo_out = tensor(shape=[3, 2], data=[20.0, 40.0, 40.0, 80.0, 60.0, 120.0])",
+    );
+
+    let build = chelis_build_c(source, "vmapgradcombinedcap");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapgradcombinedcap.c"));
+    assert_eq!(
+        binding_line(&stdout, "combo_out"),
+        binding_line(&eval_out, "combo_out"),
+    );
+}
+
 /// A second tensor supplied as an actual argument is mapped, not captured.
 /// Its rows must remain batch-varying in values and gradients.
 #[test]

@@ -2827,7 +2827,14 @@ fn lower_host_program_with_execution(
             && !needs_host_wrapper
             && !captured_value_binding
             && !display_root_binding;
-        if skip_for_lowered {
+        // A fused `vmap(grad(...))` template with a callable parameter has
+        // no standalone C ABI: the tensor entry cannot carry the function
+        // argument, while the host lane cannot execute the transform as a
+        // first-class value. Its concrete call sites are specialized by the
+        // whole-program lowerer, so omit only this unusable generic wrapper.
+        let call_site_only_vmap_grad =
+            is_fn_body && has_callable_params && expr_contains_vmap_grad(body);
+        if skip_for_lowered || call_site_only_vmap_grad {
             continue;
         }
         // The wrapper emitter doesn't know every pattern the DAG-path
@@ -15171,6 +15178,26 @@ fn expr_contains_grad_like(expr: &Expr) -> bool {
         }
         Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
         _ => false,
+    }
+}
+
+fn expr_contains_vmap_grad(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(list, _) => {
+            list.unknown_tag_symbol() == Some("vmap-grad")
+                || (tag(list) == Some(DeepTag::Vmap)
+                    && children(list)
+                        .first()
+                        .is_some_and(|target| target.tag() == Some(DeepTag::Grad)))
+                || list.elements.iter().any(expr_contains_vmap_grad)
+        }
+        Expr::Node(node, span) => expr_contains_vmap_grad(&Expr::List(node.to_list(*span), *span)),
+        Expr::MetaExpr(meta, _) => expr_contains_vmap_grad(&meta.expr),
+        Expr::BareList(items, _) => items.iter().any(expr_contains_vmap_grad),
+        Expr::UnknownForm(data) => {
+            data.head == "vmap-grad" || data.children.iter().any(expr_contains_vmap_grad)
+        }
+        Expr::Atom(_, _) | Expr::Map(_, _) => false,
     }
 }
 
