@@ -59,7 +59,6 @@ def plan() -> dict:
             )
         ],
         "selected_packages": [],
-        "required_packages": [],
         "eligible_targets": [],
         "change_owned": [],
         "package_expansion": [],

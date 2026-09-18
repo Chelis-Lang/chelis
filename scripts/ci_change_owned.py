@@ -45,7 +45,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 3
-PLAN_VERSION = 4
+PLAN_VERSION = 3
 RECEIPT_VERSION = 1
 STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
@@ -1294,7 +1294,6 @@ def make_plan(
         "path_dispositions": dispositions,
         "target_dispositions": target_dispositions,
         "selected_packages": sorted(selected_packages),
-        "required_packages": sorted(required_packages),
         "eligible_targets": sorted(identity.canonical for identity in candidate_eligible),
         "change_owned": sorted(identity.canonical for identity in change_owned),
         "package_expansion": sorted(identity.canonical for identity in expansion),
@@ -1628,7 +1627,6 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "path_dispositions",
         "target_dispositions",
         "selected_packages",
-        "required_packages",
         "eligible_targets",
         "change_owned",
         "package_expansion",
@@ -1683,17 +1681,79 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         or len(packages) != len(set(packages))
     ):
         raise ValueError("plan selected_packages must be unique package names")
-    required_packages = plan.get("required_packages")
-    if (
-        not isinstance(required_packages, list)
-        or any(
-            not isinstance(package, str) or not IDENTIFIER.fullmatch(package)
-            for package in required_packages
-        )
-        or len(required_packages) != len(set(required_packages))
-    ):
-        raise ValueError("plan required_packages must be unique package names")
-    if not set(required_packages) <= set(packages):
+    required_packages: set[str] = set()
+    seen_required_rules: set[tuple[str, str]] = set()
+    for disposition in plan["path_dispositions"]:
+        if not isinstance(disposition, dict):
+            raise ValueError("plan path_dispositions rows must be objects")
+        rows = disposition.get("required_package_rules", [])
+        if not isinstance(rows, list):
+            raise ValueError("plan required_package_rules must be a list")
+        path = disposition.get("path")
+        if rows and not isinstance(path, str):
+            raise ValueError(
+                "plan required_package_rules require a disposition path"
+            )
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "rule",
+                "packages",
+                "reason",
+                "tracking_issue",
+            }:
+                raise ValueError(
+                    "plan required_package_rules row has the wrong shape"
+                )
+            rule = row["rule"]
+            row_packages = row["packages"]
+            reason = row["reason"]
+            tracking_issue = row["tracking_issue"]
+            if not isinstance(rule, str) or not _valid_prefix(rule):
+                raise ValueError(
+                    "plan required_package_rules requires a valid rule prefix"
+                )
+            if (
+                rule.endswith("/")
+                and not path.startswith(rule)
+                or not rule.endswith("/")
+                and path != rule
+            ):
+                raise ValueError(
+                    "plan required_package_rules rule does not match its path"
+                )
+            if (
+                not isinstance(row_packages, list)
+                or not row_packages
+                or any(
+                    not isinstance(package, str)
+                    or not IDENTIFIER.fullmatch(package)
+                    for package in row_packages
+                )
+                or len(row_packages) != len(set(row_packages))
+            ):
+                raise ValueError(
+                    "plan required_package_rules packages must be unique "
+                    "package names"
+                )
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(
+                    "plan required_package_rules requires a reason"
+                )
+            if (
+                not isinstance(tracking_issue, str)
+                or not ISSUE.fullmatch(tracking_issue)
+            ):
+                raise ValueError(
+                    "plan required_package_rules requires chelis#N tracking"
+                )
+            identity = (path, rule)
+            if identity in seen_required_rules:
+                raise ValueError(
+                    "plan required_package_rules contains a duplicate rule"
+                )
+            seen_required_rules.add(identity)
+            required_packages.update(row_packages)
+    if not required_packages <= set(packages):
         raise ValueError("plan required packages must be selected packages")
     eligible = set(_identity_list(plan, "eligible_targets"))
     change_owned = set(_identity_list(plan, "change_owned"))
@@ -1742,7 +1802,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     required_targets = {
         identity
         for identity in eligible
-        if Identity.parse(identity).package in set(required_packages)
+        if Identity.parse(identity).package in required_packages
         and identity not in target_exclusions
     }
     if not required_targets <= change_owned:

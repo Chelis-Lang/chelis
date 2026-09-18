@@ -945,7 +945,6 @@ class DurationBaselineTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p"],
-            "required_packages": [],
             "eligible_targets": [identity.canonical],
             "change_owned": [identity.canonical],
             "package_expansion": [],
@@ -1262,7 +1261,7 @@ class PlanningTests(unittest.TestCase):
             source_reader=sources.__getitem__,
         )
 
-        self.assertEqual(plan["required_packages"], ["p"])
+        self.assertNotIn("required_packages", plan)
         self.assertEqual(
             plan["change_owned"],
             ["p::default_gated", "p::smoke"],
@@ -1284,6 +1283,14 @@ class PlanningTests(unittest.TestCase):
             ],
         )
         owned.verify_plan_digest(plan)
+        incomplete = copy.deepcopy(plan)
+        incomplete["change_owned"].remove("p::default_gated")
+        owned.attach_plan_digest(incomplete)
+        with self.assertRaisesRegex(
+            ValueError,
+            "required package targets must be change-owned",
+        ):
+            owned.verify_plan_digest(incomplete)
 
     def test_targeted_rebase_promotes_the_affected_package_to_required(self) -> None:
         sources = fixture_sources()
@@ -2077,11 +2084,11 @@ class ShardingAndExecutionTests(unittest.TestCase):
             sorted(identity.canonical for identity in weights),
         )
 
-    def test_package_expansion_preserves_the_trusted_v4_plan_envelope(
+    def test_package_expansion_preserves_the_trusted_v3_plan_envelope(
         self,
     ) -> None:
         plan = self._plan(lane="package-expansion")
-        self.assertEqual(plan["version"], 4)
+        self.assertEqual(plan["version"], 3)
         self.assertEqual(
             plan["shard_planning"]["package_expansion"],
             {"algorithm": "sha256-modulo-v1"},
@@ -2488,7 +2495,6 @@ class ShardingAndExecutionTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p"],
-            "required_packages": [],
             "eligible_targets": [identity.canonical],
             "change_owned": (
                 [identity.canonical] if lane_key == "change_owned" else []
@@ -3212,7 +3218,6 @@ class ReportTests(unittest.TestCase):
             "path_dispositions": [],
             "target_dispositions": [],
             "selected_packages": ["p", "q"],
-            "required_packages": [],
             "eligible_targets": ["p::smoke", "q::smoke"],
             "change_owned": ["p::smoke", "q::smoke"],
             "package_expansion": [],
