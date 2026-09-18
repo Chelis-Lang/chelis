@@ -879,9 +879,12 @@ impl Checker {
                     self.check_expr(child, scope);
                 }
             }
-            ExprCarrier::Atom(_) => {
+            ExprCarrier::Atom(Atom::Name(_) | Atom::Tag(_)) => {
                 self.reject_non_runtime_carrier(expr, "an atom");
             }
+            // `Node::validate` admits literal atoms at RuntimeExpr positions:
+            // they carry no variable use or ownership event for linearity.
+            ExprCarrier::Atom(_) => {}
             ExprCarrier::MetadataMap(map) => {
                 self.reject_non_runtime_carrier(expr, "a standalone metadata map");
                 map.visit_syntax(&mut |_, value| {
@@ -936,17 +939,27 @@ impl Checker {
         scope: &mut LinearScope,
     ) {
         for (index, child) in children.iter().enumerate() {
-            match child_stamp_role(parent_tag, index, children.len()) {
-                ChildStampRole::RuntimeExpr => self.check_expr(child, scope),
-                ChildStampRole::ExplicitInferenceBypass => {
-                    self.check_structural_payload(child, scope);
-                }
-                ChildStampRole::Syntax
-                | ChildStampRole::Selector
-                | ChildStampRole::EffectHandler
-                | ChildStampRole::Binder
-                | ChildStampRole::Type => {}
+            self.check_child_by_role(parent_tag, index, children.len(), child, scope);
+        }
+    }
+
+    fn check_child_by_role(
+        &mut self,
+        parent_tag: DeepTag,
+        index: usize,
+        child_count: usize,
+        child: &Expr,
+        scope: &mut LinearScope,
+    ) {
+        match child_stamp_role(parent_tag, index, child_count) {
+            ChildStampRole::RuntimeExpr => self.check_expr(child, scope),
+            ChildStampRole::ExplicitInferenceBypass | ChildStampRole::EffectHandler => {
+                self.check_structural_payload(child, scope);
             }
+            ChildStampRole::Syntax
+            | ChildStampRole::Selector
+            | ChildStampRole::Binder
+            | ChildStampRole::Type => {}
         }
     }
 
@@ -1018,10 +1031,10 @@ impl Checker {
                 self.check_expr(target, scope);
             }
         }
-        // Walk remaining children (the index lit) so any nested
-        // expressions inside the index are still checked.
-        for child in children.iter().skip(1) {
-            self.check_expr(child, scope);
+        // Preserve the canonical role decision for the selector rather than
+        // treating a legal bare integer index as a runtime expression.
+        for (index, child) in children.iter().enumerate().skip(1) {
+            self.check_child_by_role(DeepTag::TupleGet, index, children.len(), child, scope);
         }
     }
 
@@ -1392,17 +1405,6 @@ impl Checker {
                 arm_scopes.push(arm_scope);
                 continue;
             };
-            if arm_kids.len() < 3 {
-                continue;
-            }
-            // chelis#1200 Q1: an arm body is a new declaration region, so
-            // the destructured-component mark does not cross into it. The
-            // arm's own pattern binders were already covered by `declare`
-            // below; this covers the outer names the arm merely mentions,
-            // which is what made the arm reject where the equivalent
-            // closure body compiled. See
-            // `LinearScope::clear_destructured_marks`.
-            arm_scope.clear_destructured_marks();
             let pattern_bindings = pattern_named_types(&arm_kids[0]);
             let mut pattern_ids = Vec::new();
             for (name, ty) in &pattern_bindings {
@@ -2212,9 +2214,6 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut 
                             collect_untrusted_free_vars(arm, bound, free);
                             continue;
                         };
-                        if arm_kids.len() < 3 {
-                            continue;
-                        }
                         bound.push(pattern_names(&arm_kids[0]).into_iter().collect());
                         collect_free_vars(&arm_kids[1], bound, free);
                         collect_free_vars(&arm_kids[2], bound, free);
@@ -2705,7 +2704,13 @@ fn type_expr_is_unresolved_tvar_from_well_formed_type(expr: &Expr) -> bool {
 }
 
 fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
-    type_expr_may_contain_tensor(expr, tensor_carrying_adts) && !type_expr_is_ref(expr)
+    match tensor_evidence(expr, tensor_carrying_adts) {
+        TensorEvidence::Absent => false,
+        // Unreadable evidence remains conservatively owned and cannot
+        // authorize the explicit-reference exemption.
+        TensorEvidence::Unreadable => true,
+        TensorEvidence::Contains => !matches!(get_tag_expr(expr), Some(DeepTag::TRef)),
+    }
 }
 
 /// Walk top-level declarations and return the set of ADT names whose
@@ -3149,9 +3154,100 @@ mod tests {
     }
 
     #[test]
+    fn admitted_literal_atoms_are_ownership_neutral() {
+        let int = |value| Expr::Atom(Atom::Int(value), span());
+        let bool_lit = |value| {
+            node(
+                "lit",
+                vec![("type", node("t-prim", vec![], vec![sym("bool")]))],
+                vec![Expr::Atom(Atom::Bool(value), span())],
+            )
+        };
+        let cases = [
+            ("direct definition body", int(42)),
+            (
+                "if branches",
+                node("if", vec![], vec![bool_lit(true), int(1), int(2)]),
+            ),
+            ("block child", node("block", vec![], vec![int(1)])),
+            (
+                "literal effect handler",
+                node(
+                    "handle-effect",
+                    vec![],
+                    vec![
+                        node(
+                            "lit",
+                            vec![("type", node("t-prim", vec![], vec![sym("i64")]))],
+                            vec![int(7)],
+                        ),
+                        int(1),
+                    ],
+                ),
+            ),
+            (
+                "tuple-get selector",
+                node(
+                    "tuple-get",
+                    vec![],
+                    vec![node("tuple", vec![], vec![int(7)]), int(0)],
+                ),
+            ),
+        ];
+
+        for (label, body) in cases {
+            let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+                vec![node("def", vec![], vec![sym("accepted"), body])],
+                BTreeMap::new(),
+            );
+            check_linearity(&program)
+                .unwrap_or_else(|errors| panic!("{label} must remain admitted: {errors:?}"));
+        }
+    }
+
+    #[test]
+    fn effect_handler_payload_retains_nested_ownership_traversal() {
+        let use_x = || node("realize", vec![], vec![node("var", vec![], vec![sym("x")])]);
+        let handler = Expr::BareList(vec![use_x()], span());
+        let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+            vec![
+                node(
+                    "def",
+                    vec![],
+                    vec![sym("x"), node("var", vec![], vec![sym("x")])],
+                ),
+                node(
+                    "def",
+                    vec![],
+                    vec![
+                        sym("result"),
+                        node(
+                            "handle-effect",
+                            vec![],
+                            vec![
+                                handler,
+                                node("copy", vec![], vec![node("var", vec![], vec![sym("x")])]),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+            BTreeMap::from([("x".to_string(), tensor_4_f32())]),
+        );
+
+        let errors = check_linearity(&program)
+            .expect_err("the handler and body must both retain their ownership uses");
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume)),
+            "the second use must observe the handler payload's first consume: {errors:?}"
+        );
+    }
+
+    #[test]
     fn every_non_runtime_carrier_is_diagnosed_in_runtime_position() {
         let cases = [
-            ("atom", Expr::Atom(Atom::Int(1), span())),
             ("metadata map", Expr::Map(Metadata::default(), span())),
             ("empty structural list", Expr::BareList(Vec::new(), span())),
             (
@@ -3183,17 +3279,24 @@ mod tests {
 
     #[test]
     fn rejected_non_runtime_carriers_still_walk_nested_content() {
-        let nested_atom = || Expr::Atom(Atom::Int(1), span());
+        let nested_unknown = || {
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: "future-runtime-form".to_string(),
+                meta: Metadata::default(),
+                children: Vec::new(),
+                span: span(),
+            }))
+        };
         let cases = [
             (
                 "structural list",
-                Expr::BareList(vec![nested_atom()], span()),
+                Expr::BareList(vec![nested_unknown()], span()),
             ),
             (
                 "legacy structural list",
                 Expr::List(
                     List {
-                        elements: vec![nested_atom()],
+                        elements: vec![nested_unknown()],
                     },
                     span(),
                 ),
@@ -3203,7 +3306,7 @@ mod tests {
                 Expr::MetaExpr(
                     MetaExpr {
                         metadata: Metadata::default(),
-                        expr: Box::new(nested_atom()),
+                        expr: Box::new(nested_unknown()),
                     },
                     span(),
                 ),
@@ -3223,7 +3326,8 @@ mod tests {
                 .count();
             assert!(
                 malformed_count >= 2,
-                "{label} must diagnose itself and retain traversal of its nested atom: {errors:?}"
+                "{label} must diagnose itself and retain traversal of its nested unknown form: \
+                 {errors:?}"
             );
         }
     }
