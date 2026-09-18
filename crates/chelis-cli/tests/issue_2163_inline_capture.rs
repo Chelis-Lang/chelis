@@ -207,6 +207,26 @@ fn a_let_binding_rename_does_not_reach_its_own_value() {
 }
 
 #[test]
+fn a_let_rename_that_actually_fires_still_skips_its_own_value() {
+    // The test above exercises the `live` narrowing rather than the ordering:
+    // its `let` binder shares a name with a shadowed parameter, so no rename
+    // fires at all. Here `m` is a SECOND, unshadowed parameter whose argument
+    // `add(x, 1.0f64)` carries the caller's `x`, so `x` is live, the `let`
+    // binder `x` really is renamed, and its own value `mul(x, m)` must still
+    // read the callee's parameter `x`. Recording the rename before rewriting
+    // that value yields `x__inl1 = mul(x__inl1, m)` and fails ownership
+    // lowering with "references unbound name `x__inl1`".
+    assert_lanes_agree(
+        "def bump2[n, p: Float](v: &tensor[n, p], x: p, m: p) -> tensor[n, p] = {\n  \
+             x = mul(x, m)\n  to_tensor(map(fn (e: p) -> add(e, x), to_list(v)))\n}\n\
+         def main() -> tensor[2, f64] = {\n  x = 3.0f64\n  \
+         bump2(to_tensor([1.0f64, 2.0f64]), x, add(x, 1.0f64))\n}",
+        "let_rename_fires_and_skips_own_value",
+        &[13.0, 14.0],
+    );
+}
+
+#[test]
 fn renaming_a_captured_binder_stops_at_an_inner_binder_of_the_same_name() {
     // The renaming is itself scope-aware. The outer lambda's `x` is renamed
     // because it would capture the caller's `x`, but the inner lambda binds
