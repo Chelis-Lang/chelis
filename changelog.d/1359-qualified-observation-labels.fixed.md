@@ -6,6 +6,8 @@ package output. Previously display dequalification could mistake authored
 `__` for a linker separator and drop part of the source label. Batched test
 diagnostics now also remove exact synthetic `__Eval` and
 `__ChelisTestBatchN` module provenance without exposing those linker-private
-prefixes or truncating names such as `bad__forge`. See
+prefixes or truncating names such as `bad__forge`. Expression-mode evaluation
+continues to expose its synthetic result as `eval_result`, while a real source
+binding named `__eval_result` remains unchanged. See
 [#1359](https://github.com/Chelis-Lang/chelis/issues/1359) and
 [#2193](https://github.com/Chelis-Lang/chelis/pull/2193).

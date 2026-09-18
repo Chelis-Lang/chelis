@@ -885,6 +885,14 @@ fn eval_json_emits_int64_scalar() {
     let json = run_eval_json_expr("mod(cast(17, i64), cast(5, i64))");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0]["name"], "eval_result",
+        "the private expression wrapper must not leak into machine-facing root names"
+    );
+    assert_eq!(
+        json["manifest"]["entries"][0]["name"], "eval_result",
+        "realized roots and manifest entries must use the same public expression label"
+    );
     assert_eq!(roots[0]["value"]["type"], "scalar");
     assert_eq!(roots[0]["value"]["value"]["dtype"], "int64");
     assert_eq!(roots[0]["value"]["value"]["value"], 2);

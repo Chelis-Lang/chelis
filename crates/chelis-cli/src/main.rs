@@ -1877,7 +1877,7 @@ fn cmd_eval_inner(
 ) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
     // source). The `--expr` form is a synthetic one-line snippet
-    // wrapped as `__eval_result = <expr>` and never lands on disk, so
+    // wrapped as `eval_result = <expr>` and never lands on disk, so
     // there's nothing canonical to compare against.
     if let Some(path) = file
         && let Ok(source) = fs::read_to_string(path)
@@ -1985,8 +1985,12 @@ fn cmd_eval_inner(
         }
         (None, Some(e)) => {
             // `--expr` is by construction a one-line snippet with no reef
-            // resolution — keep the legacy path.
-            let source = format!("__eval_result = {e}");
+            // resolution — keep the legacy path. Its synthetic binding uses
+            // the public observation label directly; de-mangling is reserved
+            // for actual linker provenance, so a private `__` sentinel would
+            // otherwise leak while lexical file bindings with that spelling
+            // must remain untouched.
+            let source = format!("eval_result = {e}");
             if json {
                 prepare_eval_json(try_eval_result_for_target(
                     SourceKind::Surf,

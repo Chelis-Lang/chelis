@@ -146,6 +146,16 @@ fn record_field_reproducer_is_byte_identical_across_eval_and_c() {
 }
 
 #[test]
+fn lexical_leading_underscores_remain_authored_root_text() {
+    const SOURCE: &str = "__eval_result = cast(7, i32)\n";
+    let eval = eval_text(SOURCE);
+    let compiled = common::build_and_run(SOURCE, "authored_leading_underscores");
+
+    assert_eq!(eval, "__eval_result = 7\n");
+    assert_eq!(compiled, eval, "eval and C lexical root bytes must agree");
+}
+
+#[test]
 fn nested_record_and_tuple_descendants_keep_their_originating_root() {
     let eval = eval_text(NESTED_PRODUCTS);
     let compiled = common::build_and_run(NESTED_PRODUCTS, "nested_qualified_roots");
