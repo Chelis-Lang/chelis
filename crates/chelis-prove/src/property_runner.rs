@@ -16,8 +16,8 @@
 //! test locks). This mirrors [`crate::obligation_engine`], which already
 //! shares the derived-obligation run across the two surfaces.
 
-use chelis_deep::DeepTag;
 use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -4365,15 +4365,14 @@ fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
 /// file ingress stays in the role-typed representation while legacy callers
 /// remain readable until the carrier is deleted atomically.
 fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])> {
-    match expr {
-        DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        DeepExpr::List(list, _) => {
-            let tag = list_tag_from_list(list)?;
-            let meta = list.elements.get(1).and_then(meta_map)?;
-            let children = list.elements.get(2..)?;
-            Some((tag, meta, children))
-        }
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -4494,15 +4493,26 @@ fn deep_param(expr: &DeepExpr) -> Option<Param> {
             span: *span,
         });
     }
-    let (elements, span) = match expr {
-        DeepExpr::BareList(elements, span) => (elements.as_slice(), *span),
-        DeepExpr::List(list, span) => (list.elements.as_slice(), *span),
-        _ => return None,
+    let span = expr.span();
+    let (name, metadata) = match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => (
+            elements.first().and_then(symbol_text)?,
+            elements.get(1).and_then(meta_map),
+        ),
+        ExprCarrier::UndecodableHead(head, metadata, _) if matches!(expr, DeepExpr::List(_, _)) => {
+            (head, Some(metadata))
+        }
+        ExprCarrier::UndecodableHead(_, _, _) => return None,
+        ExprCarrier::MalformedLegacyList(list) => (
+            list.elements.first().and_then(symbol_text)?,
+            list.elements.get(1).and_then(meta_map),
+        ),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
-    let name = elements.first().and_then(symbol_text)?;
-    let ty = elements
-        .get(1)
-        .and_then(meta_map)
+    let ty = metadata
         .and_then(|meta| meta.ty())
         .map(|ty| ty.expression())
         .and_then(type_expr_from_deep);
@@ -4611,9 +4621,6 @@ fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     )
 }
 
-fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
-    list.tag()
-}
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),

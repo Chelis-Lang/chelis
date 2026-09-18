@@ -17,10 +17,10 @@
 //! Gated on the `chelis-prove` optional dependency (the obligation /
 //! generation machinery lives there).
 
-use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 use chelis_types::types::Prim;
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
@@ -606,19 +606,41 @@ fn bool_lit(v: bool) -> Expr {
 }
 
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::MalformedLegacyList(list) => list.tag(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn child0_sym(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(l, _) if l.elements.len() >= 3 => match &l.elements[2] {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => match children.first()? {
             Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
             _ => None,
         },
-        _ => None,
+        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
+            match children.first()? {
+                Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
+                _ => None,
+            }
+        }
+        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 3 => {
+            match &list.elements[2] {
+                Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
+                _ => None,
+            }
+        }
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
     }
 }
 
@@ -626,10 +648,25 @@ fn module_defines(expr: &Expr, type_name: &str) -> bool {
     if list_tag(expr) == Some(DeepTag::Deftype) && child0_sym(expr) == Some(type_name) {
         return true;
     }
-    if let Expr::List(l, _) = expr {
-        return l.elements.iter().any(|c| module_defines(c, type_name));
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children
+            .iter()
+            .any(|child| module_defines(child, type_name)),
+        ExprCarrier::UndecodableHead(_, _, _) => match expr {
+            Expr::List(list, _) => list
+                .elements
+                .iter()
+                .any(|child| module_defines(child, type_name)),
+            Expr::UnknownForm(_) => false,
+            _ => unreachable!(),
+        },
+        ExprCarrier::MalformedLegacyList(list) => list
+            .elements
+            .iter()
+            .any(|child| module_defines(child, type_name)),
+        ExprCarrier::StructuralList(_) | ExprCarrier::MetadataExpression(_) => false,
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
     }
-    false
 }
 
 fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
@@ -680,6 +717,53 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_search_rejects_unknown_form_but_keeps_legacy_name_head_recursion() {
+        let span = span0();
+        let deftype = node("deftype", vec![sym("Token")]);
+        let legacy = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("future-wrapper".into()), span),
+                    Expr::Map(Metadata::default(), span),
+                    deftype.clone(),
+                ],
+            },
+            span,
+        );
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-wrapper".into(),
+            meta: Metadata::default(),
+            children: vec![deftype],
+            span,
+        }));
+
+        assert!(module_defines(&legacy, "Token"));
+        assert!(!module_defines(&unknown, "Token"));
+    }
+
+    #[test]
+    fn injection_does_not_discover_types_through_metadata_wrapper() {
+        let span = span0();
+        let wrapped = Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(node("deftype", vec![sym("Token")])),
+            },
+            span,
+        );
+        let module = node("module", vec![sym("M"), wrapped]);
+        let marker = sym("marker");
+
+        let injected = inject_into_module(&[module], "Token", marker.clone());
+        assert_eq!(
+            injected.len(),
+            2,
+            "metadata wrappers had no type-discovery authority before this slice"
+        );
+        assert_eq!(injected[1], marker);
+    }
 
     #[test]
     fn injection_attempt_cap_is_finite_and_honors_override() {

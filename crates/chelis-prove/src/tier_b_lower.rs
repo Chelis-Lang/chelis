@@ -21,8 +21,8 @@
 //! derived obligation proves with `proof_tier:"smt"` for linear-arithmetic
 //! invariants. A residual irreducible `match` falls to Tier C.
 
-use chelis_deep::DeepTag;
 use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
@@ -48,18 +48,30 @@ const MAX_INLINE_DEPTH: usize = 3;
 // both reporting `passed` and exit 0.
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::MalformedLegacyList(list) => list.tag(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
+            children
+        }
+        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => &[],
     }
 }
 
@@ -86,14 +98,20 @@ fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
     None
 }
 
-/// The element sequence of an inline-annotated param `(name {type: T})`, on
-/// either carrier it can arrive in: a tagless `Expr::List` on the normalizing
-/// tide route and an `Expr::BareList` on the stamped CLI route.
-fn inline_param_elements(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::List(list, _) => &list.elements,
-        Expr::BareList(elements, _) => elements,
-        _ => &[],
+/// The binder of an inline-annotated param `(name {type: T})`, on either
+/// carrier it can arrive in. A legacy list is an undecodable head because the
+/// binder occupies its head slot; the stamped route preserves the full
+/// sequence as a structural list.
+fn inline_param_name(expr: &Expr) -> Option<&str> {
+    match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(symbol_text),
+        ExprCarrier::UndecodableHead(head, _, _) if matches!(expr, Expr::List(_, _)) => Some(head),
+        ExprCarrier::UndecodableHead(_, _, _) => None,
+        ExprCarrier::MalformedLegacyList(list) => list.elements.first().and_then(symbol_text),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -122,10 +140,8 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                     // `Expr::Node`; both spellings put the name atom first.
                     if let Some(n) = symbol_text(p) {
                         params.push(n.to_string());
-                    } else if let Some(Expr::Atom(Atom::Name(s), _)) =
-                        inline_param_elements(p).first()
-                    {
-                        params.push(s.clone());
+                    } else if let Some(name) = inline_param_name(p) {
+                        params.push(name.to_string());
                     }
                 }
                 let body = fkids.get(1)?;
@@ -294,7 +310,16 @@ fn rewrite_opaque_field_access(
                 .expect("opaque field-access rewrite preserves every child role");
             Expr::Node(rewritten, *span)
         }
-        other => other.clone(),
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|element| rewrite_opaque_field_access(element, opaque_params))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(_) | Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {
+            expr.clone()
+        }
     }
 }
 

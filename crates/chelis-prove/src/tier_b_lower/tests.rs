@@ -59,6 +59,188 @@ fn flagship_guarded_option_lowers_to_smt_property() {
     assert_eq!(lowered.property.variables.len(), 1);
 }
 
+#[test]
+fn guarded_opaque_field_rewrite_matches_successor_and_legacy_carriers() {
+    let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
+        .into_iter()
+        .next()
+        .expect("fixture has one opaque invariant");
+    let mut opaque_params = UnordMap::new();
+    opaque_params.insert("p".to_string(), invariant);
+
+    let span = chelis_deep::Span::new(0, 0);
+    let successor = Expr::node(
+        DeepTag::Access,
+        Default::default(),
+        vec![
+            Expr::node(
+                DeepTag::Var,
+                Default::default(),
+                vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                span,
+            ),
+            Expr::Atom(Atom::Name("value".to_string()), span),
+        ],
+        span,
+    );
+    let legacy = crate::deep_compat::normalize_nodes_to_lists(std::slice::from_ref(&successor))
+        .into_iter()
+        .next()
+        .expect("one normalized expression");
+
+    assert_eq!(
+        var_name(&rewrite_opaque_field_access(&successor, &opaque_params)),
+        Some("p.value")
+    );
+    assert_eq!(
+        var_name(&rewrite_opaque_field_access(&legacy, &opaque_params)),
+        Some("p.value")
+    );
+
+    let untouched = rewrite_opaque_field_access(&successor, &UnordMap::new());
+    assert_eq!(tag(&untouched), Some(DeepTag::Access));
+    assert_eq!(
+        children(&untouched).first().and_then(var_name),
+        Some("p"),
+        "the guarded arm must not rewrite a non-opaque parameter"
+    );
+}
+
+#[test]
+fn undecodable_source_variants_keep_tier_b_children_and_params_distinct() {
+    let span = chelis_deep::Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let legacy = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Name("param".into()), span),
+                Expr::Map(Default::default(), span),
+                child.clone(),
+            ],
+        },
+        span,
+    );
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "param".into(),
+        meta: Default::default(),
+        children: vec![child.clone()],
+        span,
+    }));
+
+    assert_eq!(inline_param_name(&legacy), Some("param"));
+    assert_eq!(inline_param_name(&unknown), None);
+    assert_eq!(children(&legacy), std::slice::from_ref(&child));
+    assert!(children(&unknown).is_empty());
+}
+
+#[test]
+fn producer_lookup_keeps_malformed_legacy_module_and_inline_param() {
+    let span = chelis_deep::Span::new(0, 0);
+    let malformed_param = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Name("x".into()), span),
+                Expr::Atom(Atom::Int(0), span),
+            ],
+        },
+        span,
+    );
+    let params = Expr::node(
+        DeepTag::Params,
+        Default::default(),
+        vec![malformed_param],
+        span,
+    );
+    let function = Expr::node(
+        DeepTag::Fn,
+        Default::default(),
+        vec![
+            params,
+            Expr::node(
+                DeepTag::Lit,
+                Default::default(),
+                vec![Expr::Atom(Atom::Int(1), span)],
+                span,
+            ),
+        ],
+        span,
+    );
+    let def = Expr::node(
+        DeepTag::Def,
+        Default::default(),
+        vec![Expr::Atom(Atom::Name("make".into()), span), function],
+        span,
+    );
+    let module = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Module), span),
+                Expr::Atom(Atom::Int(0), span),
+                Expr::Atom(Atom::Name("M".into()), span),
+                def,
+            ],
+        },
+        span,
+    );
+
+    let expressions = [module];
+    let producer = lookup_producer(&expressions, "make").expect("producer remains discoverable");
+    assert_eq!(producer.params, ["x"]);
+}
+
+#[test]
+fn opaque_field_rewrite_does_not_cross_unclaimed_wrappers() {
+    let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
+        .into_iter()
+        .next()
+        .expect("fixture has one opaque invariant");
+    let opaque_params = UnordMap::from([("p".to_string(), invariant)]);
+    let span = chelis_deep::Span::new(0, 0);
+    let access = Expr::node(
+        DeepTag::Access,
+        Default::default(),
+        vec![
+            Expr::node(
+                DeepTag::Var,
+                Default::default(),
+                vec![Expr::Atom(Atom::Name("p".into()), span)],
+                span,
+            ),
+            Expr::Atom(Atom::Name("value".into()), span),
+        ],
+        span,
+    );
+    let metadata_wrapper = Expr::MetaExpr(
+        chelis_deep::MetaExpr {
+            metadata: Default::default(),
+            expr: Box::new(access.clone()),
+        },
+        span,
+    );
+    let unknown_wrapper = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-wrapper".into(),
+        meta: Default::default(),
+        children: vec![access.clone()],
+        span,
+    }));
+
+    assert_eq!(
+        rewrite_opaque_field_access(&metadata_wrapper, &opaque_params),
+        metadata_wrapper
+    );
+    assert_eq!(
+        rewrite_opaque_field_access(&unknown_wrapper, &opaque_params),
+        unknown_wrapper
+    );
+
+    let structural = Expr::BareList(vec![access], span);
+    let rewritten = rewrite_opaque_field_access(&structural, &opaque_params);
+    let Expr::BareList(elements, _) = rewritten else {
+        panic!("structural list carrier is preserved")
+    };
+    assert_eq!(elements.first().and_then(var_name), Some("p.value"));
+}
+
 #[cfg(feature = "smt")]
 #[test]
 fn flagship_guarded_option_proves_at_smt_tier() {

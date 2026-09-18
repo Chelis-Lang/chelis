@@ -1,7 +1,82 @@
 use super::*;
 use crate::opaque::collect_opaque_invariants;
+use chelis_deep::Metadata;
 use chelis_types::types::Type;
 use std::collections::BTreeMap;
+
+#[test]
+fn undecodable_source_variants_keep_obligation_children_and_metadata_distinct() {
+    let span = chelis_deep::Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let opaque = Metadata::from(chelis_deep::annotations::MetadataValue::Opaque(
+        chelis_deep::annotations::Present::new(span),
+    ));
+    let legacy = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Name("future".into()), span),
+                Expr::Map(opaque.clone(), span),
+                child.clone(),
+            ],
+        },
+        span,
+    );
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future".into(),
+        meta: opaque.clone(),
+        children: vec![child.clone()],
+        span,
+    }));
+
+    assert_eq!(children(&legacy), std::slice::from_ref(&child));
+    assert!(children(&unknown).is_empty());
+    assert!(is_opaque(&legacy));
+    assert!(!is_opaque(&unknown));
+
+    let malformed = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Int(0), span),
+                Expr::Map(opaque, span),
+                child.clone(),
+            ],
+        },
+        span,
+    );
+    assert_eq!(children(&malformed), std::slice::from_ref(&child));
+    assert!(is_opaque(&malformed));
+}
+
+#[test]
+fn export_discovery_keeps_malformed_legacy_tag_and_descendants() {
+    let span = chelis_deep::Span::new(0, 0);
+    let malformed_export = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Export), span),
+                Expr::Atom(Atom::Int(0), span),
+                Expr::Atom(Atom::Name("make".into()), span),
+            ],
+        },
+        span,
+    );
+    let malformed_module = Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Module), span),
+                Expr::Atom(Atom::Int(0), span),
+                Expr::Atom(Atom::Name("M".into()), span),
+                malformed_export,
+            ],
+        },
+        span,
+    );
+
+    assert_eq!(
+        collect_exports(&[malformed_module]),
+        BTreeSet::from(["make".to_string()])
+    );
+}
 
 #[test]
 fn issue_872_declared_function_alias_retains_erased_opaque_return() {

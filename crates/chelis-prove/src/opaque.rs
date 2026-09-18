@@ -14,8 +14,8 @@
 //! `invariant_amenability` recorded on a `.dp` is NOT trusted: it is
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
-use chelis_deep::DeepTag;
 use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast::{Atom, Expr};
@@ -158,18 +158,30 @@ impl OpaqueInvariant {
 // ===========================================================================
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::MalformedLegacyList(list) => list.tag(),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::UndecodableHead(_, _, children) if matches!(expr, Expr::List(_, _)) => {
+            children
+        }
+        ExprCarrier::MalformedLegacyList(list) if list.elements.len() >= 2 => &list.elements[2..],
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => &[],
     }
 }
 
@@ -181,13 +193,20 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
 }
 
 fn annotations(expr: &Expr) -> Option<&chelis_deep::Metadata> {
-    match expr {
-        Expr::Node(node, _) => Some(node.meta()),
-        Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(meta, _)) => Some(meta),
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => Some(metadata),
+        ExprCarrier::UndecodableHead(_, metadata, _) if matches!(expr, Expr::List(_, _)) => {
+            Some(metadata)
+        }
+        ExprCarrier::MalformedLegacyList(list) => match list.elements.get(1) {
+            Some(Expr::Map(metadata, _)) => Some(metadata),
             _ => None,
         },
-        _ => None,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -383,18 +402,24 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
         return Some(name.to_string());
     }
     // A typed-param list `(p {type: ...})`: head symbol is the name.
-    let elements = match first {
-        Expr::BareList(elements, _) => Some(elements.as_slice()),
-        Expr::List(list, _) => Some(list.elements.as_slice()),
-        _ => None,
-    };
-    if let Some(name) = elements
-        .and_then(|elements| elements.first())
-        .and_then(symbol_text)
-    {
-        return Some(name.to_string());
+    match first.carrier() {
+        ExprCarrier::StructuralList(elements) => {
+            elements.first().and_then(symbol_text).map(str::to_string)
+        }
+        ExprCarrier::UndecodableHead(head, _, _) if matches!(first, Expr::List(_, _)) => {
+            Some(head.to_string())
+        }
+        ExprCarrier::UndecodableHead(_, _, _) => None,
+        ExprCarrier::MalformedLegacyList(list) => list
+            .elements
+            .first()
+            .and_then(symbol_text)
+            .map(str::to_string),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
-    None
 }
 
 /// Parse a Deep type node into a [`FieldType`] in the V1 value class.
@@ -2041,7 +2066,11 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
                 // and reparsed by `eval_selected` immediately below, so the
                 // carrier is transient and the emitted text is unchanged.
                 Expr::Node(node, span) => {
-                    let mut elements = node.to_list(*span).elements;
+                    let mut elements = vec![
+                        Expr::Atom(Atom::Tag(node.tag()), *span),
+                        Expr::Map(node.meta().clone(), *span),
+                    ];
+                    elements.extend(node.children_slice().iter().cloned());
                     elements.push(def.clone());
                     out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
                     injected = true;
