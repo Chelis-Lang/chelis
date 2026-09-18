@@ -27,6 +27,7 @@ serde_json = "1"
 bincode = "1"
 chelis-surf.workspace = true
 chelis-macros.workspace = true
+proc-macro2 = "1"
 syn.workspace = true
 quote.workspace = true
 
