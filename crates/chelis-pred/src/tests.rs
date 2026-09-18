@@ -446,17 +446,56 @@ fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
             path.ident == "to_list" || use_tree_mentions_to_list(&path.tree)
         }
         syn::UseTree::Name(name) => name.ident == "to_list",
-        syn::UseTree::Rename(rename) => rename.ident == "to_list",
+        syn::UseTree::Rename(rename) => rename.ident == "to_list" || rename.rename == "to_list",
         syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_to_list),
         syn::UseTree::Glob(_) => false,
     }
 }
 
+fn tokens_mention_to_list(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == "to_list",
+        proc_macro2::TokenTree::Group(group) => tokens_mention_to_list(group.stream()),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
+}
+
 fn macro_mentions_to_list(mac: &syn::Macro) -> bool {
-    mac.tokens
-        .to_string()
-        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .any(|token| token == "to_list")
+    mac.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "to_list")
+        || tokens_mention_to_list(mac.tokens.clone())
+}
+
+fn attribute_mentions_to_list(attribute: &syn::Attribute) -> bool {
+    if attribute
+        .path()
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "to_list")
+    {
+        return true;
+    }
+    match &attribute.meta {
+        syn::Meta::List(list) => tokens_mention_to_list(list.tokens.clone()),
+        syn::Meta::NameValue(name_value) => {
+            struct ToListPathScan(bool);
+            impl<'ast> Visit<'ast> for ToListPathScan {
+                fn visit_path(&mut self, path: &'ast syn::Path) {
+                    self.0 |= path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "to_list");
+                    syn::visit::visit_path(self, path);
+                }
+            }
+            let mut scan = ToListPathScan(false);
+            scan.visit_expr(&name_value.value);
+            scan.0
+        }
+        syn::Meta::Path(_) => false,
+    }
 }
 
 fn audit_source(source: &str) -> Vec<String> {
@@ -512,9 +551,23 @@ impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
         syn::visit::visit_item_use(self, item);
     }
 
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if attribute_mentions_to_list(attribute) {
+            self.record("reserved attribute identifier");
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if item.ident.as_ref().is_some_and(|ident| ident == "to_list") {
+            self.record("reserved macro definition");
+        }
+        syn::visit::visit_item_macro(self, item);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if macro_mentions_to_list(mac) {
-            self.record("reserved macro token");
+            self.record("reserved macro identifier");
         }
         syn::visit::visit_macro(self, mac);
     }
@@ -568,7 +621,12 @@ fn node_to_list_audit_reserves_all_receiver_spellings_without_type_inference() {
         "fn bridge(node: Box<chelis_deep::node::Node>) { node.to_list(span); }",
         "fn bridge(node: chelis_deep::node::Node) { let f = |node: Unrelated| node.to_list(span); let _ = node; }",
         "use chelis_deep::node::Node::to_list as bridge; fn call() { bridge(node, span); }",
+        "use helper::convert as to_list; fn call() { to_list(node); }",
         "fn bridge() { quote::quote! { node.to_list(span) }; }",
+        "fn bridge() { to_list!(); }",
+        "fn bridge() { helper::to_list!(); }",
+        "macro_rules! to_list { () => {} }",
+        "#[to_list] fn bridge() {}",
     ] {
         let calls = audit_source(source);
         assert!(
@@ -576,6 +634,11 @@ fn node_to_list_audit_reserves_all_receiver_spellings_without_type_inference() {
             "reserved bridge spelling escaped the predicate source audit: {source}"
         );
     }
+
+    assert!(
+        audit_source(r#"fn bridge() { format_args!("to_list"); }"#).is_empty(),
+        "literal content is not an identifier use of the reserved spelling"
+    );
 }
 
 #[test]

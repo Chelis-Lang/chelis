@@ -11,6 +11,7 @@ chelis-deep.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+proc-macro2 = "1"
 syn.workspace = true
 
 [lints]
