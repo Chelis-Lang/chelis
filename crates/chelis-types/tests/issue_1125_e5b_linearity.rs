@@ -5,129 +5,115 @@ use chelis_deep::{Atom, Expr, List, Metadata};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity, check_typed_program};
+use std::collections::BTreeSet;
 use syn::visit::{self, Visit};
 
-fn path_ends_with(path: &syn::Path, expected: &str) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| segment.ident == expected)
-}
+const CARRIER_ROLES: [&str; 7] = [
+    "DecodedNode",
+    "StructuralList",
+    "UndecodableHead",
+    "Atom",
+    "MetadataMap",
+    "MetadataExpression",
+    "MalformedLegacyList",
+];
 
-fn type_path_ends_with(ty: &syn::Type, expected: &str) -> bool {
-    matches!(ty, syn::Type::Path(path) if path_ends_with(&path.path, expected))
-}
-
-fn optional_decoded_parts_return(ty: &syn::Type) -> bool {
-    let syn::Type::Path(option) = ty else {
-        return false;
-    };
-    let Some(segment) = option.path.segments.last() else {
-        return false;
-    };
-    if segment.ident != "Option" {
-        return false;
+fn direct_carrier_call(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::MethodCall(call) => call.method == "carrier",
+        syn::Expr::Group(group) => direct_carrier_call(&group.expr),
+        syn::Expr::Paren(paren) => direct_carrier_call(&paren.expr),
+        _ => false,
     }
-    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return false;
-    };
-    let Some(syn::GenericArgument::Type(syn::Type::Tuple(parts))) = arguments.args.first() else {
-        return false;
-    };
-    let mut parts = parts.elems.iter();
-    let (Some(tag), Some(metadata), Some(children), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    let syn::Type::Reference(metadata) = metadata else {
-        return false;
-    };
-    let syn::Type::Reference(children) = children else {
-        return false;
-    };
-    let syn::Type::Slice(children) = children.elem.as_ref() else {
-        return false;
-    };
-    type_path_ends_with(tag, "DeepTag")
-        && type_path_ends_with(&metadata.elem, "Metadata")
-        && type_path_ends_with(&children.elem, "Expr")
 }
 
-#[derive(Default)]
-struct DecodedAdapterBody {
-    calls_carrier: bool,
-    matches_decoded_node: bool,
-    returns_some: bool,
-    returns_none: bool,
-}
+fn carrier_roles(pattern: &syn::Pat) -> BTreeSet<String> {
+    #[derive(Default)]
+    struct RoleScan {
+        roles: BTreeSet<String>,
+    }
 
-impl<'ast> Visit<'ast> for DecodedAdapterBody {
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "carrier" {
-            self.calls_carrier = true;
+    impl<'ast> Visit<'ast> for RoleScan {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if let Some(role) = path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                && CARRIER_ROLES.contains(&role.as_str())
+            {
+                self.roles.insert(role);
+            }
+            visit::visit_path(self, path);
         }
-        visit::visit_expr_method_call(self, call);
     }
 
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        self.matches_decoded_node |= path_ends_with(path, "DecodedNode");
-        self.returns_some |= path_ends_with(path, "Some");
-        self.returns_none |= path_ends_with(path, "None");
-        visit::visit_path(self, path);
-    }
+    let mut scan = RoleScan::default();
+    scan.visit_pat(pattern);
+    scan.roles
 }
 
-fn private_optional_decoded_adapters(source: &str) -> Vec<String> {
+fn macro_mentions_carrier(mac: &syn::Macro) -> bool {
+    let tokens = mac.tokens.to_string();
+    tokens.contains(". carrier (") || tokens.contains(":: carrier (")
+}
+
+fn carrier_totality_findings(source: &str) -> Vec<String> {
     let file = syn::parse_file(source).expect("linearity source parses as Rust");
 
     #[derive(Default)]
-    struct PrivateAdapterScan {
-        names: Vec<String>,
+    struct CarrierTotalityScan {
+        carrier_calls: usize,
+        direct_matches: usize,
+        findings: Vec<String>,
     }
 
-    impl PrivateAdapterScan {
-        fn inspect(
-            &mut self,
-            visibility: &syn::Visibility,
-            signature: &syn::Signature,
-            block: &syn::Block,
-        ) {
-            if !matches!(visibility, syn::Visibility::Inherited) {
-                return;
+    impl<'ast> Visit<'ast> for CarrierTotalityScan {
+        fn visit_expr_match(&mut self, match_expr: &'ast syn::ExprMatch) {
+            if direct_carrier_call(&match_expr.expr) {
+                self.direct_matches += 1;
+                let present = match_expr
+                    .arms
+                    .iter()
+                    .flat_map(|arm| carrier_roles(&arm.pat))
+                    .collect::<BTreeSet<_>>();
+                let missing = CARRIER_ROLES
+                    .iter()
+                    .filter(|role| !present.contains(**role))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    self.findings
+                        .push(format!("carrier match missing {}", missing.join(", ")));
+                }
             }
-            let syn::ReturnType::Type(_, ty) = &signature.output else {
-                return;
-            };
-            if !optional_decoded_parts_return(ty) {
-                return;
+            visit::visit_expr_match(self, match_expr);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "carrier" {
+                self.carrier_calls += 1;
             }
-            let mut body = DecodedAdapterBody::default();
-            body.visit_block(block);
-            if body.calls_carrier
-                && body.matches_decoded_node
-                && body.returns_some
-                && body.returns_none
-            {
-                self.names.push(signature.ident.to_string());
+            visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if macro_mentions_carrier(mac) {
+                self.findings
+                    .push("carrier access hidden inside a macro".to_string());
             }
+            visit::visit_macro(self, mac);
         }
     }
 
-    impl<'ast> Visit<'ast> for PrivateAdapterScan {
-        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-            self.inspect(&function.vis, &function.sig, &function.block);
-            visit::visit_item_fn(self, function);
-        }
-
-        fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
-            self.inspect(&function.vis, &function.sig, &function.block);
-            visit::visit_impl_item_fn(self, function);
-        }
-    }
-
-    let mut scan = PrivateAdapterScan::default();
+    let mut scan = CarrierTotalityScan::default();
     scan.visit_file(&file);
-    scan.names
+    if scan.carrier_calls != scan.direct_matches {
+        scan.findings.push(format!(
+            "{} carrier call(s) but {} direct carrier match(es)",
+            scan.carrier_calls, scan.direct_matches
+        ));
+    }
+    scan.findings
 }
 
 fn legacy_metadata(metadata: &Metadata) -> Metadata {
@@ -245,16 +231,17 @@ def bad(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
 }
 
 #[test]
-fn linearity_reader_has_no_private_optional_adapter_or_node_bridge() {
+fn linearity_reader_has_only_role_total_carrier_matches_and_no_node_bridge() {
     let source = include_str!("../src/linearity.rs");
     let production = source
         .split("#[cfg(test)]")
         .next()
         .expect("linearity source has a production prefix");
 
+    let carrier_findings = carrier_totality_findings(production);
     assert!(
-        private_optional_decoded_adapters(production).is_empty(),
-        "E5b forbids private Option adapters that can erase a non-decoded carrier"
+        carrier_findings.is_empty(),
+        "E5b requires every carrier access to be a direct, role-total match: {carrier_findings:?}"
     );
     assert!(
         !production.contains(".to_list("),
@@ -281,31 +268,49 @@ fn linearity_reader_has_no_private_optional_adapter_or_node_bridge() {
 }
 
 #[test]
-fn optional_decoded_adapter_ratchet_is_name_independent() {
-    let renamed_adapter = r#"
+fn carrier_totality_ratchet_is_signature_and_visibility_independent() {
+    let incomplete_adapters = [
+        r#"
 fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
         _ => None,
     }
 }
-
-fn pre_declare_one(expr: &Expr) {
-    match decoded_parts(expr) {
-        Some((DeepTag::Module, _, children)) => {
-            for child in children {
-                pre_declare_one(child);
-            }
-        }
-        Some(_) | None => {}
+"#,
+        r#"
+type DecodedParts<'a> = Option<(DeepTag, &'a Metadata, &'a [Expr])>;
+fn decoded_parts(expr: &Expr) -> DecodedParts<'_> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
     }
 }
-"#;
-    assert_eq!(
-        private_optional_decoded_adapters(renamed_adapter),
-        vec!["decoded_parts"],
-        "renaming the adapter and routing a reader through Some/None must not bypass the ratchet"
-    );
+"#,
+        r#"
+pub(crate) fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+"#,
+        r#"
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    let carrier = expr.carrier();
+    match carrier {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+"#,
+    ];
+    for adapter in incomplete_adapters {
+        assert!(
+            !carrier_totality_findings(adapter).is_empty(),
+            "signature, alias, visibility, or local delegation must not bypass totality: {adapter}"
+        );
+    }
 
     let unrelated_option = r#"
 fn maybe_name(enabled: bool) -> Option<&'static str> {
@@ -313,7 +318,7 @@ fn maybe_name(enabled: bool) -> Option<&'static str> {
 }
 "#;
     assert!(
-        private_optional_decoded_adapters(unrelated_option).is_empty(),
-        "ordinary Option helpers are outside the decoded-carrier adapter class"
+        carrier_totality_findings(unrelated_option).is_empty(),
+        "ordinary Option helpers without carrier access are outside the totality ratchet"
     );
 }
