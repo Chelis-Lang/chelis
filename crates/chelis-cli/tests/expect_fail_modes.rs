@@ -145,7 +145,7 @@ fn neg_bare_file_check_failure_matches_sidecar() {
 }
 
 #[test]
-fn ordinary_testless_compile_mismatch_keeps_legacy_zero_record_behavior() {
+fn ordinary_testless_file_is_an_empty_selection_error_before_compile() {
     let (_d, pkg) = make_probe_package("ordinary-testless");
     write_file_probe(
         &pkg,
@@ -167,8 +167,13 @@ fn ordinary_testless_compile_mismatch_keeps_legacy_zero_record_behavior() {
             "1",
         ])
         .assert()
-        .success()
-        .stdout(predicate::eq("{\"summary\":{\"passed\":0,\"failed\":0}}\n"));
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .stdout(predicate::str::contains(
+            "\"kind\":\"empty_test_selection\"",
+        ))
+        .stdout(predicate::str::contains("\"summary\"").not());
 }
 
 #[test]

@@ -358,6 +358,15 @@ Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 serial file execution. Output remains stable in discovery order for both plain
 text and NDJSON.
 
+An ordinary run must select at least one runnable nullary `test_*` function
+returning `unit`. Chelis exits `2` when the directory walk finds no `.ch`
+files, when the discovered files declare no runnable tests, or when `--filter`
+matches none of them. Plain mode prints an error instead of a passing
+`0 passed, 0 failed` summary. Under `--json`, stdout contains one record with
+an `errors` array and an `empty_test_selection` diagnostic; no test row or
+summary is emitted. A failed directory walk retains its own error and is not
+also described as an empty selection.
+
 `--timeout` is a per-test budget (30 seconds by default).
 `--suite-timeout` is an independent bound around the complete command,
 including Reef/context preparation, workers, output collection, and

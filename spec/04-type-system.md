@@ -2771,7 +2771,44 @@ Inference and checking obey these rules:
 - top-level `IO` is permitted
 - assertion operations introduce `Test`; only the test runner handles it
 
-### 7.2 Type Representation
+### 7.2 Native Test Selection
+
+`chelis test` discovers ordinary tests as nullary definitions named
+`test_*` whose result type is `unit`. A path may name one `.ch` file or a
+directory tree; a substring filter narrows the discovered definitions by
+their `<file>::<name>` identity.
+
+> **[04-TEST-1]** A completed ordinary `chelis test` invocation SHALL run at
+> least one selected test. Zero selected tests is a runner error in each of
+> these cases: the completed directory walk found no `.ch` files; `.ch` files
+> were found but none declared a runnable `test_*`; or `--filter` excluded
+> every runnable test. The condition is judged once over the complete target,
+> so an empty subdirectory inside a target with a selected test contributes
+> nothing. The runner SHALL exit `2` for this error and SHALL NOT emit a
+> passing `0 passed, 0 failed` summary.
+
+> **[04-TEST-2]** The zero-selection diagnostic SHALL name the target and
+> distinguish the three cases in [04-TEST-1]. When no `.ch` file was found,
+> it SHALL also report the `.ch` files excluded under dot-prefixed entries or
+> directories named `target`, using an exact count when that excluded walk
+> completes and a lower bound otherwise. Text mode SHALL render the diagnostic
+> as an error. JSON mode SHALL emit one record with a top-level `errors` array
+> containing exactly one diagnostic with kind `empty_test_selection`, its
+> message, and severity `1.0`; it SHALL emit no test row and no summary record.
+
+> **[04-TEST-3]** Only completed discovery establishes zero selection. A
+> failure while walking the target SHALL retain its walk-error result and SHALL
+> NOT also emit `empty_test_selection`. Likewise, a file that cannot be read or
+> parsed continues through the ordinary file-failure path rather than being
+> counted as evidence that the selected set is empty.
+
+`--expect neg|blocked` is a file-probe mode rather than an ordinary test
+selection. Each discovered `.ch` file remains one probe even when it declares
+no `test_*`, because its compile or check diagnostic may be the expected
+outcome. Its existing non-empty-suite requirement is therefore based on
+discovered probe files, not on [04-TEST-1]'s runnable-test count.
+
+### 7.3 Type Representation
 
 Declared function types with effects use `eff` metadata on `t-fn`:
 
@@ -2799,7 +2836,7 @@ imported helpers; unused library definitions do not constrain that entry's
 target. A whole-program build checks the whole emitted program. Target checking
 does not change the authored input or output ABI.
 
-### 7.3 Metadata Contract
+### 7.4 Metadata Contract
 
 The `eff` metadata key on `t-fn` nodes carries a declared effect upper bound;
 the `effects` key on checked `fn` nodes carries the inferred unhandled set.

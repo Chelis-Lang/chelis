@@ -6913,7 +6913,7 @@ struct TestFileResult {
 ///
 /// * `0` — every selected test passed.
 /// * `1` — at least one test failed.
-/// * `2` — runner error (missing dir, missing reef package, or no test files parsed).
+/// * `2` — runner error (missing dir, missing reef package, or zero selected tests).
 #[allow(clippy::too_many_arguments)]
 fn cmd_test(
     path: Option<&Path>,
@@ -6987,42 +6987,37 @@ fn cmd_test(
                 target.display()
             ));
         }
-        // Empty test dir is a legitimate CI state (no tests yet, or all filtered
-        // out before discovery). Report 0/0 and exit 0 — matches `cargo test` and
-        // `pytest` ergonomics. A truly missing `tests/` dir already errored above.
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
-        if json {
-            writeln!(out, "{{\"summary\":{{\"passed\":0,\"failed\":0}}}}")
-                .map_err(|e| e.to_string())?;
-        } else {
-            writeln!(out, "0 passed, 0 failed").map_err(|e| e.to_string())?;
-        }
-        return Ok(0);
+        return emit_empty_test_selection(
+            json,
+            describe_empty_test_selection(
+                &target,
+                EmptyTestSelection::NoSourceFiles {
+                    excluded: count_excluded_test_files(&target),
+                },
+            ),
+        );
     }
 
-    // Phase G' — fast path: when `--filter <substring>` matches zero
-    // tests across every discovered file, skip the (expensive)
-    // `compile_reef_context` build entirely. The pre-G' code paid the
-    // full ~65 s parent overhead even for `chelis test --filter __no_match__`,
-    // a documented bottleneck in `docs/perf_baseline.md` and the archived
-    // Phase J notes. Surf-parsing
-    // each test file is ~10 ms; that's the ceiling we accept here.
+    // [04-TEST-1..3]: ordinary mode must establish a non-empty runnable
+    // selection before paying for Reef/context compilation. The scan is
+    // conservative: unreadable, unparsable, or duplicate-bearing files fall
+    // through to the normal file-failure path instead of being used as
+    // evidence that the selected set is empty. `--expect` remains file-probe
+    // mode and deliberately bypasses this runnable-test count.
     //
-    // We do this BEFORE `prepare_reef_graph` runs so a no-match
-    // invocation pays only the file-walk + per-file parse cost.
-    if let Some(needle) = filter
-        && !any_file_has_filter_match(&test_files, &cwd, needle)?
-    {
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
-        if json {
-            writeln!(out, "{{\"summary\":{{\"passed\":0,\"failed\":0}}}}")
-                .map_err(|e| e.to_string())?;
-        } else {
-            writeln!(out, "0 passed, 0 failed").map_err(|e| e.to_string())?;
+    // This also preserves Phase G's no-match fast path: a filter selecting
+    // nothing still avoids the historically expensive context build, but now
+    // exits 2 with a diagnostic rather than presenting a false green.
+    if expect.is_none() {
+        match preflight_test_selection(&test_files, &cwd, filter) {
+            TestSelectionPreflight::NeedsExecution => {}
+            TestSelectionPreflight::Empty(reason) => {
+                return emit_empty_test_selection(
+                    json,
+                    describe_empty_test_selection(&target, reason),
+                );
+            }
         }
-        return Ok(0);
     }
 
     // Phase H: build the `CompiledContext` ONCE in the parent and hand it
@@ -8293,23 +8288,130 @@ fn emit_test_file_rows(
     Ok(())
 }
 
-/// Phase G' — pre-flight filter scan. Returns `true` if any test file
-/// contains at least one `def test_*` whose `<rel_display>::<name>`
-/// key contains the filter substring. Returns `false` when the filter
-/// matches zero tests across every file. A parse error on any file
-/// surfaces as `Err`; the caller treats that as "fall through to the
-/// normal path" because suppressing it here would silently swallow a
-/// real file-level failure.
+enum EmptyTestSelection {
+    NoSourceFiles {
+        excluded: ExcludedTestFileCount,
+    },
+    NoRunnableTests {
+        source_files: usize,
+    },
+    FilterNoMatch {
+        filter: String,
+        runnable_tests: usize,
+    },
+}
+
+enum TestSelectionPreflight {
+    NeedsExecution,
+    Empty(EmptyTestSelection),
+}
+
+struct ExcludedTestFileCount {
+    count: usize,
+    lower_bound: bool,
+}
+
+/// Count source files hidden by the ordinary test walk's exclusions.
 ///
-/// This intentionally mirrors the per-file enumeration logic in
-/// `enumerate_test_fns` so the pre-flight is consistent with the
-/// per-worker filter check; it just runs with no library link, so it's
-/// dramatically cheaper than the full `compile_reef_context` walk.
-fn any_file_has_filter_match(
+/// The selected walk has already completed, so a failure here can only occur
+/// below an excluded entry. As with `chelis check`'s [04-FIT-24] diagnostic,
+/// that makes the result a lower bound rather than a reason to add a second
+/// walk error.
+fn count_excluded_test_files(target: &Path) -> ExcludedTestFileCount {
+    let unfiltered = walk_sources(
+        target,
+        &WalkRules {
+            exclusions: false,
+            ..TEST_WALK
+        },
+    );
+    ExcludedTestFileCount {
+        count: unfiltered
+            .iter()
+            .filter(|item| matches!(item, WalkItem::Source(_)))
+            .count(),
+        lower_bound: unfiltered
+            .iter()
+            .any(|item| matches!(item, WalkItem::Failure(_))),
+    }
+}
+
+fn describe_empty_test_selection(target: &Path, reason: EmptyTestSelection) -> String {
+    match reason {
+        EmptyTestSelection::NoSourceFiles { excluded } => {
+            let bound = if excluded.lower_bound {
+                "at least "
+            } else {
+                ""
+            };
+            format!(
+                "no .ch test files under {}: {bound}{} excluded under dot-prefixed entries or \
+                 `target` directories",
+                escaped_path(target),
+                excluded.count
+            )
+        }
+        EmptyTestSelection::NoRunnableTests { source_files } => {
+            let noun = if source_files == 1 { "file" } else { "files" };
+            format!(
+                "found {source_files} .ch {noun} under {} but no runnable `test_*` functions",
+                escaped_path(target)
+            )
+        }
+        EmptyTestSelection::FilterNoMatch {
+            filter,
+            runnable_tests,
+        } => {
+            let noun = if runnable_tests == 1 {
+                "test was"
+            } else {
+                "tests were"
+            };
+            format!(
+                "no tests matched filter {filter:?} under {}: {runnable_tests} runnable {noun} \
+                 available before filtering",
+                escaped_path(target)
+            )
+        }
+    }
+}
+
+fn emit_empty_test_selection(json: bool, message: String) -> Result<i32, String> {
+    if json {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "errors": [{
+                    "kind": DiagnosticKind::EmptyTestSelection.as_str(),
+                    "message": message,
+                    "severity": 1.0,
+                }]
+            })
+        )
+        .map_err(|error| error.to_string())?;
+    } else {
+        let stderr = io::stderr();
+        let mut out = stderr.lock();
+        writeln!(out, "error: {message}").map_err(|error| error.to_string())?;
+    }
+    Ok(2)
+}
+
+/// Cheap conservative scan for [04-TEST-1]'s ordinary runnable selection.
+///
+/// A source failure or duplicate test definition returns `NeedsExecution`,
+/// allowing the normal worker path to report the real file error. Only a
+/// complete, clean scan may return `Empty`.
+fn preflight_test_selection(
     test_files: &[PathBuf],
     cwd: &Path,
-    filter_needle: &str,
-) -> Result<bool, String> {
+    filter: Option<&str>,
+) -> TestSelectionPreflight {
+    let mut runnable_tests = 0usize;
+    let mut selected_tests = 0usize;
     for file in test_files {
         let rel_display = file
             .strip_prefix(cwd)
@@ -8318,47 +8420,42 @@ fn any_file_has_filter_match(
             .to_string();
         let source = match fs::read_to_string(file) {
             Ok(s) => s,
-            // Unreadable file: don't short-circuit; let the normal path
-            // surface the read error as a per-file FAIL row.
-            Err(_) => return Ok(true),
+            Err(_) => return TestSelectionPreflight::NeedsExecution,
         };
         let parsed = match chelis_surf::parser::parse_str(&source) {
             Ok(p) => p,
-            // Parse error: same — let the normal path surface the
-            // file-level error.
-            Err(_) => return Ok(true),
+            Err(_) => return TestSelectionPreflight::NeedsExecution,
         };
         let flat = flatten_module_decls(&parsed);
-        for decl in &flat {
-            let Decl::FunDef {
-                name,
-                params,
-                ret_ty,
-                ..
-            } = decl
-            else {
-                continue;
-            };
-            // Same gating as enumerate_test_fns: nullary, test_-prefixed,
-            // unit-typed.
-            if !name.starts_with("test_") || name == "test_" {
-                continue;
-            }
-            if !params.is_empty() {
-                continue;
-            }
-            if let Some(ty) = ret_ty
-                && !is_unit_type(ty)
-            {
-                continue;
-            }
-            let key = format!("{rel_display}::{name}");
-            if key.contains(filter_needle) {
-                return Ok(true);
-            }
+        let tests = match enumerate_test_fns(&flat, None, &rel_display) {
+            EnumerationOutcome::Tests(tests) => tests,
+            EnumerationOutcome::Error(_) => return TestSelectionPreflight::NeedsExecution,
+        };
+        runnable_tests += tests.len();
+        selected_tests += tests
+            .iter()
+            .filter(|test| {
+                filter.is_none_or(|needle| format!("{rel_display}::{}", test.name).contains(needle))
+            })
+            .count();
+        if selected_tests > 0 {
+            return TestSelectionPreflight::NeedsExecution;
         }
     }
-    Ok(false)
+
+    if runnable_tests == 0 {
+        TestSelectionPreflight::Empty(EmptyTestSelection::NoRunnableTests {
+            source_files: test_files.len(),
+        })
+    } else {
+        match filter {
+            Some(filter) => TestSelectionPreflight::Empty(EmptyTestSelection::FilterNoMatch {
+                filter: filter.to_string(),
+                runnable_tests,
+            }),
+            None => TestSelectionPreflight::NeedsExecution,
+        }
+    }
 }
 
 fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
