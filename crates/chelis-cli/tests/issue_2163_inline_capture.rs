@@ -154,6 +154,59 @@ fn a_let_bound_name_in_the_callee_does_not_capture_the_argument() {
 }
 
 #[test]
+fn a_fresh_name_avoids_an_existing_unreferenced_inl_binder() {
+    // The fresh name must collide with nothing, including a binder that the
+    // body never reads. `avoid` built from `var` references alone does not see
+    // the `x__inl1` binder here, so the outer `x` renames onto it and the
+    // inner lambda's `x` reads the wrong value: [103, 106] instead of
+    // [102, 104].
+    assert_lanes_agree(
+        "def cap[n, p: Float](v: &tensor[n, p], k: p) -> tensor[n, p] = \
+             to_tensor(map(fn (x: p) -> add(x, (fn (x__inl1: p) -> add(x, k))(add(x, x))), \
+             to_list(v)))\n\
+         def main() -> tensor[2, f64] = {\n  x = 100.0f64\n  \
+         cap(to_tensor([1.0f64, 2.0f64]), x)\n}",
+        "fresh_avoids_existing_inl",
+        &[102.0, 104.0],
+    );
+}
+
+#[test]
+fn a_shadowed_parameter_does_not_trigger_a_rename() {
+    // A replacement whose parameter is shadowed here can never be inserted
+    // below, so no binder underneath needs renaming. Renaming anyway is not
+    // free: the fresh name can land on an existing binder and capture. With
+    // `live` widened to every replacement, the inner `fn (x: p)` renames onto
+    // the existing `x__inl1` and this gives [5, 10] instead of [3, 6].
+    assert_lanes_agree(
+        "def f[n, p: Float](v: &tensor[n, p], k: p) -> tensor[n, p] = \
+             to_tensor(map(fn (k: p) -> \
+             (fn (x: p) -> add(x, (fn (x__inl1: p) -> add(x, x))(add(x, x))))(k), \
+             to_list(v)))\n\
+         def main() -> tensor[2, f64] = {\n  x = 100.0f64\n  \
+         f(to_tensor([1.0f64, 2.0f64]), x)\n}",
+        "shadowed_parameter_no_rename",
+        &[3.0, 6.0],
+    );
+}
+
+#[test]
+fn a_let_binding_rename_does_not_reach_its_own_value() {
+    // `x = add(x, m)` reads the OUTER `x` (the callee's parameter): the
+    // binding's own name is not in scope in its own value. Applying the
+    // rename there produces `x__inl1 = add(x__inl1, m)`, a self-reference that
+    // fails ownership lowering with "references unbound name `x__inl1`".
+    assert_lanes_agree(
+        "def bump[n, p: Float](v: &tensor[n, p], x: p, m: p) -> tensor[n, p] = {\n  \
+             x = add(x, m)\n  to_tensor(map(fn (e: p) -> add(e, x), to_list(v)))\n}\n\
+         def main() -> tensor[2, f64] = {\n  x = 100.0f64\n  \
+         bump(to_tensor([1.0f64, 2.0f64]), x, 7.0f64)\n}",
+        "let_rename_skips_own_value",
+        &[108.0, 109.0],
+    );
+}
+
+#[test]
 fn renaming_a_captured_binder_stops_at_an_inner_binder_of_the_same_name() {
     // The renaming is itself scope-aware. The outer lambda's `x` is renamed
     // because it would capture the caller's `x`, but the inner lambda binds

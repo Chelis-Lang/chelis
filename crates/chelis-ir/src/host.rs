@@ -13255,16 +13255,67 @@ fn collect_referenced_names(expr: &Expr, out: &mut UnordSet<String>) {
     }
 }
 
-/// Every name the replacements reference (chelis#2163).
+/// EVERY name occurring anywhere in `expr`, bound as well as referenced
+/// (chelis#2163).
 ///
-/// A binder spelling one of these would capture it, so the binder is renamed.
-/// The set is deliberately not narrowed to the replacements still reachable in
-/// this scope: skipping a shadowed parameter's replacement would only avoid a
-/// rename that is already meaning-preserving, and no program can distinguish
-/// the two. An unobservable branch is an untestable one.
-fn replacement_names(substitutions: &UnordMap<String, Expr>) -> UnordSet<String> {
+/// This is the avoid-set feeder, and it is deliberately the widest possible
+/// collection: a fresh binder name must collide with nothing, and a name is
+/// dangerous whether it is referenced or merely bound. Collecting only `var`
+/// references misses a binder that is never read, and a fresh name landing on
+/// one of those captures it - the defect that shipped in the first revision of
+/// this fix. Over-approximating what to AVOID only makes a fresh name more
+/// exotic; under-approximating it miscompiles.
+fn collect_occurring_names(expr: &Expr, out: &mut UnordSet<String>) {
+    if let Expr::Atom(Atom::Name(name), _) = expr {
+        out.insert(name.clone());
+    }
+    match expr {
+        Expr::MetaExpr(meta, _) => {
+            collect_occurring_names(&meta.expr, out);
+            // Annotation expressions carry names too, and `substitute_expr`
+            // rewrites them, so they are in scope for collisions.
+            let _ = meta.metadata.map_expressions(&mut |value, _| {
+                collect_occurring_names(value, out);
+                value.clone()
+            });
+        }
+        Expr::List(list, _) => {
+            for child in &list.elements {
+                collect_occurring_names(child, out);
+            }
+        }
+        Expr::BareList(items, _) => {
+            for child in items {
+                collect_occurring_names(child, out);
+            }
+        }
+        Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                collect_occurring_names(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names referenced by the replacements that can still reach this scope
+/// (chelis#2163).
+///
+/// A replacement whose parameter is shadowed here is never inserted below, so
+/// it cannot be captured and its binder needs no rename. The narrowing is not
+/// cosmetic: a rename is only meaning-preserving when the fresh name is truly
+/// fresh, so every rename that fires is a risk, and one that cannot prevent a
+/// capture is pure risk. Removing this narrowing is what made
+/// `a_shadowed_parameter_does_not_trigger_a_rename` miscompile.
+fn live_replacement_names(
+    substitutions: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
+) -> UnordSet<String> {
     let mut out = UnordSet::default();
-    for (_, replacement) in substitutions.to_sorted() {
+    for (name, replacement) in substitutions.to_sorted() {
+        if shadowed.contains(name) {
+            continue;
+        }
         collect_referenced_names(replacement, &mut out);
     }
     out
@@ -13274,6 +13325,9 @@ fn replacement_names(substitutions: &UnordMap<String, Expr>) -> UnordSet<String>
 ///
 /// Deterministic: the first free `<name>__inl<k>`, never a global counter, so
 /// the emitted source of an unchanged program does not move between builds.
+/// `avoid` must be fed by [`collect_occurring_names`], not by the referenced
+/// names alone: an existing `x__inl1` binder that nothing reads is still a
+/// collision.
 fn fresh_binder_name(name: &str, avoid: &UnordSet<String>) -> String {
     (1..)
         .map(|index| format!("{name}__inl{index}"))
@@ -13508,12 +13562,19 @@ fn substitute_expr(
             // chelis#2163: the arguments being substituted in carry the
             // CALLER's names. A binder here that spells one of them would
             // capture it, so rename the binder first. Renaming a binder
-            // preserves meaning; leaving the capture in place miscompiles.
-            let live = replacement_names(substitutions);
-            let mut avoid = live.clone();
-            if let Some(body) = kids.get(1) {
-                collect_referenced_names(body, &mut avoid);
+            // preserves meaning ONLY when the fresh name is genuinely unused,
+            // so `live` stays narrow (rename no more than necessary) while
+            // `avoid` stays wide (collide with nothing).
+            let mut bound = shadowed.clone();
+            for name in param_names.iter().flatten() {
+                bound.insert(name.clone());
             }
+            let live = live_replacement_names(substitutions, &bound);
+            let mut avoid = UnordSet::default();
+            for (_, replacement) in substitutions.to_sorted() {
+                collect_occurring_names(replacement, &mut avoid);
+            }
+            collect_occurring_names(expr, &mut avoid);
             for name in param_names.iter().flatten() {
                 avoid.insert(name.clone());
             }
@@ -13586,12 +13647,17 @@ fn substitute_expr(
                 None => Vec::new(),
             };
             // chelis#2163: same capture rule as the `fn` arm above, for a
-            // `let` binder.
-            let live = replacement_names(substitutions);
-            let mut avoid = live.clone();
-            for child in &list.elements {
-                collect_referenced_names(child, &mut avoid);
+            // `let` binder, with the same narrow-`live`/wide-`avoid` split.
+            let mut bound = shadowed.clone();
+            for name in bound_names.iter().flatten() {
+                bound.insert(name.clone());
             }
+            let live = live_replacement_names(substitutions, &bound);
+            let mut avoid = UnordSet::default();
+            for (_, replacement) in substitutions.to_sorted() {
+                collect_occurring_names(replacement, &mut avoid);
+            }
+            collect_occurring_names(expr, &mut avoid);
             let mut renames: Vec<(String, String)> = Vec::new();
             for name in bound_names.iter().flatten() {
                 if live.contains(name) {
@@ -13624,6 +13690,14 @@ fn substitute_expr(
                         // name, value, ...]: the names start at index 2.
                         let mut applied: Vec<(String, String)> = Vec::new();
                         let mut rebuilt_binds = bind_list.elements.clone();
+                        // A binding's own value is evaluated BEFORE its name is
+                        // in scope, so this binding's rename must not reach it:
+                        // `x = add(x, m)` refers to an outer `x`, and rewriting
+                        // it to `x__inl1 = add(x__inl1, m)` is a self-reference
+                        // that fails ownership lowering. The rename is recorded
+                        // only after its own value slot has been rewritten, so
+                        // it applies to LATER values and to the body.
+                        let mut pending: Option<(String, String)> = None;
                         for (index, slot) in rebuilt_binds.iter_mut().enumerate().skip(2) {
                             if index % 2 == 0 {
                                 let renamed = symbol_name(slot).and_then(|name| {
@@ -13631,10 +13705,13 @@ fn substitute_expr(
                                 });
                                 if let Some((from, fresh)) = renamed {
                                     *slot = Expr::Atom(Atom::Name(fresh.clone()), *span);
-                                    applied.push((from, fresh));
+                                    pending = Some((from, fresh));
                                 }
                             } else {
                                 *slot = rename_bound_names(slot, &applied, &UnordSet::new());
+                                if let Some(entry) = pending.take() {
+                                    applied.push(entry);
+                                }
                             }
                         }
                         substitute_expr(
