@@ -327,14 +327,17 @@ fn inline_line_allows(line: &str, surface: Surface, rule: &str) -> bool {
     };
     if rule == rules::carrier_reader_completeness::RULE_ID {
         let rest = rest.trim();
-        let Some(justification) = rest
+        let Some(exception) = rest
             .strip_prefix(rule)
             .and_then(|rest| rest.trim().strip_prefix("--"))
             .map(str::trim)
         else {
             return false;
         };
-        return justification.len() >= 12;
+        let Some((kind, necessity)) = exception.split_once(':') else {
+            return false;
+        };
+        return matches!(kind.trim(), "producer" | "symmetric") && !necessity.trim().is_empty();
     }
     rest.split_whitespace().any(|name| name == rule)
 }

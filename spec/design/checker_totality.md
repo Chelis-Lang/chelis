@@ -2851,18 +2851,19 @@ enum a traversal must exhaust, not an `Option` it may drop.
   `tag` and `children` carrier-complete was measured, not assumed, to be
   insufficient on its own.
 - **E5d, the lint and its corpus. Implemented by this slice.** The blocking
-  `carrier-reader-completeness` rule parses Rust structurally, permits either
-  the shared total accessor or an explicit exhaustive carrier match, and
-  rejects new bare `Expr::List` reader patterns and `Node::to_list` bridges
-  outside `chelis-deep`. Its exact site inventory freezes the remaining E5e
-  debt and fails on additions, removals, or changed identities; permanent
-  producer/symmetric exceptions and inline escapes require a site-specific
-  rationale. A CLI integration test plants the guarded-arm blind spot and
-  proves that `chelis lint --check .` rejects it.
-- **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
-  19 never-adjudicated ones the audit inventories, swept behind E5b so the
-  sweep has one accessor to route to. Unbounded until E5b lands; do not
-  estimate it before then.
+  `carrier-reader-completeness` rule parses newly added production Rust
+  structurally and rejects bare `Expr::List` reader patterns, including
+  guarded match arms, and typed `Node::to_list` bridges outside `chelis-deep`.
+  An unguarded exhaustive `Expr` carrier match is permitted. A true producer
+  or proven-symmetric legacy exception must be inline at the site with a
+  nonempty necessity. The ratchet carries no exact-site inventory, source
+  count, or claim that existing E5e readers are adjudicated. A CLI integration
+  test plants the guarded-arm blind spot and proves that
+  `chelis lint --check .` rejects it.
+- **E5e, the remaining sites.** Existing unswept readers are assessed and
+  repaired behind E5b so the sweep has one accessor to route to. E5d neither
+  inventories nor closes them. Unbounded until E5b lands; do not estimate it
+  before then.
 
 The five slices exceed one pull request's hand-written budget together. E5a is
 one pull request; E5b with E5c is a second; E5d is a third. E5e is its own,
@@ -2911,8 +2912,8 @@ make that command green.
   axis.
 - **No universal reader claim.** The oracle proves the listed rows and
   whatever the lint's corpus plants. It does not prove that no reader remains
-  carrier-incomplete; E5e's inventory is the honest statement of what is
-  unswept.
+  carrier-incomplete; the existing unswept source remains E5e work rather than
+  an E5d inventory claim.
 - **The tide MCP prove route is not affected, and the source says otherwise.**
   `run_deep_source_obligations` normalizes through
   `deep_compat::parse_file_to_lists`; `prove_deep_file` does not. The comment
@@ -2922,7 +2923,7 @@ make that command green.
 - **One recorded site did not reproduce.** The `pipe_stage.rs` auto-borrow
   misclassification did not diverge on
   `add(x |> shape(0), x |> shape(0))` at this head; both surfaces accept.
-  The site is still List-only and stays in E5e's inventory, unconfirmed.
+  The site is still List-only and remains unconfirmed E5e work.
 
 #### Risks and overlaps
 

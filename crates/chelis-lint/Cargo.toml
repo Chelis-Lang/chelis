@@ -16,7 +16,6 @@ chelis-deep.workspace = true
 chelis-surf.workspace = true
 ignore = "0.4"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-quote.workspace = true
 regex = "1"
 serde.workspace = true
 syn.workspace = true

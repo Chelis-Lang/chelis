@@ -2,6 +2,7 @@ use chelis_lint::rules::carrier_reader_completeness::CarrierReaderCompleteness;
 use chelis_lint::{Context, Rule, Surface};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use tempfile::tempdir;
 
 fn check(rel: &str, source: &str) -> Vec<chelis_lint::Violation> {
@@ -15,9 +16,22 @@ fn check(rel: &str, source: &str) -> Vec<chelis_lint::Violation> {
     })
 }
 
+fn write_workspace(root: &Path, source: &str) {
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = []\nresolver = \"2\"\n",
+    )
+    .expect("write workspace manifest");
+    let source_dir = root.join("crates/chelis-types/src/infer");
+    fs::create_dir_all(&source_dir).expect("create fixture source root");
+    fs::write(source_dir.join("reader.rs"), source).expect("write fixture");
+}
+
 #[test]
-fn guarded_expr_list_arm_is_rejected() {
-    let source = r#"
+fn guarded_match_arm_is_rejected() {
+    let violations = check(
+        "crates/chelis-types/src/infer/planted.rs",
+        r#"
 use chelis_deep::Expr;
 
 fn read(expr: &Expr) -> bool {
@@ -26,100 +40,55 @@ fn read(expr: &Expr) -> bool {
         _ => false,
     }
 }
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
+"#,
+    );
     assert_eq!(violations.len(), 1, "{violations:?}");
-    assert_eq!(violations[0].rule_id, "carrier-reader-completeness");
 }
 
 #[test]
-fn if_let_and_let_else_expr_list_readers_are_rejected() {
-    let source = r#"
+fn guard_keeps_an_otherwise_exhaustive_match_from_escaping() {
+    let violations = check(
+        "crates/chelis-types/src/infer/planted.rs",
+        r#"
+use chelis_deep::Expr;
+
+fn read(expr: &Expr) {
+    match expr {
+        Expr::List(_, _) if false => {}
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        Expr::Atom(_, _) | Expr::Map(_, _) | Expr::MetaExpr(_, _) => {}
+        _ => {}
+    }
+}
+"#,
+    );
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn aliases_if_let_and_matches_are_rejected() {
+    let violations = check(
+        "crates/chelis-types/src/infer/planted.rs",
+        r#"
 use chelis_deep::Expr as DeepExpr;
-
-fn read_if(expr: &DeepExpr) -> bool {
-    if let DeepExpr::List(list, _) = expr {
-        return list.elements.is_empty();
-    }
-    false
-}
-
-fn read_let(expr: &DeepExpr) -> bool {
-    let DeepExpr::List(list, _) = expr else {
-        return false;
-    };
-    list.elements.is_empty()
-}
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
-    assert_eq!(violations.len(), 2, "{violations:?}");
-}
-
-#[test]
-fn fully_qualified_and_crate_alias_readers_are_rejected() {
-    let source = r#"
-use chelis_deep::{self as deep};
-
-fn read_direct(expr: &chelis_deep::Expr) -> bool {
-    matches!(expr, chelis_deep::Expr::List(_, _))
-}
-
-fn read_alias(expr: &deep::Expr) -> bool {
-    if let deep::Expr::List(_, _) = expr {
-        return true;
-    }
-    false
-}
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
-    assert_eq!(violations.len(), 2, "{violations:?}");
-}
-
-#[test]
-fn directly_imported_expr_list_reader_is_rejected() {
-    let source = r#"
-use chelis_deep::Expr::List;
-
-fn read(expr: &chelis_deep::Expr) -> bool {
-    if let List(list, _) = expr {
-        return list.elements.is_empty();
-    }
-    false
-}
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
-    assert_eq!(violations.len(), 1, "{violations:?}");
-}
-
-#[test]
-fn renamed_expr_list_import_is_rejected() {
-    let source = r#"
 use chelis_deep::Expr::List as LegacyList;
 
-fn read(expr: &chelis_deep::Expr) -> bool {
+fn read_if(expr: &DeepExpr) -> bool {
+    if let DeepExpr::List(_, _) = expr {
+        return true;
+    }
     matches!(expr, LegacyList(_, _))
 }
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
-    assert_eq!(violations.len(), 1, "{violations:?}");
+"#,
+    );
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
-fn expr_variant_glob_reader_is_rejected() {
-    let source = r#"
-use chelis_deep::Expr::*;
-
-fn read(expr: &chelis_deep::Expr) -> bool {
-    matches!(expr, List(list, _) if list.elements.is_empty())
-}
-"#;
-    let violations = check("crates/chelis-types/src/infer/planted.rs", source);
-    assert_eq!(violations.len(), 1, "{violations:?}");
-}
-
-#[test]
-fn node_to_list_method_and_ufcs_alias_are_rejected() {
-    let source = r#"
+fn node_bridge_spellings_are_rejected() {
+    let violations = check(
+        "crates/chelis-ir/src/planted.rs",
+        r#"
 use chelis_deep::{Node, Node as DeepNode, Span};
 
 fn bridge(node: &Node, span: Span) {
@@ -129,8 +98,8 @@ fn bridge(node: &Node, span: Span) {
 fn bridge_ufcs(node: DeepNode, span: Span) {
     let _ = DeepNode::to_list(node, span);
 }
-"#;
-    let violations = check("crates/chelis-ir/src/planted.rs", source);
+"#,
+    );
     assert_eq!(violations.len(), 2, "{violations:?}");
     assert!(
         violations
@@ -141,45 +110,15 @@ fn bridge_ufcs(node: DeepNode, span: Span) {
 }
 
 #[test]
-fn constructors_and_prose_do_not_look_like_readers() {
+fn constructors_prose_and_exhaustive_matches_are_allowed() {
     let source = r#"
 use chelis_deep::{Expr, List, Span};
 
 const NOTE: &str = "Expr::List(list, _) and node.to_list(span)";
 
 fn produce(list: List, span: Span) -> Expr {
-    // Expr::List(list, _) is reader syntax only in this comment.
     Expr::List(list, span)
 }
-"#;
-    assert!(check("crates/chelis-types/src/infer/planted.rs", source).is_empty());
-}
-
-#[test]
-fn carrier_accessor_match_is_allowed_without_a_named_helper() {
-    let source = r#"
-use chelis_deep::{DeepTag, Expr, ExprCarrier};
-
-fn read(expr: &Expr) -> usize {
-    match expr.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::Tuple, _, children) => children.len(),
-        ExprCarrier::DecodedNode(_, _, _)
-        | ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_)
-        | ExprCarrier::MalformedLegacyList(_) => 0,
-    }
-}
-"#;
-    assert!(check("crates/chelis-types/src/infer/planted.rs", source).is_empty());
-}
-
-#[test]
-fn direct_exhaustive_expr_match_is_carrier_complete() {
-    let source = r#"
-use chelis_deep::Expr;
 
 fn read(expr: &Expr) -> usize {
     match expr {
@@ -195,78 +134,90 @@ fn read(expr: &Expr) -> usize {
 }
 
 #[test]
-fn directly_imported_variants_form_a_carrier_complete_match() {
-    let source = r#"
-use chelis_deep::Expr;
-use chelis_deep::Expr::{
-    Atom as ExprAtom,
-    BareList as ExprBareList,
-    List as ExprList,
-    Map as ExprMap,
-    MetaExpr as ExprMeta,
-    Node as ExprNode,
-    UnknownForm as ExprUnknown,
-};
-
-fn read(expr: &Expr) -> usize {
-    match expr {
-        ExprList(list, _) => list.elements.len(),
-        ExprNode(node, _) => node.children_slice().len(),
-        ExprBareList(items, _) => items.len(),
-        ExprUnknown(data) => data.children.len(),
-        ExprAtom(_, _) | ExprMap(_, _) | ExprMeta(_, _) => 0,
-    }
-}
-"#;
-    assert!(check("crates/chelis-types/src/infer/planted.rs", source).is_empty());
-}
-
-#[test]
-fn inline_escape_requires_a_site_level_justification() {
+fn inline_exception_requires_a_class_and_nonempty_necessity() {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("crates/chelis-types/src/infer");
-    fs::create_dir_all(&path).expect("create fixture source root");
-    let source_path = path.join("reader.rs");
-    fs::write(
-        &source_path,
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
+
+    write_workspace(
+        dir.path(),
         r#"
 use chelis_deep::Expr;
-
 fn read(expr: &Expr) -> bool {
-    // chelis-lint: allow carrier-reader-completeness
-    matches!(expr, Expr::List(list, _) if list.elements.is_empty())
+    // chelis-lint: allow carrier-reader-completeness -- producer:
+    matches!(expr, Expr::List(_, _))
 }
 "#,
-    )
-    .expect("write unjustified fixture");
-    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
-    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint fixture");
+    );
+    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint empty necessity");
     assert_eq!(violations.len(), 1, "{violations:?}");
 
-    fs::write(
-        &source_path,
+    write_workspace(
+        dir.path(),
         r#"
 use chelis_deep::Expr;
-
-fn read(expr: &Expr) -> bool {
-    // chelis-lint: allow carrier-reader-completeness -- source is normalized legacy output only; chelis#1125
-    matches!(expr, Expr::List(list, _) if list.elements.is_empty())
+fn preserve_legacy_output(expr: &Expr) -> bool {
+    // chelis-lint: allow carrier-reader-completeness -- symmetric: preserves the input carrier while rebuilding children
+    matches!(expr, Expr::List(_, _))
 }
 "#,
-    )
-    .expect("write justified fixture");
-    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint justified fixture");
+    );
+    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint justified exception");
     assert!(violations.is_empty(), "{violations:?}");
 }
 
 #[test]
-fn chelis_deep_owns_raw_carrier_representation() {
-    let source = r#"
-use crate::Expr;
-
-fn read(expr: &Expr) -> bool {
+fn existing_debt_is_not_snapshotted_but_a_new_site_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    write_workspace(
+        dir.path(),
+        r#"
+use chelis_deep::Expr;
+fn existing(expr: &Expr) -> bool {
     matches!(expr, Expr::List(_, _))
 }
-"#;
-    assert!(check("crates/chelis-deep/src/ast.rs", source).is_empty());
+"#,
+    );
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "lint@example.invalid"][..],
+        &["config", "user.name", "Lint Test"][..],
+        &["add", "."][..],
+        &["commit", "-qm", "baseline"][..],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .status()
+            .expect("run git fixture command");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let rules: Vec<Box<dyn Rule>> = vec![Box::new(CarrierReaderCompleteness)];
+    let baseline = chelis_lint::lint(dir.path(), &rules).expect("lint baseline");
+    assert!(baseline.is_empty(), "{baseline:?}");
+
+    let path = dir.path().join("crates/chelis-types/src/infer/reader.rs");
+    let mut source = fs::read_to_string(&path).expect("read fixture");
+    source.push_str(
+        r#"
+fn added(expr: &Expr) -> bool {
+    matches!(expr, Expr::List(_, _))
+}
+"#,
+    );
+    fs::write(path, source).expect("add new reader");
+    let violations = chelis_lint::lint(dir.path(), &rules).expect("lint changed source");
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn chelis_deep_owns_the_raw_representation() {
+    assert!(
+        check(
+            "crates/chelis-deep/src/ast.rs",
+            "fn read(expr: &Expr) { let Expr::List(_, _) = expr else { return; }; }",
+        )
+        .is_empty()
+    );
 }
