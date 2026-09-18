@@ -134,7 +134,7 @@ fn an_imported_bound_survives_a_local_wrapper() {
 
 import Std.Tensor.Construct (arange)
 
-def wrap[p: Int](start: p, stop: p) -> tensor[n, p] = arange(start, stop)
+def wrap[n, p: Int](start: p, stop: p) -> tensor[n, p] = arange(start, stop)
 
 values = wrap(cast(0.0, f64), cast(2.0, f64))
 "#,

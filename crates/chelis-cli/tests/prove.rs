@@ -984,7 +984,7 @@ fn property_binder_types_are_required() {
 fn symbolic_tensor_binder_is_unsupported_exit_two() {
     let dir = write_prop(
         r#"
-@property symbolic_tensor forall(x: tensor[n, f32]):
+@property symbolic_tensor[n] forall(x: tensor[n, f32]):
   true
 "#,
     );

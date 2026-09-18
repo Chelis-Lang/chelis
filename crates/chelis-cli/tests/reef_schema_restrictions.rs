@@ -34,7 +34,7 @@ module_prefix = "Restriction"
         &root.join("src/main.ch"),
         r#"module Restriction.Main
 export (restricted_close)
-def restricted_close[p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
+def restricted_close[n, p_float: Float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 "#,
     );
 
