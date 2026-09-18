@@ -839,6 +839,14 @@ fn parity_caller_actual_scope() {
     drive_parity(&examples_root().join("caller_actual_scope.ch"), true);
 }
 
+#[test]
+fn parity_nested_tuple_projection() {
+    let path = examples_root().join("nested_tuple_projection.ch");
+    assert_check_clean(&path);
+    assert_eq!(run_eval(&path), b"main = 2\n");
+    drive_parity(&path, true);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------

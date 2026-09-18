@@ -706,6 +706,27 @@ fn formatting_canonical_surf_is_idempotent() {
 }
 
 #[test]
+fn nested_numeric_projections_keep_lexically_required_grouping() {
+    let source = concat!(
+        "nested = (pairs.0).0\n",
+        "ordinary = pair.1\n",
+        "tuple_then_field = records.0.value\n",
+        "field_then_tuple = record.values.1\n",
+    );
+
+    assert_eq!(
+        format_source(source).expect("projection forms parse"),
+        source,
+        "canonical formatting must preserve grouping only where adjacent numeric \
+         projections would otherwise merge into a float token",
+    );
+    assert!(
+        parse_str("broken = pairs.0.0\n").is_err(),
+        "the ambiguous ungrouped spelling must remain rejected rather than widening the lexer",
+    );
+}
+
+#[test]
 fn property_preconditions_are_formatter_fixed_points() {
     let source = "@property bounded forall(x: i32) where x <= 1:\n  true\n";
     let once = format_source(source).expect("canonical property parses");

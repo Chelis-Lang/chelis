@@ -42,6 +42,10 @@ The canonical forms are:
   returned by another expression uses explicit grouping (`(f(x))(y)`), while
   ungrouped `f(x)(y)` is rejected. The parser accepts whitespace before the
   argument list (`f (x)`, `Some (x)`), and the formatter removes it;
+- consecutive numeric tuple projections group the receiver
+  (`(nested.0).1`), because the ungrouped spelling `nested.0.1` would lex its
+  adjacent numeric suffixes as a floating-point token. Ordinary single
+  projections and mixed field/projection chains need no grouping;
 - ordinary binding blocks use newlines as separators, contain at least one
   binding and one tail expression, and contain no semicolons; `par` and direct
   Deep sequencing use their distinct semicolon-delimited forms;
