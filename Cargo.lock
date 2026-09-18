@@ -699,8 +699,11 @@ dependencies = [
  "chelis-unord",
  "ignore",
  "predicates",
+ "proc-macro2",
+ "quote",
  "regex",
  "serde",
+ "syn 2.0.117",
  "tempfile",
  "toml",
 ]

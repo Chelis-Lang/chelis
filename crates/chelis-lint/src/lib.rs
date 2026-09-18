@@ -290,7 +290,7 @@ fn inline_allows(source: Option<&str>, surface: Surface, violation: &Violation) 
         return false;
     };
     let rule = violation.rule_id.as_str();
-    if file_level_allows(source, rule) {
+    if rule != rules::carrier_reader_completeness::RULE_ID && file_level_allows(source, rule) {
         return true;
     }
     let Some(line_no) = violation.line else {
@@ -322,10 +322,21 @@ fn inline_line_allows(line: &str, surface: Surface, rule: &str) -> bool {
         return false;
     };
     let directive = directive.trim();
-    directive
-        .strip_prefix("allow")
-        .map(|rest| rest.split_whitespace().any(|name| name == rule))
-        .unwrap_or(false)
+    let Some(rest) = directive.strip_prefix("allow") else {
+        return false;
+    };
+    if rule == rules::carrier_reader_completeness::RULE_ID {
+        let rest = rest.trim();
+        let Some(justification) = rest
+            .strip_prefix(rule)
+            .and_then(|rest| rest.trim().strip_prefix("--"))
+            .map(str::trim)
+        else {
+            return false;
+        };
+        return justification.len() >= 12;
+    }
+    rest.split_whitespace().any(|name| name == rule)
 }
 
 fn inline_line_keeps(line: &str, surface: Surface, rule: &str) -> bool {

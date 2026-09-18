@@ -6,6 +6,7 @@ use crate::rules;
 /// Return every rule the lint enforces.
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
     vec![
+        Box::new(rules::carrier_reader_completeness::CarrierReaderCompleteness),
         Box::new(rules::no_shell_scripts::NoShellScripts),
         Box::new(rules::phase_identifier_case::PhaseIdentifierCase),
         Box::new(rules::module_compound_titlecase::ModuleCompoundTitlecase),

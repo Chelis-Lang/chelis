@@ -3,6 +3,7 @@
 //! Each rule corresponds to a section of `chelis/spec/01-nomenclature.md`.
 //! The mapping is recorded in [`crate::registry::all_rules`].
 
+pub mod carrier_reader_completeness;
 pub mod deep_user_symbol_charset;
 pub mod doc_filename_convention;
 pub mod invariant_float_equality;

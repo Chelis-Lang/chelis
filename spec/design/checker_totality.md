@@ -2850,7 +2850,15 @@ enum a traversal must exhaust, not an `Option` it may drop.
   `rewrite_opaque_field_access`'s recursion, and `rebuild`'s tag copy. Making
   `tag` and `children` carrier-complete was measured, not assumed, to be
   insufficient on its own.
-- **E5d, the lint and its corpus.** Roughly 250 lines.
+- **E5d, the lint and its corpus. Implemented by this slice.** The blocking
+  `carrier-reader-completeness` rule parses Rust structurally, permits either
+  the shared total accessor or an explicit exhaustive carrier match, and
+  rejects new bare `Expr::List` reader patterns and `Node::to_list` bridges
+  outside `chelis-deep`. Its exact site inventory freezes the remaining E5e
+  debt and fails on additions, removals, or changed identities; permanent
+  producer/symmetric exceptions and inline escapes require a site-specific
+  rationale. A CLI integration test plants the guarded-arm blind spot and
+  proves that `chelis lint --check .` rejects it.
 - **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
   19 never-adjudicated ones the audit inventories, swept behind E5b so the
   sweep has one accessor to route to. Unbounded until E5b lands; do not

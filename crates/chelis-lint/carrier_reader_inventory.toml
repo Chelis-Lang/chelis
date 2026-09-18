@@ -1,0 +1,493 @@
+version = 1
+
+# `reader_debt` freezes every unswept reader owned by chelis#1125/E5e. A new
+# site or a stale identity is an error; remove each row when its reader becomes
+# carrier-complete. Permanent exceptions use `[[files.exceptions]]` with a
+# `producer` or `justified` disposition and a site-specific rationale.
+
+[[files]]
+path = "crates/chelis-cli/src/main.rs"
+reader_debt = [
+  "fn collect_lowered_root_names_from_expr|expr-list-pattern|d5013516899f4ac8|1",
+  "fn collect_lowered_root_names_from_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "fn collect_symbolic_dims_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "fn deep_named_decl_name|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_top_level_expr_name|expr-list-pattern|d5013516899f4ac8|1",
+  "fn expr_type_metadata|expr-list-pattern|d5013516899f4ac8|1",
+  "fn extend_root_names_from_value|expr-list-pattern|d5013516899f4ac8|1",
+  "fn extend_root_names_from_value|expr-list-pattern|d5013516899f4ac8|2",
+  "fn manifest_root_names_from_decls::fn collect_decl_names|expr-list-pattern|d5013516899f4ac8|1",
+  "fn manifest_root_names_from_decls::fn collect_decl_names|node-to-list|3ae3abe78fdcdee2|1",
+  "fn top_level_def_body|expr-list-pattern|d5013516899f4ac8|1",
+  "fn type_expr_is_function|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-cli/src/prove/mod.rs"
+reader_debt = [
+  "fn collect_deep_refs|expr-list-pattern|d5013516899f4ac8|1",
+  "fn compute_deep_dependency_edges|expr-list-pattern|d5013516899f4ac8|1",
+  "fn count_invariant_opaque_deep::fn decoded|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_fn_body|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_fn_params_from_bare_list|expr-list-pattern|df8bbffb16f1eaed|1",
+  "fn deep_fn_params|expr-list-pattern|705d7ca5772dc1de|1",
+  "fn deep_fn_params|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_fn_params|expr-list-pattern|df8bbffb16f1eaed|1",
+  "fn deep_fn_params|expr-list-pattern|df8bbffb16f1eaed|2",
+  "fn deep_int_value|expr-list-pattern|d5013516899f4ac8|1",
+  "fn discover_deep_properties_expr|expr-list-pattern|d5013516899f4ac8|1",
+  "fn list_tag|expr-list-pattern|d5013516899f4ac8|1",
+  "fn type_expr_from_deep|expr-list-pattern|02b39503ba2d9429|1",
+  "fn type_expr_from_deep|expr-list-pattern|02b39503ba2d9429|2",
+  "fn type_expr_from_deep|expr-list-pattern|1b6895742195d11f|1",
+  "fn type_expr_from_deep|expr-list-pattern|d83ca433dd723350|1",
+  "fn type_expr_from_deep|expr-list-pattern|d83ca433dd723350|2",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/compiler.rs"
+reader_debt = [
+  "fn deep_decl_name|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_def_has_role|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_tagged_children|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/context.rs"
+reader_debt = [
+  "fn library_structural_summary|expr-list-pattern|03fadaf3a625c572|1",
+  "fn library_structural_summary|expr-list-pattern|ce545f814f786923|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/prune.rs"
+reader_debt = [
+  "fn decl_head|expr-list-pattern|d5013516899f4ac8|1",
+  "fn prune_entry|expr-list-pattern|a5dd67881635c39f|1",
+  "fn prune_entry|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/eval.rs"
+reader_debt = [
+  "fn source_call_with_checked_argument_types|expr-list-pattern|b10f80c468307d3b|1",
+  "impl EvalContext < 'a >::fn eval_app_under_result_claim|expr-list-pattern|9ae054ded396ba4a|1",
+  "impl EvalContext < 'a >::fn eval_app_under_result_claim|expr-list-pattern|9ae054ded396ba4a|2",
+  "impl EvalContext < 'a >::fn eval_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "impl EvalContext < 'a >::fn eval_lit|expr-list-pattern|3c4cf092d136ce46|1",
+  "impl EvalContext < 'a >::fn eval_under_result_claim|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/host_ops.rs"
+reader_debt = [
+  "fn collect_adt_ctor_fields|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/invariant.rs"
+reader_debt = [
+  "fn expr_parts|expr-list-pattern|589927259a6bd14a|1",
+  "fn strip_span_meta|node-to-list|cfbb1800706bd54c|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/mod.rs"
+reader_debt = [
+  "fn carries_effect_row|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_top_level_items|expr-list-pattern|589927259a6bd14a|1",
+  "fn literal_seed_i64|expr-list-pattern|589927259a6bd14a|1",
+  "fn tagged_expr_children|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/named_axis.rs"
+reader_debt = [
+  "fn declared_tensor_type_for_shape|expr-list-pattern|589927259a6bd14a|1",
+  "fn declared_tensor_type_for_shape|expr-list-pattern|5dae50cef659b983|1",
+  "fn declared_tensor_type_for_shape|expr-list-pattern|5dae50cef659b983|2",
+  "fn scan_expr_for_named_axis_reduction|expr-list-pattern|589927259a6bd14a|1",
+  "fn strip_type_wrappers|expr-list-pattern|589927259a6bd14a|1",
+  "impl EvalContext < 'a >::fn prepare_named_axis_input|expr-list-pattern|1dfcb3519b1e6d91|1",
+  "impl EvalContext < 'a >::fn static_type_expr_of|expr-list-pattern|589927259a6bd14a|1",
+  "impl EvalContext < 'a >::fn unwrap_declared_scalar_return|expr-list-pattern|db7e789cc2a2bf9a|1",
+  "impl EvalContext < 'a >::fn unwrap_declared_scalar_return|expr-list-pattern|f7317162bb4d0050|1",
+]
+
+[[files]]
+path = "crates/chelis-compiler-api/src/runtime/transforms.rs"
+reader_debt = [
+  "fn as_list|expr-list-pattern|589927259a6bd14a|1",
+  "fn extract_prim_from_type_expr|expr-list-pattern|589927259a6bd14a|1",
+  "fn grad_type_expr_has_float|expr-list-pattern|589927259a6bd14a|1",
+  "fn grad_wrt_indices_from_transform|expr-list-pattern|c804077d6b5a1378|1",
+  "fn param_decl_type_expr|expr-list-pattern|30c26c78716b9e48|1",
+  "fn param_type_expr_at|expr-list-pattern|17de1c7d3fe1f577|1",
+  "fn param_type_expr_at|expr-list-pattern|589927259a6bd14a|1",
+  "fn resolve_transform_fn_for_formals|expr-list-pattern|589927259a6bd14a|1",
+  "fn runtime_param_name|expr-list-pattern|589927259a6bd14a|1",
+  "fn scan_expr_for_host_only|expr-list-pattern|589927259a6bd14a|1",
+  "fn scan_expr_for_host_only|expr-list-pattern|8a5698dcb9e3ea20|1",
+  "fn static_usize_value|expr-list-pattern|589927259a6bd14a|1",
+  "fn var_name|expr-list-pattern|589927259a6bd14a|1",
+  "impl EvalContext < 'a >::fn apply_transform|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-effects/src/lib.rs"
+reader_debt = [
+  "fn annotate_let_children|expr-list-pattern|19b777d9e84c3349|1",
+  "fn string_literal|expr-list-pattern|589927259a6bd14a|1",
+  "fn var_name|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-effects/src/realizability.rs"
+reader_debt = [
+  "fn extract_prims_recursive|expr-list-pattern|589927259a6bd14a|1",
+  "fn tagged_children|expr-list-pattern|589927259a6bd14a|1",
+  "fn tagged_meta|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-ir/src/host.rs"
+reader_debt = [
+  "fn analyze_tensor_helper_preflight_scoped|expr-list-pattern|589927259a6bd14a|1",
+  "fn as_list|expr-list-pattern|589927259a6bd14a|1",
+  "fn beta_reduce_inline_host_call|expr-list-pattern|bd89f1d7e4cc79ea|1",
+  "fn binder_child_name|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_called_top_level_fns|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_deep_var_names|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_program_defs|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_top_level_items|expr-list-pattern|589927259a6bd14a|1",
+  "fn contains_computed_callable_application|node-to-list|3ae3abe78fdcdee2|1",
+  "fn def_body_decision_impl|expr-list-pattern|589927259a6bd14a|1",
+  "fn dual_eval|expr-list-pattern|589927259a6bd14a|1",
+  "fn expr_contains_grad_like|expr-list-pattern|589927259a6bd14a|1",
+  "fn expr_fn_type|expr-list-pattern|589927259a6bd14a|1",
+  "fn expr_host_type_raw|expr-list-pattern|432eaca45988254d|1",
+  "fn expr_host_type_raw|expr-list-pattern|432eaca45988254d|2",
+  "fn expr_int_literal|expr-list-pattern|432eaca45988254d|1",
+  "fn expr_int_literal|expr-list-pattern|432eaca45988254d|2",
+  "fn expr_reaches_forward_fail|expr-list-pattern|589927259a6bd14a|1",
+  "fn expr_type|expr-list-pattern|589927259a6bd14a|1",
+  "fn find_direct_builtin_call::fn find|node-to-list|3ae3abe78fdcdee2|1",
+  "fn hoist_host_lane_tensor_bindings|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn hoist_record_projections|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn host_def_signature|expr-list-pattern|589927259a6bd14a|1",
+  "fn host_expr_lowering_error|expr-list-pattern|589927259a6bd14a|1",
+  "fn inline_local_callable_lets|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn inline_top_level_host_call|expr-list-pattern|425ad2b7741d0a1e|1",
+  "fn inline_top_level_host_call|expr-list-pattern|affea5ca3ad48151|1",
+  "fn is_inlinable_callable_binding_value|expr-list-pattern|3c4cf092d136ce46|1",
+  "fn is_static_scalar|expr-list-pattern|432eaca45988254d|1",
+  "fn lower_host_callback|expr-list-pattern|589927259a6bd14a|1",
+  "fn lower_host_callback|expr-list-pattern|589927259a6bd14a|2",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|1",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|10",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|11",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|12",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|13",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|14",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|15",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|16",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|17",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|18",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|19",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|2",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|20",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|3",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|4",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|5",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|6",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|7",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|8",
+  "fn lower_host_expr_kind|expr-list-pattern|589927259a6bd14a|9",
+  "fn lower_host_expr_kind|expr-list-pattern|c617caab0a4d8d4a|1",
+  "fn lower_host_program_with_execution|expr-list-pattern|1dfcb3519b1e6d91|1",
+  "fn lower_host_program_with_execution|expr-list-pattern|1dfcb3519b1e6d91|2",
+  "fn lower_host_program_with_execution|expr-list-pattern|1dfcb3519b1e6d91|3",
+  "fn lower_host_program_with_execution|expr-list-pattern|589927259a6bd14a|1",
+  "fn lower_host_program_with_execution|expr-list-pattern|589927259a6bd14a|2",
+  "fn lower_host_program_with_execution|expr-list-pattern|589927259a6bd14a|3",
+  "fn lower_host_program_with_execution|expr-list-pattern|589927259a6bd14a|4",
+  "fn lower_host_program_with_execution|expr-list-pattern|589927259a6bd14a|5",
+  "fn lower_list_literal_items|expr-list-pattern|589927259a6bd14a|1",
+  "fn lower_list_literal_items|expr-list-pattern|589927259a6bd14a|2",
+  "fn lower_retained_host_invocation|expr-list-pattern|15a10a5dc679e1f9|1",
+  "fn named_tensor_entry_lowering_inputs|expr-list-pattern|589927259a6bd14a|1",
+  "fn names_bound_in|expr-list-pattern|589927259a6bd14a|1",
+  "fn param_declared_type_expr|expr-list-pattern|589927259a6bd14a|1",
+  "fn param_host_type|expr-list-pattern|432eaca45988254d|1",
+  "fn param_name|expr-list-pattern|589927259a6bd14a|1",
+  "fn params_list_of|expr-list-pattern|affea5ca3ad48151|1",
+  "fn program_has_top_level_value_bindings|expr-list-pattern|1dfcb3519b1e6d91|1",
+  "fn program_has_top_level_value_bindings|expr-list-pattern|589927259a6bd14a|1",
+  "fn resolve_scalar_def|expr-list-pattern|1dfcb3519b1e6d91|1",
+  "fn resolve_scalar_def|expr-list-pattern|589927259a6bd14a|1",
+  "fn sequential_host_let_chain|expr-list-pattern|589927259a6bd14a|1",
+  "fn sequential_host_let_chain|expr-list-pattern|b674f69aee07e134|1",
+  "fn should_keep_tensor_expr_in_host_lane|expr-list-pattern|589927259a6bd14a|1",
+  "fn should_keep_tensor_expr_in_host_lane|expr-list-pattern|6929de7344ca9df5|1",
+  "fn staged_def_kernel_product::fn has_control|expr-list-pattern|589927259a6bd14a|1",
+  "fn substitute_expr|expr-list-pattern|95fb08c91e44657e|1",
+  "fn substitute_expr|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn substitute_expr|expr-list-pattern|a7d50acb6f3d7b71|2",
+  "fn substitute_expr|expr-list-pattern|a7d50acb6f3d7b71|3",
+  "fn substitute_expr|expr-list-pattern|a7d50acb6f3d7b71|4",
+  "fn top_level_fn_call_graph|expr-list-pattern|589927259a6bd14a|1",
+  "fn top_level_fn_helper_summary_rejects|expr-list-pattern|589927259a6bd14a|1",
+  "fn top_level_fn_is_nullary_generic_constructor_wrapper|expr-list-pattern|affea5ca3ad48151|1",
+  "fn top_level_fn_is_nullary_generic_constructor_wrapper|expr-list-pattern|e46a310b15414205|1",
+  "fn try_lower_general_list_grad_app|expr-list-pattern|affea5ca3ad48151|1",
+  "fn try_lower_tensor_helper_call_inner|expr-list-pattern|589927259a6bd14a|1",
+  "impl UncarriableWalk < '_ >::fn expr|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-ir/src/lower.rs"
+reader_debt = [
+  "fn builtin_name|expr-list-pattern|76907c5aa1216c6c|1",
+  "fn expr_requires_host_runtime_with_ctx|expr-list-pattern|8a5698dcb9e3ea20|1",
+  "fn expr_requires_host_runtime_with_ctx|node-to-list|3ae3abe78fdcdee2|1",
+  "fn extract_int_for_dim|expr-list-pattern|432eaca45988254d|1",
+  "fn extract_numeric_leaf|expr-list-pattern|432eaca45988254d|1",
+  "fn extract_param_type|expr-list-pattern|30c26c78716b9e48|1",
+  "fn guard_is_absent|expr-list-pattern|dda6b75c0abd39fd|1",
+  "fn param_name_and_type_expr|expr-list-pattern|30c26c78716b9e48|1",
+  "impl LowerCtx < 'program >::fn extract_f64_value|expr-list-pattern|432eaca45988254d|1",
+  "impl LowerCtx < 'program >::fn extract_pair_list|expr-list-pattern|589927259a6bd14a|1",
+  "impl LowerCtx < 'program >::fn extract_pair_list|expr-list-pattern|6ebebb538c633445|1",
+  "impl LowerCtx < 'program >::fn fold_shape_derived_static_size|expr-list-pattern|589927259a6bd14a|1",
+  "impl LowerCtx < 'program >::fn is_shape_derived_arith_dim|expr-list-pattern|589927259a6bd14a|1",
+  "impl LowerCtx < 'program >::fn is_shape_derived_arith_leaf|expr-list-pattern|589927259a6bd14a|1",
+  "impl LowerCtx < 'program >::fn lower_expr_unclaimed|node-to-list|3ae3abe78fdcdee2|1",
+  "impl LowerCtx < 'program >::fn resolve_static_f64_arg|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-ir/src/ownership/lower.rs"
+reader_debt = [
+  "fn tag_and_children|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-lint/src/rules/opaque_domain_construction.rs"
+reader_debt = [
+  "fn deep_node_parts|expr-list-pattern|71e4e1791f0088f0|1",
+  "fn type_name_from_meta_expr|expr-list-pattern|062134fb4c623da7|1",
+]
+
+[[files]]
+path = "crates/chelis-macros/src/lib.rs"
+reader_debt = [
+  "fn annotate_source_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "fn collect_symbols|node-to-list|3ae3abe78fdcdee2|1",
+  "fn extract_macro_def|expr-list-pattern|17de1c7d3fe1f577|1",
+  "fn extract_macro_def|expr-list-pattern|589927259a6bd14a|1",
+  "fn hygienize_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "fn hygienize_let|expr-list-pattern|05979bf95da68ef1|1",
+  "fn hygienize_match|expr-list-pattern|4239875fdb4eb23b|1",
+  "fn hygienize_params_expr|expr-list-pattern|6651304bc4b0481d|1",
+  "fn hygienize_params_expr|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn hygienize_pattern|expr-list-pattern|37a19e3dcc70619d|1",
+  "fn hygienize_pattern|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn is_unit_list|expr-list-pattern|dda6b75c0abd39fd|1",
+  "fn params_blockers|expr-list-pattern|30c26c78716b9e48|1",
+  "fn params_blockers|expr-list-pattern|589927259a6bd14a|1",
+  "fn replace_placeholder_vars|node-to-list|3ae3abe78fdcdee2|1",
+  "fn standard_prelude_decl_name|expr-list-pattern|589927259a6bd14a|1",
+  "fn substitute_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "fn substitute_let|expr-list-pattern|05979bf95da68ef1|1",
+  "fn substitute_match|expr-list-pattern|4239875fdb4eb23b|1",
+  "fn var_name|expr-list-pattern|589927259a6bd14a|1",
+  "impl Expander::fn expand_expr|node-to-list|3ae3abe78fdcdee2|1",
+  "impl Expander::fn expand_let|expr-list-pattern|05979bf95da68ef1|1",
+  "impl Expander::fn expand_match|expr-list-pattern|4239875fdb4eb23b|1",
+]
+
+[[files]]
+path = "crates/chelis-pipeline-core/src/roots.rs"
+reader_debt = [
+  "fn expr_type_metadata|expr-list-pattern|d5013516899f4ac8|1",
+  "fn tagged_children|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-pred/src/lib.rs"
+reader_debt = [
+  "fn binder_name|expr-list-pattern|589927259a6bd14a|1",
+  "fn check_in_grammar|node-to-list|3ae3abe78fdcdee2|1",
+  "fn children|expr-list-pattern|589927259a6bd14a|1",
+  "fn collect_free_vars|expr-list-pattern|589927259a6bd14a|1",
+  "fn tag|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/obligation_engine.rs"
+reader_debt = [
+  "fn binder_name|expr-list-pattern|dda6b75c0abd39fd|1",
+  "fn inject_const_probe|expr-list-pattern|1fd3dddeec4b0add|1",
+  "fn inject_into_defining_module::fn module_defines|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn inject_into_defining_module|expr-list-pattern|1fd3dddeec4b0add|1",
+  "fn list_tag|expr-list-pattern|589927259a6bd14a|1",
+  "fn literal_const_value::fn find|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn module_zero_arg_scalar_defs::fn walk|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn node_children|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn strip_invariant_meta|expr-list-pattern|a7d50acb6f3d7b71|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/obligations.rs"
+reader_debt = [
+  "fn children|expr-list-pattern|589927259a6bd14a|1",
+  "fn is_opaque|expr-list-pattern|589927259a6bd14a|1",
+  "fn tag|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/opaque.rs"
+reader_debt = [
+  "fn annotations|expr-list-pattern|589927259a6bd14a|1",
+  "fn children|expr-list-pattern|589927259a6bd14a|1",
+  "fn inject_into_module_with_source|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn inject_into_module_with_source|node-to-list|3ae3abe78fdcdee2|1",
+  "fn predicate_binder|expr-list-pattern|589927259a6bd14a|1",
+  "fn strip_invariant_metadata|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn tag|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/property_runner.rs"
+reader_debt = [
+  "fn deep_node_parts|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_param|expr-list-pattern|1b6895742195d11f|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/property_runner/injection.rs"
+reader_debt = [
+  "fn child0_sym|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn inject_into_module|expr-list-pattern|1fd3dddeec4b0add|1",
+  "fn list_tag|expr-list-pattern|589927259a6bd14a|1",
+  "fn module_defines|expr-list-pattern|7c83cad3ba591f6e|1",
+  "fn strip_invariant_meta|expr-list-pattern|a7d50acb6f3d7b71|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/property_runner/smt_lower.rs"
+reader_debt = [
+  "fn deep_node_parts|expr-list-pattern|d5013516899f4ac8|1",
+  "fn deep_structural_elements|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-prove/src/tier_b_lower.rs"
+reader_debt = [
+  "fn children|expr-list-pattern|589927259a6bd14a|1",
+  "fn inline_param_elements|expr-list-pattern|589927259a6bd14a|1",
+  "fn rewrite_opaque_field_access|expr-list-pattern|a7d50acb6f3d7b71|1",
+  "fn tag|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-reef/src/lib.rs"
+reader_debt = [
+  "fn sig_type_repr|expr-list-pattern|ce545f814f786923|1",
+]
+
+[[files]]
+path = "crates/chelis-surf/src/desugar.rs"
+reader_debt = [
+  "fn apply_effect_metadata|expr-list-pattern|88b8a8a9adf7d277|1",
+  "fn has_type_metadata|expr-list-pattern|71e4e1791f0088f0|1",
+  "fn inject_type_metadata|expr-list-pattern|062134fb4c623da7|1",
+  "fn normalize_single|expr-list-pattern|88b8a8a9adf7d277|1",
+  "fn with_metadata_value|expr-list-pattern|73623506ecb0493d|1",
+]
+
+[[files]]
+path = "crates/chelis-surf/src/resugar.rs"
+reader_debt = [
+  "fn node_ref|expr-list-pattern|1b6895742195d11f|1",
+  "fn resugar_literal_impl|expr-list-pattern|d5013516899f4ac8|1",
+  "fn strip_matching_param_type|expr-list-pattern|1b6895742195d11f|1",
+  "fn structural_items|expr-list-pattern|d5013516899f4ac8|1",
+  "fn validate_literal_type|expr-list-pattern|d5013516899f4ac8|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/adt.rs"
+reader_debt = [
+  "impl AdtRegistry::fn register_deftype|expr-list-pattern|71e4e1791f0088f0|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/deep_type.rs"
+reader_debt = [
+  "impl DeepTypeResolver < 'resolver , 'session , 'binders >::fn resolve_cast_target|expr-list-pattern|baeb774fdb47689f|1",
+  "impl DeepTypeResolver < 'resolver , 'session , 'binders >::fn type_form_expr|expr-list-pattern|71e4e1791f0088f0|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/fitness.rs"
+reader_debt = [
+  "fn count_node|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/infer/annotate.rs"
+reader_debt = [
+  "fn annotate_params_node|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/infer/common.rs"
+reader_debt = [
+  "fn check_rank_body_discipline|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/infer/declarations.rs"
+reader_debt = [
+  "fn collect_top_level_references|node-to-list|3ae3abe78fdcdee2|1",
+  "fn expr_mentions_unshadowed_name|node-to-list|3ae3abe78fdcdee2|1",
+  "fn param_has_consuming_use_inner|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/infer/expr.rs"
+reader_debt = [
+  "fn infer_expr_with_type_metadata_ownership|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/infer/validate.rs"
+reader_debt = [
+  "fn annotated_totality_invariant_traces::fn walk|node-to-list|3ae3abe78fdcdee2|1",
+  "fn as_list|node-to-list|3ae3abe78fdcdee2|1",
+  "fn validate_ir_expr|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/invariants.rs"
+reader_debt = [
+  "fn children|expr-list-pattern|589927259a6bd14a|1",
+  "fn meta_map|expr-list-pattern|589927259a6bd14a|1",
+  "fn tag|expr-list-pattern|589927259a6bd14a|1",
+]
+
+[[files]]
+path = "crates/chelis-types/src/linearity.rs"
+reader_debt = [
+  "fn collect_free_vars|node-to-list|3ae3abe78fdcdee2|1",
+  "fn param_name_and_type|expr-list-pattern|30c26c78716b9e48|1",
+  "fn param_names|expr-list-pattern|30c26c78716b9e48|1",
+  "impl Checker::fn check_expr|node-to-list|3ae3abe78fdcdee2|1",
+]
+
+[[files]]
+path = "crates/chelis-validate/src/lib.rs"
+reader_debt = [
+  "fn deep_node_parts|expr-list-pattern|ce545f814f786923|1",
+]
