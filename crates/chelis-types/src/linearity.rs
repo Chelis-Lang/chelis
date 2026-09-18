@@ -839,6 +839,7 @@ impl Checker {
                 }
             }
             ExprCarrier::StructuralList(elements) => {
+                self.reject_non_runtime_carrier(expr, "a structural list");
                 for element in elements {
                     self.check_expr(element, scope);
                 }
@@ -857,13 +858,19 @@ impl Checker {
                     self.check_expr(child, scope);
                 }
             }
-            ExprCarrier::Atom(_) => {}
+            ExprCarrier::Atom(_) => {
+                self.reject_non_runtime_carrier(expr, "an atom");
+            }
             ExprCarrier::MetadataMap(map) => {
+                self.reject_non_runtime_carrier(expr, "a standalone metadata map");
                 map.visit_syntax(&mut |_, value| {
                     self.check_expr(value, scope);
                 });
             }
-            ExprCarrier::MetadataExpression(meta) => self.check_expr(&meta.expr, scope),
+            ExprCarrier::MetadataExpression(meta) => {
+                self.reject_non_runtime_carrier(expr, "a metadata expression wrapper");
+                self.check_expr(&meta.expr, scope);
+            }
             ExprCarrier::MalformedLegacyList(list) => {
                 if malformed_list_has_semantic_head(list) {
                     self.push_diagnostic(CheckError::new(
@@ -875,6 +882,8 @@ impl Checker {
                         ),
                         vec![],
                     ));
+                } else {
+                    self.reject_non_runtime_carrier(expr, "a malformed legacy structural list");
                 }
                 // Legacy structural lists still exist in checked parameter
                 // and pattern payloads. Their lack of a vocabulary role is
@@ -885,6 +894,18 @@ impl Checker {
                 }
             }
         }
+    }
+
+    fn reject_non_runtime_carrier(&mut self, expr: &Expr, carrier: &str) {
+        self.push_diagnostic(CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "{carrier} reached linearity runtime position {}; expected a decoded Deep \
+                 vocabulary node ([04-TOT-5]; chelis#1125)",
+                diag_site(expr)
+            ),
+            vec![],
+        ));
     }
 
     fn check_children_by_role(
@@ -1353,7 +1374,13 @@ impl Checker {
             for (name, ty) in &pattern_bindings {
                 pattern_ids.push(arm_scope.declare(name.clone(), ty.clone()));
             }
-            self.check_expr(&arm_kids[1], &mut arm_scope);
+            // The empty list in an arm's guard slot is the grammar's
+            // explicit "no guard" sentinel, not a runtime expression.
+            // Screen that declared omission here so `check_expr` can reject
+            // the same carrier when it actually occupies a runtime slot.
+            if !is_absent_match_guard(&arm_kids[1]) {
+                self.check_expr(&arm_kids[1], &mut arm_scope);
+            }
             self.check_expr(&arm_kids[2], &mut arm_scope);
             for id in pattern_ids.into_iter().rev() {
                 self.pop_and_check(&mut arm_scope, id, expr_scope_end(&arm_kids[2]));
@@ -1815,6 +1842,19 @@ fn malformed_list_has_semantic_head(list: &List) -> bool {
         list.elements.first(),
         Some(Expr::Atom(Atom::Tag(_) | Atom::Name(_), _))
     )
+}
+
+fn is_absent_match_guard(expr: &Expr) -> bool {
+    match expr.carrier() {
+        ExprCarrier::StructuralList([]) => true,
+        ExprCarrier::MalformedLegacyList(list) => list.elements.is_empty(),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => false,
+    }
 }
 
 fn get_tag_expr(expr: &Expr) -> Option<DeepTag> {
@@ -2946,6 +2986,86 @@ mod tests {
                 .any(|error| matches!(error.kind, CheckErrorKind::MalformedForm)),
             "expected a malformed-form diagnostic for the metadata-less runtime form: {errors:?}"
         );
+    }
+
+    #[test]
+    fn every_non_runtime_carrier_is_diagnosed_in_runtime_position() {
+        let cases = [
+            ("atom", Expr::Atom(Atom::Int(1), span())),
+            ("metadata map", Expr::Map(Metadata::default(), span())),
+            ("empty structural list", Expr::BareList(Vec::new(), span())),
+            (
+                "empty legacy structural list",
+                Expr::List(
+                    List {
+                        elements: Vec::new(),
+                    },
+                    span(),
+                ),
+            ),
+        ];
+
+        for (label, body) in cases {
+            let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+                vec![node("def", vec![], vec![sym("bad"), body])],
+                BTreeMap::new(),
+            );
+            let errors = check_linearity(&program)
+                .expect_err("a non-runtime carrier in runtime position must fail closed");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error.kind, CheckErrorKind::MalformedForm)),
+                "{label} must produce a linearity-owned malformed-form diagnostic: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_non_runtime_carriers_still_walk_nested_content() {
+        let nested_atom = || Expr::Atom(Atom::Int(1), span());
+        let cases = [
+            (
+                "structural list",
+                Expr::BareList(vec![nested_atom()], span()),
+            ),
+            (
+                "legacy structural list",
+                Expr::List(
+                    List {
+                        elements: vec![nested_atom()],
+                    },
+                    span(),
+                ),
+            ),
+            (
+                "metadata expression",
+                Expr::MetaExpr(
+                    MetaExpr {
+                        metadata: Metadata::default(),
+                        expr: Box::new(nested_atom()),
+                    },
+                    span(),
+                ),
+            ),
+        ];
+
+        for (label, body) in cases {
+            let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+                vec![node("def", vec![], vec![sym("bad"), body])],
+                BTreeMap::new(),
+            );
+            let errors = check_linearity(&program)
+                .expect_err("a non-runtime carrier in runtime position must fail closed");
+            let malformed_count = errors
+                .iter()
+                .filter(|error| matches!(error.kind, CheckErrorKind::MalformedForm))
+                .count();
+            assert!(
+                malformed_count >= 2,
+                "{label} must diagnose itself and retain traversal of its nested atom: {errors:?}"
+            );
+        }
     }
 
     #[test]

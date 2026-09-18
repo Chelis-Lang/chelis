@@ -5,6 +5,130 @@ use chelis_deep::{Atom, Expr, List, Metadata};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 use chelis_types::{CheckedProgram, check_ir_program, check_linearity, check_typed_program};
+use syn::visit::{self, Visit};
+
+fn path_ends_with(path: &syn::Path, expected: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == expected)
+}
+
+fn type_path_ends_with(ty: &syn::Type, expected: &str) -> bool {
+    matches!(ty, syn::Type::Path(path) if path_ends_with(&path.path, expected))
+}
+
+fn optional_decoded_parts_return(ty: &syn::Type) -> bool {
+    let syn::Type::Path(option) = ty else {
+        return false;
+    };
+    let Some(segment) = option.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    let Some(syn::GenericArgument::Type(syn::Type::Tuple(parts))) = arguments.args.first() else {
+        return false;
+    };
+    let mut parts = parts.elems.iter();
+    let (Some(tag), Some(metadata), Some(children), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let syn::Type::Reference(metadata) = metadata else {
+        return false;
+    };
+    let syn::Type::Reference(children) = children else {
+        return false;
+    };
+    let syn::Type::Slice(children) = children.elem.as_ref() else {
+        return false;
+    };
+    type_path_ends_with(tag, "DeepTag")
+        && type_path_ends_with(&metadata.elem, "Metadata")
+        && type_path_ends_with(&children.elem, "Expr")
+}
+
+#[derive(Default)]
+struct DecodedAdapterBody {
+    calls_carrier: bool,
+    matches_decoded_node: bool,
+    returns_some: bool,
+    returns_none: bool,
+}
+
+impl<'ast> Visit<'ast> for DecodedAdapterBody {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "carrier" {
+            self.calls_carrier = true;
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.matches_decoded_node |= path_ends_with(path, "DecodedNode");
+        self.returns_some |= path_ends_with(path, "Some");
+        self.returns_none |= path_ends_with(path, "None");
+        visit::visit_path(self, path);
+    }
+}
+
+fn private_optional_decoded_adapters(source: &str) -> Vec<String> {
+    let file = syn::parse_file(source).expect("linearity source parses as Rust");
+
+    #[derive(Default)]
+    struct PrivateAdapterScan {
+        names: Vec<String>,
+    }
+
+    impl PrivateAdapterScan {
+        fn inspect(
+            &mut self,
+            visibility: &syn::Visibility,
+            signature: &syn::Signature,
+            block: &syn::Block,
+        ) {
+            if !matches!(visibility, syn::Visibility::Inherited) {
+                return;
+            }
+            let syn::ReturnType::Type(_, ty) = &signature.output else {
+                return;
+            };
+            if !optional_decoded_parts_return(ty) {
+                return;
+            }
+            let mut body = DecodedAdapterBody::default();
+            body.visit_block(block);
+            if body.calls_carrier
+                && body.matches_decoded_node
+                && body.returns_some
+                && body.returns_none
+            {
+                self.names.push(signature.ident.to_string());
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for PrivateAdapterScan {
+        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+            self.inspect(&function.vis, &function.sig, &function.block);
+            visit::visit_item_fn(self, function);
+        }
+
+        fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+            self.inspect(&function.vis, &function.sig, &function.block);
+            visit::visit_impl_item_fn(self, function);
+        }
+    }
+
+    let mut scan = PrivateAdapterScan::default();
+    scan.visit_file(&file);
+    scan.names
+}
 
 fn legacy_metadata(metadata: &Metadata) -> Metadata {
     metadata
@@ -127,12 +251,10 @@ fn linearity_reader_has_no_private_optional_adapter_or_node_bridge() {
         .split("#[cfg(test)]")
         .next()
         .expect("linearity source has a production prefix");
-    let adapter_definition = ["fn stamped_", "parts"].concat();
-    let adapter_call = ["stamped_", "parts("].concat();
 
     assert!(
-        !production.contains(&adapter_definition) && !production.contains(&adapter_call),
-        "E5b requires the measured reads to use Expr::carrier directly"
+        private_optional_decoded_adapters(production).is_empty(),
+        "E5b forbids private Option adapters that can erase a non-decoded carrier"
     );
     assert!(
         !production.contains(".to_list("),
@@ -156,4 +278,42 @@ fn linearity_reader_has_no_private_optional_adapter_or_node_bridge() {
             "missing explicit carrier disposition `{disposition}`"
         );
     }
+}
+
+#[test]
+fn optional_decoded_adapter_ratchet_is_name_independent() {
+    let renamed_adapter = r#"
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        _ => None,
+    }
+}
+
+fn pre_declare_one(expr: &Expr) {
+    match decoded_parts(expr) {
+        Some((DeepTag::Module, _, children)) => {
+            for child in children {
+                pre_declare_one(child);
+            }
+        }
+        Some(_) | None => {}
+    }
+}
+"#;
+    assert_eq!(
+        private_optional_decoded_adapters(renamed_adapter),
+        vec!["decoded_parts"],
+        "renaming the adapter and routing a reader through Some/None must not bypass the ratchet"
+    );
+
+    let unrelated_option = r#"
+fn maybe_name(enabled: bool) -> Option<&'static str> {
+    enabled.then_some("name")
+}
+"#;
+    assert!(
+        private_optional_decoded_adapters(unrelated_option).is_empty(),
+        "ordinary Option helpers are outside the decoded-carrier adapter class"
+    );
 }
