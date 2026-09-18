@@ -528,8 +528,11 @@ impl GeneralKind {
             // chelis#1678: directory mode's walk failures reach the wire only
             // through `CheckDirectoryReport`, which is the one place that can
             // tell a walk failure from an empty corpus ([04-FIT-23],
-            // [04-FIT-24]).
-            DiagnosticKind::DirectoryWalkError | DiagnosticKind::EmptyCorpus => None,
+            // [04-FIT-24]). chelis#1825's empty-test-selection kind is
+            // produced only by the native test runner ([04-TEST-1..3]).
+            DiagnosticKind::DirectoryWalkError
+            | DiagnosticKind::EmptyCorpus
+            | DiagnosticKind::EmptyTestSelection => None,
             DiagnosticKind::SurfParseError => Some(Self::SurfParseError),
             DiagnosticKind::DeepParseError => Some(Self::DeepParseError),
             DiagnosticKind::MacroError => Some(Self::MacroError),
@@ -3189,8 +3192,9 @@ mod tests {
     /// `Diagnostic::from_effect_error`. Stated as a list so that adding a
     /// governed identity and quietly excluding it from general production
     /// has to be written down here. chelis#1678 adds directory mode's two,
-    /// which only `CheckDirectoryReport` produces.
-    const NON_GENERAL_KINDS: [DiagnosticKind; 7] = [
+    /// which only `CheckDirectoryReport` produces; chelis#1825 adds the
+    /// native test runner's zero-selection diagnostic.
+    const NON_GENERAL_KINDS: [DiagnosticKind; 8] = [
         DiagnosticKind::UnsupportedFeature,
         DiagnosticKind::UnhandledEffect,
         DiagnosticKind::InvalidHandler,
@@ -3198,6 +3202,7 @@ mod tests {
         DiagnosticKind::TypeTotality,
         DiagnosticKind::DirectoryWalkError,
         DiagnosticKind::EmptyCorpus,
+        DiagnosticKind::EmptyTestSelection,
     ];
 
     #[test]

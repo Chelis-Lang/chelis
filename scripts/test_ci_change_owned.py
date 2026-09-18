@@ -731,6 +731,10 @@ class SchemaTests(unittest.TestCase):
                 "ci.yml",
                 "script-unit",
             ),
+            "scripts/diagnostic_kind_oracle.py": (
+                "ci.yml",
+                "diagnostic-kind-oracle",
+            ),
             "scripts/compiled_value_ownership_oracle.py": (
                 "heavy-e2e.yml",
                 "compiled-value-ownership-phase0-oracle",
@@ -760,6 +764,13 @@ class SchemaTests(unittest.TestCase):
                     (rule.owner.workflow, rule.owner.job),
                     expected,
                 )
+        diagnostic_kind_oracle = by_path["scripts/diagnostic_kind_oracle.py"]
+        self.assertFalse(
+            diagnostic_kind_oracle.matches(
+                "scripts/diagnostic_kind_oracle_extra.py"
+            ),
+            "a neighboring script inherited diagnostic-kind oracle ownership",
+        )
         package_owners = {
             "spec/05-risc-primitives.md": ("chelis-cli",),
             "tests/support/capacity_census_stdlib.rs": ("chelis-cli",),

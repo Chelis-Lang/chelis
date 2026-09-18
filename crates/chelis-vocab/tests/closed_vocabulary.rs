@@ -69,6 +69,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::TypeTotality, "TypeTotality"),
         (DiagnosticKind::DirectoryWalkError, "directory_walk_error"),
         (DiagnosticKind::EmptyCorpus, "empty_corpus"),
+        (DiagnosticKind::EmptyTestSelection, "empty_test_selection"),
     ];
     assert_eq!(DiagnosticKind::ALL, expected.map(|(kind, _)| kind));
 
@@ -151,7 +152,8 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::BuildTargetMismatch
             | DiagnosticKind::TypeTotality
             | DiagnosticKind::DirectoryWalkError
-            | DiagnosticKind::EmptyCorpus => "general",
+            | DiagnosticKind::EmptyCorpus
+            | DiagnosticKind::EmptyTestSelection => "general",
         }
     }
 

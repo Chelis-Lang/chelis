@@ -26,6 +26,19 @@ REGION = "## Start\nThe contract.\n## End\nOutside.\n"
 BUILTIN_TEXT = "| Identity | Atom |\n|---|---|\n| `Numeric:scalar:Scalar` | [05-OP-31] |\n"
 
 
+def apply_exact_replacements(documents, replacements):
+    mutated = dict(documents)
+    for path, old, new in replacements:
+        count = mutated[path].count(old)
+        if count != 1:
+            raise AssertionError(
+                "expected one exact replacement anchor, "
+                f"found {count} in {path}: {old!r}"
+            )
+        mutated[path] = mutated[path].replace(old, new, 1)
+    return mutated
+
+
 def inventory(*, atoms=None, regions=None, registries=None):
     return (
         f"CONTRACT_FILES = {(OP, TYPES, REGISTRY, BUILTINS, DESIGN)!r}\n"
@@ -42,6 +55,32 @@ def current_inventory(*, atoms=("05-OP-31",), regions=None):
         f"REQUIRED_REGIONS = {({'example': (DESIGN, '## Start', '## End')} if regions is None else regions)!r}\n"
         f"OP_MANIFEST_REGISTRY_FILES = {{'05-OP-31': {REGISTRY!r}}}\n"
     )
+
+
+class ExactReplacementTests(unittest.TestCase):
+    def test_multiple_exact_replacements_share_one_fixture(self):
+        documents = {"contract.md": "first\nmiddle\nlast\n"}
+        self.assertEqual(
+            apply_exact_replacements(
+                documents,
+                (
+                    ("contract.md", "first", "changed first"),
+                    ("contract.md", "last", "changed last"),
+                ),
+            ),
+            {"contract.md": "changed first\nmiddle\nchanged last\n"},
+        )
+        self.assertEqual(documents, {"contract.md": "first\nmiddle\nlast\n"})
+
+    def test_missing_or_ambiguous_replacement_anchor_fails(self):
+        for source in ("no token\n", "anchor\nanchor\n"):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                AssertionError, "expected one exact replacement anchor"
+            ):
+                apply_exact_replacements(
+                    {"contract.md": source},
+                    (("contract.md", "anchor", "changed"),),
+                )
 
 
 class InventoryRetirementTests(unittest.TestCase):
@@ -432,27 +471,69 @@ class RetainedMutationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         documents = {name: (root / name).read_text() for name in oracle.CONTRACT_FILES}
         documents[report.ORACLE] = (root / report.ORACLE).read_text()
-        baseline_failures = []
-        oracle.validate_required_contract(documents, baseline_failures)
-        self.assertEqual(baseline_failures, [])
         before = report.snapshot(documents.__getitem__)
         cases = []
+        atom_replacements = []
         for atom in oracle.REQUIRED_ATOMS:
             path = TYPES if atom.startswith("04-") else OP
             block = oracle.strict_atom_block(documents[path], atom)
-            cases.append(("atom", atom, path, block, block.rstrip() + "\n> Mutated obligation.\n"))
+            replacement = block.rstrip() + "\n> Mutated obligation.\n"
+            cases.append(("atom", atom, path, block, replacement))
+            atom_replacements.append((path, block, replacement))
+        region_replacements = {}
         for label, (path, start, end) in oracle.REQUIRED_REGIONS.items():
             block = oracle.frozen_region(documents[path], start, end, label)
             cases.append(("region", label, path, block, block + "Mutated obligation.\n"))
+            region_replacements[(path, end)] = (
+                path,
+                end,
+                "Mutated obligation.\n" + end,
+            )
+
+        # These validators inspect the complete contract corpus. Running them
+        # once for every retained identity made this test quadratic as the
+        # inventory grew. Two aggregate fixtures preserve the same coverage:
+        # every atom receives the exact wording mutation above, and every
+        # region receives a wording mutation immediately before its end marker.
+        with (
+            mock.patch.object(
+                oracle,
+                "validate_required_contract",
+                wraps=oracle.validate_required_contract,
+            ) as validate_required,
+            mock.patch.object(
+                oracle,
+                "validate_normative_contract",
+                wraps=oracle.validate_normative_contract,
+            ) as validate_normative,
+            mock.patch.object(
+                oracle,
+                "validate_schema_and_consumers",
+                wraps=oracle.validate_schema_and_consumers,
+            ) as validate_consumers,
+        ):
+            for label, replacements in (
+                ("atoms", atom_replacements),
+                ("regions", region_replacements.values()),
+            ):
+                with self.subTest(validation=label):
+                    mutated = apply_exact_replacements(documents, replacements)
+                    failures = []
+                    oracle.validate_required_contract(mutated, failures)
+                    oracle.validate_normative_contract(mutated, failures)
+                    oracle.validate_schema_and_consumers(mutated, failures)
+                    self.assertEqual(
+                        failures, [], "wording has no mechanical digest requirement"
+                    )
+        self.assertEqual(validate_required.call_count, 2)
+        self.assertEqual(validate_normative.call_count, 2)
+        self.assertEqual(validate_consumers.call_count, 2)
+
         for kind, identity, path, old, new in cases:
             with self.subTest(kind=kind, identity=identity):
-                mutated = dict(documents)
-                mutated[path] = mutated[path].replace(old, new, 1)
-                failures = []
-                oracle.validate_required_contract(mutated, failures)
-                oracle.validate_normative_contract(mutated, failures)
-                oracle.validate_schema_and_consumers(mutated, failures)
-                self.assertEqual(failures, [], "wording has no mechanical digest requirement")
+                mutated = apply_exact_replacements(
+                    documents, ((path, old, new),)
+                )
                 changes = report.compare_snapshots(before, report.snapshot(mutated.__getitem__))
                 self.assertIn((kind, identity), {(row["kind"], row["identity"]) for row in changes})
                 result = {"changes": changes}
@@ -467,21 +548,66 @@ class RetainedMutationTests(unittest.TestCase):
     def test_missing_or_ambiguous_required_definitions_and_boundaries_still_fail(self):
         root = Path(__file__).resolve().parents[1]
         documents = {name: (root / name).read_text() for name in oracle.CONTRACT_FILES}
-        cases = []
+        atom_blocks = []
         for atom in oracle.REQUIRED_ATOMS:
             path = TYPES if atom.startswith("04-") else OP
             block = oracle.strict_atom_block(documents[path], atom)
-            cases.extend((atom, path, block, replacement) for replacement in ("", block + block))
+            atom_blocks.append((atom, path, block))
+        boundaries = {"start": {}, "end": {}}
         for label, (path, start, end) in oracle.REQUIRED_REGIONS.items():
-            cases.extend((label, path, marker, replacement)
-                         for marker in (start, end) for replacement in ("REMOVED", marker + marker))
-        for identity, path, old, new in cases:
-            with self.subTest(identity=identity, replacement=new[:30]):
-                mutated = dict(documents)
-                mutated[path] = mutated[path].replace(old, new, 1)
-                failures = []
-                oracle.validate_required_contract(mutated, failures)
-                self.assertTrue(any(identity in failure for failure in failures), failures)
+            boundaries["start"].setdefault((path, start), set()).add(label)
+            boundaries["end"].setdefault((path, end), set()).add(label)
+
+        scenarios = [
+            (
+                "missing atoms",
+                ((path, block, "") for _, path, block in atom_blocks),
+                set(oracle.REQUIRED_ATOMS),
+            ),
+            (
+                "duplicated atoms",
+                ((path, block, block + block) for _, path, block in atom_blocks),
+                set(oracle.REQUIRED_ATOMS),
+            ),
+        ]
+        for boundary, markers in boundaries.items():
+            scenarios.extend(
+                (
+                    (
+                        f"missing region {boundary} markers",
+                        (
+                            (path, marker, "REMOVED")
+                            for path, marker in markers
+                        ),
+                        set(oracle.REQUIRED_REGIONS),
+                    ),
+                    (
+                        f"duplicated region {boundary} markers",
+                        (
+                            (path, marker, marker + marker)
+                            for path, marker in markers
+                        ),
+                        set(oracle.REQUIRED_REGIONS),
+                    ),
+                )
+            )
+
+        with mock.patch.object(
+            oracle,
+            "validate_required_contract",
+            wraps=oracle.validate_required_contract,
+        ) as validate_required:
+            for scenario, replacements, identities in scenarios:
+                with self.subTest(scenario=scenario):
+                    mutated = apply_exact_replacements(documents, replacements)
+                    failures = []
+                    oracle.validate_required_contract(mutated, failures)
+                    for identity in identities:
+                        self.assertTrue(
+                            any(identity in failure for failure in failures),
+                            f"{identity} was not rejected by {scenario}: {failures}",
+                        )
+        self.assertEqual(validate_required.call_count, len(scenarios))
 
 
 

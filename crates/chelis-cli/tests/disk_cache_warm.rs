@@ -267,15 +267,15 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     // re-run with unchanged sources reuses the on-disk artifact instead
     // of paying the full library compile.
     //
-    // We need at least one test file: `chelis test` short-circuits on an
-    // empty tests dir BEFORE the parent's compile_reef_context call, so
-    // an empty dir wouldn't exercise the disk-cache wire-up at all.
-    // A trivial `def test_*` is enough.
+    // We need at least one runnable test: `chelis test` rejects a zero-test
+    // selection BEFORE the parent's compile_reef_context call, so an empty
+    // selection wouldn't exercise the disk-cache wire-up at all.
+    // A trivial runnable `def test_*` is enough.
     let (_pkg_dir, root) = path_dep_package();
     fs::create_dir_all(root.join("tests")).expect("mkdir tests");
     write_file(
         &root.join("tests/smoke.ch"),
-        "module App.SmokeTest\n\ndef test_trivial() -> bool = true\n",
+        "module App.SmokeTest\n\ndef test_trivial() -> unit = test_assert(true, \"trivial\")\n",
     );
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -295,7 +295,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
         .expect("run chelis test (cold)");
     assert!(
         cold.status.success(),
-        "cold chelis test must succeed on empty tests dir; exit={:?} stderr={}",
+        "cold chelis test must succeed on populated tests dir; exit={:?} stderr={}",
         cold.status,
         String::from_utf8_lossy(&cold.stderr)
     );

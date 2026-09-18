@@ -8,11 +8,39 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
+}
+
+/// Makes `path` unreadable, restoring it on drop. Returns `None` when the
+/// current user can still read mode-000 directories, because that host cannot
+/// produce the walk failure this guard needs.
+#[cfg(unix)]
+struct Unreadable(PathBuf);
+
+#[cfg(unix)]
+impl Unreadable {
+    fn new(path: &Path) -> Option<Self> {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let guard = Self(path.to_path_buf());
+        if fs::read_dir(path).is_ok() {
+            eprintln!("skipped: permissions are not enforced for this user");
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// Create a bare reef package with a `tests/` directory and return
@@ -223,15 +251,19 @@ def test_gamma() -> unit = test_assert(true, "c")
         .stdout(predicate::str::contains("test_beta").not())
         .stdout(predicate::str::contains("test_gamma").not());
 
-    // Filter that matches nothing → no counts, runner exits 0 with "0 passed, 0 failed".
+    // [04-TEST-1]: a filter that matches nothing is a runner error, not a
+    // successful empty summary.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .args(["test", "--filter", "nonexistent_xyz", "tests/"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("0 passed, 0 failed"));
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no tests matched filter"))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
 }
 
 #[test]
@@ -1191,10 +1223,9 @@ fn chelis_test_non_reef_context_exits_two() {
 // === RT3 regression tests ===
 
 #[test]
-fn chelis_test_empty_tests_dir_exits_zero_with_zero_zero_summary() {
-    // RT3 H5: empty `tests/` must exit 0 with "0 passed, 0 failed", not
-    // exit 2. Matches `cargo test` and `pytest` ergonomics — a fresh
-    // package with no tests yet is a legitimate state, not a runner error.
+fn chelis_test_empty_tests_dir_is_an_exit_two_error() {
+    // [04-TEST-1..2]: a completed walk that selects no source is one
+    // diagnostic, never a successful 0/0 summary.
     let (_dir, pkg) = make_reef_package("phase3t-smoke-empty");
     // tests/ exists but has no .ch files. Ensure it is truly empty.
     Command::cargo_bin("chelis")
@@ -1203,9 +1234,198 @@ fn chelis_test_empty_tests_dir_exits_zero_with_zero_zero_summary() {
         .current_dir(&pkg)
         .args(["test", "tests/"])
         .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no .ch test files under"))
+        .stderr(predicate::str::contains("0 excluded"))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
+}
+
+#[test]
+fn chelis_test_empty_tests_dir_json_is_one_exact_diagnostic_record() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-json");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<&str> = std::str::from_utf8(&output)
+        .expect("utf-8")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 1, "one diagnostic record: {lines:?}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("JSON diagnostic");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "no .ch test files under b\"tests/\": 0 excluded under dot-prefixed entries or `target` directories",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_files_without_runnable_tests_are_an_error_in_text_and_json() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-testless");
+    write_file(
+        &pkg.join("tests/helper.ch"),
+        "module Smoke.Tests.Helper\n\ndef helper() -> unit = ()\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("found 1 .ch file under"))
+        .stderr(predicate::str::contains(
+            "but no runnable `test_*` functions",
+        ))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let record: serde_json::Value =
+        serde_json::from_slice(&output).expect("one JSON diagnostic record");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "found 1 .ch file under b\"tests/\" but no runnable `test_*` functions",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_filter_no_match_json_is_an_error_without_a_summary() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-filter-empty-json");
+    write_file(
+        &pkg.join("tests/one.ch"),
+        "module Smoke.Tests.One\n\ndef test_one() -> unit = test_assert(true, \"one\")\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "--filter", "missing", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let record: serde_json::Value =
+        serde_json::from_slice(&output).expect("one JSON diagnostic record");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "no tests matched filter \"missing\" under b\"tests/\": 1 runnable test was available before filtering",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_empty_subdirectory_does_not_poison_a_populated_selection() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-subdir");
+    fs::create_dir_all(pkg.join("tests/empty/deeper")).expect("mkdir empty subtree");
+    write_file(
+        &pkg.join("tests/pass.ch"),
+        "module Smoke.Tests.Pass\n\ndef test_pass() -> unit = test_assert(true, \"pass\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
         .success()
-        .code(0)
-        .stdout(predicate::str::contains("0 passed, 0 failed"));
+        .stdout(predicate::str::contains("1 passed, 0 failed"))
+        .stderr(predicate::str::contains("empty_test_selection").not());
+}
+
+#[test]
+fn chelis_test_empty_source_message_counts_excluded_ch_files() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-excluded");
+    fs::create_dir_all(pkg.join("tests/target")).expect("mkdir excluded target");
+    write_file(
+        &pkg.join("tests/.hidden.ch"),
+        "def test_hidden() -> unit = test_assert(false, \"hidden\")\n",
+    );
+    write_file(
+        &pkg.join("tests/target/hidden.ch"),
+        "def test_target() -> unit = test_assert(false, \"target\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("2 excluded"));
+}
+
+#[cfg(unix)]
+#[test]
+fn chelis_test_walk_failure_is_not_also_an_empty_selection_error() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-unreadable-walk");
+    fs::create_dir_all(pkg.join("tests/locked")).expect("mkdir locked subtree");
+    write_file(
+        &pkg.join("tests/locked/test.ch"),
+        "def test_hidden() -> unit = test_assert(true, \"hidden\")\n",
+    );
+    let Some(_guard) = Unreadable::new(&pkg.join("tests/locked")) else {
+        return;
+    };
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to walk"))
+        .stderr(predicate::str::contains("empty_test_selection").not());
 }
 
 #[test]

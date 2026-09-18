@@ -80,10 +80,13 @@ pub enum DiagnosticKind {
     // file (spec/04 [04-FIT-23] and [04-FIT-24]).
     DirectoryWalkError,
     EmptyCorpus,
+    // chelis#1825: a completed ordinary `chelis test` run selected no
+    // runnable test (spec/04 [04-TEST-1..3]).
+    EmptyTestSelection,
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 55] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -138,6 +141,7 @@ impl DiagnosticKind {
         Self::TypeTotality,
         Self::DirectoryWalkError,
         Self::EmptyCorpus,
+        Self::EmptyTestSelection,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -196,6 +200,7 @@ impl DiagnosticKind {
             Self::TypeTotality => "TypeTotality",
             Self::DirectoryWalkError => "directory_walk_error",
             Self::EmptyCorpus => "empty_corpus",
+            Self::EmptyTestSelection => "empty_test_selection",
         }
     }
 
