@@ -172,6 +172,23 @@ fn var_name(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// Preserve the legacy free-variable reader's first-child interpretation
+/// without letting malformed `var` nodes become binders or callable names.
+fn free_var_name(expr: &Expr) -> Option<&str> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, [Expr::Atom(Atom::Name(name), _), ..]) => {
+            Some(name.as_str())
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_)
+        | ExprCarrier::MalformedLegacyList(_) => None,
+    }
+}
+
 /// If `expr` is an application `(app {} callee args...)`, return
 /// `(callee, args)`.
 fn as_app(expr: &Expr) -> Option<(&Expr, &[Expr])> {
@@ -261,7 +278,7 @@ pub fn predicate_free_vars(fn_node: &Expr) -> Vec<String> {
 fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     // A bare `var` in a value position is a free reference (the binder
     // or an in-module constant). The caller validates scoping.
-    if let Some(name) = var_name(expr) {
+    if let Some(name) = free_var_name(expr) {
         if name != binder && !out.iter().any(|n| n == name) {
             out.push(name.to_string());
         }
@@ -272,7 +289,7 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     // variable). Recurse into the arguments only. (When the callee is
     // not a bare var, fall through and recurse over everything.)
     if let Some((callee, args)) = as_app(expr)
-        && var_name(callee).is_some()
+        && free_var_name(callee).is_some()
     {
         for arg in args {
             collect_free_vars(arg, binder, out);
@@ -361,7 +378,8 @@ fn check_decoded_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
         DeepTag::Lit => Ok(()),
         // The binder reference and in-module constant references both
         // surface as bare `var` nodes; scoping is the caller's job.
-        DeepTag::Var => Ok(()),
+        DeepTag::Var if var_name(expr).is_some() => Ok(()),
+        DeepTag::Var => Err(PredGrammarError::DisallowedNode(node_desc(expr))),
         // Field projection on the binder (or nested records).
         DeepTag::Access => {
             let kids = children(expr);

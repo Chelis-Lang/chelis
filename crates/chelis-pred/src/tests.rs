@@ -830,6 +830,56 @@ fn free_vars_picks_up_module_constant() {
 }
 
 #[test]
+fn malformed_decoded_var_is_rejected_without_erasing_its_free_variable() {
+    let span = Span::new(3, 9);
+    let predicate = |body| {
+        Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::Params,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                    span,
+                ),
+                body,
+            ],
+            span,
+        )
+    };
+    let children = || {
+        vec![
+            Expr::Atom(Atom::Name("external".to_string()), span),
+            Expr::Atom(Atom::Name("extra".to_string()), span),
+        ]
+    };
+    let legacy = predicate(Expr::List(
+        List {
+            elements: [
+                vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                    Expr::Map(Metadata::default(), span),
+                ],
+                children(),
+            ]
+            .concat(),
+        },
+        span,
+    ));
+
+    assert!(matches!(
+        predicate_in_grammar(&legacy),
+        Err(PredGrammarError::DisallowedNode(_))
+    ));
+    assert_eq!(
+        predicate_free_vars(&legacy),
+        vec!["external".to_string()],
+        "a wrong-arity legacy Var preserves its old first-child free-variable role"
+    );
+}
+
+#[test]
 fn free_vars_excludes_field_selectors() {
     // The field names `value` are selectors, never variables.
     let vars = predicate_free_vars(&fnnode(POLYNOMIAL));
