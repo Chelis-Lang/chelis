@@ -82,3 +82,19 @@ fn stamped_tuple_wrt_rejects_a_negative_element_with_the_value_reason() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn stamped_tuple_wrt_rejects_an_empty_explicit_target() {
+    let diagnostics = ingress_diagnostics(&format!(
+        "{PAIR2}
+         (def {{}} gradient
+           (grad {{}} (var {{}} pair2) (tuple {{}})))"
+    ));
+    assert!(
+        diagnostics.iter().any(|message| {
+            message.contains("[MalformedForm]")
+                && message.contains("grad `wrt` tuple must contain at least one parameter index")
+        }),
+        "{diagnostics:?}"
+    );
+}

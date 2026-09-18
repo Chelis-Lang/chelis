@@ -185,6 +185,18 @@ pub(super) fn grad_wrt_indices(
 
     match selector {
         WrtSelector::Tuple(items) => {
+            if items.is_empty() {
+                return Err(report_witness(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::MalformedForm,
+                        "grad `wrt` tuple must contain at least one parameter index \
+                         (spec/03-deep-syntax.md; spec/06-transformations.md §2.7)"
+                            .to_string(),
+                        vec![],
+                    ),
+                ));
+            }
             let mut indices = Vec::new();
             for item in items {
                 let Some(index) = extract_int_for_dim(item) else {
