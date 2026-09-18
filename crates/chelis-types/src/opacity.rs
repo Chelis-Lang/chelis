@@ -369,14 +369,65 @@ pub(crate) fn reef_module_stem(name: &str) -> Option<String> {
 /// unchanged.
 ///
 /// Public so the eval value renderer (chelis-compiler-api) shows the
-/// user-facing constructor name rather than the internal mangled form,
-/// matching the de-mangling already applied to diagnostics (chelis#399).
+/// user-facing source name rather than the internal mangled form, matching the
+/// de-mangling already applied to diagnostics (chelis#399). Lowercase binding
+/// names may themselves contain `__`; the package/module casing boundary
+/// identifies where that authored terminal begins.
 pub fn demangle_ident(name: &str) -> String {
-    if name.starts_with("Pkg__") || name.starts_with("pkg__") {
+    if let Some(stem) = name.strip_prefix("pkg__")
+        && let Some(binding) = demangle_lowercase_binding(stem)
+    {
+        binding
+    } else if name.starts_with("Pkg__") || name.starts_with("pkg__") {
         terminal_segment(name).to_string()
     } else {
         name.to_string()
     }
+}
+
+fn demangle_lowercase_binding(stem: &str) -> Option<String> {
+    let segments = stem.split("__").collect::<Vec<_>>();
+    // Reef packages are lowercase while module paths are TypeIdent segments.
+    // Synthetic entry modules are the only module components that begin with
+    // `__`; `internal_name` encodes that prefix as an empty segment followed
+    // by its reserved TypeIdent payload. Skip only those exact linker-owned
+    // spellings. The first remaining non-TypeIdent segment begins the
+    // lowercase source binding, and every later `__` belongs to that binding.
+    let module_start = segments.iter().position(|segment| {
+        segment
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+    })?;
+    let mut binding_start = module_start;
+    while binding_start < segments.len() {
+        let segment = segments[binding_start];
+        if segment
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            binding_start += 1;
+            continue;
+        }
+        if segment.is_empty()
+            && segments
+                .get(binding_start + 1)
+                .is_some_and(|next| is_synthetic_module_payload(next))
+        {
+            binding_start += 2;
+            continue;
+        }
+        return Some(segments[binding_start..].join("__"));
+    }
+    None
+}
+
+fn is_synthetic_module_payload(segment: &str) -> bool {
+    segment == "Eval"
+        || segment
+            .strip_prefix("ChelisTestBatch")
+            .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 /// Best-effort de-mangle of a module key for display (RFC v4c). A reef
@@ -746,9 +797,89 @@ mod tests {
             demangle_ident("pkg__opq__Demo__Types__raw_make"),
             "raw_make"
         );
+        assert_eq!(
+            demangle_ident("pkg__obs__labels__App__Main__root__tuple"),
+            "root__tuple"
+        );
+        assert_eq!(
+            demangle_ident("pkg__obs__labels__App__Main__record_root"),
+            "record_root"
+        );
         // Lexical (unmangled) identifiers pass through unchanged.
         assert_eq!(demangle_ident("Probability"), "Probability");
         assert_eq!(demangle_ident("raw_make"), "raw_make");
+    }
+
+    #[test]
+    fn demangle_ident_distinguishes_synthetic_modules_from_authored_underscores() {
+        let cases = [
+            (
+                "pkg__demo__Demo____Eval__bad__forge",
+                "bad__forge",
+                "prefixed synthetic eval module",
+            ),
+            (
+                "pkg__demo____Eval__bad__forge",
+                "bad__forge",
+                "root synthetic eval module",
+            ),
+            (
+                "pkg__demo__Demo____ChelisTestBatch0__bad__forge",
+                "bad__forge",
+                "prefixed first synthetic batch module",
+            ),
+            (
+                "pkg__demo__Demo____ChelisTestBatch7__inner__value",
+                "inner__value",
+                "prefixed later synthetic batch module",
+            ),
+            (
+                "pkg__demo____ChelisTestBatch7__root__tuple",
+                "root__tuple",
+                "root synthetic batch module",
+            ),
+            (
+                "pkg__obs__labels__App__Main__root__tuple",
+                "root__tuple",
+                "ordinary reef binding with authored underscores",
+            ),
+            (
+                "pkg__obs__labels__App__Main__record_root",
+                "record_root",
+                "ordinary reef binding",
+            ),
+            (
+                "pkg__obs__labels__App__Main__root____tail",
+                "root____tail",
+                "ordinary reef binding with an empty authored segment",
+            ),
+            (
+                "pkg__demo__Demo____ChelisTestBatch__bad__forge",
+                "__ChelisTestBatch__bad__forge",
+                "batch lookalike without an index",
+            ),
+            (
+                "pkg__demo__Demo____ChelisTestBatchX__bad__forge",
+                "__ChelisTestBatchX__bad__forge",
+                "batch lookalike with a non-numeric index",
+            ),
+            (
+                "pkg__demo__Demo____Eval7__bad__forge",
+                "__Eval7__bad__forge",
+                "eval lookalike with a suffix",
+            ),
+            ("bad__forge", "bad__forge", "lexical authored underscores"),
+            ("__Eval", "__Eval", "lexical synthetic-looking name"),
+            (
+                "__ChelisTestBatch7",
+                "__ChelisTestBatch7",
+                "lexical batch-looking name",
+            ),
+        ];
+
+        for (encoded, expected, case) in cases {
+            assert_eq!(demangle_ident(encoded), expected, "{case}: {encoded}");
+        }
     }
 
     #[test]

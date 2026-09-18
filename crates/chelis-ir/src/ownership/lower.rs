@@ -2574,12 +2574,11 @@ pub(super) fn materialize_manifest_roots(
 }
 
 fn display_root(root: &chelis_types::manifest::RootEntry) -> HostDisplayRoot {
-    let short_def = root
-        .def_name
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
-        .unwrap_or(root.def_name.as_str());
+    let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
+        chelis_types::demangle_ident(&root.def_name)
+    } else {
+        root.def_name.clone()
+    };
     let suffix = root
         .name
         .strip_prefix(root.def_name.as_str())
