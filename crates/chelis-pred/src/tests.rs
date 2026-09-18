@@ -10,6 +10,7 @@ use chelis_deep::ast::{List, Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str;
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::ext::IdentExt;
 use syn::visit::Visit;
 
 /// Parse a single Deep expression (the predicate fn node).
@@ -440,13 +441,19 @@ fn production_rust_sources(root: &Path) -> Vec<PathBuf> {
     sources
 }
 
+fn ident_is(ident: &proc_macro2::Ident, expected: &str) -> bool {
+    ident.unraw() == expected
+}
+
 fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
     match tree {
         syn::UseTree::Path(path) => {
-            path.ident == "to_list" || use_tree_mentions_to_list(&path.tree)
+            ident_is(&path.ident, "to_list") || use_tree_mentions_to_list(&path.tree)
         }
-        syn::UseTree::Name(name) => name.ident == "to_list",
-        syn::UseTree::Rename(rename) => rename.ident == "to_list" || rename.rename == "to_list",
+        syn::UseTree::Name(name) => ident_is(&name.ident, "to_list"),
+        syn::UseTree::Rename(rename) => {
+            ident_is(&rename.ident, "to_list") || ident_is(&rename.rename, "to_list")
+        }
         syn::UseTree::Group(group) => group.items.iter().any(use_tree_mentions_to_list),
         syn::UseTree::Glob(_) => false,
     }
@@ -454,7 +461,7 @@ fn use_tree_mentions_to_list(tree: &syn::UseTree) -> bool {
 
 fn tokens_mention_to_list(tokens: proc_macro2::TokenStream) -> bool {
     tokens.into_iter().any(|token| match token {
-        proc_macro2::TokenTree::Ident(ident) => ident == "to_list",
+        proc_macro2::TokenTree::Ident(ident) => ident_is(&ident, "to_list"),
         proc_macro2::TokenTree::Group(group) => tokens_mention_to_list(group.stream()),
         proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
     })
@@ -464,7 +471,7 @@ fn macro_mentions_to_list(mac: &syn::Macro) -> bool {
     mac.path
         .segments
         .last()
-        .is_some_and(|segment| segment.ident == "to_list")
+        .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
         || tokens_mention_to_list(mac.tokens.clone())
 }
 
@@ -473,7 +480,7 @@ fn attribute_mentions_to_list(attribute: &syn::Attribute) -> bool {
         .path()
         .segments
         .last()
-        .is_some_and(|segment| segment.ident == "to_list")
+        .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
     {
         return true;
     }
@@ -486,7 +493,7 @@ fn attribute_mentions_to_list(attribute: &syn::Attribute) -> bool {
                     self.0 |= path
                         .segments
                         .last()
-                        .is_some_and(|segment| segment.ident == "to_list");
+                        .is_some_and(|segment| ident_is(&segment.ident, "to_list"));
                     syn::visit::visit_path(self, path);
                 }
             }
@@ -525,7 +532,7 @@ impl NodeToListSpellingAudit<'_> {
 
 impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "to_list" {
+        if ident_is(&call.method, "to_list") {
             self.record("reserved method spelling");
         }
         syn::visit::visit_expr_method_call(self, call);
@@ -536,7 +543,7 @@ impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
             .path
             .segments
             .last()
-            .is_some_and(|segment| segment.ident == "to_list")
+            .is_some_and(|segment| ident_is(&segment.ident, "to_list"))
             && (path.qself.is_some() || path.path.segments.len() > 1)
         {
             self.record("reserved qualified path spelling");
@@ -559,10 +566,26 @@ impl<'ast> Visit<'ast> for NodeToListSpellingAudit<'_> {
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if item.ident.as_ref().is_some_and(|ident| ident == "to_list") {
+        if item
+            .ident
+            .as_ref()
+            .is_some_and(|ident| ident_is(ident, "to_list"))
+        {
             self.record("reserved macro definition");
         }
         syn::visit::visit_item_macro(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if ident_is(&item.ident, "to_list")
+            || item
+                .rename
+                .as_ref()
+                .is_some_and(|(_, rename)| ident_is(rename, "to_list"))
+        {
+            self.record("reserved extern-crate identifier");
+        }
+        syn::visit::visit_item_extern_crate(self, item);
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -627,6 +650,12 @@ fn node_to_list_audit_reserves_all_receiver_spellings_without_type_inference() {
         "fn bridge() { helper::to_list!(); }",
         "macro_rules! to_list { () => {} }",
         "#[to_list] fn bridge() {}",
+        "fn bridge(node: &chelis_deep::node::Node, span: chelis_deep::Span) { let _ = node.r#to_list(span); }",
+        "fn bridge() { helper::r#to_list!(); }",
+        "macro_rules! r#to_list { () => {} }",
+        "#[r#to_list] fn bridge() {}",
+        "extern crate r#to_list;",
+        "extern crate helper as r#to_list;",
     ] {
         let calls = audit_source(source);
         assert!(
