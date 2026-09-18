@@ -10546,7 +10546,7 @@ mod exact_manifest_observation_driver_tests {
         for required in [
             "chelis_scalar_from_bits",
             "chelis_string_from_scalar",
-            "chelis_string_data",
+            "chelis_print_string",
             "chelis_string_release",
             "chelis_dtype_size",
             "view.dtype",
@@ -10561,6 +10561,7 @@ mod exact_manifest_observation_driver_tests {
             "chelis_format_shortest",
             "CHELIS_F64",
             "CHELIS_BOOL",
+            "chelis_string_data",
             "tensor->ndim",
         ] {
             assert!(

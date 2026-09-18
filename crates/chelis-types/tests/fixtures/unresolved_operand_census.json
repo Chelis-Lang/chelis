@@ -685,9 +685,8 @@
       "file": "app_string.rs",
       "function": "string_route_result",
       "ordinal": 5,
-      "pattern": "Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_)",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_string.rs",
@@ -700,13 +699,28 @@
       "file": "app_string.rs",
       "function": "string_route_result",
       "ordinal": 7,
+      "pattern": "Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 8,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
       "file": "app_string.rs",
       "function": "string_route_result",
-      "ordinal": 8,
+      "ordinal": 9,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 10,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
